@@ -105,6 +105,21 @@ fn collect_controller_controlled_as_cast_filters_from_condition(
     }
 }
 
+fn recompute_pending_cast_cost_after_additional_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) {
+    let object_id = pending.object_id;
+    let prior_pending = state.pending_cast.take();
+    state.pending_cast = Some(Box::new(pending.clone()));
+    let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
+    state.pending_cast = prior_pending;
+    if let Some(cost) = recomputed {
+        pending.cost = cost;
+    }
+}
+
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
 /// For `Optional`: `pay=true` pays the cost and sets `additional_cost_paid`, `pay=false` skips.
@@ -282,14 +297,7 @@ pub(crate) fn handle_decide_additional_cost(
     // flag via `state.pending_cast`, so publish `updated_pending` there for the
     // duration of the recompute, then restore the prior value.
     if optional_cost_paid {
-        let object_id = updated_pending.object_id;
-        let prior_pending = state.pending_cast.take();
-        state.pending_cast = Some(Box::new(updated_pending.clone()));
-        let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
-        state.pending_cast = prior_pending;
-        if let Some(cost) = recomputed {
-            updated_pending.cost = cost;
-        }
+        recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
     if let Some(cost) = cost_to_pay {
@@ -467,6 +475,10 @@ fn handle_decide_kicker_cost(
 
     pending.ability.context.additional_cost_paid = true;
     pending.ability.context.kickers_paid.push(variant);
+    // CR 601.2b + CR 601.2f + CR 702.33d: Kicker is declared before total cost is
+    // locked in. Recompute now so "kicked spell" cost reducers see the paid kicker
+    // through `state.pending_cast` before mana payment.
+    recompute_pending_cast_cost_after_additional_cost(state, player, &mut pending);
     if pending.deferred_modal_choice.is_some() || pending.deferred_target_selection {
         pending.declared_kickers_to_pay.push(variant);
         return finish_pending_cost_or_cast(state, player, pending, events);
@@ -828,10 +840,23 @@ fn finish_pending_cost_or_cast(
         );
         capped.max_choices = capped.max_choices.min(capped.mode_count);
         pending.target_constraints = target_constraints_from_modal(&capped);
+        let mode_abilities = state
+            .objects
+            .get(&pending.object_id)
+            .map(super::ability_utils::modal_spell_mode_abilities)
+            .unwrap_or_default();
+        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+            state,
+            pending.object_id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
             pending_cast: Box::new(pending),
+            unavailable_modes,
         });
     }
 
@@ -870,6 +895,7 @@ fn finish_pending_cost_or_cast(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         )?;
         return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -1177,6 +1203,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             activation_ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -1903,6 +1930,63 @@ pub(crate) fn handle_exile_for_cost(
     )
 }
 
+/// CR 601.2h + CR 701.13: Resolve a battlefield exile-permanent additional cost
+/// (Food Chain class; Lunar Hatchling's "Exile a land you control"). The player
+/// has chosen permanents they control on the battlefield; validate count and
+/// legality, re-validate eligibility against the live battlefield (still on the
+/// battlefield, controlled by `player`, matching `filter`, not the source), then
+/// EXILE each chosen object (CR 701.13 — not a sacrifice, so no sacrifice/death
+/// triggers) and resume the pending cast. Mirrors `handle_exile_for_cost`
+/// (single-zone, single-filter) but revalidates against the battlefield rather
+/// than hand/graveyard. `count == min_count` for a mandatory fixed-count cost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_permanent_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    filter: Option<TargetFilter>,
+    pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (expected, expected),
+        legal_cards,
+        chosen,
+        events,
+        "permanent(s)",
+        "Selected permanent not eligible to exile as a cost",
+        |state, player, id, pending| {
+            // CR 601.2h: Re-validate against the live battlefield — the chosen
+            // permanent must still be on the battlefield, controlled by the
+            // payer, match the cost's filter, and not be the cast source.
+            if id == pending.object_id {
+                return Err(EngineError::InvalidAction(
+                    "Cannot exile the spell being cast as its own escape cost".into(),
+                ));
+            }
+            let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+            let eligible = state.objects.get(&id).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && filter
+                        .as_ref()
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            });
+            if !eligible {
+                return Err(EngineError::InvalidAction(
+                    "Selected permanent is no longer eligible to exile".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_exile_selection_for_cost(
     state: &mut GameState,
@@ -2037,6 +2121,7 @@ pub(crate) fn handle_exile_materials_for_cost(
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_activated_ability_to_stack(
     state: &mut GameState,
     player: PlayerId,
@@ -2044,12 +2129,85 @@ pub(super) fn push_activated_ability_to_stack(
     ability_index: usize,
     mut resolved: ResolvedAbility,
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
+    // CR 601.2f + CR 601.2h: POSITIVE signal that the caller took the `{X}`-mana
+    // detour, so `remaining_cost` is the unpaid residual non-mana tail. Threaded
+    // from `PendingCast::x_residual_activation` — set ONLY by that detour.
+    x_residual: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // CR 601.2f + CR 601.2h + CR 701.9a: When the X-mana detour ran first
+        // (e.g. the Momir Basic emblem's `{X}, Discard a card` cost), the non-self
+        // "discard a card" sub-cost is still OUTSTANDING here AFTER mana payment,
+        // signalled by `x_residual`. In contrast, the discard-FIRST pre-check
+        // detour in `handle_activate_ability` already paid the discard and resumes
+        // with `x_residual == false` and the ORIGINAL cost — its discard sub-cost
+        // is correctly no-op'd by `pay_ability_cost_for_activation` below. Gating
+        // on the positive `x_residual` signal (not the cost shape) avoids
+        // double-charging the discard on that pre-check path even when the cost is
+        // a BARE `Discard` (which would otherwise fail with an empty hand).
+        if let Some((count, filter)) =
+            super::casting::find_non_self_discard(cost).filter(|_| x_residual)
+        {
+            let count =
+                super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+            let eligible =
+                super::casting::find_eligible_discard_targets(state, player, source_id, filter);
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard".into(),
+                ));
+            }
+            let mut pending_discard =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_discard.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
+            });
+        }
+
+        // CR 118.3 + CR 601.2h: The `{X}`-mana detour (`extract_x_mana_cost` in
+        // `handle_activate_ability`) hoists X-first and leaves the residual tail
+        // here, but ONLY the non-self `Discard` arm above re-surfaces an
+        // interactive cost. A residual non-self SACRIFICE or non-self EXILE would
+        // otherwise fall through to `pay_ability_cost_for_activation`, where both
+        // are silent `Paid` no-ops (they rely on the pre-payment
+        // SacrificeForCost / ExileForCost WaitingFor interception that the X-first
+        // hoist bypassed) — silently SKIPPING the cost. No current card has an
+        // `{X} + non-self-sacrifice/exile` activated ability (corpus scan = zero),
+        // and this was already broken pre-hoist (X→0), so this is not a
+        // regression — but a silent cost-swallow must not ship. Fail LOUDLY here.
+        // A future `{X} + non-self-sacrifice/exile` activated ability must extend
+        // this residual detour with Sacrifice/Exile arms mirroring the Discard arm
+        // above (route to `WaitingFor::PayCost { kind: Sacrifice | ExileFromZone }`
+        // with the residual stored in the resumed pending).
+        if x_residual
+            && (super::casting::find_non_self_sacrifice_cost(cost).is_some()
+                || super::casting::find_non_self_exile(cost).is_some())
+        {
+            debug_assert!(
+                false,
+                "X-residual activation left a non-self sacrifice/exile cost unhandled \
+                 (cost: {cost:?}); extend the residual detour in \
+                 push_activated_ability_to_stack"
+            );
+            return Err(EngineError::ActionNotAllowed(
+                "Unsupported activated-ability cost: {X} combined with a non-self \
+                 sacrifice/exile is not yet implemented"
+                    .into(),
+            ));
+        }
+
         // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
         // chosen-X concretization turns it into a fixed counter-removal count.
         let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
@@ -2389,10 +2547,23 @@ pub(super) fn begin_modal_additional_cost_declaration(
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
         pending.target_constraints = target_constraints_from_modal(&capped);
+        let mode_abilities = state
+            .objects
+            .get(&object_id)
+            .map(super::ability_utils::modal_spell_mode_abilities)
+            .unwrap_or_default();
+        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+            state,
+            object_id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
             pending_cast: Box::new(pending),
+            unavailable_modes,
         });
     };
 
@@ -3055,9 +3226,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
-    // CR 702.138a: Escape requires exiling N other cards from graveyard.
+    // CR 702.138a: Escape's additional cost is the residual after extracting the
+    // mana sub-cost. Usually "Exile N other cards from your graveyard"; may be a
+    // Composite of multiple exile clauses (Lunar Hatchling: "Exile a land you
+    // control, Exile five other cards from your graveyard"). Paid one sub-cost at
+    // a time by `pay_additional_cost`'s Composite arm (CR 601.2h).
     if casting_variant == CastingVariant::Escape {
-        if let Some((_, exile_count)) = super::keywords::effective_escape_data(state, object_id) {
+        if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -3066,17 +3241,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.payment_mode = payment_mode;
             pending.additional_cost_flow =
                 imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(
-                state,
-                player,
-                AbilityCost::Exile {
-                    count: exile_count,
-                    zone: Some(Zone::Graveyard),
-                    filter: None,
-                },
-                pending,
-                events,
-            );
+            return pay_additional_cost(state, player, residual, pending, events);
         }
     }
 
@@ -3796,6 +3961,53 @@ fn pay_additional_cost_with_source(
                     }));
             }
             return pay_additional_cost(state, player, first, pending, events);
+        }
+        // CR 118.9 + CR 601.2h + CR 701.13: Exile a permanent you control on the
+        // battlefield as an additional/alternative cost (Food Chain class; Lunar
+        // Hatchling's "Exile a land you control"). The parser emits zone: None +
+        // a permanent-implying filter; `exile_cost_effective_zone` resolves it to
+        // the battlefield. The permanent is EXILED, not sacrificed (CR 701.13).
+        // `eligible_exile_cost_objects` is single-zone (only controller-owned
+        // battlefield objects matching the filter) — graveyard cards are NEVER
+        // offered (unlike the dual-zone craft union `ExileMaterials`). Ordered
+        // before the hand/graveyard exile arm; the two are disjoint by effective
+        // zone, but the battlefield case is checked first.
+        AbilityCost::Exile {
+            count,
+            zone,
+            ref filter,
+        } if super::cost_payability::exile_cost_effective_zone(zone, filter.as_ref())
+            == Zone::Battlefield =>
+        {
+            let effective_filter =
+                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+            let eligible = super::cost_payability::eligible_exile_cost_objects(
+                state,
+                player,
+                pending.object_id,
+                Zone::Battlefield,
+                effective_filter.as_ref(),
+                count,
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to exile".into(),
+                ));
+            }
+            // CR 601.2h: "Exile a land you control" is a mandatory fixed-count
+            // cost (min == count), unlike the optional graveyard exile below.
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExilePermanent {
+                    filter: filter.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: count as usize,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            });
         }
         AbilityCost::Exile {
             count,
@@ -5326,6 +5538,20 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         super::casting::consume_single_use_play_from_exile(state, group);
     }
 
+    // CR 611.2f: Snapshot the spell's effective keywords NOW, while the spell is
+    // not yet in `spells_cast_this_turn_by_player`, so that
+    // `SpellsCastThisTurn == 0`-gated `CastWithKeyword` grants (first-qualifying-
+    // spell each turn) evaluate against the pre-record count and correctly attach
+    // to this spell. The post-record SpellCast trigger seams (Cascade, Demonstrate)
+    // read this snapshot instead of re-querying the now-incremented grant. Uses
+    // `effective_spell_keyword_instances` so multi-instance keywords (Cascade x2,
+    // Ripple) are preserved, matching what the seams' instance counting expects.
+    let cast_spell_keywords =
+        super::casting::effective_spell_keyword_instances(state, player, object_id);
+    if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        obj_mut.cast_spell_keywords = cast_spell_keywords;
+    }
+
     let obj = state
         .objects
         .get(&object_id)
@@ -5984,27 +6210,48 @@ fn auto_tap_mana_sources_inner(
 
     // Build the typed shard-requirements list first — used by both the
     // combination pre-pass and the main MCV/LCV loop.
+    //
+    // CR 107.4f: Phyrexian shards can be paid with 2 life, so they should
+    // not block using flexible mana sources (dual lands) for strict colored
+    // requirements. We track Phyrexian shards separately and prioritize
+    // them after strict colored shards (MCV will sort them as least constrained).
     let mut deferred_generic: usize = 0;
-    let mut needs: Vec<(Vec<ManaType>, bool, bool)> = Vec::new();
+    let mut needs: Vec<(Vec<ManaType>, bool, bool, bool)> = Vec::new();
     for shard in shards {
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
-            ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
+            ShardRequirement::Single(color) => {
                 let acceptable = if any_color { Vec::new() } else { vec![color] };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
-            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
+            ShardRequirement::Phyrexian(color) => {
+                // CR 107.4f: Mark as phyrexian (4th field = true) so MCV deprioritizes it
+                // compared to strict Single color requirements. Phyrexian can be paid with
+                // life, so we should consume other mana sources for strict requirements first.
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, false, false, true));
+            }
+            ShardRequirement::Hybrid(a, b) => {
                 let acceptable = if any_color { Vec::new() } else { vec![a, b] };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
-            ShardRequirement::TwoGenericHybrid(color)
+            ShardRequirement::HybridPhyrexian(a, b) => {
+                // CR 107.4f: Hybrid Phyrexian also allows life payment, so deprioritize.
+                let acceptable = if any_color { Vec::new() } else { vec![a, b] };
+                needs.push((acceptable, false, false, true));
+            }
+            ShardRequirement::TwoGenericHybrid(color) => {
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, true, false, false));
+            }
             // CR 107.4f: K'rrik promotion never reaches the auto-tap
             // planner (`shard_to_mana_type` never emits this variant),
             // but the arm is required for exhaustiveness. Same
-            // tap-planning shape as the unpromoted `TwoGenericHybrid`.
-            | ShardRequirement::TwoGenericHybridPhyrexian(color) => {
+            // tap-planning shape as the unpromoted `TwoGenericHybrid` but
+            // with potential life payment, so deprioritize.
+            ShardRequirement::TwoGenericHybridPhyrexian(color) => {
                 let acceptable = if any_color { Vec::new() } else { vec![color] };
-                needs.push((acceptable, true, false));
+                needs.push((acceptable, true, false, true));
             }
             ShardRequirement::ColorlessHybrid(color) => {
                 let acceptable = if any_color {
@@ -6012,10 +6259,10 @@ fn auto_tap_mana_sources_inner(
                 } else {
                     vec![ManaType::Colorless, color]
                 };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
             ShardRequirement::TwoOrMoreColorSource => {
-                needs.push((Vec::new(), false, true));
+                needs.push((Vec::new(), false, true, false));
             }
             ShardRequirement::Snow | ShardRequirement::X => {
                 deferred_generic += 1;
@@ -6046,11 +6293,15 @@ fn auto_tap_mana_sources_inner(
     // a color only the flexible source can produce.
     //
     // MCV: process the most constrained shard first (fewest available sources).
+    // Phyrexian shards are deprioritized since they can be paid with life.
     // LCV: for each shard, prefer the least flexible source (fewest color options).
     for _ in 0..needs.len() {
         let mut best_idx = None;
         let mut min_sources = usize::MAX;
-        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
+        let mut best_priority = 1u8; // 0 = strict color (prioritized), 1 = phyrexian (deprioritized)
+        for (i, (acceptable, _, requires_two_or_more_color_source, is_phyrexian)) in
+            needs.iter().enumerate()
+        {
             if assigned[i] {
                 continue;
             }
@@ -6061,23 +6312,28 @@ fn auto_tap_mana_sources_inner(
                 *requires_two_or_more_color_source,
                 effective_ctx,
             );
-            if count < min_sources {
+            let priority = if *is_phyrexian { 1u8 } else { 0u8 };
+            // CR 107.4f: Prioritize strict colored shards (priority 0) over Phyrexian
+            // shards (priority 1). Within the same priority tier, use MCV (fewest sources).
+            if priority < best_priority || (priority == best_priority && count < min_sources) {
                 min_sources = count;
+                best_priority = priority;
                 best_idx = Some(i);
             }
         }
         let Some(idx) = best_idx else { break };
-        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source) = needs[idx];
+        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source, _) =
+            &needs[idx];
         if let Some(option) = find_least_flexible_source(
             &available,
             &used_sources,
             acceptable,
-            requires_two_or_more_color_source,
+            *requires_two_or_more_color_source,
             effective_ctx,
         ) {
             used_sources.insert(option.object_id);
             to_tap.push(option);
-        } else if two_generic_fallback {
+        } else if *two_generic_fallback {
             deferred_generic += 2;
         }
         assigned[idx] = true;
@@ -6281,7 +6537,7 @@ fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
 /// `used_sources`, blocking further rows of every combination variant.
 fn assign_combination_sources(
     available: &[ManaSourceOption],
-    needs: &[(Vec<ManaType>, bool, bool)],
+    needs: &[(Vec<ManaType>, bool, bool, bool)],
     assigned: &mut [bool],
     used_sources: &mut HashSet<ObjectId>,
     to_tap: &mut Vec<ManaSourceOption>,
@@ -6356,13 +6612,13 @@ fn assign_combination_sources(
 /// first-fit is sufficient for the filter-land class).
 fn score_combination(
     combo: &[ManaType],
-    needs: &[(Vec<ManaType>, bool, bool)],
+    needs: &[(Vec<ManaType>, bool, bool, bool)],
     assigned: &[bool],
 ) -> (usize, Vec<usize>) {
     let mut locally_consumed: Vec<bool> = assigned.to_vec();
     let mut covered = Vec::new();
     for mana in combo {
-        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
+        for (i, (acceptable, _, requires_two_or_more_color_source, _)) in needs.iter().enumerate() {
             if locally_consumed[i] {
                 continue;
             }
@@ -6949,6 +7205,7 @@ pub fn finalize_mana_payment(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7113,6 +7370,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7371,6 +7629,39 @@ pub fn cost_has_x(cost: &crate::types::mana::ManaCost) -> bool {
         }
         _ => false,
     }
+}
+
+/// Return true when an activated ability's cost contains `{X}` anywhere in its
+/// cost tree (including composite costs like `{T}, Pay {X}`).
+pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
+    use crate::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::Mana { cost } => cost_has_x(cost),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(ability_cost_has_x)
+        }
+        _ => false,
+    }
+}
+
+/// Return true when `source_id`'s most recent pending activation carries an
+/// `{X}` activation cost. Used by `AbilityActivated` trigger matchers.
+pub fn pending_activation_cost_has_x(state: &GameState, source_id: ObjectId) -> bool {
+    let Some((_, ability_index)) = state
+        .pending_activations
+        .iter()
+        .rev()
+        .find(|(id, _)| *id == source_id)
+    else {
+        return false;
+    };
+    let Some(obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let Some(ability) = obj.abilities.get(*ability_index) else {
+        return false;
+    };
+    ability.cost.as_ref().is_some_and(ability_cost_has_x)
 }
 
 /// Extract a mana sub-cost containing X from an activated ability cost.
@@ -7756,6 +8047,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }
     }
 
@@ -11867,6 +12159,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -11991,6 +12284,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let mut events = Vec::new();
@@ -12084,6 +12378,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -12166,6 +12461,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -12281,6 +12577,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -14875,6 +15172,66 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 3,
             },
             "declined offering must leave cost at full {{3}}{{W}}"
+        );
+    }
+
+    /// CR 118.3 + CR 601.2h: A `{X}` + non-self SACRIFICE activated-ability cost
+    /// takes the X-mana detour, leaving the non-self sacrifice as the unpaid
+    /// residual in `push_activated_ability_to_stack`. That function only
+    /// re-surfaces the non-self DISCARD arm; a non-self sacrifice/exile residual
+    /// would otherwise fall through to `pay_ability_cost_for_activation` and be a
+    /// SILENT `Paid` no-op (the cost would be skipped). The guard must instead
+    /// fail LOUDLY. No real card has this cost shape; this guards the shared
+    /// pipeline against a future one. In debug builds the `debug_assert!` panics
+    /// (asserted here); in release builds it is compiled out and the function
+    /// returns `EngineError::ActionNotAllowed` instead, so the cost is never
+    /// silently skipped on either profile.
+    #[test]
+    #[should_panic(expected = "non-self sacrifice/exile cost unhandled")]
+    fn x_residual_non_self_sacrifice_fails_loudly() {
+        let mut state = GameState::new_two_player(42);
+        // A permanent the player could sacrifice — present so the failure is the
+        // unhandled-cost guard, not an empty eligible set.
+        let source = create_object(
+            &mut state,
+            CardId(7_700),
+            PlayerId(0),
+            "X-Sacrifice Source".to_string(),
+            Zone::Battlefield,
+        );
+        let _victim = create_object(
+            &mut state,
+            CardId(7_701),
+            PlayerId(0),
+            "Sac Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        let resolved = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        // The X-mana sub-cost has already been extracted/paid by the detour; the
+        // residual handed to `push_activated_ability_to_stack` is the non-self
+        // sacrifice, flagged as the X-residual path (`x_residual = true`).
+        let residual = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            1,
+        ));
+        let mut events = Vec::new();
+        let _ = push_activated_ability_to_stack(
+            &mut state,
+            PlayerId(0),
+            source,
+            0,
+            resolved,
+            Some(&residual),
+            true,
+            &mut events,
         );
     }
 }

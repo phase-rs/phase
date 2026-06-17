@@ -64,7 +64,7 @@ fn cast_tribute_creature(count: u32, paid: bool) -> GameRunner {
             ..
         } => {
             assert_eq!(*player, P0, "controller should be choosing the opponent");
-            assert_eq!(*choice_type, ChoiceType::Opponent);
+            assert_eq!(*choice_type, ChoiceType::Opponent { restriction: None });
             assert!(
                 options.contains(&P1.0.to_string()),
                 "P1 must be a valid opponent choice, got {options:?}"

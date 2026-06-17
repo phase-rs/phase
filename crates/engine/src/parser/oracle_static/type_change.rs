@@ -211,10 +211,8 @@ pub(crate) fn parse_collection_counter_play_permission_static(
     })?;
 
     Some(
-        StaticDefinition::new(StaticMode::Other(
-            "LinkedCollectionCounterPlayPermission".to_string(),
-        ))
-        .description(description.to_string()),
+        StaticDefinition::new(StaticMode::LinkedCollectionCounterPlayPermission)
+            .description(description.to_string()),
     )
 }
 
@@ -640,6 +638,39 @@ pub(crate) fn parse_enchanted_is_type(
                 break;
             } else {
                 break;
+            }
+        }
+
+        // CR 305.7: If a non-additive type-changing Aura sets exactly one
+        // basic land subtype, keep the card-type replacement ("is a ... land")
+        // and use SetBasicLandType instead of AddSubtype so the land-subtype
+        // change removes rules-text abilities and old land subtypes.
+        if !is_additive && granted_core_types == vec![CoreType::Land] && granted_subtypes.len() == 1
+        {
+            if let Some(basic_type) = parse_basic_land_type(&granted_subtypes[0].to_lowercase()) {
+                let affected = TargetFilter::Typed(
+                    TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+                );
+                let mut mods = modifications;
+                mods.push(ContinuousModification::SetCardTypes {
+                    core_types: granted_core_types,
+                });
+                if let Some(color) = opt_color {
+                    mods.push(ContinuousModification::SetColor {
+                        colors: vec![color],
+                    });
+                } else if is_colorless {
+                    mods.push(ContinuousModification::SetColor { colors: vec![] });
+                }
+                mods.push(ContinuousModification::SetBasicLandType {
+                    land_type: basic_type,
+                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(mods)
+                        .description(description.to_string()),
+                );
             }
         }
 

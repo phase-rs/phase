@@ -727,6 +727,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 502.3: bounded untap-subset selection under a MaxUntapPerType cap
+        // (Smoke / Stoic Angel / Damping Field). The active player chooses which
+        // `max` of `group` untap. Offer the cap-saturating choice — untap the
+        // first `max` members — as the single AI candidate; untapping fewer is
+        // never advantageous to the AI, and the engine validates `len() <= max`.
+        // Search may still enumerate alternative subsets via legal-actions if a
+        // richer policy is wired later; this guarantees the AI never wedges.
+        WaitingFor::ChooseUntapSubset { player, group, max } => {
+            let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
+            vec![candidate(
+                GameAction::SelectCards { cards: chosen },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
         // CR 508.1g + CR 701.43d: exert-as-attack is optional — offer both
         // paying the exert cost and declining so search can weigh the linked
         // "when you do" payoff against losing the next untap.
@@ -941,9 +956,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             constraint,
             ..
         } => {
-            // CR 107.1c + CR 701.23d: "any number of" / "up to N" searches enumerate
-            // combination sizes 0..=count; exact-count searches enumerate only `count`.
-            let sizes: Vec<usize> = if *up_to {
+            // CR 701.23b/d: constrained (stated-quality) searches enumerate 0..=count
+            // so the legal-action set always contains the empty fail-to-find plus
+            // valid partials; pure-quantity exact-count searches enumerate only
+            // `count`. `combinations(_, 0)` returns `vec![vec![]]`, so the empty
+            // decline survives the constraint filter below.
+            let sizes: Vec<usize> = if *up_to || constraint.permits_partial_find() {
                 (0..=*count).collect()
             } else {
                 vec![*count]
@@ -1269,12 +1287,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             modal,
             pending_cast,
+            unavailable_modes,
         } => {
+            let available: Vec<usize> = (0..modal.mode_count)
+                .filter(|i| !unavailable_modes.contains(i))
+                .collect();
             let actions = if modal.allow_repeat_modes {
-                // CR 700.2d: Use sequence generation that allows repeated indices.
-                crate::game::ability_utils::generate_modal_index_sequences(modal)
+                // Build a filtered ModalChoice for sequence generation with repeats.
+                let filtered = crate::types::ability::ModalChoice {
+                    mode_count: available.len(),
+                    min_choices: modal.min_choices,
+                    max_choices: modal.max_choices,
+                    allow_repeat_modes: true,
+                    ..modal.clone()
+                };
+                crate::game::ability_utils::generate_modal_index_sequences(&filtered)
                     .into_iter()
-                    .map(|indices| {
+                    .map(|local_indices| {
+                        let indices = local_indices.into_iter().map(|i| available[i]).collect();
                         candidate(
                             GameAction::SelectModes { indices },
                             TacticalClass::Selection,
@@ -1283,9 +1313,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     })
                     .collect()
             } else {
-                mode_actions(
+                mode_actions_from_available(
                     *player,
-                    modal.mode_count,
+                    &available,
                     modal.min_choices,
                     modal.max_choices,
                 )
@@ -2357,7 +2387,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => {
+        WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
                 vec![candidate(
                     GameAction::SelectCards { cards: vec![] },
@@ -2769,6 +2799,37 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                                 TacticalClass::Spell,
                                 Some(player),
                             ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // CR 114.4 + CR 602.1: Command-zone activated abilities (Momir Basic
+        // emblem). Mirrors the battlefield loop above; `can_activate_ability_now`
+        // honors each ability's `activation_zone` (casting.rs), so legality is
+        // unchanged. Gated on the format's command-zone capability so non-Momir
+        // games pay no extra scan.
+        if state.format_config.command_zone {
+            for &obj_id in &state.command_zone {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller == player {
+                        for (i, ability_def) in
+                            casting::activated_ability_definitions(state, obj_id)
+                        {
+                            if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                                && !crate::game::mana_abilities::is_mana_ability(&ability_def)
+                                && casting::can_activate_ability_now(state, player, obj_id, i)
+                            {
+                                actions.push(candidate(
+                                    GameAction::ActivateAbility {
+                                        source_id: obj_id,
+                                        ability_index: i,
+                                    },
+                                    TacticalClass::Ability,
+                                    Some(player),
+                                ));
+                            }
                         }
                     }
                 }
@@ -3573,16 +3634,6 @@ fn remove_counter_cost_distribution_candidate(
     }
 }
 
-fn mode_actions(
-    player: PlayerId,
-    mode_count: usize,
-    min: usize,
-    max: usize,
-) -> Vec<CandidateAction> {
-    let indices: Vec<usize> = (0..mode_count).collect();
-    mode_actions_from_available(player, &indices, min, max)
-}
-
 fn mode_actions_from_available(
     player: PlayerId,
     available: &[usize],
@@ -3923,6 +3974,7 @@ fn crew_vehicle_candidates(
         player,
         eligible_creatures,
         crew_power as i32,
+        crate::types::statics::CrewAction::Crew,
         |creature_ids| GameAction::CrewVehicle {
             vehicle_id,
             creature_ids,
@@ -3945,6 +3997,7 @@ fn saddle_mount_candidates(
         player,
         eligible_creatures,
         saddle_power as i32,
+        crate::types::statics::CrewAction::Saddle,
         |creature_ids| GameAction::SaddleMount {
             mount_id,
             creature_ids,
@@ -3961,6 +4014,7 @@ fn minimal_power_subset_candidates<F>(
     player: PlayerId,
     eligible_creatures: &[crate::types::identifiers::ObjectId],
     threshold: i32,
+    action: crate::types::statics::CrewAction,
     wrap: F,
 ) -> Vec<CandidateAction>
 where
@@ -3968,14 +4022,25 @@ where
 {
     const MAX_CANDIDATES: usize = 20;
 
+    // CR 702.122c / 702.171a: a creature's contribution toward the crew/saddle
+    // threshold may be modified ("as though its power were N greater" / "using
+    // its toughness rather than its power"). The activation gate and the
+    // announcement validator both measure power via `object_crew_power_contribution`,
+    // so the candidate enumerator must use the same authority — measuring raw
+    // `power` here disagrees with those seams and yields zero valid covers for
+    // Pilot-style creatures (e.g. Deathless Pilot, "crews as though its power
+    // were 2 greater"), hanging the controller with an empty legal-action set.
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
-            .filter_map(|&id| {
-                state
-                    .objects
-                    .get(&id)
-                    .map(|o| (id, o.power.unwrap_or(0).max(0)))
+            .filter(|&&id| state.objects.contains_key(&id))
+            .map(|&id| {
+                (
+                    id,
+                    crate::game::static_abilities::object_crew_power_contribution(
+                        state, id, action,
+                    ),
+                )
             })
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic
@@ -5547,7 +5612,11 @@ mod tests {
     /// duplicate-named entry is collapsed to its canonical id before
     /// combinations are generated (a duplicate cannot legally appear in any
     /// chosen set with its twin), so a 5-card pool with one duplicate
-    /// collapses to 4 unique-name ids → C(4,2) = 6 combinations.
+    /// collapses to 4 unique-name ids. Because a stated-quality constraint
+    /// permits partial finds (CR 701.23b/d — a player may find fewer than the
+    /// stated number, including none), the enumeration covers every size
+    /// 0..=count, i.e. C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combinations — each of
+    /// which is still name-unique.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
         use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
@@ -5586,9 +5655,10 @@ mod tests {
         );
 
         // With distinct names the engine pool cap collapses the duplicate
-        // Alpha to a single canonical id (5 → 4 ids), and the post-hoc
-        // selection-constraint filter then enumerates C(4,2) = 6 combos —
-        // every one of which contains two distinct names.
+        // Alpha to a single canonical id (5 → 4 ids). The constraint permits
+        // partial finds (CR 701.23b/d), so the enumeration covers sizes
+        // 0..=count = C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combos — every one of
+        // which is name-unique (no combo contains two cards sharing a name).
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
             cards: ids,
@@ -5603,8 +5673,9 @@ mod tests {
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
             filtered.len(),
-            6,
-            "distinct names must collapse duplicate-named ids before enumeration"
+            11,
+            "distinct names collapse duplicate-named ids (5→4) before enumeration; \
+             partial finds permitted (CR 701.23b/d) so sizes 0..=2 → 1+4+6 = 11"
         );
         for action in &filtered {
             let GameAction::SelectCards { cards } = &action.action else {

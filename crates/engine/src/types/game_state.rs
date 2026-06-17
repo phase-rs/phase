@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -258,6 +258,10 @@ pub struct SpellCastRecord {
     /// for serialized snapshots predating this field.
     #[serde(default)]
     pub cast_variant: CastingVariant,
+    /// CR 702.33d: Whether kicker was paid when this spell was cast. Captured at
+    /// cast-time for per-turn spell-history filters ("first kicked spell each turn").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub was_kicked: bool,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -289,6 +293,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         }
     }
 }
@@ -392,6 +397,13 @@ pub struct ZoneChangeRecord {
     /// on the battlefield, emblem creation in the command zone). For normal
     /// zone moves this carries the origin zone.
     pub from_zone: Option<Zone>,
+    /// CR 601.2a: Cast origin as of the zone change — distinct from `from_zone`
+    /// for objects put onto the battlefield without being cast (reanimate, etc.).
+    #[serde(default)]
+    pub cast_from_zone: Option<Zone>,
+    /// CR 305.1: Land-play provenance as of the zone change.
+    #[serde(default)]
+    pub played_from_zone: Option<Zone>,
     pub to_zone: Zone,
     /// CR 603.10a + CR 603.6e: Snapshot of attachments on the object at the moment
     /// of the zone change. Required by look-back triggers of the form
@@ -446,6 +458,17 @@ pub struct ZoneChangeCombatStatus {
     pub blocking: bool,
     #[serde(default)]
     pub blocked: bool,
+    /// CR 506.5 + CR 603.10a: Whether the object was the sole attacker when it
+    /// left combat. Captured at zone-exit because combat membership is cleared
+    /// by CR 506.4 before look-back ("leaves the battlefield") trigger
+    /// conditions are evaluated, so live combat can no longer answer it.
+    #[serde(default)]
+    pub attacking_alone: bool,
+    /// CR 506.5 + CR 603.10a: Whether the object was the sole blocker when it
+    /// left combat. Captured at zone-exit for the same look-back reason as
+    /// `attacking_alone`.
+    #[serde(default)]
+    pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
 }
@@ -514,6 +537,8 @@ impl ZoneChangeRecord {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: from,
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: to,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
@@ -898,6 +923,12 @@ pub enum PendingCoinFlipKind {
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 705.2: The player who flips (and therefore wins/loses) the coin — the
+    /// already-resolved `Effect::FlipCoin::flipper`. The kept Krark's-Thumb flip's
+    /// `CoinFlipped` is recorded for this player, not `controller`. Defaults to
+    /// the controller for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub flipper: PlayerId,
     pub targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_effect: Option<Box<AbilityDefinition>>,
@@ -970,6 +1001,11 @@ pub struct PendingChangeZoneIteration {
     /// carry-through pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 401.4 + CR 701.24a: Library placement override carried across a
+    /// replacement-ordering pause so Endurance-style "on the bottom of their
+    /// library" still suppresses auto-shuffle on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -1024,6 +1060,49 @@ pub struct PendingChooseOneOf {
     #[serde(default)]
     pub context: super::ability::SpellContext,
     pub remaining_players: Vec<PlayerId>,
+}
+
+/// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { zone_owner: EachPlayer }`
+/// iteration state. A single chooser (the spell's controller) picks one card
+/// from EACH player's zone in APNAP order; this stashes the players not yet
+/// prompted while the current player's `WaitingFor::ChooseFromZoneChoice` is
+/// outstanding. Created when the first player's choice is parked, drained after
+/// each pick accumulates into the resolution chain's tracked set, and disposed
+/// once every player has been prompted — at which point the parked
+/// `pending_continuation` (e.g. "put those cards onto the battlefield") runs.
+/// Building block for Breach the Multiverse.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPerPlayerZoneChoice {
+    /// The `Effect::ChooseFromZone` ability whose per-player body repeats. Its
+    /// `zone`/`filter`/`count`/`chooser` describe each player's prompt.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// CR 603.7 + CR 608.2c: Whether a pick from THIS per-player iteration has
+    /// already started its fresh chosen-card tracked set. The first non-empty
+    /// pick must START a fresh set (so the chosen cards do NOT merge with an
+    /// earlier producer's set — e.g. Breach the Multiverse's preceding mill,
+    /// whose milled cards would otherwise reanimate alongside the chosen ones);
+    /// every later pick EXTENDS that fresh set. `false` until the first pick is
+    /// published, then `true` for the remainder of the iteration.
+    #[serde(default)]
+    pub accumulated: bool,
+}
+
+/// CR 701.38d + CR 608.2c: Stores the remaining voters whose per-ballot
+/// interactive body has not yet been resolved. Created when the first
+/// ballot's ChooseFromZone parks WaitingFor::ChooseFromZoneChoice; drained
+/// after each choice resolves until all voters are processed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingVoteBallotIteration {
+    /// The ability template to instantiate for each remaining voter.
+    pub ability_template: Box<AbilityDefinition>,
+    /// Voters whose ballots have not yet been processed (in APNAP order).
+    pub remaining_voters: Vec<PlayerId>,
+    /// The source object that initiated the vote.
+    pub source_id: ObjectId,
+    /// The controller of the vote spell/ability.
+    pub controller: PlayerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1609,6 +1688,17 @@ pub struct PendingCast {
     /// the generic amount they will pay at `finalize_cast`.
     #[serde(default)]
     pub assist_state: AssistState,
+    /// CR 601.2f + CR 601.2h: POSITIVE signal that this pending activation took
+    /// the `{X}`-mana detour (`extract_x_mana_cost` ran first), so its
+    /// `activation_cost` is the RESIDUAL non-mana tail that has NOT yet been
+    /// paid. `push_activated_ability_to_stack` re-surfaces a non-self discard
+    /// sub-cost only when this is set — the discard-FIRST detour leaves it
+    /// `false` because it already paid the discard before resuming. Set ONLY by
+    /// the X-residual detour in `handle_activate_ability`. Skipped on the wire
+    /// only when `false`; serialized when `true` so an activation paused
+    /// mid-payment keeps the signal across a multiplayer save/restore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub x_residual_activation: bool,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1660,6 +1750,7 @@ impl PendingCast {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }
     }
 
@@ -2333,6 +2424,17 @@ pub enum PayCostKind {
     ExileMaterials {
         materials: TargetFilter,
     },
+    /// CR 601.2h + CR 701.13: Exile a permanent the player controls from the
+    /// battlefield as an additional/alternative cost (Food Chain class; Lunar
+    /// Hatchling's "Exile a land you control"). Single-zone (battlefield only),
+    /// distinct from `ExileFromZone` (Hand|Graveyard only) and `ExileMaterials`
+    /// (dual-zone craft union). `filter` is the permanent-implying `TargetFilter`
+    /// the choices were drawn from; the handler re-validates eligibility against
+    /// the live battlefield before exiling. This is EXILE (CR 701.13), not
+    /// sacrifice (CR 701.21) — no sacrifice/death triggers fire.
+    ExilePermanent {
+        filter: Option<TargetFilter>,
+    },
     /// Exile objects from any zone (mana-ability exile costs).
     ExileFromManaZone {
         zone: Zone,
@@ -2618,6 +2720,28 @@ pub enum WaitingFor {
         candidates: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
+    },
+    /// CR 502.3: "the active player determines which permanents they control
+    /// will untap." When a `StaticMode::MaxUntapPerType` cap (Smoke /
+    /// Stoic Angel / Damping Field / Winter Orb class) leaves more than `max`
+    /// matching tapped permanents eligible to untap, the active player must
+    /// directly choose the bounded subset that untaps — this is a REQUIRED
+    /// bounded selection, NOT the per-permanent optional decline modeled by
+    /// `UntapChoice` (which is the "you may choose not to untap" Vedalken
+    /// Shackles class). `group` is the over-cap set of eligible permanents
+    /// (after declines / CantUntap have been removed); the player answers with
+    /// `GameAction::SelectCards { cards }` naming up to `max` members of `group`
+    /// to untap. The complement of the chosen set stays tapped. Enforcement in
+    /// `turns::execute_untap_with_choices` keeps a deterministic clamp purely as
+    /// a safety net for malformed selections.
+    ChooseUntapSubset {
+        player: PlayerId,
+        /// The over-cap eligible permanents the player chooses among. All are
+        /// tapped, controlled by `player`, match the cap's filter, and can
+        /// legally untap (no CantUntap). `group.len() > max`.
+        group: Vec<ObjectId>,
+        /// CR 502.3 cap: the player may untap at most this many of `group`.
+        max: usize,
     },
     /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
     /// pay the optional "exert this creature as it attacks" cost on each
@@ -3000,6 +3124,9 @@ pub enum WaitingFor {
     ManifestDreadChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+        /// CR 701.62a: resolving ability source for zone-pipeline attribution on
+        /// the chosen manifest entry (Abhorrent Oculus class).
+        source_id: ObjectId,
     },
     TriggerTargetSelection {
         player: PlayerId,
@@ -3063,6 +3190,10 @@ pub enum WaitingFor {
         player: PlayerId,
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
+        /// Mode indices unavailable due to NoRepeat constraints or unsatisfied
+        /// targeting requirements (CR 700.2a-b). Mirrors `AbilityModeChoice`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// Player must choose which cards to discard down to maximum hand size (cleanup step).
     DiscardToHandSize {
@@ -4022,6 +4153,7 @@ impl WaitingFor {
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ChooseUntapSubset { .. } => "ChooseUntapSubset",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
@@ -4158,6 +4290,7 @@ impl WaitingFor {
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
+            | WaitingFor::ChooseUntapSubset { player, .. }
             | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
@@ -5464,6 +5597,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub commander_declined_zone_return: HashSet<ObjectId>,
 
+    /// CR 120.3 + CR 120.6 + CR 702.11b: Battlefield objects that have actually
+    /// dealt damage (combat or noncombat) since entering the battlefield. Sticky
+    /// per-object flag backing the `StaticCondition::SourceHasDealtDamage`
+    /// predicate (e.g. "has hexproof if it hasn't dealt damage yet"). Set only
+    /// when a nonzero amount of damage is actually dealt (CR 120.3/120.6, not the
+    /// would-deal amount of CR 120.1a); cleared when the object leaves the
+    /// battlefield so a flickered object starts with a clean slate.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub objects_that_dealt_damage: HashSet<ObjectId>,
+
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
@@ -6001,6 +6144,18 @@ pub struct GameState {
     /// selected branch has finished resolving, including any nested choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choose_one_of: Option<PendingChooseOneOf>,
+    /// CR 701.38d + CR 608.2c: Per-ballot vote iteration paused by an
+    /// interactive choice. Drained after `pending_change_zone_iteration` and
+    /// before `pending_repeat_iteration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
+    /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
+    /// iteration paused by the current player's interactive choice. Drained
+    /// alongside `pending_vote_ballot_iteration`, BEFORE `pending_continuation`
+    /// runs, so every player's graveyard pick accumulates into the chain's
+    /// tracked set before "put those cards onto the battlefield" resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
 
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
@@ -6098,6 +6253,22 @@ pub struct GameState {
     /// Wrapped in `Arc` so `GameState::clone()` during AI search is O(1).
     #[serde(skip)]
     pub card_face_registry: Arc<HashMap<String, CardFace>>,
+
+    /// Momir Basic selection index: mana value -> sorted creature face names.
+    /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
+    /// emblem's `{X}` ability can pick a creature with mana value X. Built only
+    /// when `format == Momir` (see `rehydrate_card_db_metadata`); empty
+    /// otherwise. Skipped in serialization and rebuilt deterministically per peer
+    /// from the loaded card DB.
+    #[serde(skip)]
+    pub momir_pool: BTreeMap<i32, Vec<String>>,
+
+    /// Momir Basic hydration map: lowercase creature name -> `CardFace`. The
+    /// resolver reads this (NEVER `card_face_registry`, which is conjure-scoped
+    /// and misses most creatures) to build the copy token. Skipped in
+    /// serialization; rebuilt with `momir_pool`.
+    #[serde(skip)]
+    pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
 
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
@@ -6272,6 +6443,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
 
+    /// CR 502.3: Transient untap-step carry. When a `MaxUntapPerType` cap
+    /// (Smoke / Stoic Angel / Damping Field) raises `WaitingFor::ChooseUntapSubset`,
+    /// the permanents the active player already chose not to untap (from the
+    /// preceding `UntapChoice` optional-decline prompt) are stashed here so the
+    /// subset resolution can fold the unchosen complement in alongside them when
+    /// it executes the untap. Cleared as soon as the subset prompt resolves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_untap_declines: Vec<ObjectId>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6364,6 +6544,15 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
+    /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
+    /// that are set in motion turn face up and stay in the command zone, NOT here.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub scheme_deck: im::Vector<ObjectId>,
+    /// CR 904.2a: The archenemy — owner/controller of all scheme cards
+    /// (CR 314.5 / CR 904.7). `None` outside an Archenemy game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<PlayerId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -6397,6 +6586,18 @@ pub struct TransientContinuousEffect {
     pub modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<StaticCondition>,
+    /// CR 611.2b + CR 110.5d: the concrete object a target-relative
+    /// `ForAsLongAs` duration tracks, captured at resolution time. Distinct
+    /// from `affected` when the modification's recipient and the duration's
+    /// subject diverge — Zygon Infiltrator: the copy modification applies to
+    /// the source, but the duration tracks the copy *target*'s tap state.
+    /// `None` for the common case where the duration tracks `affected` or the
+    /// source. Set only via [`GameState::set_transient_duration_subject`] on the
+    /// TCE that `add_transient_continuous_effect` just created, so all TCE
+    /// construction stays in one authority. Backward-compatible across the
+    /// WASM/multiplayer serialization boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_subject: Option<ObjectId>,
     /// Snapshot of the originating object's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -6857,6 +7058,8 @@ impl GameState {
             pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
+            pending_vote_ballot_iteration: None,
+            pending_per_player_zone_choice: None,
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,
@@ -6871,6 +7074,8 @@ impl GameState {
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
+            momir_pool: BTreeMap::new(),
+            momir_pool_faces: Arc::new(HashMap::new()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
@@ -6893,6 +7098,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
@@ -6908,11 +7114,14 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            scheme_deck: im::Vector::new(),
+            archenemy: None,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
+            objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
             debug_infinite_mana: BTreeSet::new(),
@@ -6991,10 +7200,31 @@ impl GameState {
                 affected,
                 modifications,
                 condition,
+                duration_subject: None,
                 source_name,
             });
         self.layers_dirty.mark_full();
         id
+    }
+
+    /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
+    /// concrete object resolved at effect-resolution time, on the TCE that
+    /// [`Self::add_transient_continuous_effect`] just created (addressed by its
+    /// returned `id`). Used when the duration's tracked subject diverges from the
+    /// effect's `affected` recipient — Zygon Infiltrator: the copy modification
+    /// applies to the source, but the duration tracks the copy *target*'s tap
+    /// state. Keeps construction in one authority (no second constructor); the
+    /// only divergent caller is `effects/become_copy.rs`. Marks layers dirty so
+    /// the duration re-evaluation picks up the binding.
+    pub fn set_transient_duration_subject(&mut self, id: u64, subject: ObjectId) {
+        if let Some(tce) = self
+            .transient_continuous_effects
+            .iter_mut()
+            .find(|tce| tce.id == id)
+        {
+            tce.duration_subject = Some(subject);
+            self.layers_dirty.mark_full();
+        }
     }
 
     /// CR 614.12a + CR 615.5: Migrate the pre-2026-05-09 audit M4 split-slot
@@ -7190,6 +7420,7 @@ impl PartialEq for GameState {
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
+            && self.objects_that_dealt_damage == other.objects_that_dealt_damage
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
@@ -7297,6 +7528,8 @@ impl PartialEq for GameState {
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
+            && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
+            && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
@@ -7321,6 +7554,8 @@ impl PartialEq for GameState {
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.scheme_deck == other.scheme_deck
+            && self.archenemy == other.archenemy
     }
 }
 
@@ -7475,6 +7710,7 @@ mod tests {
         assert!(!WaitingFor::ManifestDreadChoice {
             player: PlayerId(0),
             cards: vec![],
+            source_id: ObjectId(1),
         }
         .accepts_freeform_card_selection());
     }
@@ -7635,6 +7871,7 @@ mod tests {
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
+                x_residual_activation: false,
             })
         }
 
@@ -7771,6 +8008,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: dummy_pending(),
+            unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::DiscardToHandSize {
             player: PlayerId(0),
@@ -7966,6 +8204,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
@@ -8165,6 +8404,21 @@ mod tests {
         assert!(json.contains("\"EffectZoneChoice\""));
     }
 
+    /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
+    /// so the human-play transport can present it (and reload it) verbatim.
+    #[test]
+    fn choose_untap_subset_roundtrips() {
+        let wf = WaitingFor::ChooseUntapSubset {
+            player: PlayerId(0),
+            group: vec![ObjectId(2), ObjectId(3), ObjectId(4)],
+            max: 1,
+        };
+        let json = serde_json::to_string(&wf).unwrap();
+        let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(wf, deserialized);
+        assert!(json.contains("\"ChooseUntapSubset\""));
+    }
+
     // ---------------------------------------------------------------------
     // CR 110.2a: serde coverage for the resolved-once runtime carriers
     // (`PendingChangeZoneIteration` and `WaitingFor::EffectZoneChoice`).
@@ -8197,6 +8451,7 @@ mod tests {
                 subtypes: vec!["Forest".to_string()],
                 ward: None,
             }),
+            library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -8571,6 +8826,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Graveyard,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

@@ -163,6 +163,11 @@ interface UiStoreState {
   debugHighlightedObjectId: ObjectId | null;
   debugHighlightedPlayerId: number | null;
   logPanelOpen: boolean;
+  /** Whether Flex Layout edit mode is active. Ephemeral (never persisted) — the
+   *  layout DATA lives in `preferencesStore.flexLayout`; this is just the
+   *  transient "the user is currently rearranging the board" toggle that gates
+   *  the edit overlay, widget dragging, and resize grabbers. */
+  flexEditMode: boolean;
 }
 
 interface UiStoreActions {
@@ -223,6 +228,8 @@ interface UiStoreActions {
   setDebugHighlightedPlayerId: (id: number | null) => void;
   setLogPanelOpen: (open: boolean) => void;
   toggleLogPanel: () => void;
+  setFlexEditMode: (active: boolean) => void;
+  toggleFlexEditMode: () => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -262,6 +269,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugHighlightedObjectId: null,
   debugHighlightedPlayerId: null,
   logPanelOpen: false,
+  flexEditMode: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -514,4 +522,6 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   toggleHelpSheet: () => set((state) => ({ helpSheetOpen: !state.helpSheetOpen })),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
+  setFlexEditMode: (active) => set({ flexEditMode: active }),
+  toggleFlexEditMode: () => set((state) => ({ flexEditMode: !state.flexEditMode })),
 }));

@@ -289,6 +289,10 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "ParentTargetController".into(),
         }),
+        ControllerRef::ParentTargetOwner => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "ParentTargetOwner".into(),
+        }),
         ControllerRef::DefendingPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "ProhibitionScope",
             needed_variant: "DefendingPlayer".into(),

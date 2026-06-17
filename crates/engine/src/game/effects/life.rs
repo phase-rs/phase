@@ -1141,6 +1141,115 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 109.5: Genesis of the Daleks chapter IV — "...and each of
+    /// your opponents loses life equal to ...". End-to-end resolution guard for
+    /// the parser fix that lifts the "each of your opponents" subject onto the
+    /// sub_ability's `player_scope` (leaving `LoseLife.target: None`) instead of
+    /// stamping a non-resolvable `Typed(controller=Opponent)` target.
+    ///
+    /// This drives the actual parsed encoding through `resolve_ability_chain`:
+    /// the controller (p0) must NOT lose life and the opponent (p1) MUST. The
+    /// AST-only parser test (`genesis_villainous_branch_splits_destroy_and_lose_life`)
+    /// asserts the shape; this test asserts the runtime routing, closing the
+    /// path-divergence gap where a green AST test masked the inverse drain.
+    #[test]
+    fn genesis_each_opponent_loses_life_drains_opponent() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::PlayerFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        // Genesis branch-1 LoseLife encoding: undirected `target: None` with the
+        // each-opponent scope lifted onto the ability (the post-fix shape). The
+        // amount is fixed here — the bug under test is target routing, not amount
+        // resolution (the dynamic `ZoneChangeAggregateThisTurn` amount is covered
+        // by the AST parser test).
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "Genesis's controller (p0) must NOT lose life — the each-opponent \
+             scope routes the loss to opponents, not the source controller"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 5,
+            "each opponent (p1) must lose 5 life"
+        );
+    }
+
+    /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Archfiend of Despair /
+    /// Warlock Class L3): "each opponent loses life equal to the life they lost
+    /// this turn" resolves with a `LifeLostThisTurn { ScopedPlayer }` amount under
+    /// `player_scope: Opponent`. Each iterated opponent must lose its OWN life lost
+    /// this turn — NOT the source controller's. The controller's count is seeded
+    /// high (99) as a trap: the prior `Controller`-scoped encoding drained every
+    /// opponent by 99. This is the canonical runtime regression guard for the
+    /// reported bug; the parser fix is covered in oracle_effect/mod.rs.
+    #[test]
+    fn each_opponent_loses_own_life_lost_uses_scoped_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope};
+
+        // 3-player game so two distinct opponents prove per-iteration scoping.
+        let mut state = GameState::new(crate::types::FormatConfig::standard(), 3, 42);
+        state.players[0].life_lost_this_turn = 99; // controller — trap, must be ignored
+        state.players[1].life_lost_this_turn = 3; // opponent A
+        state.players[2].life_lost_this_turn = 5; // opponent B
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+        let p2_life_before = state.players[2].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Controller untouched — it is the source, not an affected opponent.
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "controller must not lose life — the trap value (99) must be ignored"
+        );
+        // Each opponent loses ITS OWN life lost this turn (3 and 5), not 99.
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 3,
+            "opponent A must lose its own life lost (3), not the controller's 99"
+        );
+        assert_eq!(
+            state.players[2].life,
+            p2_life_before - 5,
+            "opponent B must lose its own life lost (5), not the controller's 99"
+        );
+    }
+
     /// Issue #317 (Lich): "If you would gain life, draw that many cards
     /// instead." The replacement substitutes a *different* event type
     /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +

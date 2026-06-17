@@ -384,7 +384,8 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaCost, ManaCostShard};
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
@@ -540,6 +541,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
             &mut events,
         );
 
@@ -1028,6 +1030,64 @@ mod tests {
         assert!(
             state.stack.iter().all(|entry| entry.id != copy_id),
             "cancelled cast must remove stack placeholder for synthesized copy"
+        );
+    }
+
+    #[test]
+    fn prepared_sorcery_not_castable_during_opponents_main_phase() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let source_id = setup_creature(&mut state);
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.prepared = Some(PreparedState);
+            source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            }));
+        }
+        state.players[0].mana_pool.mana.push(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+
+        assert!(
+            !can_cast_prepared_copy_now(&state, PlayerId(0), source_id),
+            "prepared sorcery must not be castable during the opponent's main phase"
+        );
+    }
+
+    #[test]
+    fn prepared_sorcery_requires_payable_mana_even_at_sorcery_speed() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let source_id = setup_creature(&mut state);
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.prepared = Some(PreparedState);
+            source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            }));
+        }
+
+        assert!(
+            !can_cast_prepared_copy_now(&state, PlayerId(0), source_id),
+            "prepared copy must not be castable without payable mana"
         );
     }
 

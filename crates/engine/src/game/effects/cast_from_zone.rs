@@ -141,6 +141,19 @@ pub fn resolve(
             .collect();
     }
 
+    // CR 310.11b + CR 608.2c: "exile it, then you may cast it transformed" —
+    // the SelfRef filter resolves to the source object itself. When
+    // `ability.targets` is empty (no pre-selected target, as is typical for
+    // Siege defeat and Suspend self-cast triggers), fall back to the source
+    // directly so the card can be cast during resolution rather than silently
+    // staying in exile.
+    if target_ids.is_empty()
+        && matches!(target_filter, TargetFilter::SelfRef)
+        && ability.source_is_current(state)
+    {
+        target_ids = vec![ability.source_id];
+    }
+
     if target_ids.is_empty() {
         if let Some(source_zone) = target_filter.extract_in_zone() {
             if source_zone == Zone::Hand {
@@ -273,6 +286,80 @@ fn target_is_in_other_players_graveyard(
         .objects
         .get(&card)
         .is_some_and(|obj| obj.zone == Zone::Graveyard && obj.owner != controller)
+}
+
+/// CR 608.2g + CR 601.2a: After a resolution-time hand pick for a free
+/// `CastFromZone` (Expertise cycle, Electrodominance), cast the chosen spell
+/// during resolution instead of granting a lingering hand permission.
+pub(crate) fn complete_hand_pick_cast_from_zone(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    let (without_paying, cast_transformed, alt_ability_cost, constraint, driver) =
+        match &ability.effect {
+            Effect::CastFromZone {
+                without_paying_mana_cost,
+                cast_transformed,
+                alt_ability_cost,
+                constraint,
+                driver,
+                ..
+            } => (
+                *without_paying_mana_cost,
+                *cast_transformed,
+                alt_ability_cost.as_ref(),
+                constraint.clone(),
+                *driver,
+            ),
+            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+        };
+
+    let during_resolution = driver.is_during_resolution()
+        || (without_paying
+            && alt_ability_cost.is_none()
+            && matches!(
+                &ability.effect,
+                Effect::CastFromZone { target, .. }
+                    if target.extract_in_zone() == Some(Zone::Hand)
+            ));
+
+    if during_resolution {
+        cast_single_target_during_resolution(
+            state,
+            ability,
+            card,
+            constraint.or_else(|| effective_cast_from_zone_constraint(ability)),
+            cast_transformed,
+            events,
+        )?;
+        return Ok(true);
+    }
+
+    grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?;
+    Ok(false)
+}
+
+fn effective_cast_from_zone_constraint(
+    ability: &ResolvedAbility,
+) -> Option<crate::types::ability::CastPermissionConstraint> {
+    let Effect::CastFromZone { target, .. } = &ability.effect else {
+        return None;
+    };
+    let TargetFilter::Typed(filter) = target else {
+        return None;
+    };
+    filter.properties.iter().find_map(|prop| {
+        if let crate::types::ability::FilterProp::Cmc { comparator, value } = prop {
+            Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                comparator: *comparator,
+                value: value.clone(),
+            })
+        } else {
+            None
+        }
+    })
 }
 
 /// CR 608.2g + CR 601.2a–i: Cast a single targeted card DURING the resolution of
@@ -426,11 +513,21 @@ pub(crate) fn grant_lingering_permissions(
                     // durational grants (Rebound's `UntilEndOfTurn` upkeep
                     // recast offer) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
-                    // semantics used by Discover, Suspend, Nashi, etc.
-                    // Emry-class graveyard grants default to UntilEndOfTurn
-                    // when the parser did not carry an explicit duration.
+                    // semantics used by Discover, Suspend, Nashi, etc., whose
+                    // cards are exiled and stay castable until they leave exile
+                    // (cleared by `zones::apply_zone_exit_cleanup`).
+                    // CR 611.2a: An *in-place* grant on a card left in the hand
+                    // or graveyard (Emry, Sunforger searching to hand,
+                    // Electrodominance) is a continuous effect from this
+                    // ability's resolution; it must expire at cleanup if the
+                    // cast is declined, since the card never leaves a zone that
+                    // would trigger permission cleanup.
+                    // Default both in-place origins to UntilEndOfTurn when the
+                    // parser carried no explicit duration. (Exile-origin grants
+                    // keep `None` — they are pruned on leaving exile instead.)
                     duration: duration.clone().or_else(|| {
-                        (current_zone == Some(Zone::Graveyard)).then_some(Duration::UntilEndOfTurn)
+                        matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
+                            .then_some(Duration::UntilEndOfTurn)
                     }),
                     exile_instead_of_graveyard_on_resolve,
                 }
@@ -727,6 +824,78 @@ mod tests {
         );
     }
 
+    /// CR 310.11b (#2876): Siege defeat — "exile it, then you may cast it
+    /// transformed". The `CastFromZone { target: SelfRef }` sub-ability fires
+    /// with an EMPTY `ability.targets` (the exile step doesn't pre-select a
+    /// target; the source IS the card to cast). Without the SelfRef fallback in
+    /// `resolve`, `target_ids` stays empty and the function returns early,
+    /// leaving the Siege card in exile forever. With the fix, the source id is
+    /// used directly and the card is cast onto the stack.
+    ///
+    /// Discriminating assertion: stack grows by 1 and the exiled card moves to
+    /// Zone::Stack. Reverting the SelfRef fallback makes target_ids stay empty,
+    /// hitting the early-return path — stack stays 0, card stays in exile.
+    #[test]
+    fn siege_self_ref_cast_with_empty_targets_casts_from_exile() {
+        let mut state = make_test_state();
+        let siege_id = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Invasion of Ikoria".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        let captured_incarnation = state.objects[&siege_id].incarnation;
+
+        // The Siege defeat sub-ability has SelfRef target and DuringResolution
+        // driver. Crucially, ability.targets is EMPTY — the Siege card is the
+        // source, not a pre-selected target.
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: true,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+            },
+            vec![], // empty — the bug: source is the card to cast, not a named target
+            siege_id,
+            PlayerId(0),
+        );
+        ability.set_source_incarnation_recursive(Some(captured_incarnation));
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, siege_id, Zone::Exile, &mut events);
+        assert_eq!(
+            state.objects[&siege_id].incarnation, captured_incarnation,
+            "the engine's self-reference epoch guard is bumped on battlefield entry, so the \
+             Siege defeat zone exit must not make its same-resolution self-cast stale"
+        );
+        events.clear();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 310.11b: Siege defeat must put the card on the stack (cast it), \
+             not silently return with it still in exile"
+        );
+        assert_eq!(
+            state.objects.get(&siege_id).map(|o| o.zone),
+            Some(Zone::Stack),
+            "the Siege card must move from exile to the stack on defeat"
+        );
+    }
+
     #[test]
     fn grants_zero_cost_permission_on_exiled_card() {
         let mut state = make_test_state();
@@ -992,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn hand_cast_selection_grants_zero_cost_permission_in_hand() {
+    fn hand_cast_selection_casts_during_resolution_without_lingering_permission() {
         let mut state = make_test_state();
         let cheap = add_card_to_hand(&mut state, PlayerId(0), CardId(505));
         let ability = electrodominance_hand_ability(3);
@@ -1001,18 +1170,36 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
 
+        assert_eq!(state.objects[&cheap].zone, Zone::Stack);
+        assert!(state.objects[&cheap].casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn hand_in_place_grant_defaults_to_until_end_of_turn() {
+        let mut state = make_test_state();
+        let cheap = add_card_to_hand(&mut state, PlayerId(0), CardId(515));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[cheap], &mut events).unwrap();
+
         assert_eq!(state.objects[&cheap].zone, Zone::Hand);
-        assert!(state.objects[&cheap]
-            .casting_permissions
-            .iter()
-            .any(|p| matches!(
-                p,
-                CastingPermission::ExileWithAltCost {
-                    cost,
-                    granted_to: Some(PlayerId(0)),
-                    ..
-                } if *cost == ManaCost::zero()
-            )));
+        assert!(
+            state.objects[&cheap]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost {
+                        duration: Some(Duration::UntilEndOfTurn),
+                        granted_to: Some(PlayerId(0)),
+                        ..
+                    }
+                )),
+            "hand-origin in-place grant must default to UntilEndOfTurn so a \
+             declined offer expires at cleanup; got {:?}",
+            state.objects[&cheap].casting_permissions
+        );
     }
 
     #[test]

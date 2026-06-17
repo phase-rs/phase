@@ -15,6 +15,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { RichLabel } from "../mana/RichLabel.tsx";
 import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
 
 interface StackEntryProps {
@@ -98,7 +99,14 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
-  const paidLabels = details?.paid?.map((fact) => formatPaidFact(fact, t)) ?? [];
+  // The chosen {X} is a resolved value (like a chosen color), not just a cost —
+  // pull it out for a dedicated, always-visible badge and drop it from the
+  // capped paid-chip row so it isn't shown twice.
+  const xValueFact = details?.paid?.find((fact) => fact.type === "XValue");
+  const xValue = xValueFact?.type === "XValue" ? xValueFact.data.value : undefined;
+  const paidLabels =
+    details?.paid?.filter((fact) => fact.type !== "XValue").map((fact) => formatPaidFact(fact, t)) ??
+    [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
   const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
   const seatColor = useSeatColor(entry.controller);
@@ -197,6 +205,18 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </span>
       )}
 
+      {/* Chosen {X} value — a resolved choice the player needs to see at a
+          glance (e.g. Fireball cast for X=5). Top-left so it never competes with
+          the top-right status badge or the capped cost-chip row. */}
+      {xValue !== undefined && (
+        <span
+          className="absolute -left-1 -top-2 z-10 rounded-full bg-purple-600 px-2 py-0.5 text-[10px] font-bold text-white shadow-md"
+          title={t("stack.paidXValue", { value: xValue })}
+        >
+          X={xValue}
+        </span>
+      )}
+
       {/* Badge: "Casting..." for pending spells, "Next" for top of stack */}
       {isPending ? (
         <span className="absolute -right-1 -top-2 animate-pulse rounded-full bg-cyan-500 px-2 py-0.5 text-[10px] font-bold text-black shadow-md">
@@ -214,11 +234,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
           title={stackEntryTitle(abilityLabel, triggerDescription, targetLabels, paidLabels, contextLabels, t)}
         >
-          <div className="truncate pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
+          <RichLabel
+            text={abilityLabel}
+            size="xs"
+            className="block truncate pr-8 text-[9px] font-semibold text-purple-300"
+          />
           {triggerDescription && (
-            <div className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300">
-              {triggerDescription}
-            </div>
+            <RichLabel
+              text={triggerDescription}
+              size="xs"
+              className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300"
+            />
           )}
         </div>
       )}

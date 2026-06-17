@@ -453,6 +453,63 @@ pub(crate) fn parse_attached_condition_run(input: &str) -> OracleResult<'_, Stat
 /// `StaticMode`). Simple lines return a length-1 vec; unparsed lines an empty
 /// vec.
 ///
+/// CR 509.1c: Recognize a "must be blocked by <filter> if able" lure conjunct.
+///
+/// The BARE form ("must be blocked if able" → `StaticMode::MustBeBlocked`) is
+/// already modeled by `try_split_and_must_attack_block`. The FILTERED form
+/// ("must be blocked by a Dalek if able", "must be blocked by an Eldrazi if
+/// able") requires the typed `MustBeBlocked { by: <filter> }` requirement that
+/// has not yet been parameterized (/add-engine-variant Stage-2
+/// REFUSE_WITH_REFACTOR, ~80 sites). This combinator detects ONLY the filtered
+/// form — the leading `tag("by ")` after "must be blocked " excludes the bare
+/// form — so it can be surfaced as an `Effect::Unimplemented` residual rather
+/// than silently dropped.
+pub(crate) fn parse_must_be_blocked_by_filter_lure(input: &str) -> OracleResult<'_, &str> {
+    recognize((
+        tag("must be blocked by "),
+        take_until(" if able"),
+        tag(" if able"),
+    ))
+    .parse(input)
+}
+
+/// Scan the lowercase predicate for a filtered "must be blocked by … if able"
+/// lure conjunct at any word boundary and, when present, return the matched
+/// conjunct span (from "must" through "if able"). The successful combinator parse
+/// IS the detector — `scan_at_word_boundaries` tries the combinator at each word
+/// start, so there is no `contains`/`find` dispatch. Returns `None` when only the
+/// bare (already-modeled) form or no lure is present.
+fn extract_must_be_blocked_by_filter_lure(predicate: &str) -> Option<String> {
+    let lower = predicate.to_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_must_be_blocked_by_filter_lure)
+        .map(|span| span.trim().to_string())
+}
+
+/// CR 509.1c: Build an `Effect::Unimplemented` residual static for an unmodeled
+/// effect-conjunct inside an attached-subject grant (the filtered "must be
+/// blocked by … if able" lure). The residual rides in a `GrantAbility`
+/// modification so coverage flags the card (`is_static_supported`) and the
+/// swallow check defers (`any_ability_has_unimplemented`) — the single honest
+/// signal that the conjunct is a known gap. See
+/// `try_parse_inverted_attached_combat_grant` for the full deferral rationale.
+pub(crate) fn unimplemented_conjunct_residual(
+    affected: TargetFilter,
+    residual_text: &str,
+) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::GrantAbility {
+            definition: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                crate::types::ability::Effect::unimplemented(
+                    "attached_grant_unmodeled_conjunct",
+                    residual_text.to_string(),
+                ),
+            )),
+        }])
+        .description(residual_text.to_string())
+}
+
 /// CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Enchanted/equipped predicate dispatch.
 pub(crate) fn parse_enchanted_equipped_predicate(
     predicate: &str,
@@ -679,9 +736,25 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // parse. "gets +N/+M and has trample and lifelink" is merged into ONE
     // Continuous def by `parse_continuous_modifications`, so it returns here and
     // is NEVER split. ---
-    match parse_continuous_gets_has(predicate, affected, description) {
-        Some(def) => vec![def],
-        None => vec![],
+    {
+        let mut defs = Vec::new();
+        if let Some(def) = parse_continuous_gets_has(predicate, affected.clone(), description) {
+            defs.push(def);
+        }
+        // CR 509.1c: "<grant> and must be blocked by <filter> if able"
+        // (Slayer's Cleaver: "Equipped creature gets +3/+1 and must be blocked
+        // by an Eldrazi if able."). `parse_continuous_modifications` models the
+        // P/T/keyword grant but silently drops the filtered lure conjunct (the
+        // bare "must be blocked if able" form is handled by
+        // `try_split_and_must_attack_block`; the typed by-filter requirement is
+        // the deferred /add-engine-variant Stage-2 work). Surface the dropped
+        // conjunct as an `Effect::Unimplemented` residual so it is a visible
+        // coverage gap, not a silent drop, even when the predicate has no
+        // continuous grant sibling.
+        if let Some(residual_text) = extract_must_be_blocked_by_filter_lure(predicate) {
+            defs.push(unimplemented_conjunct_residual(affected, &residual_text));
+        }
+        defs
     }
 }
 
@@ -1569,13 +1642,35 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
     .trim();
     let type_filter = if pre_type.is_empty() {
         None
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(pre_type)
+        .is_ok()
+    {
+        // CR 700.6: bare "historic" is a card-property adjective, not a type word.
+        // `parse_type_phrase` only emits `FilterProp::Historic` when a type word
+        // follows (oracle_target.rs), so the bare "historic spell" subject must
+        // lower the property here. Covers every "first historic spell you cast …"
+        // grantor (Peri Brown class) without weakening the `parse_type_phrase`
+        // guard, and benefits both the keyword-grant and cost-modifier callers.
+        Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::Historic]),
+        ))
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
+        .parse(pre_type)
+        .is_ok()
+    {
+        // CR 702.33d: bare "kicked spell" — kicker-paid qualifier for Vine Gecko
+        // class cost reducers.
+        Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::WasKicked]),
+        ))
     } else {
         let (filter, remainder) = parse_type_phrase(pre_type);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             Some(filter)
         } else {
-            // Unrecognized pre-spell qualifier (e.g. "kicked") — decline rather
-            // than emit a cost reduction that ignores the printed restriction.
+            // Unrecognized pre-spell qualifier — decline rather than emit a cost
+            // reduction that ignores the printed restriction.
             return FirstQualifiedSpell::UnsupportedQualifier;
         }
     };
@@ -1600,6 +1695,38 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
         },
     };
     FirstQualifiedSpell::Supported(filter, timing)
+}
+
+/// CR 601.2f: Audit that a "the first … spell <timing> has [keyword]" subject is
+/// FULLY represented by `parse_first_qualified_spell_filter` — i.e. the text
+/// AFTER the timing phrase is empty.
+///
+/// `parse_first_qualified_spell_filter` discards everything after the timing
+/// phrase (the cost-modification verb on the cost-reducer path, "costs {1} less
+/// …"). On the keyword-grant path the grant verb was already split off by the
+/// caller, so a clean subject must terminate at the timing phrase. Any trailing
+/// residue means an unrepresentable qualifier sits in the discarded region
+/// (Rain of Riches' "that mana from a Treasure was spent to cast"; TARDIS Bay's
+/// post-timing "with mana value 2 or greater"), so the keyword-grant caller must
+/// decline rather than emit a residue-blind gate.
+///
+/// Lives next to the parser whose discard it audits. Called ONLY from the
+/// keyword-grant arm — the cost-modifier consumer legitimately expects trailing
+/// cost-verb text, so this guard must NOT move into the shared
+/// `parse_first_qualified_spell_filter`.
+pub(crate) fn first_qualified_spell_subject_fully_consumed(subject: &str) -> bool {
+    let Some(after_prefix) = nom_tag_lower(subject, subject, "the first ") else {
+        return false;
+    };
+    let Some((_, post)) = split_first_spell_cast_region(after_prefix) else {
+        return false;
+    };
+    let Some((_, _, after_timing)) =
+        nom_primitives::scan_preceded(post.trim(), parse_first_spell_timing_phrase)
+    else {
+        return false;
+    };
+    after_timing.trim().is_empty()
 }
 
 fn split_first_spell_cast_region(subject: &str) -> Option<(&str, &str)> {

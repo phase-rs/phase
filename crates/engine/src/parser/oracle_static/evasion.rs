@@ -328,6 +328,54 @@ pub(crate) fn parse_compound_subject_keyword_static(
     Some(vec![object_def, player_def])
 }
 
+/// CR 702.16 + CR 702.16k + CR 702.16i: Player-SUBJECT protection of the form
+/// `"You have protection from <quality>."` — the PLAYER gains the protection,
+/// distinct from `"creatures you control have protection from <quality>"`
+/// (which grants the keyword to permanents). A `StaticDefinition` cannot carry
+/// the keyword on a player, so this emits `StaticMode::PlayerProtection` with
+/// `affected = the controller (Typed{controller: You})`, mirroring the
+/// player-half produced by `parse_compound_subject_keyword_static` and consumed
+/// by `player_protection_from`.
+///
+/// Quality classification is delegated to the single authority
+/// `parse_protection_target`, so every quality form already understood for
+/// permanent protection (color, everything, each of your opponents, card type,
+/// mana-value filter) is unlocked for the player subject in one stroke — this
+/// builds the player-subject protection class, not one card (Absolute Virtue).
+pub(crate) fn parse_player_protection_static(text: &str, lower: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    // Subject + verb prefix: "you have protection from " (compose apostrophe /
+    // contracted variants via `alt` only as real Oracle text requires them).
+    let (rest_lower, _) = alt((
+        tag::<_, _, VE<'_>>("you have protection from "),
+        tag("you've got protection from "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Recover the original-case quality slice (TextPair-equivalent offset idiom),
+    // then strip the sentence terminator. The quality is classified by the typed
+    // `parse_protection_target` lookup — never an Oracle-text dispatch here.
+    let quality = text[text.len() - rest_lower.len()..]
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    if quality.is_empty() {
+        return None;
+    }
+
+    let target = crate::types::keywords::parse_protection_target(quality);
+
+    Some(
+        StaticDefinition::new(StaticMode::PlayerProtection(target))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -1217,6 +1265,23 @@ fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<StaticCondit
         }
         return None;
     }
+    // CR 509.1b: "can't be blocked unless it's attacking its owner [or a
+    // permanent its owner controls]" — conditional evasion gated on the
+    // recipient's attack target relative to its OWNER (CR 108.3). Express as
+    // CantBeBlocked + Not(RecipientAttackingOwnerTarget): unblockable EXCEPT when
+    // attacking owner / owner-controlled permanent. Must precede the generic
+    // "as long as …" condition fallthrough so the "unless" form is classified
+    // explicitly rather than mis-handled by the generic condition parser.
+    if let Some(after) = nom_tag_lower(rest, rest, " unless ") {
+        if let Some(target) = parse_block_unless_attacking_owner_nom(after) {
+            return Some((
+                StaticMode::CantBeBlocked,
+                Some(StaticCondition::Not {
+                    condition: Box::new(StaticCondition::RecipientAttackingOwnerTarget { target }),
+                }),
+            ));
+        }
+    }
     // Bare "can't be blocked".
     if rest.is_empty() {
         return Some((StaticMode::CantBeBlocked, None));
@@ -1225,6 +1290,36 @@ fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<StaticCondit
         return Some((StaticMode::CantBeBlocked, Some(condition)));
     }
     None
+}
+
+/// CR 509.1b + CR 506.2 + CR 108.3: classify the "unless it's attacking its
+/// owner [or a permanent its owner controls]" exception following
+/// "can't be blocked". Mirrors the attack-side owner-relative axis
+/// (`parse_cant_attack_rule_static_predicate_nom`). The longer
+/// `OwnerOrPlaneswalker` phrase is ordered before `Owner` (nom `alt` is
+/// leftmost-match). `tag_no_case` handles casing; the split path reconstructs
+/// the clause with an ASCII apostrophe (`try_split_and_cant_be_blocked`), so a
+/// single ASCII-apostrophe arm suffices. Returns `Some` only when the combinator
+/// consumes the whole tail — the parser IS the detector.
+fn parse_block_unless_attacking_owner_nom(
+    input: &str,
+) -> Option<crate::types::triggers::AttackTargetFilter> {
+    use crate::types::triggers::AttackTargetFilter;
+    let (rest, target) = alt((
+        value(
+            AttackTargetFilter::OwnerOrPlaneswalker,
+            tag_no_case::<_, _, OracleError<'_>>(
+                "it's attacking its owner or a permanent its owner controls",
+            ),
+        ),
+        value(
+            AttackTargetFilter::Owner,
+            tag_no_case::<_, _, OracleError<'_>>("it's attacking its owner"),
+        ),
+    ))
+    .parse(input)
+    .ok()?;
+    rest.trim().is_empty().then_some(target)
 }
 
 /// CR 509.1b: Attach a trailing "as long as …" condition to the evasion
@@ -2231,6 +2326,55 @@ pub(crate) fn parse_activate_abilities_as_though_haste(
 
     Some(
         StaticDefinition::new(StaticMode::CanActivateAbilitiesAsThoughHaste)
+            .affected(affected)
+            .description(description.to_string()),
+    )
+}
+
+/// CR 509.1b + CR 609.4 + CR 702.28b: parse "<subject> can block creatures with
+/// shadow as though <they didn't have shadow | it had shadow>" into a
+/// `StaticMode::CanBlockShadow` on `affected`.
+///
+/// Captures both printed phrasings of the same block-legality outcome — Heartwood
+/// Dryad ("... as though they didn't have shadow") and Wall of Diffusion ("... as
+/// though it had shadow"). Mirrors `parse_can_attack_despite_defender`: locate the
+/// `"can block creatures with shadow as though"` phrase at a word boundary with
+/// `scan_split_at_phrase`, verify the tail with an `alt()` of the two forms, then
+/// resolve the subject via `parse_continuous_subject_filter`. Returns `None`
+/// (graceful fall-through) when the phrase is absent, the tail doesn't match, or
+/// the subject can't be resolved — so unrelated shadow lines never match here.
+pub(crate) fn parse_block_shadow_as_though(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        tag::<_, _, VE>("can block creatures with shadow as though").parse(i)
+    })?;
+
+    // Verify the trailing clause: " they didn't have shadow" (Heartwood Dryad)
+    // or " it had shadow" (Wall of Diffusion). Both lift the same CR 702.28b
+    // blocker-side restriction; the `alt()` keeps the two phrasings on one axis.
+    let after_phrase =
+        &tp.lower[subject_prefix.len() + "can block creatures with shadow as though".len()..];
+    let (rest, _) = alt((
+        tag::<_, _, VE>(" they didn't have shadow"),
+        tag::<_, _, VE>(" it had shadow"),
+    ))
+    .parse(after_phrase)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, VE>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // Subject text = original slice for correct case preservation.
+    let subject_original = tp.original[..subject_prefix.len()].trim();
+    let affected = parse_continuous_subject_filter(subject_original)?;
+
+    Some(
+        StaticDefinition::new(StaticMode::CanBlockShadow)
             .affected(affected)
             .description(description.to_string()),
     )

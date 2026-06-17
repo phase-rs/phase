@@ -237,6 +237,26 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
 
+    // CR 800.4a: A paused triggered ability on the stack is "an object on the
+    // stack not represented by a card" and ceases to exist when its controller
+    // leaves the game. The stack retain above drops that entry, but a trigger
+    // paused mid-target-selection (e.g. Lathiel's end-step trigger awaiting
+    // `WaitingFor::DistributeAmong`) also leaves a live cursor in
+    // `state.pending_trigger` / `pending_trigger_entry` pointing at that now-gone
+    // entry. Left dangling, the next surviving player's action drives
+    // `begin_pending_trigger_target_selection` (which gates on `pending_trigger`)
+    // back into target selection for a dead entry id, panicking in
+    // `mutate_pending_trigger_entry`. Clear the cursor only when the entry it
+    // tracks is no longer on the stack, mirroring the `pending_cast` cleanup below.
+    if state
+        .pending_trigger_entry
+        .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
+    {
+        state.pending_trigger_entry = None;
+        state.pending_trigger = None;
+        state.pending_trigger_event_batch.clear();
+    }
+
     // CR 800.4a: Abandon any not-yet-resolved cast this player controls. A spell
     // paused mid-cast (e.g. a convoke spell awaiting `WaitingFor::ManaPayment`)
     // is held in `state.pending_cast`, not as a stack entry, so the stack retain
@@ -385,6 +405,23 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                 };
             crate::game::planechase::set_planar_controller(state, new_controller, events);
         }
+    }
+
+    // CR 800.4a: If the archenemy leaves the game, the Archenemy subsystem ends.
+    // The archenemy is unique (CR 904.2a), so there is no reassignment — unlike the
+    // planar controller. Scheme cards are owned by the archenemy and are locked to
+    // the command zone (CR 314.2), so they are dropped as bookkeeping here rather
+    // than routed through the normal owner-leaves zone pipeline.
+    if state.archenemy == Some(player) {
+        state.archenemy = None;
+        state.scheme_deck.clear();
+        let scheme_ids: Vec<crate::types::identifiers::ObjectId> = state
+            .command_zone
+            .iter()
+            .copied()
+            .filter(|&id| crate::game::archenemy::is_scheme_object(state, id))
+            .collect();
+        state.command_zone.retain(|id| !scheme_ids.contains(id));
     }
 
     events.push(GameEvent::PlayerEliminated { player_id: player });

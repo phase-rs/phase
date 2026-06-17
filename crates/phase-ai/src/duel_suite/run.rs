@@ -162,6 +162,9 @@ pub struct SuiteOptions {
     pub games_per_matchup: usize,
     pub base_seed: u64,
     pub output_path: PathBuf,
+    /// Comma-separated list of id substrings; a matchup is run if its id
+    /// contains *any* of them (e.g. `"red-mirror,affinity-mirror"` runs both).
+    /// `None` runs every matchup. A single substring keeps the legacy behavior.
     pub filter: Option<String>,
     pub attribution: AttributionMode,
     pub git_sha: Option<String>,
@@ -212,42 +215,124 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     finalize_report(options, results)
 }
 
+/// True if a matchup `id` should run under `filter`. The filter is a
+/// comma-separated list of id substrings — the matchup runs if its id contains
+/// *any* of them. `None` runs every matchup; a single substring keeps the
+/// legacy `contains` behavior. Empty/whitespace-only parts are ignored.
+fn matchup_selected(id: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|filter| {
+        filter
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .any(|part| id.contains(part))
+    })
+}
+
 fn run_all_matchups(
     db: &CardDatabase,
     options: &SuiteOptions,
     capture: Option<&CaptureLayer>,
 ) -> Vec<MatchupResult> {
     let matchups = all_matchups();
-    let mut results: Vec<MatchupResult> = Vec::with_capacity(matchups.len());
+    let total = matchups.len();
+    // Indexed selection honoring the id filter. The retained index is the
+    // matchup's *original* position, which both derives its deterministic seed
+    // (base_seed + idx*1000) and labels progress output.
+    let selected: Vec<(usize, &MatchupSpec)> = matchups
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| matchup_selected(spec.id, options.filter.as_deref()))
+        .collect();
 
-    for (idx, spec) in matchups.iter().enumerate() {
-        if let Some(filter) = &options.filter {
-            if !spec.id.contains(filter) {
-                continue;
+    // Attribution drains a process-global tracing subscriber between matchups,
+    // so capture runs must stay sequential — concurrent matchups would interleave
+    // their decision-trace events into the one capture layer.
+    if capture.is_some() {
+        let mut results = Vec::with_capacity(selected.len());
+        for (idx, spec) in &selected {
+            eprintln!(
+                "[{n:>2}/{total}] {id}  (games: {games})",
+                n = idx + 1,
+                id = spec.id,
+                games = options.games_per_matchup,
+            );
+            // Drain any stale events captured before this matchup started.
+            if let Some(layer) = capture {
+                let _ = layer.drain();
             }
+            let matchup_seed = options.base_seed.wrapping_add(*idx as u64 * 1_000);
+            let mut result = run_single_matchup(db, spec, options, matchup_seed);
+            if let Some(layer) = capture {
+                let events = layer.drain();
+                result.attribution = Some(aggregate_events(&events));
+            }
+            print_matchup_row(&result);
+            results.push(result);
         }
-        eprintln!(
-            "[{idx:>2}/{total}] {id}  (games: {games})",
-            idx = idx + 1,
-            total = matchups.len(),
-            id = spec.id,
-            games = options.games_per_matchup,
-        );
-        // Drain any stale events captured before this matchup started — e.g.
-        // from the previous matchup's cooldown.
-        if let Some(layer) = capture {
-            let _ = layer.drain();
-        }
-        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-        let mut result = run_single_matchup(db, spec, options, matchup_seed);
-        if let Some(layer) = capture {
-            let events = layer.drain();
-            result.attribution = Some(aggregate_events(&events));
-        }
-        print_matchup_row(&result);
-        results.push(result);
+        return results;
     }
-    results
+
+    run_matchups_parallel(db, options, &selected)
+}
+
+/// Run the selected matchups across all available cores via a work-stealing
+/// atomic cursor (matchups vary widely in length, so a static split would leave
+/// cores idle). Each matchup is a pure function of `(db, spec, options,
+/// matchup_seed)` with its seed derived from the original index, so results are
+/// byte-identical to a sequential run regardless of scheduling — only live
+/// progress order varies. The returned Vec is restored to selection order.
+fn run_matchups_parallel(
+    db: &CardDatabase,
+    options: &SuiteOptions,
+    selected: &[(usize, &MatchupSpec)],
+) -> Vec<MatchupResult> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let run_total = selected.len();
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(run_total.max(1));
+    let cursor = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+
+    let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..n_workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                    loop {
+                        let pos = cursor.fetch_add(1, Ordering::Relaxed);
+                        if pos >= run_total {
+                            break;
+                        }
+                        let (idx, spec) = selected[pos];
+                        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
+                        let result = run_single_matchup(db, spec, options, matchup_seed);
+                        let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!(
+                            "[{completed:>2}/{run_total}] {id}  done (games: {games})",
+                            id = spec.id,
+                            games = options.games_per_matchup,
+                        );
+                        print_matchup_row(&result);
+                        local.push((pos, result));
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("suite worker thread panicked"))
+            .collect()
+    });
+
+    // Parallel completion is unordered; restore the original selection order so
+    // the report and any baseline comparison are stable across runs.
+    collected.sort_by_key(|(pos, _)| *pos);
+    collected.into_iter().map(|(_, result)| result).collect()
 }
 
 fn finalize_report(
@@ -593,6 +678,36 @@ pub fn resolve_matchup(
 mod tests {
     use super::*;
     use crate::duel_suite::{Expected, FeatureKind};
+
+    #[test]
+    fn filter_none_runs_every_matchup() {
+        assert!(matchup_selected("red-mirror", None));
+        assert!(matchup_selected("affinity-mirror", None));
+    }
+
+    #[test]
+    fn filter_single_substring_is_legacy_contains() {
+        assert!(matchup_selected("red-mirror", Some("red-mirror")));
+        assert!(matchup_selected("red-mirror", Some("mirror")));
+        assert!(!matchup_selected("affinity-mirror", Some("red-mirror")));
+    }
+
+    #[test]
+    fn filter_comma_list_matches_any_part() {
+        let f = Some("red-mirror,affinity-mirror");
+        assert!(matchup_selected("red-mirror", f));
+        assert!(matchup_selected("affinity-mirror", f));
+        assert!(!matchup_selected("green-mirror", f));
+        // The quick-gate set is exactly red-mirror + affinity-mirror: no other
+        // mirror leaks in (guards against an accidental bare "mirror" part).
+        assert!(!matchup_selected("blue-mirror", f));
+    }
+
+    #[test]
+    fn filter_ignores_blank_and_whitespace_parts() {
+        assert!(matchup_selected("red-mirror", Some(" red-mirror , ")));
+        assert!(!matchup_selected("red-mirror", Some(",,")));
+    }
 
     fn report_with_timing(timestamp: i64, duration_ms: u128) -> SuiteReport {
         SuiteReport {

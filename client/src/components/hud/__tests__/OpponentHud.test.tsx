@@ -232,15 +232,18 @@ describe("OpponentHud", () => {
 
     render(<OpponentHud />);
 
-    expect(screen.getByTitle("Poison counters: 3")).toHaveAttribute("aria-label", "3 poison counters");
-    expect(screen.getByTitle("Speed: 2")).toHaveAttribute("aria-label", "Speed 2");
+    // Custom GameplayTooltip text in the DOM replaces the native `title`.
+    expect(screen.getByLabelText("3 poison counters")).toBeInTheDocument();
+    expect(screen.getByText("Poison counters: 3")).toBeInTheDocument();
+    expect(screen.getByLabelText("Speed 2")).toBeInTheDocument();
+    expect(screen.getByText("Speed: 2")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
   });
 
   it("hides zero poison counters", () => {
     render(<OpponentHud />);
 
-    expect(screen.queryByTitle(/Poison counters:/)).toBeNull();
+    expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
 
   describe("FFA targeting intent disambiguation", () => {
@@ -377,8 +380,10 @@ describe("OpponentHud", () => {
 
     render(<OpponentHud />);
 
-    expect(screen.getByTitle("Poison counters: 4")).toHaveAttribute("aria-label", "4 poison counters");
-    expect(screen.getByTitle("Speed: 1")).toHaveAttribute("aria-label", "Speed 1");
+    expect(screen.getByLabelText("4 poison counters")).toBeInTheDocument();
+    expect(screen.getByText("Poison counters: 4")).toBeInTheDocument();
+    expect(screen.getByLabelText("Speed 1")).toBeInTheDocument();
+    expect(screen.getByText("Speed: 1")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
   });
 

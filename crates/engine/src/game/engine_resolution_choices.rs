@@ -390,7 +390,11 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (
-            WaitingFor::ManifestDreadChoice { player, cards },
+            WaitingFor::ManifestDreadChoice {
+                player,
+                cards,
+                source_id,
+            },
             GameAction::SelectCards {
                 cards: selected_cards,
             },
@@ -408,16 +412,44 @@ pub(super) fn handle_resolution_choice(
                 .copied()
                 .collect();
 
-            crate::game::morph::manifest_card(
+            let face_down = crate::types::ability::FaceDownProfile::vanilla_2_2();
+            match crate::game::zone_pipeline::move_object(
                 state,
-                player,
-                manifest_id,
-                crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    manifest_id,
+                    Zone::Battlefield,
+                    source_id,
+                )
+                .face_down(face_down),
                 events,
-            )
-            .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
+            ) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                // CR 303.4f / CR 616.1 + CR 701.62a: the chosen card's manifest
+                // entry paused (aura host pick or a replacement-ordering prompt).
+                // Defer the non-manifested card's graveyard move + reveal-marker
+                // cleanup until the manifest finishes entering — otherwise the
+                // other card is graved while the chosen card is still in the
+                // library (issue #3245).
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    crate::game::zone_pipeline::defer_completion_on_pause(
+                        state,
+                        crate::types::game_state::BatchCompletion::RevealRestPile {
+                            player,
+                            rest_cards: graveyard_cards,
+                            rest_destination: Zone::Graveyard,
+                            clear_markers: cards.clone(),
+                            publish_tracked_set: None,
+                            emit_reveal_until_resolved: None,
+                        },
+                    );
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+            }
 
-            // CR 614.6 + CR 701.17a class: route the non-manifested cards to the
+            // CR 614.6 + CR 701.62a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own
             // `Moved` redirects (Rest in Peace / Leyline of the Void: "would be
             // put into a graveyard from anywhere → exile instead") fire — a raw
@@ -1651,8 +1683,13 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 107.1c + CR 701.23d: "up to N" / "any number of" accept 0..=count picks.
-            let valid = if up_to {
+            // CR 701.23b/d: "up to N" OR a stated-quality constraint accepts a
+            // short/empty pick (fail-to-find); a pure quantity search needs
+            // exactly `count`. The subsequent `selection_satisfies_constraint`
+            // re-check validates the distinct-slot consistency of whatever was
+            // chosen, so widening the count bound here is safe.
+            let lower_bounded = up_to || constraint.permits_partial_find();
+            let valid = if lower_bounded {
                 chosen.len() <= count
             } else {
                 chosen.len() == count
@@ -1660,7 +1697,7 @@ pub(super) fn handle_resolution_choice(
             if !valid {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select {}{} card(s), got {}",
-                    if up_to { "up to " } else { "exactly " },
+                    if lower_bounded { "up to " } else { "exactly " },
                     count,
                     chosen.len()
                 )));
@@ -2017,6 +2054,25 @@ pub(super) fn handle_resolution_choice(
                 .map(|cont| cont.chain.controller)
                 .unwrap_or(player);
             set_priority(state, priority_player);
+            // CR 101.4 + CR 608.2c: A per-player `ChooseFromZone { EachPlayer }`
+            // iteration does NOT partition this player's pick into the
+            // continuation's target slots — each pick is accumulated into the
+            // chain's tracked set by `drain_pending_per_player_zone_choice`, and
+            // the continuation ("put those cards onto the battlefield") reads
+            // that tracked set. Hand the choice straight to the drain so it can
+            // accumulate and prompt the next player (Breach the Multiverse).
+            if state.pending_per_player_zone_choice.is_some() {
+                effects::choose_from_zone::drain_pending_per_player_zone_choice(
+                    state, &chosen, events,
+                );
+                // Only after every player has been prompted (the drain leaves no
+                // pending iteration and is no longer waiting on a choice) does
+                // the parked continuation run.
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
@@ -2531,6 +2587,7 @@ pub(super) fn handle_resolution_choice(
                         // DOWN with the specified characteristics instead of
                         // resuming face up and exposing the real object.
                         face_down_profile: face_down_profile.clone(),
+                        library_placement: None,
                     };
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
@@ -2557,6 +2614,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2588,6 +2646,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -2664,13 +2723,29 @@ pub(super) fn handle_resolution_choice(
                         ));
                     };
                     let ability = *cont.chain;
-                    effects::cast_from_zone::grant_lingering_permissions(
-                        &mut *state,
-                        &ability,
-                        &chosen,
-                        events,
-                    )
-                    .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    if chosen.len() == 1 {
+                        let used_during_resolution =
+                            effects::cast_from_zone::complete_hand_pick_cast_from_zone(
+                                &mut *state,
+                                &ability,
+                                chosen[0],
+                                events,
+                            )
+                            .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                        if used_during_resolution {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                    } else {
+                        effects::cast_from_zone::grant_lingering_permissions(
+                            &mut *state,
+                            &ability,
+                            &chosen,
+                            events,
+                        )
+                        .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    }
                 }
                 // CR 701.68a: Place `count_param` -1/-1 counters on the creature
                 // the controller chose. The choice is non-targeted; the pool was
@@ -2888,7 +2963,7 @@ pub(super) fn handle_resolution_choice(
                                 // or zones (Sewer Nemesis, Skyshroud War Beast) —
                                 // recompute layers immediately.
                                 | ChoiceType::Player
-                                | ChoiceType::Opponent
+                                | ChoiceType::Opponent { .. }
                         ) {
                             crate::game::layers::mark_layers_full(state);
                         }
@@ -2906,7 +2981,10 @@ pub(super) fn handle_resolution_choice(
             // continuation chain carries the list because it is a
             // `ResolvedAbility` — unlike `last_named_choice`, which is a
             // single GameState slot cleared after every drain.
-            if matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
+            if matches!(
+                choice_type,
+                ChoiceType::Player | ChoiceType::Opponent { .. }
+            ) {
                 if let Ok(pid) = choice.parse::<u8>() {
                     if let Some(cont) = state.pending_continuation.as_mut() {
                         let mut chosen = cont.chain.chosen_players.clone();
@@ -2926,6 +3004,7 @@ pub(super) fn handle_resolution_choice(
                         ability_index,
                         pending.ability,
                         pending.activation_cost.as_ref(),
+                        pending.x_residual_activation,
                         events,
                     )?;
                 } else {
@@ -3043,7 +3122,15 @@ pub(super) fn handle_resolution_choice(
             }
             state.ring_bearer.insert(player, Some(target));
             crate::game::layers::mark_layers_full(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let waiting_for = finish_with_continuation(state, player, events);
+            // CR 603.2 + CR 701.54: RingTemptsYou observer triggers are batched
+            // while ChooseRingBearer pauses spell resolution (issue #1017).
+            if let Some(outcome) =
+                batch_or_drain_observer_triggers(state, events, events.len(), events.len())
+            {
+                return Ok(outcome);
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
             if !options.contains(&dungeon) {

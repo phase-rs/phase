@@ -123,6 +123,11 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.31d: planeswalked-away-from / planeswalked-to (encounter) endpoints.
         TriggerMode::PlaneswalkedFrom => match_planeswalked_from,
         TriggerMode::PlaneswalkedTo => match_planeswalked_to,
+        // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
+        // the scheme set in motion.
+        TriggerMode::SetInMotion => match_set_in_motion,
+        // CR 701.33b: "When you abandon this scheme" fires for the abandoned scheme.
+        TriggerMode::Abandoned => match_abandoned,
         TriggerMode::RoomEntered => match_room_entered,
         TriggerMode::UnlockDoor => match_unlock_door,
         TriggerMode::FullyUnlock => match_fully_unlock,
@@ -169,7 +174,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PlanarDice
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
-        | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
@@ -178,7 +182,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Mentored
         | TriggerMode::Proliferate
         | TriggerMode::SeekAll
-        | TriggerMode::SetInMotion
         | TriggerMode::Trains
         | TriggerMode::VisitAttraction => match_visit_attraction,
         TriggerMode::Specializes => match_specializes,
@@ -381,6 +384,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::ChaosEnsues, match_chaos_ensues);
     r.insert(TriggerMode::PlaneswalkedFrom, match_planeswalked_from);
     r.insert(TriggerMode::PlaneswalkedTo, match_planeswalked_to);
+    // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
+    r.insert(TriggerMode::SetInMotion, match_set_in_motion);
+    r.insert(TriggerMode::Abandoned, match_abandoned);
     r.insert(TriggerMode::RoomEntered, match_room_entered);
     r.insert(TriggerMode::UnlockDoor, match_unlock_door);
     r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
@@ -454,7 +460,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         // TriggerMode::ChaosEnsues — moved to real matcher above
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
-        TriggerMode::Abandoned,
+        // TriggerMode::Abandoned — moved to real matcher above
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
@@ -463,7 +469,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Mentored,
         // TriggerMode::Mutates — moved to real matcher below
         TriggerMode::SeekAll,
-        TriggerMode::SetInMotion,
+        // TriggerMode::SetInMotion — moved to real matcher above
         // TriggerMode::Specializes — moved to real matcher above
         // TriggerMode::Stationed — moved to real matcher below
         TriggerMode::Trains,
@@ -657,6 +663,35 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
             properties,
         }) => type_filters.is_empty() && properties.is_empty(),
         _ => false,
+    }
+}
+
+/// CR 120.3 + CR 102.2: True when a damage-recipient `valid_target` *can* be
+/// satisfied by a player recipient.
+///
+/// This is the player-arm dual of [`is_player_scope_damage_filter`]: a player
+/// recipient must be rejected only when the filter names an object and could
+/// never be a player (e.g. `Typed([Creature])`, `Typed([Planeswalker])`). A
+/// pure player-scope filter trivially qualifies, and a mixed disjunction such as
+/// "a player or planeswalker" (`Or { Player, Typed([Planeswalker]) }`, emitted by
+/// `parse_damage_to_qualifier`) qualifies through its player-scope leg — so
+/// Hunter's Insight's "deals combat damage to a player or planeswalker" still
+/// fires on combat damage to a player. An `And` qualifies only when every
+/// conjunct can match a player (no printed damage recipient uses this shape
+/// today, but the recursion keeps the predicate total).
+fn damage_recipient_filter_can_match_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } => {
+            filters.iter().any(damage_recipient_filter_can_match_player)
+        }
+        TargetFilter::And { filters } => {
+            filters.iter().all(damage_recipient_filter_can_match_player)
+        }
+        // A pure object `Typed` filter (type constraints, no player-compatible
+        // controller-only scope) can never be a player; everything else the
+        // parser emits for a player recipient is covered by the player-scope
+        // classifier.
+        other => is_player_scope_damage_filter(other),
     }
 }
 
@@ -871,6 +906,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Planeswalked { .. }
         | GameEvent::ChaosEnsued { .. }
         | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
@@ -1040,6 +1077,64 @@ pub(super) fn match_changes_zone_all(
 }
 
 // CR 603.6d: DamageDone trigger fires on damage dealt events.
+
+/// CR 510.2 + CR 603.2: Source-filtered observers whose source is not the
+/// trigger source itself listen on the aggregate `CombatDamageDealtToPlayer`
+/// event. Self/no-source creature triggers already fire on per-source
+/// `DamageDealt` events emitted during the combat damage step; matching them
+/// again on the aggregate event double-fires.
+pub(super) fn listens_on_aggregate_combat_damage_done(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::DamageDone
+        && matches!(
+            trigger.valid_source,
+            Some(ref filter) if !matches!(filter, TargetFilter::SelfRef)
+        )
+}
+
+fn matching_combat_damage_to_player_sources(
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+    player_id: PlayerId,
+    source_amounts: &[(ObjectId, u32)],
+) -> Vec<(ObjectId, u32)> {
+    if trigger.damage_kind == DamageKindFilter::NoncombatOnly {
+        return Vec::new();
+    }
+    if let Some(ref vt) = trigger.valid_target {
+        // CR 120.3 + CR 102.2: a type-bearing recipient filter ("to a
+        // creature/permanent/planeswalker") names an OBJECT recipient and can
+        // never match combat damage dealt to a *player*. The aggregate path
+        // delivers combat-damage-to-a-player for non-SelfRef listeners (the
+        // per-event DamageDealt/Player arm is short-circuited for them at the
+        // `listens_on_aggregate_combat_damage_done` check in `match_damage_done`),
+        // so without this guard every non-SelfRef object-recipient trigger (e.g.
+        // Greven il-Vec, Giant's Skewer) would mis-fire on combat damage to a
+        // player via `player_matches_filter`'s `_ => true` fallthrough. Uses the
+        // same `damage_recipient_filter_can_match_player` predicate as the
+        // per-event Player arm, so mixed recipients like "a player or
+        // planeswalker" still pass through their player-scope leg.
+        if !damage_recipient_filter_can_match_player(vt) {
+            return Vec::new();
+        }
+        if !player_matches_filter(vt, state, player_id, source_id) {
+            return Vec::new();
+        }
+    }
+    source_amounts
+        .iter()
+        .filter(|(src, amt)| {
+            if let Some((cmp, threshold)) = trigger.damage_amount {
+                if !cmp.evaluate(*amt as i32, threshold as i32) {
+                    return false;
+                }
+            }
+            valid_source_matches(trigger, state, *src, source_id)
+        })
+        .copied()
+        .collect()
+}
+
 pub(super) fn match_damage_done(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1054,6 +1149,12 @@ pub(super) fn match_damage_done(
         ..
     } = event
     {
+        if *is_combat
+            && matches!(target, TargetRef::Player(_))
+            && listens_on_aggregate_combat_damage_done(trigger)
+        {
+            return false;
+        }
         // Check if trigger requires damage from a specific source
         if !valid_source_matches(trigger, state, *dmg_source, source_id) {
             return false;
@@ -1079,6 +1180,25 @@ pub(super) fn match_damage_done(
         if let Some(ref vt) = trigger.valid_target {
             match target {
                 TargetRef::Player(pid) => {
+                    // CR 120.3 + CR 102.2: a *type-bearing* recipient filter ("to a
+                    // creature/permanent/planeswalker") names an OBJECT recipient and
+                    // can never be satisfied by damage dealt to a player. Only
+                    // player-scope filters (Player / Controller / controller-only
+                    // Typed, i.e. "to a player / to an opponent / to you") may match a
+                    // player recipient. Without this, a trigger carrying
+                    // Typed([Creature], controller:None) would fire on combat damage to
+                    // a player, because `player_matches_filter` falls through to
+                    // `_ => true` for a controller-less Typed filter. Uses
+                    // `damage_recipient_filter_can_match_player` (the player-arm dual
+                    // of the Object arm's `is_player_scope_damage_filter`), which still
+                    // admits mixed recipients like "a player or planeswalker" through
+                    // their player-scope leg. This per-event arm is reached by SelfRef
+                    // damage triggers (non-aggregate listeners); non-SelfRef listeners
+                    // reach players only via the aggregate path guarded in
+                    // `matching_combat_damage_to_player_sources`.
+                    if !damage_recipient_filter_can_match_player(vt) {
+                        return false;
+                    }
                     if !player_matches_filter(vt, state, *pid, source_id) {
                         return false;
                     }
@@ -1104,9 +1224,62 @@ pub(super) fn match_damage_done(
             }
         }
         true
+    } else if let GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        source_amounts,
+        ..
+    } = event
+    {
+        if !listens_on_aggregate_combat_damage_done(trigger) {
+            return false;
+        }
+        !matching_combat_damage_to_player_sources(
+            trigger,
+            source_id,
+            state,
+            *player_id,
+            source_amounts,
+        )
+        .is_empty()
     } else {
         false
     }
+}
+
+/// CR 510.2 + CR 603.2: `DamageDone` triggers on equipment (and other
+/// observers) listen for per-source combat damage via the aggregate
+/// `CombatDamageDealtToPlayer` event. Expand matching sources into synthetic
+/// `DamageDealt` events so downstream `EventContextAmount` and intervening-if
+/// checks see the per-source amount.
+pub(super) fn matching_damage_done_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<GameEvent> {
+    if !listens_on_aggregate_combat_damage_done(trigger) {
+        return Vec::new();
+    }
+
+    let GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        source_amounts,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+
+    matching_combat_damage_to_player_sources(trigger, source_id, state, *player_id, source_amounts)
+        .into_iter()
+        .map(|(src, amt)| GameEvent::DamageDealt {
+            source_id: src,
+            target: TargetRef::Player(*player_id),
+            amount: amt,
+            is_combat: true,
+            excess: 0,
+        })
+        .collect()
 }
 
 pub(super) fn match_damage_done_once_by_controller(
@@ -1958,6 +2131,7 @@ pub(super) fn match_discarded(
     if let GameEvent::Discarded {
         player_id,
         object_id,
+        ..
     } = event
     {
         // CR 603.2: The trigger event includes which player discarded; scope
@@ -2497,6 +2671,7 @@ pub(super) fn match_cycled_or_discarded(
     if let GameEvent::Discarded {
         player_id,
         object_id,
+        ..
     } = event
     {
         if !valid_player_matches(trigger, state, *player_id, source_id) {
@@ -3302,10 +3477,11 @@ pub(super) fn matching_you_attack_pairs(
     // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
     // "attackers controlled by the trigger's source controller" semantics.
     let player_ok = match trigger.valid_target.as_ref() {
-        // Parser legacy for "one or more creatures attack a player": the
-        // attacked-player type is represented as `TargetFilter::Player`, not
-        // as attacking-player scope. The per-attack target filter below handles
-        // it, so keep the attacking-player gate permissive here.
+        // CR 506.2 + CR 303.4e: `valid_target == Player` is purely the permissive
+        // attacking-player pass-through (any attacking player) and carries NO
+        // attack-target narrowing — that lives solely in `attack_target_filter`.
+        // Used by attachment-relation triggers ("enchanted by an Aura you control
+        // attack") whose enchanted/equipped attacker may be opponent-controlled.
         Some(TargetFilter::Player) => true,
         Some(_) => valid_player_matches(trigger, state, attacking_player, source_id),
         None => {
@@ -3331,15 +3507,14 @@ pub(super) fn matching_you_attack_pairs(
                 .iter()
                 .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
                 .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            // CR 508.3a: attacked-target narrowing ("attacks a player/planeswalker/
+            // battle") lives solely in `attack_target_filter`; `valid_target` carries
+            // only attacking-player scope (CR 506.2), mirroring
+            // `matching_you_attack_unblocked_pairs`.
             if trigger
                 .attack_target_filter
                 .as_ref()
                 .is_some_and(|filter| !attack_target_type_matches(target, filter))
-            {
-                return None;
-            }
-            if matches!(trigger.valid_target, Some(TargetFilter::Player))
-                && !matches!(target, crate::game::combat::AttackTarget::Player(_))
             {
                 return None;
             }
@@ -3585,6 +3760,32 @@ pub(super) fn match_planeswalked_to(
     }
 }
 
+/// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
+/// scheme set in motion; "you" resolves to the archenemy via the scheme's
+/// controller (stamped in `archenemy::set_in_motion`).
+pub(super) fn match_set_in_motion(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
+        if *scheme_id == source_id
+        && valid_player_matches(trigger, state, *player_id, source_id))
+}
+
+/// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
+pub(super) fn match_abandoned(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::SchemeAbandoned { scheme_id, player_id }
+        if *scheme_id == source_id
+        && valid_player_matches(trigger, state, *player_id, source_id))
+}
+
 /// CR 104.3a: "Whenever a player loses the game" — fires when any player's
 /// loss event is recorded. The `valid_target` filter (if set) restricts
 /// which player's loss triggers the ability. Cards: Withengar Unbound,
@@ -3765,8 +3966,10 @@ pub(super) fn match_ability_activated(
     else {
         return false;
     };
-    valid_player_matches(trigger, state, *player_id, source_id)
-        && valid_card_matches(trigger, state, *activated_id, source_id)
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return false;
+    }
+    valid_card_matches(trigger, state, *activated_id, source_id)
 }
 
 /// CR 702.26c: Matches when a permanent phases in.
@@ -4137,7 +4340,7 @@ mod tests {
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
         Comparator, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, ManaTapState, PlayerActionKind};
@@ -4269,6 +4472,7 @@ mod tests {
             &GameEvent::Discarded {
                 player_id: PlayerId(1),
                 object_id: discarded,
+                source_id: None,
             },
             &trigger,
             source,
@@ -4278,6 +4482,7 @@ mod tests {
             &GameEvent::Discarded {
                 player_id: PlayerId(0),
                 object_id: discarded,
+                source_id: None,
             },
             &trigger,
             source,
@@ -4341,6 +4546,7 @@ mod tests {
             &GameEvent::Discarded {
                 player_id: PlayerId(1),
                 object_id: card,
+                source_id: None,
             },
             &trigger,
             source,
@@ -4350,6 +4556,7 @@ mod tests {
             &GameEvent::Discarded {
                 player_id: PlayerId(0),
                 object_id: card,
+                source_id: None,
             },
             &trigger,
             source,
@@ -6640,6 +6847,586 @@ mod tests {
         assert_eq!(rebuilt_amounts, vec![(creature_a, 3)]);
         // Only creature_a's 3 damage counts, not the aggregate 5.
         assert_eq!(total_damage, 3);
+    }
+
+    #[test]
+    fn matching_damage_done_events_expands_equipped_creature_combat_damage() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Key to the Vault".to_string(),
+            Zone::Battlefield,
+        );
+        let bearer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipped Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bearer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(AttachTarget::Object(bearer));
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::AttachedTo);
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(bearer, 3)],
+            total_damage: 3,
+        };
+
+        assert!(match_damage_done(&event, &trigger, equipment, &state));
+        let expanded = matching_damage_done_events(&event, &trigger, equipment, &state);
+        assert_eq!(expanded.len(), 1);
+        assert!(matches!(
+            expanded[0],
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 3,
+                is_combat: true,
+                ..
+            } if source_id == bearer
+        ));
+    }
+
+    #[test]
+    fn matching_damage_done_events_expands_source_filtered_combat_damage() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        for attacker in [attacker_a, attacker_b] {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
+            total_damage: 5,
+        };
+
+        let per_source_event = GameEvent::DamageDealt {
+            source_id: attacker_a,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&per_source_event, &trigger, watcher, &state),
+            "source-filtered observers use the aggregate event for combat damage to players"
+        );
+        assert!(match_damage_done(&event, &trigger, watcher, &state));
+        assert_eq!(
+            matching_damage_done_events(&event, &trigger, watcher, &state).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn matching_damage_done_events_does_not_expand_once_modes() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        for attacker in [attacker_a, attacker_b] {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnce);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
+            total_damage: 5,
+        };
+
+        assert!(!match_damage_done(&event, &trigger, watcher, &state));
+        assert!(matching_damage_done_events(&event, &trigger, watcher, &state).is_empty());
+    }
+
+    #[test]
+    fn matching_damage_done_events_does_not_expand_self_source_triggers() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tempest Hawk".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(attacker, 2)],
+            total_damage: 2,
+        };
+
+        assert!(
+            !match_damage_done(&event, &trigger, attacker, &state),
+            "SelfRef triggers must not match aggregate combat damage"
+        );
+        assert!(!listens_on_aggregate_combat_damage_done(&trigger));
+        assert!(matching_damage_done_events(&event, &trigger, attacker, &state).is_empty());
+    }
+
+    /// CR 120.3: a SelfRef object-recipient trigger ("deals damage to a
+    /// creature") fires on damage to a matching object but NOT on damage to a
+    /// player. Exercises the per-event `match_damage_done` path (Step 0a guard)
+    /// for the 37 SelfRef cards in the class (Strax, Lowland Basilisk, Mirri).
+    #[test]
+    fn object_recipient_self_ref_gates_player_vs_object() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strax, Sontaran Nurse".to_string(),
+            Zone::Battlefield,
+        );
+        let damaged_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Damaged Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let noncreature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Damaged Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&damaged_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        // Damage to a creature recipient fires.
+        let to_creature = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(damaged_creature),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(match_damage_done(&to_creature, &trigger, source, &state));
+
+        // Damage to a player must NOT fire (Step 0a: type-bearing filter rejects
+        // a player recipient).
+        let to_player = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!match_damage_done(&to_player, &trigger, source, &state));
+
+        // Damage to a non-creature object must NOT fire (Object arm type gate).
+        let to_noncreature = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(noncreature),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!match_damage_done(
+            &to_noncreature,
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    /// CR 120.3: a planeswalker-recipient trigger gates on the damaged object's
+    /// type the same way and still rejects player recipients.
+    #[test]
+    fn object_recipient_planeswalker_gates_player_vs_object() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Questing Beast".to_string(),
+            Zone::Battlefield,
+        );
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Damaged Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::new(
+            TypeFilter::Planeswalker,
+        )));
+
+        let to_pw = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(planeswalker),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(match_damage_done(&to_pw, &trigger, source, &state));
+
+        let to_player = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!match_damage_done(&to_player, &trigger, source, &state));
+    }
+
+    /// CR 120.3 + CR 102.2: Step 0a must NOT over-reject the legitimate
+    /// player-scope recipient case ("to an opponent" → controller-only Typed).
+    /// Player recipient still fires; an object an opponent controls does not
+    /// (preserves the established Coastal Piracy behavior).
+    #[test]
+    fn player_scope_recipient_still_fires_on_player_after_guard() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coastal Piracy".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        // "to an opponent" → controller-only Typed (player-scope).
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        let to_opp = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(match_damage_done(&to_opp, &trigger, source, &state));
+
+        let to_opp_creature = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(opp_creature),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!match_damage_done(
+            &to_opp_creature,
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    /// CR 120.3 + CR 102.2: a mixed "a player or planeswalker" recipient
+    /// (`Or { Player, Typed([Planeswalker]) }`, Hunter's Insight) must STILL fire
+    /// on combat damage to a player — the player-arm guard
+    /// (`damage_recipient_filter_can_match_player`) admits the disjunction through
+    /// its `Player` leg — while a creature object (not in the disjunction) does
+    /// not fire.
+    #[test]
+    fn mixed_player_or_planeswalker_recipient_fires_on_player() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hunter's Insight Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            ],
+        });
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        // Combat damage to a player fires (Player leg of the disjunction).
+        let to_player = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(match_damage_done(&to_player, &trigger, source, &state));
+
+        // Combat damage to a creature (not a planeswalker) does not fire.
+        let to_creature = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(creature),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!match_damage_done(&to_creature, &trigger, source, &state));
+    }
+
+    /// CR 120.3: a NON-SelfRef object-recipient trigger (aggregate listener,
+    /// Greven il-Vec / Giant's Skewer shape) must NOT fire on combat damage to a
+    /// player via the aggregate path. This is the Step 0b regression guard — the
+    /// exact mis-fire the new blocker describes. Without Step 0b
+    /// `match_damage_done` returns true here.
+    #[test]
+    fn object_recipient_aggregate_rejects_player_combat_damage() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Greven il-Vec".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature You Control".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        // Non-SelfRef source → aggregate listener.
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        // Object-recipient valid_target ("to a creature").
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(attacker, 3)],
+            total_damage: 3,
+        };
+
+        assert!(listens_on_aggregate_combat_damage_done(&trigger));
+        // Step 0b: the type-bearing valid_target rejects the player recipient.
+        assert!(!match_damage_done(&event, &trigger, watcher, &state));
+        assert!(matching_combat_damage_to_player_sources(
+            &trigger,
+            watcher,
+            &state,
+            PlayerId(1),
+            &[(attacker, 3)]
+        )
+        .is_empty());
+
+        // A player-scope valid_target ("to you") must still pass the guard and
+        // return the matching sources — Step 0b must not over-reject. "to you"
+        // resolves to the trigger source's controller (PlayerId(0)), so the
+        // damaged player must be PlayerId(0) for the recipient to match.
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        assert_eq!(
+            matching_combat_damage_to_player_sources(
+                &trigger,
+                watcher,
+                &state,
+                PlayerId(0),
+                &[(attacker, 3)]
+            ),
+            vec![(attacker, 3)]
+        );
+    }
+
+    /// CR 120.1 + CR 108.3: The Beast smoke — a non-SelfRef aggregate listener
+    /// with `valid_target = None` and the relational condition is unaffected by
+    /// Step 0b (the `Some(vt)` guard is skipped) and still expands per-source
+    /// synthetic events.
+    #[test]
+    fn owner_relation_trigger_expands_aggregate_unaffected_by_guard() {
+        let mut state = setup();
+        let beast = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Beast, Deathless Prince".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::Typed(TypedFilter::creature()));
+        trigger.valid_target = None;
+        trigger.condition = Some(TriggerCondition::DamagedPlayerIsEventSourceOwner);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(attacker, 4)],
+            total_damage: 4,
+        };
+
+        assert!(listens_on_aggregate_combat_damage_done(&trigger));
+        // No valid_target → Step 0b's Some(vt) block is skipped; matcher fires
+        // (the owner relation is gated separately by the condition evaluator).
+        assert!(match_damage_done(&event, &trigger, beast, &state));
+        assert_eq!(
+            matching_damage_done_events(&event, &trigger, beast, &state).len(),
+            1
+        );
     }
 
     #[test]

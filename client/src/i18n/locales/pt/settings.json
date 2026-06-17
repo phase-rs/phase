@@ -32,7 +32,6 @@
       "customUrl": "URL personalizada",
       "none": "Nenhum"
     },
-    "commandZone": "Zona de comando",
     "commandZoneOptions": {
       "compact": "Compacto",
       "inline": "Em linha",
@@ -79,6 +78,34 @@
       "full": "Completa",
       "reduced": "Reduzida",
       "minimal": "Mínima"
+    }
+  },
+  "flexLayout": {
+    "title": "Layout flexível",
+    "description": "Arraste painéis e HUDs para qualquer lugar e redimensione as zonas do tabuleiro.",
+    "edit": "Personalizar layout…",
+    "done": "Concluído",
+    "reset": "Redefinir layout",
+    "preset": "Predefinição",
+    "hint": "Arraste qualquer painel para movê-lo. Arraste as barras brilhantes para redimensionar zonas.",
+    "align": {
+      "left": "Alinhar à esquerda",
+      "center": "Centralizar",
+      "right": "Alinhar à direita"
+    },
+    "presets": {
+      "default": { "label": "Layout 1", "description": "O layout equilibrado padrão." },
+      "layout2": { "label": "Layout 2", "description": "Um campo de batalha maior com as mãos recolhidas." },
+      "layout3": { "label": "Layout 3", "description": "Um terço inferior mais alto." }
+    },
+    "zones": {
+      "playerHud": "Seu HUD",
+      "opponentHud": "HUD do oponente",
+      "stackPanel": "Pilha",
+      "logPanel": "Registro",
+      "actionRail": "Ações",
+      "playerPiles": "Suas zonas",
+      "opponentPiles": "Zonas do oponente"
     }
   },
   "audio": {

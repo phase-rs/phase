@@ -619,6 +619,28 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
         .is_some()
 }
 
+/// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
+/// block a creature with shadow. This returns `true` when the blocker has a
+/// functioning `CanBlockShadow` static — "~ can block creatures with shadow as
+/// though they didn't have shadow" / "as though it had shadow" — which lifts
+/// the shadow blocker-side restriction for that affected creature.
+///
+/// Mirrors the `CanAttackWithDefender` lookup: intrinsic self statics are read
+/// from the blocker, and remote affected filters are resolved through the shared
+/// static-ability checker.
+fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, blocker)
+        .any(|sd| sd.mode == StaticMode::CanBlockShadow)
+        || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CanBlockShadow,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(blocker.id),
+                ..Default::default()
+            },
+        )
+}
+
 /// CR 509.1b: Static abilities on the blocker (or on another source whose
 /// `affected` filter matches the blocker) that restrict which attackers it
 /// may block — e.g. "This creature can block only creatures with flying."
@@ -906,7 +928,9 @@ pub fn validate_blockers_for_player(
         // and cannot block creatures without shadow.
         let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-        if attacker_has_shadow && !blocker_has_shadow {
+        // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+        // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+        if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow can only be blocked by shadow)",
                 blocker_id, attacker_id
@@ -2407,6 +2431,27 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 506.5: A creature is attacking alone if it's attacking but no other
+/// creatures are. This reads live combat (the sole declared attacker); callers
+/// that must survive the attacker leaving combat (CR 506.4) capture the result
+/// into the zone-change snapshot at zone-exit per the look-back rule CR 603.10a.
+pub fn attacking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.attackers.len() == 1 && combat.attackers[0].object_id == object_id
+    })
+}
+
+/// CR 506.5: A creature is blocking alone if it's blocking but no other
+/// creatures are. `blocker_to_attacker` is keyed by blocker id (one entry per
+/// distinct declared blocker), so a single entry that contains `object_id`
+/// means it is the only blocker in combat. Like `attacking_alone`, this reads
+/// live combat; look-back callers snapshot the result (CR 603.10a).
+pub fn blocking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.blocker_to_attacker.len() == 1 && combat.blocker_to_attacker.contains_key(&object_id)
+    })
+}
+
 /// CR 302.6: Returns true iff this creature can't attack or pay `{T}`/`{Q}`
 /// costs due to summoning sickness — i.e., it has NOT been continuously under
 /// its controller's control since that player's most recent turn began.
@@ -2704,7 +2749,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }
     let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
     let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-    if attacker_has_shadow && !blocker_has_shadow {
+    // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+    // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+    if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
         return false;
     }
     if !attacker_has_shadow && blocker_has_shadow {
@@ -4263,6 +4310,52 @@ mod tests {
         assert_eq!(combat.blocker_to_attacker[&blocker], vec![attacker]);
     }
 
+    /// CR 506.5: the sole declared attacker is "attacking alone"; a co-attacker
+    /// makes neither attacker alone.
+    #[test]
+    fn attacking_alone_authority() {
+        let mut state = setup();
+        let solo = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(solo, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(attacking_alone(&state, solo));
+
+        let other = create_creature(&mut state, PlayerId(0), "Wolf", 3, 3);
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(solo, PlayerId(1)),
+                AttackerInfo::attacking_player(other, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        assert!(!attacking_alone(&state, solo));
+        assert!(!attacking_alone(&state, other));
+    }
+
+    /// CR 506.5: the sole declared blocker is "blocking alone"; a co-blocker
+    /// makes neither blocker alone.
+    #[test]
+    fn blocking_alone_authority() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let solo = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(solo, attacker)], &mut events).unwrap();
+        assert!(blocking_alone(&state, solo));
+
+        let second = create_creature(&mut state, PlayerId(1), "Guard", 1, 3);
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(second, attacker)], &mut events).unwrap();
+        assert!(!blocking_alone(&state, solo));
+        assert!(!blocking_alone(&state, second));
+    }
+
     #[test]
     fn has_potential_attackers_with_valid_creature() {
         let mut state = setup();
@@ -4350,6 +4443,70 @@ mod tests {
 
         // Shadow creature can't block non-shadow attacker
         assert!(validate_blockers(&state, &[(shadow_blocker, attacker)]).is_err());
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Heartwood Dryad / Wall of Diffusion —
+    /// a non-shadow creature with `CanBlockShadow` may block a shadow attacker.
+    /// Discriminating: an identical non-shadow creature WITHOUT the static cannot.
+    #[test]
+    fn can_block_shadow_static_lets_non_shadow_block_shadow() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow A", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        // Plain non-shadow blocker: cannot block the shadow attacker.
+        let plain_blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, plain_blocker, attacker));
+
+        // Non-shadow blocker with CanBlockShadow: now allowed by both seams.
+        let dryad = create_creature(&mut state, PlayerId(1), "Heartwood Dryad", 2, 2);
+        state
+            .objects
+            .get_mut(&dryad)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::SelfRef),
+            );
+        assert!(validate_blockers(&state, &[(dryad, attacker)]).is_ok());
+        assert!(can_block_pair(&state, dryad, attacker));
+
+        // A source whose affected filter matches another creature also grants
+        // that creature the permission; the parser accepts subject-scoped
+        // variants, so runtime must honor `affected` rather than only checking
+        // the blocker's own statics.
+        let standard_bearer = create_creature(&mut state, PlayerId(1), "Shadow Standard", 1, 1);
+        state
+            .objects
+            .get_mut(&standard_bearer)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_ok());
+        assert!(can_block_pair(&state, plain_blocker, attacker));
+
+        // The permission does NOT make the Dryad itself blockable-by-anything or
+        // change the non-shadow attacker symmetry: a shadow blocker still can't
+        // block a non-shadow attacker (the other CR 702.28b half is untouched).
+        let normal_attacker = create_creature(&mut state, PlayerId(0), "Grizzly", 2, 2);
+        let shadow_blocker = create_creature(&mut state, PlayerId(1), "Shadow B", 2, 2);
+        state
+            .objects
+            .get_mut(&shadow_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+        assert!(validate_blockers(&state, &[(shadow_blocker, normal_attacker)]).is_err());
     }
 
     #[test]
@@ -4445,6 +4602,195 @@ mod tests {
         attacker_obj.power = Some(4);
         attacker_obj.base_power = Some(4);
         assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 506.2 + CR 108.3: An Aura-style `CantBeBlocked` gated on
+    /// `Not(RecipientAttackingOwnerTarget { OwnerOrPlaneswalker })` (Become the
+    /// Pilot) — attached to a creature OWNED by B but CONTROLLED by A. The
+    /// creature is unblockable when attacking anyone except its owner B (or a
+    /// permanent B controls). Exercises the owner-vs-controller distinction.
+    #[test]
+    fn cant_be_blocked_unless_attacking_owner_reads_owner_not_controller() {
+        use crate::types::ability::{
+            FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::triggers::AttackTargetFilter;
+
+        // Player B (1) owns the creature; player A (0) controls it (donated).
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(1), "Donated Beater", 4, 4);
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0); // owner B, controller A
+        }
+        // Blocker controlled by the defending player (the creature's owner B).
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Aura granting the conditional-evasion static, attached to the attacker.
+        let aura = create_creature(&mut state, PlayerId(0), "Become the Pilot", 0, 0);
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.attached_to = Some(attacker.into());
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeBlocked)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .condition(StaticCondition::Not {
+                        condition: Box::new(StaticCondition::RecipientAttackingOwnerTarget {
+                            target: AttackTargetFilter::OwnerOrPlaneswalker,
+                        }),
+                    }),
+            );
+        }
+
+        // 1) Attacking a third party (defending player A's own ally seat is N/A
+        //    in 2p, so attack a player who is NOT the owner): unblockable.
+        //    Owner is B(1); attack player A(0) (not the owner) → exception not met
+        //    → Not(false) = true → CantBeBlocked active.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+        assert!(
+            !can_block_pair(&state, blocker, attacker),
+            "attacking a non-owner player → unblockable"
+        );
+
+        // 2) Attacking its OWNER (player B = 1): exception met → Not(true) = false
+        //    → static inactive → blockable.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(
+            can_block_pair(&state, blocker, attacker),
+            "attacking its owner → blockable"
+        );
+
+        // 3) Attacking a planeswalker CONTROLLED BY THE OWNER (B): "a permanent
+        //    its owner controls" → exception met → blockable.
+        let owner_pw = create_planeswalker(&mut state, PlayerId(1), "Owner's Walker");
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(owner_pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        assert!(
+            can_block_pair(&state, blocker, attacker),
+            "attacking a planeswalker its owner controls → blockable"
+        );
+
+        // 4) Attacking a planeswalker controlled by the CONTROLLER (A, not the
+        //    owner): exception NOT met → still unblockable. Guards the
+        //    owner-vs-controller distinction (CR 108.3).
+        let controller_pw = create_planeswalker(&mut state, PlayerId(0), "Controller's Walker");
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(controller_pw),
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        assert!(
+            !can_block_pair(&state, blocker, attacker),
+            "attacking a planeswalker the CONTROLLER (not owner) controls → unblockable"
+        );
+    }
+
+    /// CR 509.1b + CR 506.2: The bare `Owner` parameter only matches a direct
+    /// attack on the owning player, not a permanent the owner controls.
+    #[test]
+    fn cant_be_blocked_unless_attacking_owner_bare_player_only() {
+        use crate::types::ability::{
+            FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::triggers::AttackTargetFilter;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(1), "Donated Beater", 4, 4);
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let aura = create_creature(&mut state, PlayerId(0), "Bare Owner Aura", 0, 0);
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.attached_to = Some(attacker.into());
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeBlocked)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .condition(StaticCondition::Not {
+                        condition: Box::new(StaticCondition::RecipientAttackingOwnerTarget {
+                            target: AttackTargetFilter::Owner,
+                        }),
+                    }),
+            );
+        }
+
+        // Attacking the owner directly → blockable.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(can_block_pair(&state, blocker, attacker));
+
+        // Attacking a planeswalker the owner controls → bare Owner does NOT
+        // match a permanent → exception not met → still unblockable.
+        let owner_pw = create_planeswalker(&mut state, PlayerId(1), "Owner's Walker");
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(owner_pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        assert!(
+            !can_block_pair(&state, blocker, attacker),
+            "bare Owner must not match owner-controlled permanents"
+        );
+    }
+
+    /// CR 509.1b: No combat / not-an-attacker → the positive condition is
+    /// `false`, so the `Not` makes the creature unblockable (defensive default).
+    #[test]
+    fn cant_be_blocked_unless_attacking_owner_no_combat_is_unblockable() {
+        use crate::types::ability::{
+            FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::triggers::AttackTargetFilter;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(1), "Donated Beater", 4, 4);
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let aura = create_creature(&mut state, PlayerId(0), "Evasion Aura", 0, 0);
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.attached_to = Some(attacker.into());
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeBlocked)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .condition(StaticCondition::Not {
+                        condition: Box::new(StaticCondition::RecipientAttackingOwnerTarget {
+                            target: AttackTargetFilter::OwnerOrPlaneswalker,
+                        }),
+                    }),
+            );
+        }
+
+        // No combat state at all → not attacking → exception not met → unblockable.
+        assert!(state.combat.is_none());
+        assert!(!can_block_pair(&state, blocker, attacker));
     }
 
     /// CR 509.1b: Detaching the Equipment must restore blockability — the
@@ -6195,6 +6541,49 @@ mod tests {
             &mut vec![],
         );
         assert!(attacks_non_owner.is_ok());
+    }
+
+    #[test]
+    fn cant_attack_owner_or_planeswalker_blocks_owner_side_targets() {
+        let mut state = setup_multiplayer_combat(3);
+        let attacker = create_creature(&mut state, PlayerId(1), "Xantcha", 5, 5);
+        let owner_walker = create_planeswalker(&mut state, PlayerId(1), "Owner Walker");
+        let other_walker = create_planeswalker(&mut state, PlayerId(2), "Other Walker");
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(
+                        crate::types::triggers::AttackTargetFilter::OwnerOrPlaneswalker,
+                    )),
+            );
+        }
+
+        let attacks_owner_walker = declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Planeswalker(owner_walker))],
+            &mut vec![],
+        );
+        assert!(attacks_owner_walker.is_err());
+        assert!(attacks_owner_walker
+            .unwrap_err()
+            .contains("can't attack Planeswalker"));
+
+        let attacks_owner_player = declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_owner_player.is_err());
+
+        let attacks_other_walker = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Planeswalker(other_walker))],
+            &mut vec![],
+        );
+        assert!(attacks_other_walker.is_ok());
     }
 
     #[test]

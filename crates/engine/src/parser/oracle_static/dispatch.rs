@@ -39,6 +39,33 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 502.3: Trailing "during their untap step(s)" clause of the
+/// max-untap restriction (Smoke / Damping Field / Winter Orb class). The
+/// canonical printing uses the plural possessive "their untap steps", but the
+/// apostrophe and the singular form are admitted so the combinator covers
+/// reprints and the "during each player's untap step" wording without a flat
+/// alt of full sentences.
+fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            space1,
+            tag("during "),
+            alt((
+                tag("their"),
+                tag("each player's"),
+                tag("each player\u{2019}s"),
+            )),
+            space1,
+            tag("untap step"),
+            opt(tag("s")),
+            opt(tag(".")),
+            space0,
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -266,6 +293,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 509.1b + CR 609.4 + CR 702.28b: "<subject> can block creatures with shadow
+    // as though they didn't have shadow" / "... as though it had shadow" — per-source
+    // permission to block shadow attackers (Heartwood Dryad, Wall of Diffusion).
+    if let Some(def) = parse_block_shadow_as_though(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -462,6 +496,37 @@ pub(crate) fn parse_static_line_inner(
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string()),
         );
+    }
+
+    // --- "Players can't untap more than one <type> during their untap steps." ---
+    // CR 502.3: Smoke / Damping Field / Imi Statue / Stoic Angel / Winter Orb
+    // class — a global cap on the untap turn-based action. The count and the
+    // permanent-type filter are parsed compositionally (number combinator +
+    // `parse_type_phrase`), so one branch covers every cap N and every
+    // permanent type (creature, artifact, nonbasic land, …). The cap rides
+    // inline on `StaticMode::MaxUntapPerType` because the restriction applies
+    // to whoever is the active player, not the source's controller.
+    if let Some(rest) = nom_tag_tp(&tp, "players can't untap more than ") {
+        // The cap count and the type filter are both case-insensitive
+        // (`parse_type_phrase` lowercases internally and produces a typed,
+        // name-free filter), so the lowercase remainder is the canonical input
+        // for the whole tail — no original-case offset arithmetic needed.
+        if let Ok((after_count, count)) = nom_primitives::parse_number(rest.lower) {
+            let (filter, remainder) = parse_type_phrase(after_count.trim_start());
+            // `remainder` is already lowercase, so the suffix combinator runs
+            // directly without the `nom_on_lower` case bridge.
+            let suffix_ok = parse_during_their_untap_step_suffix(remainder).is_ok();
+            // Require a real permanent-type filter (parse_type_phrase returns a
+            // typed filter for "creature"/"artifact"/"nonbasic land"); a bare
+            // generic permanent with no narrowing would over-broaden.
+            let has_type = matches!(&filter, TargetFilter::Typed(_));
+            if suffix_ok && has_type {
+                return Some(
+                    StaticDefinition::new(StaticMode::MaxUntapPerType { filter, max: count })
+                        .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // --- "Untap all <type> you control during each other player's untap step." ---
@@ -1044,6 +1109,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 702.16k: Player-subject protection ("You have protection from <X>")
+    // must be claimed before the permanent-subject continuous path, which would
+    // otherwise grant the protection keyword to permanents you control instead
+    // of to you (the player). Distinguishes the player subject from the
+    // permanent subject — the permanent path is left untouched.
+    if let Some(def) = parse_player_protection_static(&text, &lower) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_subject_continuous_static(&text) {
         return Some(def);
     }
@@ -1185,6 +1259,43 @@ pub(crate) fn parse_static_line_inner(
                         .condition(condition)
                         .description(text.to_string()),
                 );
+            }
+        }
+    }
+
+    // --- "<self> has <kw> if <cond>" single-pair conditional keyword grant ---
+    // CR 613.1f + CR 611.3a + CR 702.11b: A self-referential keyword grant gated
+    // on a typed source-state condition (Palladia-Mors, the Ruiner; Karakyk
+    // Guardian: "has hexproof if it hasn't dealt damage yet"). The MULTI-pair list
+    // (Multiclass Baldric) is owned by the attached-grant path
+    // (`parse_conditional_keyword_list`'s `len() > 1` gate); the SELF single-pair
+    // case has no other handler, so it is parsed here. `parse_self_reference`
+    // consumes every self-subject form ("~", "this creature", "this permanent",
+    // "it", ...) uniformly — including the "this creature" forms the generic
+    // `has`/`gets` arm below excludes via its `scan_contains(subject, "creature")`
+    // guard. Full consumption + the mandatory " if " in
+    // `parse_conditional_keyword_list` mean it cannot steal "has flying as long
+    // as", "has base power and toughness X", or "has all activated abilities".
+    // Placed BEFORE the generic `has`/`gets` arm so it owns the `if`-gated form
+    // first. Calls `parse_conditional_keyword_list` DIRECTLY so the multi-pair
+    // gate there is untouched.
+    if let Some((TargetFilter::SelfRef, after_subject)) =
+        nom_on_lower(&text, &lower, nom_target::parse_self_reference)
+    {
+        if let Some(after_has) = nom_tag_lower(after_subject, after_subject, " has ") {
+            let after_has_lower = after_has.to_lowercase();
+            if let Ok((rest, pairs)) = parse_conditional_keyword_list(&after_has_lower) {
+                if rest.trim().trim_end_matches('.').is_empty() && pairs.len() == 1 {
+                    if let Some((keyword, condition)) = pairs.into_iter().next() {
+                        return Some(
+                            StaticDefinition::continuous()
+                                .affected(TargetFilter::SelfRef)
+                                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                                .condition(condition)
+                                .description(text.to_string()),
+                        );
+                    }
+                }
             }
         }
     }

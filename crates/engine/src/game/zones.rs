@@ -159,6 +159,19 @@ pub(crate) fn apply_zone_exit_cleanup(
             }
         }
 
+        // CR 708.9: A face-down permanent leaving the battlefield, or a
+        // face-down spell leaving the stack for a zone other than the battlefield,
+        // is revealed to all players. Restore its stored identity so public zones
+        // show the real card instead of a face-down 2/2 shell.
+        if obj_mut.face_down
+            && (from == Zone::Battlefield || (from == Zone::Stack && to != Zone::Battlefield))
+        {
+            obj_mut.face_down = false;
+            if let Some(back_face) = obj_mut.back_face.take() {
+                apply_back_face_to_object(obj_mut, back_face);
+            }
+        }
+
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {
@@ -186,6 +199,38 @@ pub(crate) fn apply_zone_exit_cleanup(
                 )
             });
             state.exile_links.retain(|link| link.exiled_id != object_id);
+        }
+
+        // CR 400.7 + CR 601.2a + CR 118.9 + CR 701.17d: An object-tagged cast/play
+        // grant ("you may cast it without paying its mana cost", a milled card's
+        // "you may play that card") attaches an `ExileWithAltCost` /
+        // `ExileWithAltAbilityCost` / `PlayFromExile` permission *in place* on a
+        // card picked from the hand or graveyard (Sunforger searches a card to
+        // hand and casts it from there; Electrodominance / Emry cast in place;
+        // Ark of Hunger / Tablet of Discovery mill-grant in the graveyard) — see
+        // `effects::cast_from_zone` and the #751 graveyard `PlayFromExile` path.
+        // Such a card never passes through exile, so the exile-exit clear above
+        // never fires for it. Each grant authorizes exactly one cast of *that*
+        // card; once it has been cast and is leaving the stack (resolved or
+        // countered), the spent grant must be dropped so CR 400.7's new object
+        // does not inherit it. Without this, a stale grant lands back in the
+        // graveyard where `has_graveyard_timed_alt_cost_permission` /
+        // `graveyard_spell_objects_available_to_cast` re-offer the free cast on
+        // every priority — an unbounded recast loop. Exile-origin grants are
+        // already cleared at the Exile→Stack move, so this is a no-op for them
+        // (impulse draw, Suspend, Discover, Cascade). Other exile-scoped
+        // permissions (AdventureCreature, Plotted, Foretold, WarpExile) are left
+        // untouched: an Adventure spell, for instance, gains `AdventureCreature`
+        // precisely as it resolves to exile.
+        if from == Zone::Stack {
+            obj_mut.casting_permissions.retain(|p| {
+                !matches!(
+                    p,
+                    crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                        | crate::types::ability::CastingPermission::PlayFromExile { .. }
+                )
+            });
         }
 
         if from == Zone::Battlefield {
@@ -291,6 +336,12 @@ pub(crate) fn apply_zone_exit_cleanup(
     if from == Zone::Battlefield {
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
+        // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
+        // belongs to the old object. ObjectId persists across this zone change, so
+        // clear it on a battlefield exit (death/bounce/exile/flicker) — otherwise a
+        // flickered "has hexproof if it hasn't dealt damage yet" creature would
+        // re-enter still treated as having dealt damage and never regain hexproof.
+        state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         // CR 613.1 + CR 400.7: Copy effects are pruned above, but layer-derived
@@ -775,6 +826,11 @@ fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCo
         attacking: attacker.is_some(),
         blocking: combat.blocker_to_attacker.contains_key(&object_id),
         blocked: attacker.is_some_and(|attacker| attacker.blocked),
+        // CR 506.5 + CR 603.10a: snapshot the sole-attacker / sole-blocker
+        // status via the shared combat authority so it cannot diverge from the
+        // live `FilterProp::AttackingAlone` / `BlockingAlone` evaluation.
+        attacking_alone: crate::game::combat::attacking_alone(state, object_id),
+        blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
     }
 }
@@ -1973,6 +2029,81 @@ mod tests {
         assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
         assert_eq!(obj.power, Some(1), "power must revert to front face");
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 708.9: A face-down permanent is revealed when it leaves the battlefield.
+    #[test]
+    fn face_down_permanent_turns_face_up_when_leaving_battlefield() {
+        use crate::game::morph::manifest_card;
+        use crate::types::ability::FaceDownProfile;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(3285),
+            PlayerId(0),
+            "Hidden Bear".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library.push_front(id);
+
+        let mut events = Vec::new();
+        manifest_card(
+            &mut state,
+            PlayerId(0),
+            id,
+            id,
+            FaceDownProfile::vanilla_2_2(),
+            &mut events,
+        )
+        .unwrap();
+        assert!(state.objects[&id].face_down);
+
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.face_down,
+            "CR 708.9 must clear face_down on battlefield exit"
+        );
+        assert_eq!(obj.name, "Hidden Bear");
+        assert!(obj.back_face.is_none());
+    }
+
+    /// CR 708.4: A face-down spell that resolves to the battlefield becomes a
+    /// face-down permanent. CR 708.9 reveal only applies when it leaves the stack
+    /// for a zone other than the battlefield.
+    #[test]
+    fn face_down_spell_stays_face_down_when_resolving_to_battlefield() {
+        use crate::game::morph::apply_face_down_creature_characteristics;
+        use crate::game::printed_cards::snapshot_object_face;
+        use crate::types::ability::FaceDownProfile;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(3286),
+            PlayerId(0),
+            "Hidden Stack Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let original = snapshot_object_face(&state.objects[&id]);
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_face_down_creature_characteristics(obj, &FaceDownProfile::vanilla_2_2());
+            obj.back_face = Some(original);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        let obj = &state.objects[&id];
+        assert!(
+            obj.face_down,
+            "CR 708.4 keeps the resolved permanent face down"
+        );
+        assert_eq!(obj.name, "");
+        assert!(obj.back_face.is_some());
     }
 
     /// CR 712.8a: A countered MDFC spell (stack → graveyard) must also revert to

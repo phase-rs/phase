@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{opt, peek, value};
+use nom::combinator::{opt, peek, success, value};
 use nom::multi::many0;
 use nom::Parser;
 
@@ -175,7 +175,9 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // a parent target. Placed after longer "that ..." phrases so
             // longest-match-first dispatch is preserved.
             value(TargetFilter::TriggeringSource, tag("that creature")),
-            // CR 506.3d: "defending player" — the player being attacked.
+            // CR 508.5 / CR 508.5a: "defending player" — the player (or the
+            // protector of the battle / controller of the planeswalker) that the
+            // attacking creature is attacking.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
         ))
         .parse(input)
@@ -2119,6 +2121,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
             if let Some((ctrl, consumed)) = parse_controller_suffix(after_that, ctx) {
                 controller = Some(ctrl);
                 pos += that_ctrl_offset + "that ".len() + consumed;
+
+                // A predicate relative clause can follow the controller clause —
+                // e.g. "untapped creatures that player controls that didn't attack
+                // this turn" (Angel's Trumpet). The controller clause was consumed
+                // above, so re-run the generic relative-clause extractor on the
+                // remainder to pick up the trailing verb/quality/attachment "that …"
+                // restriction that the first call (which saw "that player controls")
+                // could not match.
+                if let Some((trailing_props, consumed)) =
+                    parse_that_clause_suffix(&lower[pos..], Some(ctx))
+                {
+                    properties.extend(trailing_props);
+                    pos += consumed;
+                }
             }
         }
     }
@@ -2292,6 +2308,33 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += counters_offset + (remaining_counters.len() - rest.len());
     }
 
+    // CR 201.2a + CR 201.4: "<type-phrase> with the chosen name" / "<type-phrase>
+    // with a name chosen for ~" — restrict the object class to objects whose name
+    // equals the source's ChosenAttribute::CardName (bound by a preceding
+    // Effect::Choose { CardName, persist: true }, e.g. Day of the Moon's "Choose
+    // a creature card name, then goad all creatures with a name chosen for this
+    // enchantment"). The self-reference noun ("this enchantment"/"this permanent"
+    // /...) is normalized to `~` before parsing (SELF_REF_TYPE_PHRASES in
+    // oracle_util.rs), so every noun variant collapses to the single canonical
+    // form "with a name chosen for ~" — matching `~` is both correct and verb-/
+    // noun-agnostic. Both surface forms are CR-201.2a name-match synonyms and
+    // lower identically to a HasChosenName leg. Mirrors the `exiled_by_source`
+    // recognizer above: a pos-tracked boolean wrapped into TargetFilter::And at
+    // end-of-function. The static-line analogue ("Spells with the chosen name
+    // can't be cast") lives in oracle_static/shared.rs::parse_continuous_subject_filter.
+    let mut has_chosen_name = false;
+    let remaining_chosen = lower[pos..].trim_start();
+    let chosen_offset = lower[pos..].len() - remaining_chosen.len();
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("with the chosen name"),
+        tag::<_, _, OracleError<'_>>("with a name chosen for ~"),
+    ))
+    .parse(remaining_chosen)
+    {
+        has_chosen_name = true;
+        pos += chosen_offset + (remaining_chosen.len() - rest.len());
+    }
+
     // CR 608.2d: "of their choice" / "of his or her choice" — informational qualifier
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
@@ -2446,6 +2489,19 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let filter = if exiled_by_source {
         TargetFilter::And {
             filters: vec![filter, TargetFilter::ExiledBySource],
+        }
+    } else {
+        filter
+    };
+
+    // CR 201.2a: Compose the typed filter with the chosen-name constraint when
+    // the suffix was present. Runtime And-eval requires every inner filter to
+    // match (game/filter.rs line 1464/1782); the HasChosenName arm
+    // (game/filter.rs line 1604) compares the object's name to the source's
+    // ChosenAttribute::CardName.
+    let filter = if has_chosen_name {
+        TargetFilter::And {
+            filters: vec![filter, TargetFilter::HasChosenName],
         }
     } else {
         filter
@@ -2754,7 +2810,17 @@ fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp
 /// only to the creature disjunct. Spreading `WithKeyword(Flying)` onto the
 /// artifact/enchantment legs would require those permanents to have flying and
 /// would block activation when only a legal enchantment is present (#2941).
-fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
+///
+/// SHARED LEG-LOCALITY AUTHORITY: this predicate is the single registry of
+/// inherently-leg-local `FilterProp`s for BOTH disjunctive grammars — the
+/// target-phrase grammar (`parse_type_phrase`) and the search-filter
+/// disjunction grammar (`oracle_effect::search::parse_search_filter_disjunction`,
+/// CR 701.23a). Every `FilterProp` that an adjective prefix or a type-scoped
+/// suffix binds to exactly one disjunct MUST be registered here, or it will be
+/// wrongly distributed across earlier `Or` legs and silently break the affected
+/// cards (e.g. #2892). When adding a new leg-local search/target prop, add it to
+/// this match.
+pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
@@ -2774,6 +2840,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Untapped
             // CR 702.171b: "saddled [type]" adjective prefix.
             | FilterProp::IsSaddled
+            | FilterProp::ProtectorMatches { .. }
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking { defender: None }
             | FilterProp::Blocking
@@ -2793,6 +2860,21 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::WithKeyword { .. }
             | FilterProp::WithoutKeyword { .. }
             | FilterProp::WithoutKeywordKind { .. }
+            // CR 702.1: "<type> with [keyword kind]" (e.g. "a card with
+            // augment", Clever Combo) is a keyword-membership predicate that
+            // binds only to its own disjunct — distributing it onto a sibling
+            // leg ("host card with augment") would empty that leg's match set.
+            | FilterProp::HasKeywordKind { .. }
+            // CR 201.2 / CR 201.2a: a card-name predicate binds only to its own
+            // disjunct — distributing `Named` onto a sibling leg ("basic land
+            // named jiang yanggu") would empty that leg's match set. Named is
+            // inherently leg-local, the same class as HasKeywordKind/WithKeyword.
+            // This is defense-in-depth: no current card routes a `Named` leg
+            // through the Or distributor (name-disjunction cards either use bare
+            // "and", which takes the dual-filter MatchEachFilter path and never
+            // reaches this distributor, or carry `Named` on every leg and are
+            // deduped by `same_kind`), but excluding it future-proofs the guard.
+            | FilterProp::Named { .. }
     )
 }
 
@@ -2806,8 +2888,18 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
 /// produced by adjective prefixes (e.g. FilterProp::Modified from "modified
 /// creatures", FilterProp::EnchantedBy from "enchanted creature") are
 /// leg-local and retained only on their originating leg. See
-/// `is_trailing_suffix_prop`.
-fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
+/// `is_adjective_prefix_prop`.
+///
+/// Exposed `pub(crate)` so disjunctive grammars that compose their own `Or` from
+/// independently-parsed disjuncts can reuse this shared trailing-suffix
+/// distribution instead of duplicating it. In particular the search-filter
+/// disjunction grammar (CR 701.23a, "creature, instant, or sorcery card with
+/// mana value N", #2892) parses each comma/or segment independently, so only the
+/// final segment carries the "with mana value N" suffix — this distributes the
+/// `Cmc` prop back onto the earlier `Typed` legs. `is_adjective_prefix_prop` is
+/// the shared registry that keeps leg-local props (keyword/name/adjective) from
+/// being distributed; every leg-local search prop MUST be registered there.
+pub(crate) fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
     };
@@ -3141,6 +3233,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 // CR 702.171b: "saddled" designation as a type-phrase prefix
                 // ("saddled Mount", "saddled creature").
                 | FilterProp::IsSaddled
+                | FilterProp::ProtectorMatches { .. }
                 | FilterProp::FaceDown
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").
@@ -4084,6 +4177,27 @@ fn parse_ownership_or_controller_suffix(
         });
         return own_ctrl_offset + "you own".len();
     }
+    // CR 108.3 + CR 109.4: bare "you don't own"/"you do not own" — negated
+    // ownership with no "but" lead (distinct from the "but don't own" block in
+    // `parse_type_phrase`, which requires a controller already set). Placed after
+    // the affirmative "you own"/"you own and control" arms ("you own" is not a
+    // prefix of "you don't own", so no shadowing) and before the anaphoric
+    // subject×action block. `Owned { Opponent }` is runtime-evaluated as
+    // owner != controller (filter.rs), i.e. "you don't own it". Does NOT set
+    // *controller — ownership is independent of control; for "you control N
+    // permanents you don't own" the controller is supplied upstream by
+    // `inject_controller_you`. (Agent of Treachery #3304.)
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("you don't own"),
+        tag::<_, _, OracleError<'_>>("you do not own"),
+    ))
+    .parse(own_ctrl)
+    {
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        });
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
     // CR 108.3: "an opponent owns" — the card belongs to an opponent, used by Eldrazi Processors.
     for phrase in ["an opponent owns", "opponents own"] {
         if tag::<_, _, OracleError<'_>>(phrase).parse(own_ctrl).is_ok() {
@@ -4118,6 +4232,32 @@ fn parse_ownership_or_controller_suffix(
     let parsed: nom::IResult<&str, (ControllerRef, &str, bool), OracleError<'_>> =
         (subject, space1, action).parse(own_ctrl);
     if let Ok((rest, (owner, _, also_control))) = parsed {
+        properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+        if also_control {
+            *controller = Some(owner);
+        }
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
+    // CR 108.3 + CR 701.38d: Passive ownership form "owned by <player-ref>".
+    // Expropriate: "choose a permanent owned by the voter" — the voter is the
+    // scoped player during per-ballot iteration.  Compositional: every
+    // player-ref recognized by the active-voice combinator above is also
+    // accepted in the passive voice here.
+    let passive_parsed: nom::IResult<&str, (ControllerRef, bool), OracleError<'_>> = (
+        tag("owned by "),
+        alt((
+            tag("the voter").map(|_| ControllerRef::ScopedPlayer),
+            tag("that player").map(|_| ControllerRef::TargetPlayer),
+            tag("an opponent").map(|_| ControllerRef::Opponent),
+            tag("you").map(|_| ControllerRef::You),
+        )),
+        alt((tag(" and controlled by").map(|_| true), success(false))),
+    )
+        .map(|(_, owner, also_control)| (owner, also_control))
+        .parse(own_ctrl);
+    if let Ok((rest, (owner, also_control))) = passive_parsed {
         properties.push(FilterProp::Owned {
             controller: owner.clone(),
         });
@@ -4481,8 +4621,8 @@ pub(crate) fn attachment_kinds_filter_prop(
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
-pub(crate) fn parse_that_clause_suffix(
-    text: &str,
+pub(crate) fn parse_that_clause_suffix<'a>(
+    text: &'a str,
     ctx: Option<&ParseContext>,
 ) -> Option<(Vec<FilterProp>, usize)> {
     let default_ctx = ParseContext::default();
@@ -4557,6 +4697,86 @@ pub(crate) fn parse_that_clause_suffix(
         if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
         {
             return Some((props, consumed));
+        }
+    }
+
+    // --- CR 608.2c (De Morgan): "that didn't <verb> [or <verb>] this turn" ---
+    // Negated verb-phrase relative clause. The verbs after "didn't" are
+    // present-tense/infinitive ("attack"/"block"/"enter"), distinct from the
+    // past-tense positive VERB_PHRASES below ("attacked"/"entered"). Each verb
+    // maps to its existing positive FilterProp wrapped in `Not`; a disjunction
+    // ("attack or enter") lowers to AND-of-negations because the parsed props
+    // are AND-combined in the enclosing TypedFilter ("apply the rules of
+    // English", CR 608.2c). Must run BEFORE the positive VERB_PHRASES loop, but
+    // there is no collision risk since past-tense and present-tense are disjoint.
+    if let Ok((after_neg, _)) = tag::<_, _, OracleError<'_>>("didn't ").parse(after_that) {
+        // verb token -> positive FilterProp; longest-match-first
+        // ("enter the battlefield" before "enter"), mirroring VERB_PHRASES.
+        // CR 508.1a (attack declaration) / CR 509.1a (block declaration) /
+        // CR 400.7 (entering the battlefield is a new object).
+        static NEG_VERBS: &[(&str, FilterProp)] = &[
+            ("attack", FilterProp::AttackedThisTurn),
+            ("block", FilterProp::BlockedThisTurn),
+            ("enter the battlefield", FilterProp::EnteredThisTurn),
+            ("enter", FilterProp::EnteredThisTurn),
+        ];
+        let parse_neg_verb = |i: &'a str| -> Option<(&'a str, FilterProp)> {
+            NEG_VERBS.iter().find_map(|(token, prop)| {
+                tag::<_, _, OracleError<'_>>(*token)
+                    .parse(i)
+                    .ok()
+                    .map(|(rest, _)| (rest, prop.clone()))
+            })
+        };
+        if let Some((rest1, prop1)) = parse_neg_verb(after_neg) {
+            let mut props = vec![FilterProp::Not {
+                prop: Box::new(prop1),
+            }];
+            // Optional " or <verb>" disjunction (CR 608.2c De Morgan split).
+            let after_disjunction = match tag::<_, _, OracleError<'_>>(" or ").parse(rest1) {
+                Ok((rest2, _)) => match parse_neg_verb(rest2) {
+                    Some((rest3, prop2)) => {
+                        props.push(FilterProp::Not {
+                            prop: Box::new(prop2),
+                        });
+                        rest3
+                    }
+                    None => rest1,
+                },
+                Err(_) => rest1,
+            };
+            // Terminator: the canonical form carries the shared " this turn"
+            // suffix ("...didn't attack or enter this turn", The Fifth Doctor).
+            // Some upstream producers (e.g. the "tap all" target extractor for
+            // Angel's Trumpet) strip a trailing duration before the target text
+            // reaches here, leaving "...didn't attack" with the duration already
+            // removed. Accept either: (a) an explicit " this turn" + boundary, or
+            // (b) the verb already sitting at a clause boundary (end-of-string or
+            // a "."/"," terminator) with "this turn" stripped upstream. A trailing
+            // SPACE is NOT a boundary — it signals continued, unmatched text
+            // ("didn't attack a player"), which must not match.
+            let consumed_at =
+                |remainder: &str| -> usize { leading_ws + trimmed.len() - remainder.len() };
+            // (a) explicit " this turn" + word boundary (guards "this turning").
+            if let Ok((after_turn, _)) =
+                tag::<_, _, OracleError<'_>>(" this turn").parse(after_disjunction)
+            {
+                let at_boundary = after_turn
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                if at_boundary {
+                    return Some((props, consumed_at(after_turn)));
+                }
+            }
+            // (b) duration stripped upstream: verb at a clause boundary.
+            let at_clause_boundary = after_disjunction
+                .chars()
+                .next()
+                .is_none_or(|c| c == '.' || c == ',');
+            if at_clause_boundary {
+                return Some((props, consumed_at(after_disjunction)));
+            }
         }
     }
 
@@ -5253,6 +5473,8 @@ enum ZoneQual {
     Opponent,
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
+    /// "target player's " — produces `Owned{TargetPlayer}`.
+    TargetPlayer,
     /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
     /// the third-person possessive binds to the iterated player.
     Their,
@@ -5307,6 +5529,8 @@ pub(crate) fn scan_zone_phrase(
 /// - Opponent possessive: "from an opponent's graveyard", "from each opponent's graveyard"
 ///   → `[Owned{Opponent}, InZone]` so stolen creatures that died are still matched by owner.
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
+/// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
+///   so the card selection is constrained by the companion player target.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -5373,6 +5597,18 @@ fn parse_zone_suffix_nom(
             None,
         ),
         ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+        // CR 108.3 + CR 109.4 + CR 115.1: Non-battlefield zone membership is
+        // owner-keyed. "target player's graveyard" constrains selected cards
+        // by ownership relative to the chosen target player, not by controller.
+        ZoneQual::TargetPlayer => (
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                },
+                FilterProp::InZone { zone },
+            ],
+            None,
+        ),
         // CR 110.1 + CR 108.3: a graveyard/hand/library card is not a permanent
         // and has no controller — membership is keyed by owner. CR 109.5:
         // "their" in an each-player iteration binds to the iterated player
@@ -5399,6 +5635,7 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(
             ZoneQual::OtherPoss,
@@ -5732,6 +5969,23 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn time_lord_target_keeps_subtype_and_controller() {
+        // CR 205.3m + CR 115.1: "target Time Lord you control" must keep both the
+        // two-word subtype (CR 205.3m: the only two-word creature type) and the
+        // controller restriction (CR 115.1: declared target). Regression: when
+        // "Time Lord" was absent from the SUBTYPES registry this collapsed to
+        // Typed{type_filters:[], controller:None} (Time Lord Regeneration).
+        let (filter, rest) = parse_target("target Time Lord you control");
+        assert_eq!(rest, "");
+        let tf = typed_leg(&filter).expect("expected Typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Time Lord")));
     }
 
     #[test]
@@ -8246,6 +8500,98 @@ mod tests {
         }
     }
 
+    // ── HasChosenName suffix (CR 201.2a + CR 201.4) ──
+    //
+    // Building-block coverage for the "<type-phrase> with the chosen name" /
+    // "<type-phrase> with a name chosen for this enchantment" suffix recognized
+    // inside parse_type_phrase_with_ctx. This is verb-agnostic: every
+    // object-target effect clause (goad/destroy/exile/tap/...) funnels through
+    // this chokepoint, so the recognizer must compose the HasChosenName leg onto
+    // the typed filter regardless of the surrounding verb. Day of the Moon is
+    // the immediate unlock (goad all creatures with a name chosen for this
+    // enchantment); a card-level regression for it lives in oracle.rs.
+
+    /// Assert the filter is `And { [Typed(Creature), HasChosenName] }`.
+    fn assert_chosen_name_creature_and(f: &TargetFilter) {
+        match f {
+            TargetFilter::And { filters } => {
+                assert!(
+                    filters.contains(&TargetFilter::HasChosenName),
+                    "And must include HasChosenName, got {filters:?}"
+                );
+                assert!(
+                    filters.iter().any(|inner| matches!(
+                        inner,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "And must include a Typed creature filter, got {filters:?}"
+                );
+            }
+            other => panic!("expected And {{ Typed, HasChosenName }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn creatures_with_name_chosen_for_tilde_composes_has_chosen_name() {
+        // `~` is the normalized self-reference for "this enchantment"/"this
+        // permanent"/etc. (SELF_REF_TYPE_PHRASES). The parser sees the normalized
+        // form, so the recognizer matches `~` rather than the literal noun.
+        let (f, rest) = parse_target("creatures with a name chosen for ~");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn creatures_with_the_chosen_name_composes_has_chosen_name() {
+        let (f, rest) = parse_target("creatures with the chosen name");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn singular_creature_with_the_chosen_name_composes_has_chosen_name() {
+        // Verb-agnostic singular form (e.g. "destroy each creature with the
+        // chosen name") must compose the same way as the plural goad form.
+        let (f, rest) = parse_target("creature with the chosen name");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn creatures_with_flying_does_not_attach_has_chosen_name() {
+        // Negative: an unrelated "with <keyword>" suffix must not spuriously
+        // attach HasChosenName.
+        let (f, _rest) = parse_target("creatures with flying");
+        assert!(
+            !filter_contains_has_chosen_name(&f),
+            "flying must not attach HasChosenName, got {f:?}"
+        );
+    }
+
+    #[test]
+    fn bare_creatures_does_not_attach_has_chosen_name() {
+        // Negative: a bare type phrase must stay a bare Typed filter with no
+        // spurious And wrap.
+        let (f, rest) = parse_target("creatures");
+        assert_eq!(rest, "");
+        assert!(
+            matches!(&f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+            "bare \"creatures\" must be a Typed creature filter, got {f:?}"
+        );
+    }
+
+    /// Recursively check whether any leaf of the filter is `HasChosenName`.
+    fn filter_contains_has_chosen_name(f: &TargetFilter) -> bool {
+        match f {
+            TargetFilter::HasChosenName => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_contains_has_chosen_name)
+            }
+            _ => false,
+        }
+    }
+
     #[test]
     fn exiled_cards_with_named_counters_produces_exile_counter_filter() {
         let (f, rest) = parse_target("exiled cards with aegis counters on them");
@@ -8610,6 +8956,25 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// Issue #588 (Summon: Good King Mog XII, chapter IV): "each other Moogle
+    /// you control" must retain subtype + controller + Another. When "Moogle"
+    /// was missing from SUBTYPES the filter collapsed to every other permanent.
+    #[test]
+    fn each_other_moogle_you_control_scopes_filter_issue_588() {
+        let (filter, rest) = parse_target("each other Moogle you control");
+        assert_eq!(rest, "");
+        let tf = typed_leg(&filter).expect("expected Typed filter");
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+            "Moogle subtype must be captured, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
+    }
+
     /// Sibling coverage: bare "creatures target player controls" without
     /// "each other" prefix. Confirms the controller parser is independent of
     /// modifier words.
@@ -8807,6 +9172,73 @@ mod tests {
                     ),
                     "leg 2 = modified creatures you control"
                 );
+            }
+            other => panic!("Expected Or filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    // CR 508.5 / CR 508.5a: the "defending player controls" controller suffix
+    // scopes attack-trigger targets to the defending player (Kogla, The
+    // Tarrasque, ~42 cards). These tests pin the class-level combinator
+    // behavior across the bug-card path: the high-level controller-suffix
+    // delegate, the end-to-end target verb path, and Or-target propagation.
+
+    // High-level `parse_controller_suffix` (the runtime function the bug-card
+    // path relies on). The direct assertion guarantees the `parse_zone_controller`
+    // delegate is actually reached and not shadowed by an earlier past-tense or
+    // "that player controls" arm.
+    #[test]
+    fn parse_controller_suffix_defending_player() {
+        let ctx = ParseContext::default();
+        let (ctrl, len) = parse_controller_suffix("defending player controls", &ctx)
+            .expect("defending player controls should resolve a controller scope");
+        assert_eq!(ctrl, ControllerRef::DefendingPlayer);
+        assert_eq!(len, "defending player controls".len());
+
+        // Leading whitespace is included in the consumed length (the type-phrase
+        // suffix step passes the post-type-word remainder, which begins with a
+        // space).
+        let (ctrl_ws, len_ws) = parse_controller_suffix(" defending player controls", &ctx)
+            .expect("leading-space variant should resolve");
+        assert_eq!(ctrl_ws, ControllerRef::DefendingPlayer);
+        assert_eq!(len_ws, " defending player controls".len());
+    }
+
+    // End-to-end target verb path: a representative effect phrase parses to a
+    // Typed filter scoped to the defending player. Generic type phrase, not a
+    // card name (The Tarrasque class: "fights target creature defending player
+    // controls").
+    #[test]
+    fn parse_target_defending_player_controls_single_type() {
+        let (f, rest) = parse_target("target creature defending player controls");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // Or-target propagation: an Or-target phrase ending in "defending player
+    // controls" fans the DefendingPlayer scope onto each disjunct via
+    // `distribute_controller_to_or` (Kogla class: "destroy target artifact or
+    // enchantment defending player controls").
+    #[test]
+    fn parse_target_defending_player_controls_or_target() {
+        let (f, rest) = parse_target("target artifact or enchantment defending player controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                for (i, leg) in filters.iter().enumerate() {
+                    match leg {
+                        TargetFilter::Typed(tf) => assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::DefendingPlayer),
+                            "leg {i} must inherit the defending-player scope"
+                        ),
+                        other => panic!("leg {i} expected Typed, got {other:?}"),
+                    }
+                }
             }
             other => panic!("Expected Or filter, got {other:?}"),
         }
@@ -10303,6 +10735,186 @@ mod tests {
         );
     }
 
+    /// Cluster 15 (The Fifth Doctor / Angel's Trumpet): the negated verb-phrase
+    /// relative clause "that didn't <verb> this turn" was dropped, so the
+    /// mass effect applied to every creature. CR 608.2c De Morgan: each verb
+    /// becomes its positive FilterProp wrapped in `Not`.
+    #[test]
+    fn that_didnt_attack_emits_not_attacked() {
+        let (props, consumed) = parse_that_clause_suffix(" that didn't attack this turn", None)
+            .expect("should parse negated attack clause");
+        assert_eq!(consumed, " that didn't attack this turn".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_didnt_attack_or_enter_emits_de_morgan_pair() {
+        let (props, consumed) =
+            parse_that_clause_suffix(" that didn't attack or enter this turn", None)
+                .expect("should parse negated attack-or-enter clause");
+        assert_eq!(consumed, " that didn't attack or enter this turn".len());
+        assert_eq!(
+            props,
+            vec![
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::AttackedThisTurn),
+                },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::EnteredThisTurn),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn that_didnt_enter_the_battlefield_emits_not_entered() {
+        let (props, consumed) =
+            parse_that_clause_suffix(" that didn't enter the battlefield this turn", None)
+                .expect("should parse negated enter-the-battlefield clause");
+        assert_eq!(
+            consumed,
+            " that didn't enter the battlefield this turn".len()
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::EnteredThisTurn),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_didnt_block_emits_not_blocked() {
+        let (props, consumed) = parse_that_clause_suffix(" that didn't block this turn", None)
+            .expect("should parse negated block clause");
+        assert_eq!(consumed, " that didn't block this turn".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::BlockedThisTurn),
+            }]
+        );
+    }
+
+    /// Word-boundary guard: " this turning" must NOT match (the negated arm
+    /// requires a boundary after "this turn", unlike the positive VERB_PHRASES).
+    #[test]
+    fn that_didnt_attack_this_turning_does_not_match() {
+        assert!(parse_that_clause_suffix(" that didn't attack this turning", None).is_none());
+    }
+
+    /// Regression: the negated arm must not shadow the positive past-tense path.
+    #[test]
+    fn that_attacked_still_emits_positive_attacked() {
+        let (props, _) = parse_that_clause_suffix(" that attacked this turn", None)
+            .expect("positive past-tense clause must still parse");
+        assert_eq!(props, vec![FilterProp::AttackedThisTurn]);
+    }
+
+    /// Upstream-truncated form: some producers (the "tap all" target extractor)
+    /// strip the trailing " this turn" duration before the target text reaches
+    /// the type-phrase parser, leaving "that didn't attack" at end-of-string.
+    /// The negated arm must still match when the verb sits at a clause boundary.
+    #[test]
+    fn that_didnt_attack_without_this_turn_at_boundary_matches() {
+        let (props, _) = parse_that_clause_suffix(" that didn't attack", None)
+            .expect("duration-stripped form must still parse at end-of-string");
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+
+        // Also accepts a "."/"," clause terminator.
+        let (props, _) = parse_that_clause_suffix(" that didn't attack.", None)
+            .expect("duration-stripped form must parse before a period");
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+    }
+
+    /// Guard: a verb followed by a SPACE + more words (no "this turn", no clause
+    /// boundary) must NOT match — that is unmatched continued text, not a
+    /// complete negated relative clause.
+    #[test]
+    fn that_didnt_attack_with_trailing_words_does_not_match() {
+        assert!(parse_that_clause_suffix(" that didn't attack a player", None).is_none());
+    }
+
+    /// The Fifth Doctor end-to-end: the mass-target type phrase (the "each"
+    /// quantifier is stripped upstream before `parse_type_phrase` is reached)
+    /// must carry both negated props alongside the controller scope, so the
+    /// counter (and the chained TrackedSet untap) follow only the qualifying
+    /// subset.
+    #[test]
+    fn creature_you_control_that_didnt_attack_or_enter_full_phrase() {
+        let (filter, rest) =
+            parse_type_phrase("creature you control that didn't attack or enter this turn");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }),
+            "must exclude attackers, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EnteredThisTurn),
+            }),
+            "must exclude this-turn entrants, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Angel's Trumpet end-to-end: a negated verb clause that FOLLOWS a
+    /// controller clause ("untapped creatures that player controls that didn't
+    /// attack this turn") must still attach. The controller clause is consumed
+    /// first, then the trailing relative clause is re-parsed — so `Untapped`
+    /// (from "untapped creatures"), the `ScopedPlayer` controller, AND
+    /// `Not(AttackedThisTurn)` all land together.
+    #[test]
+    fn untapped_creatures_that_player_controls_that_didnt_attack_full_phrase() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..ParseContext::default()
+        };
+        let (filter, rest) = parse_type_phrase_with_ctx(
+            "untapped creatures that player controls that didn't attack this turn",
+            &mut ctx,
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+        assert!(
+            tf.properties.contains(&FilterProp::Untapped),
+            "must keep the untapped restriction, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }),
+            "trailing negated clause must attach after the controller clause, got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn permanents_that_are_one_or_more_colors_full_target() {
         let (filter, rest) = parse_target("all permanents that are one or more colors");
@@ -11338,6 +11950,65 @@ mod tests {
             }
             other => panic!("expected And filter, got {other:?}"),
         }
+    }
+
+    /// CR 108.3 + CR 109.4: bare "permanents you don't own" — the new
+    /// negated-ownership suffix in `parse_ownership_or_controller_suffix`. With
+    /// no controller and no "but" lead it pushes `Owned { Opponent }` directly
+    /// onto a single `Typed` filter (runtime: owner != controller, i.e. "you
+    /// don't own it"). Distinct from the "but don't own" `And[Typed, Not(..)]`
+    /// shape below, which is left UNCHANGED — proving the bare arm is additive.
+    /// (Agent of Treachery #3304.)
+    #[test]
+    fn parse_type_phrase_permanents_you_dont_own_pushes_owned_opponent() {
+        for text in ["permanents you don't own", "permanents you do not own"] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert_eq!(rest, "", "fully consumed for {text:?}");
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected single Typed filter for {text:?}, got {filter:?}");
+            };
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent
+                }),
+                "{text:?} must push Owned{{Opponent}}, got {:?}",
+                tf.properties
+            );
+            // Ownership is independent of control: the bare suffix must NOT pin
+            // a controller (CR 109.4).
+            assert_eq!(
+                tf.controller, None,
+                "bare ownership suffix must not set controller for {text:?}"
+            );
+        }
+    }
+
+    /// No-regression guard: the "but don't own" path (controller already set)
+    /// still yields the `And[Typed(You), Not(Owned{You})]` shape, UNCHANGED by
+    /// the additive bare "you don't own" arm. (CR 108.3 + CR 109.4.)
+    #[test]
+    fn parse_type_phrase_but_dont_own_shape_unchanged_by_bare_arm() {
+        let (filter, rest) = parse_type_phrase("creature you control but don't own");
+        assert_eq!(rest, "");
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected And filter, got {filter:?}");
+        };
+        assert!(matches!(
+            filters.first(),
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == &vec![TypeFilter::Creature]
+        ));
+        assert!(matches!(
+            filters.get(1),
+            Some(TargetFilter::Not { filter }) if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if properties == &vec![FilterProp::Owned { controller: ControllerRef::You }]
+            )
+        ));
     }
 
     /// CR 205.3 + CR 205.4b: "target attacking Vampire that isn't a Demon" — the

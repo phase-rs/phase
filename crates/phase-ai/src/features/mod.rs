@@ -8,9 +8,12 @@
 
 pub mod aggro_pressure;
 pub mod aristocrats;
+pub mod artifacts;
 pub mod commitment;
 pub mod control;
+pub mod enchantments;
 pub mod landfall;
+pub mod lifegain;
 pub mod mana_ramp;
 pub mod plus_one_counters;
 pub mod spellslinger_prowess;
@@ -22,8 +25,11 @@ pub mod tests;
 
 pub use aggro_pressure::AggroPressureFeature;
 pub use aristocrats::AristocratsFeature;
+pub use artifacts::ArtifactsFeature;
 pub use control::ControlFeature;
+pub use enchantments::EnchantmentsFeature;
 pub use landfall::LandfallFeature;
+pub use lifegain::LifegainFeature;
 pub use mana_ramp::ManaRampFeature;
 pub use plus_one_counters::PlusOneCountersFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
@@ -46,10 +52,13 @@ pub struct DeckFeatures {
     pub archetype: DeckArchetype,
     pub strategy: StrategyProfile,
     pub landfall: LandfallFeature,
+    pub lifegain: LifegainFeature,
     pub mana_ramp: ManaRampFeature,
     pub tribal: TribalFeature,
     pub control: ControlFeature,
+    pub enchantments: EnchantmentsFeature,
     pub aristocrats: AristocratsFeature,
+    pub artifacts: ArtifactsFeature,
     pub aggro_pressure: AggroPressureFeature,
     pub tokens_wide: TokensWideFeature,
     pub plus_one_counters: PlusOneCountersFeature,
@@ -82,10 +91,13 @@ impl DeckFeatures {
             archetype,
             strategy,
             landfall: landfall::detect(deck),
+            lifegain: lifegain::detect(deck),
             mana_ramp: mana_ramp::detect(deck),
             tribal: tribal::detect(deck),
             control: control::detect(deck),
+            enchantments: enchantments::detect(deck),
             aristocrats: aristocrats::detect(deck),
+            artifacts: artifacts::detect(deck),
             aggro_pressure: aggro_pressure::detect(deck),
             tokens_wide: tokens_wide::detect(deck),
             plus_one_counters: plus_one_counters::detect(deck),

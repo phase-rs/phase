@@ -6305,7 +6305,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6429,7 +6429,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(counter_type.clone()),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6472,7 +6472,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Fade),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     )
@@ -8734,6 +8734,58 @@ pub fn synthesize_planechase(face: &mut CardFace) {
     }
 }
 
+/// CR 314.2 / CR 904.8: Scheme cards remain in the command zone throughout the
+/// game and their abilities function from there. CR 314.4: a scheme's abilities
+/// function while it is face up in the command zone. CR 113.6b: an ability that
+/// states which zones it functions in functions only from those zones.
+/// Parser-emitted triggers/statics on a scheme carry no zone designation, so
+/// this stamps `Zone::Command` onto each — the same precedent as
+/// `synthesize_planechase` for planes/phenomena. Idempotent: only stamps when
+/// the zone list does not already contain Command.
+pub fn synthesize_archenemy(face: &mut CardFace) {
+    let is_scheme = face
+        .card_type
+        .core_types
+        .iter()
+        .any(|ct| matches!(ct, CoreType::Scheme));
+    if !is_scheme {
+        return;
+    }
+    for trigger in face.triggers.iter_mut() {
+        if !trigger.trigger_zones.contains(&Zone::Command) {
+            trigger.trigger_zones.push(Zone::Command);
+        }
+    }
+    for static_def in face.static_abilities.iter_mut() {
+        if !static_def.active_zones.contains(&Zone::Command) {
+            static_def.active_zones.push(Zone::Command);
+        }
+    }
+}
+
+/// CR 905.4: Conspiracy cards exist only in the command zone and their abilities
+/// function from there. CR 113.6b: an ability that states which zones it
+/// functions in functions only from those zones. Parser-emitted
+/// triggers/statics on a conspiracy carry no zone designation, so this stamps
+/// `Zone::Command` onto each — the same precedent as `synthesize_archenemy` for
+/// schemes and `synthesize_planechase` for planes/phenomena. Idempotent: only
+/// stamps when `Zone::Command` is not already present.
+pub fn synthesize_conspiracy(face: &mut CardFace) {
+    if !face.card_type.core_types.contains(&CoreType::Conspiracy) {
+        return;
+    }
+    for trigger in face.triggers.iter_mut() {
+        if !trigger.trigger_zones.contains(&Zone::Command) {
+            trigger.trigger_zones.push(Zone::Command);
+        }
+    }
+    for static_def in face.static_abilities.iter_mut() {
+        if !static_def.active_zones.contains(&Zone::Command) {
+            static_def.active_zones.push(Zone::Command);
+        }
+    }
+}
+
 pub fn synthesize_all(face: &mut CardFace) {
     synthesize_basic_land_mana(face);
     synthesize_equip(face);
@@ -9027,6 +9079,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 311.2 / CR 312.2 / CR 113.6b: stamp Zone::Command onto plane/phenomenon
     // triggers and statics so the command-zone scans evaluate them.
     synthesize_planechase(face);
+    // CR 314.2 / CR 904.8 / CR 113.6b: stamp Zone::Command onto scheme triggers
+    // and statics so the command-zone scans evaluate them.
+    synthesize_archenemy(face);
+    // CR 905.4 / CR 113.6b: stamp Zone::Command onto conspiracy triggers and
+    // statics so the command-zone scans evaluate them.
+    synthesize_conspiracy(face);
 }
 
 /// CR 702.176a: Synthesize Impending's battlefield static and end-step trigger.
@@ -9108,7 +9166,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -9265,7 +9323,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             && matches!(
                 r.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     persist: true,
                 })
             )
@@ -9281,7 +9339,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: ChoiceType::Opponent,
+                choice_type: ChoiceType::Opponent { restriction: None },
                 persist: true,
             },
         )));
@@ -9384,7 +9442,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
             && matches!(
                 r.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     persist: true,
                 }),
             )
@@ -9405,7 +9463,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
-            choice_type: ChoiceType::Opponent,
+            choice_type: ChoiceType::Opponent { restriction: None },
             persist: true,
         },
     )
@@ -10212,6 +10270,74 @@ mod cycling_synthesis_tests {
         ));
         let shuffle = put_in_hand.sub_ability.as_ref().expect("shuffle");
         assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    /// Issue #629: Production `build_oracle_face` must synthesize cycling and
+    /// retain the when-you-cycle trigger for sorceries whose Oracle text prints
+    /// a spell effect before the cycling keyword line.
+    #[test]
+    fn build_oracle_face_fractured_sanity_synthesizes_cycling_and_trigger() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        use crate::types::ability::AbilityTag;
+
+        let oracle = "Each opponent mills fourteen cards.\n\
+                      Cycling {1}{U} ({1}{U}, Discard this card: Draw a card.)\n\
+                      When you cycle this card, each opponent mills four cards.";
+        let mtgjson = AtomicCard {
+            name: "Fractured Sanity".to_string(),
+            mana_cost: Some("{3}{U}".to_string()),
+            colors: vec!["U".to_string()],
+            color_identity: vec!["U".to_string()],
+            text: Some(oracle.to_string()),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: Some(vec!["Cycling".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 4.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("fractured-sanity-test".to_string()),
+                scryfall_id: Some("fractured-sanity-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        let cycling = face
+            .abilities
+            .iter()
+            .find(|a| a.ability_tag == Some(AbilityTag::Cycling))
+            .expect("synthesized cycling ability with AbilityTag::Cycling");
+        assert_eq!(cycling.activation_zone, Some(Zone::Hand));
+        assert!(
+            face.triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::Cycled && t.execute.is_some()),
+            "when-you-cycle trigger must survive synthesis"
+        );
+        assert!(matches!(&*face.abilities[0].effect, Effect::Mill { .. }));
+        assert!(
+            !face.abilities.iter().any(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name.contains("Cycling")
+                )
+            }),
+            "cycling line must not become an Unimplemented spell ability"
+        );
     }
 }
 
@@ -16286,7 +16412,7 @@ mod siege_synthesis_tests {
         assert!(matches!(
             protector.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Choose {
-                choice_type: ChoiceType::Opponent,
+                choice_type: ChoiceType::Opponent { .. },
                 persist: true,
             })
         ));
@@ -22660,7 +22786,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Fade),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));
@@ -22719,7 +22845,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Time),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));
@@ -23488,6 +23614,233 @@ mod afflict_training_poisonous_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_afflict(&mut face);
         assert!(face.triggers.is_empty());
+    }
+
+    // ---- Afflict runtime (CR 702.130a) ----
+
+    #[test]
+    fn afflict_resolution_defending_player_loses_n_life() {
+        // CR 702.130a full-pipeline: synthesized Afflict trigger fires on
+        // BlockersDeclared, lands on the stack, and resolve_top makes the
+        // defending player lose N life.  DefendingPlayer resolves from
+        // state.combat.attackers by source_id (CR 506.3d).
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::printed_cards::apply_card_face_to_object;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        // Build Afflict(2) creature and run the full synthesis pipeline.
+        let mut face = CardFace {
+            name: "Ammit Eternal".to_string(),
+            power: Some(PtValue::Fixed(3)),
+            toughness: Some(PtValue::Fixed(3)),
+            keywords: vec![Keyword::Afflict(2)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let p1_starting_life = state.players[1].life;
+        assert_eq!(p1_starting_life, 20, "sanity: two-player game starts at 20");
+
+        // Place attacker with synthesized Afflict triggers.
+        let attacker_card = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            &mut state,
+            attacker_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+
+        // CR 506.3d: DefendingPlayer resolves from state.combat.attackers.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // Place a blocker on P1's side.
+        let blocker_card = CardId(state.next_object_id);
+        let blocker_id = create_object(
+            &mut state,
+            blocker_card,
+            PlayerId(1),
+            "Chump Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            state
+                .objects
+                .get_mut(&blocker_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // CR 509.1: BlockersDeclared event fires; Afflict trigger is collected.
+        process_triggers(
+            &mut state,
+            &[GameEvent::BlockersDeclared {
+                assignments: vec![(blocker_id, attacker_id)],
+            }],
+        );
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(&e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "CR 702.130a: Afflict trigger must land on the stack after becoming blocked"
+        );
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        // CR 702.130a: defending player (P1) loses N life; controller (P0) is unaffected.
+        assert_eq!(
+            state.players[1].life,
+            p1_starting_life - 2,
+            "CR 702.130a: defending player must lose 2 life (Afflict 2)"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "attacker's controller does not lose life"
+        );
+    }
+
+    #[test]
+    fn afflict_multiple_instances_each_trigger_independently() {
+        // CR 702.130b: each Afflict instance generates a separate trigger.
+        // Two Afflict 2 instances on one creature → two pending triggers collected
+        // (proven by OrderTriggers prompt with 2 entries) → both dispatch to the
+        // stack → 4 life lost total.
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::printed_cards::apply_card_face_to_object;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        let mut face = CardFace {
+            name: "Double-Cursed Horror".to_string(),
+            power: Some(PtValue::Fixed(4)),
+            toughness: Some(PtValue::Fixed(4)),
+            keywords: vec![Keyword::Afflict(2), Keyword::Afflict(2)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let attacker_card = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            &mut state,
+            attacker_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+
+        // CR 506.3d: both triggers share the same attacker entry; DefendingPlayer
+        // resolves to P1 for each.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let blocker_card = CardId(state.next_object_id);
+        let blocker_id = create_object(
+            &mut state,
+            blocker_card,
+            PlayerId(1),
+            "Chump Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blocker_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::BlockersDeclared {
+                assignments: vec![(blocker_id, attacker_id)],
+            }],
+        );
+
+        // CR 603.3b: two triggers from the same controller require ordering.
+        // The WaitingFor::OrderTriggers prompt proves both were collected.
+        let trigger_count = match &state.waiting_for {
+            WaitingFor::OrderTriggers { triggers, .. } => triggers.len(),
+            _ => {
+                // No ordering needed (single-controller fast path): check stack directly.
+                state
+                    .stack
+                    .iter()
+                    .filter(|e| matches!(&e.kind, StackEntryKind::TriggeredAbility { .. }))
+                    .count()
+            }
+        };
+        assert_eq!(
+            trigger_count, 2,
+            "CR 702.130b: two Afflict 2 instances must produce two collected triggers"
+        );
+
+        // Dispatch any pending ordering choice, then resolve both stack entries.
+        if matches!(&state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::OrderTriggers { order: vec![0, 1] },
+            )
+            .unwrap();
+        }
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        assert_eq!(
+            state.players[1].life, 16,
+            "CR 702.130b: two Afflict 2 triggers each cause 2 life loss = 4 total"
+        );
     }
 
     // ---- Training (CR 702.149a) ----

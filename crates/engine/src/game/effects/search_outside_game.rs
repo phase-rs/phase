@@ -2,10 +2,8 @@ use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, FilterProp, ResolvedAbility};
-use crate::types::ability::{TargetFilter, TypeFilter};
-use crate::types::card::CardFace;
-use crate::types::card_type::CoreType;
+use crate::types::ability::TargetFilter;
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, OutsideGameCardUse, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
@@ -50,15 +48,19 @@ pub fn resolve(
                         sideboard_index,
                         entry.count,
                     );
-                    (available_count > 0 && sideboard_entry_matches_filter(&entry.card, filter))
-                        .then(|| OutsideGameChoiceEntry {
-                            source: OutsideGameChoiceSource::Sideboard {
-                                sideboard_index,
-                                card: entry.card.clone(),
-                            },
-                            count: available_count,
-                            name: entry.card.name.clone(),
-                        })
+                    (available_count > 0
+                        && crate::game::filter::matches_target_filter_against_face(
+                            &entry.card,
+                            filter,
+                        ))
+                    .then(|| OutsideGameChoiceEntry {
+                        source: OutsideGameChoiceSource::Sideboard {
+                            sideboard_index,
+                            card: entry.card.clone(),
+                        },
+                        count: available_count,
+                        name: entry.card.name.clone(),
+                    })
                 })
                 .collect()
         })
@@ -173,6 +175,7 @@ pub(crate) fn put_face_up_exile_into(
         track_exiled_by_source: false,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
+        library_placement: None,
     };
     Ok(change_zone::process_one_zone_move(
         state, &ctx, object_id, events,
@@ -242,55 +245,10 @@ fn available_sideboard_count(
     sideboard_count.saturating_sub(used)
 }
 
-fn sideboard_entry_matches_filter(card: &CardFace, filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::None => false,
-        TargetFilter::Typed(typed) => {
-            typed.controller.is_none()
-                && typed
-                    .type_filters
-                    .iter()
-                    .all(|type_filter| card_matches_type_filter(card, type_filter))
-                && typed.properties.iter().all(|property| match property {
-                    FilterProp::HasSupertype { value } => card.card_type.supertypes.contains(value),
-                    _ => false,
-                })
-        }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| sideboard_entry_matches_filter(card, inner)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| sideboard_entry_matches_filter(card, inner)),
-        TargetFilter::Not { filter } => !sideboard_entry_matches_filter(card, filter),
-        _ => false,
-    }
-}
-
-fn card_matches_type_filter(card: &CardFace, filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Creature => card.card_type.core_types.contains(&CoreType::Creature),
-        TypeFilter::Land => card.card_type.core_types.contains(&CoreType::Land),
-        TypeFilter::Artifact => card.card_type.core_types.contains(&CoreType::Artifact),
-        TypeFilter::Enchantment => card.card_type.core_types.contains(&CoreType::Enchantment),
-        TypeFilter::Instant => card.card_type.core_types.contains(&CoreType::Instant),
-        TypeFilter::Sorcery => card.card_type.core_types.contains(&CoreType::Sorcery),
-        TypeFilter::Planeswalker => card.card_type.core_types.contains(&CoreType::Planeswalker),
-        TypeFilter::Battle => card.card_type.core_types.contains(&CoreType::Battle),
-        TypeFilter::Permanent => card
-            .card_type
-            .core_types
-            .iter()
-            .any(|card_type| card_type.is_permanent_type()),
-        TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !card_matches_type_filter(card, inner),
-        TypeFilter::Subtype(subtype) => card.card_type.subtypes.contains(subtype),
-        TypeFilter::AnyOf(filters) => filters
-            .iter()
-            .any(|inner| card_matches_type_filter(card, inner)),
-    }
-}
+// CR 205: card-type/face filtering for sideboard entries now delegates to the
+// shared `crate::game::filter::matches_target_filter_against_face` building block
+// (used here and by `Effect::CreateTokenCopyFromPool`), so face-vs-filter logic
+// lives in exactly one place.
 
 #[cfg(test)]
 mod tests {
@@ -300,9 +258,10 @@ mod tests {
     use crate::game::deck_loading::DeckEntry;
     use crate::game::effects;
     use crate::game::zones::create_object;
-    use crate::types::ability::{OutsideGameSourcePool, QuantityExpr, TypedFilter};
+    use crate::types::ability::{OutsideGameSourcePool, QuantityExpr, TypeFilter, TypedFilter};
     use crate::types::actions::{GameAction, OutsideGameSelection};
-    use crate::types::card_type::CardType;
+    use crate::types::card::CardFace;
+    use crate::types::card_type::{CardType, CoreType};
     use crate::types::game_state::PlayerDeckPool;
 
     fn face(name: &str, core_type: CoreType) -> CardFace {

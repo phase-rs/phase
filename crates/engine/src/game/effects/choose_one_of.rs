@@ -166,7 +166,37 @@ fn choosing_players(
     ability: &ResolvedAbility,
     chooser: &crate::types::ability::PlayerFilter,
 ) -> Vec<PlayerId> {
+    use crate::types::ability::PlayerFilter;
+
     let apnap = players::apnap_order(state);
+
+    // CR 608.2c + CR 108.3 + CR 109.4: Two chooser filters are anchored to
+    // resolution-scoped state that `matches_player_scope` cannot see (it carries
+    // no `ResolvedAbility`): `ChosenPlayer` reads the player chosen earlier this
+    // resolution from `ability.chosen_players`, and `ParentObjectTargetOwner`
+    // reads the owner of the ability's first object target. Resolve them here —
+    // this is the one caller that has the ability in scope — and order the
+    // result in APNAP (CR 701.55d). Both filter out eliminated players (CR
+    // 104.3a — a player who loses leaves the game and can no longer be a
+    // chooser) and yield a single chooser, which is correct for the
+    // villainous-choice patterns these power (The Master, This Is How It Ends).
+    let anchored: Option<PlayerId> = match chooser {
+        PlayerFilter::ChosenPlayer { index } => {
+            ability.chosen_players.get(*index as usize).copied()
+        }
+        PlayerFilter::ParentObjectTargetOwner => {
+            crate::game::ability_utils::parent_target_owner(ability, state)
+        }
+        _ => None,
+    };
+    if let Some(player) = anchored {
+        let alive = state
+            .players
+            .iter()
+            .any(|p| p.id == player && !p.is_eliminated);
+        return if alive { vec![player] } else { Vec::new() };
+    }
+
     let targeted: Vec<PlayerId> = ability
         .targets
         .iter()
@@ -319,6 +349,94 @@ mod tests {
             labels,
             vec!["Create a Food token", "Create a Treasure token"]
         );
+    }
+
+    #[test]
+    fn chosen_player_chooser_prompts_chosen_opponent() {
+        // CR 608.2c + CR 109.4: A `ChooseOneOf` whose chooser is
+        // `PlayerFilter::ChosenPlayer { index: 0 }` must prompt the player
+        // recorded in `ability.chosen_players[0]` (the opponent chosen earlier
+        // this resolution — The Master, Gallifrey's End), not the controller.
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ChosenPlayer { index: 0 },
+                branches: vec![branch],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.chosen_players = vec![PlayerId(2)];
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(2));
+                assert!(remaining_players.is_empty());
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_object_target_owner_chooser_prompts_target_owner() {
+        // CR 108.3 + CR 109.4: A `ChooseOneOf` whose chooser is
+        // `ParentObjectTargetOwner` must prompt the owner of the ability's first
+        // object target (This Is How It Ends — the targeted creature's owner
+        // faces the villainous choice).
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Create an object owned by player 2 and bind it as the parent target.
+        let obj_id = ObjectId(99);
+        let obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(2),
+            "Test Creature".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.insert(obj_id, obj);
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ParentObjectTargetOwner,
+                branches: vec![branch],
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch { player, .. } => {
+                assert_eq!(*player, PlayerId(2), "owner of target should be chooser");
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
     }
 
     #[test]

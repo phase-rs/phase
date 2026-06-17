@@ -333,6 +333,13 @@ pub enum GameEvent {
     Discarded {
         player_id: PlayerId,
         object_id: ObjectId,
+        /// CR 603.2 + CR 109.5: The spell/ability that caused this discard, if any
+        /// (effect- or cost-driven discards). `None` for a player's own
+        /// turn-based / hand-size discards. Carried from `ProposedEvent::Discard`
+        /// so triggers like "when a spell or ability an opponent controls causes
+        /// you to discard this card" can resolve the cause's controller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
     },
     DamageCleared {
         object_id: ObjectId,
@@ -665,6 +672,18 @@ pub enum GameEvent {
     PlanarDieRolled {
         player_id: PlayerId,
         face: crate::game::planechase::PlanarDieFace,
+    },
+    /// CR 904.9 / CR 701.32b: A scheme was set in motion (turned face up in the
+    /// command zone). Fires "When you set this scheme in motion" (SetInMotion).
+    SchemeSetInMotion {
+        player_id: PlayerId,
+        scheme_id: ObjectId,
+    },
+    /// CR 701.33b / CR 904.10: A scheme was abandoned (turned face down and put
+    /// on the bottom of its owner's scheme deck).
+    SchemeAbandoned {
+        player_id: PlayerId,
+        scheme_id: ObjectId,
     },
     /// CR 726.2: A player took the initiative.
     InitiativeTaken {

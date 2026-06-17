@@ -102,10 +102,6 @@ pub(crate) fn parse_quantity_ref_with_context(
 
     // Complex patterns requiring type phrase parsing or counter normalization.
 
-    if let Some(qty) = parse_sacrificed_permanents_this_turn_quantity(trimmed) {
-        return Some(qty);
-    }
-
     // CR 608.2c + CR 122.1: "the number of [kind] counter[s] removed this way"
     // is a dynamic amount from the preceding RemoveCounter effect, not an
     // object count over a battlefield type phrase.
@@ -287,6 +283,37 @@ pub(crate) fn parse_quantity_ref_with_context(
                 property: prop,
                 filter,
             });
+        }
+
+        // CR 400.7 + CR 700.4: "the total power of <filter> that died [under your
+        // control] this turn" aggregates over this turn's battlefield→graveyard
+        // zone-change records, not live battlefield objects — the objects have
+        // left play and carry their death-time P/T snapshot. Reuse the filter
+        // parse_type_phrase_with_ctx already produced (above) and run the shared
+        // death-suffix combinator on its remainder. Placed before the past-tense
+        // "you controlled" arm so it isn't shadowed, and after the present-tense
+        // arm so plain "the total power of creatures you control" stays a live
+        // `Aggregate`.
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+            if let Ok((after, controller)) =
+                nom_quantity::parse_died_this_turn_suffix(remainder.trim_start())
+            {
+                if after.trim().is_empty() {
+                    // Only ControllerRef::You is producible by the suffix combinator.
+                    let filter = if controller.is_some() {
+                        inject_controller_you(filter)
+                    } else {
+                        filter
+                    };
+                    return Some(QuantityRef::ZoneChangeAggregateThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter,
+                        function: func,
+                        property: prop,
+                    });
+                }
+            }
         }
 
         // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
@@ -834,50 +861,6 @@ pub(crate) fn parse_cda_quantity_with_context(
     }
 
     None
-}
-
-/// CR 701.21a: "the number of permanents you've sacrificed this turn" and typed
-/// variants ("the number of artifacts you've sacrificed this turn").
-fn parse_sacrificed_permanents_this_turn_quantity(text: &str) -> Option<QuantityRef> {
-    let trimmed = text.trim().trim_end_matches('.');
-    let (rest, _) = tag::<_, _, OracleError<'_>>("the number of ")
-        .parse(trimmed)
-        .ok()?;
-    let (rest, filter) = parse_sacrificed_permanents_this_turn_filter(rest)?;
-    if !rest.is_empty() {
-        return None;
-    }
-    Some(QuantityRef::SacrificedThisTurn {
-        player: PlayerScope::Controller,
-        filter,
-    })
-}
-
-fn parse_sacrificed_permanents_this_turn_filter(input: &str) -> Option<(&str, TargetFilter)> {
-    let (suffix_rest, type_text) = take_until::<_, _, OracleError<'_>>(" you")
-        .parse(input)
-        .ok()?;
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" you"),
-        opt(tag("'ve")),
-        tag(" sacrificed this turn"),
-    )
-        .parse(suffix_rest)
-        .ok()?;
-    if type_text.trim() == "permanents" {
-        return Some((
-            rest,
-            TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Permanent],
-                ..Default::default()
-            }),
-        ));
-    }
-    let (filter, leftover) = parse_type_phrase(type_text.trim());
-    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
-        return None;
-    }
-    Some((rest, filter))
 }
 
 // CR 604.3: "the total number of cards you own in exile and in your graveyard
@@ -1795,6 +1778,12 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
         let result: OracleResult<'_, &str> =
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
+            // CR 700.1: "card" is the zone-agnostic head noun for the discarded
+            // members ("nonland card discarded this way"). parse_type_phrase maps
+            // it to TypeFilter::Card (matches every card type), so "nonland card"
+            // yields [Card, Non(Land)] — counting nonland instants/sorceries too.
+            // It must NOT be narrowed to TypeFilter::Permanent: a nonland instant
+            // discarded by Seasoned Pyromancer is still counted (CR 701.9a).
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
             if remainder.trim().is_empty() {
@@ -2333,6 +2322,14 @@ fn parse_for_each_clause_with_they_controller(
         if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
             return Some(qty);
         }
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" —
+        // distinct card types among the cause-filtered chain tracked set (Occult
+        // Epiphany #3307). Must precede the bare `TrackedSetSize` fallback.
+        if let Ok(("", qty)) =
+            crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(&lower)
+        {
+            return Some(qty);
+        }
         return Some(QuantityRef::TrackedSetSize);
     }
 
@@ -2709,6 +2706,70 @@ mod tests {
                 },
             }),
         }
+    }
+
+    /// CR 400.7 + CR 700.4: "the total power of <subtype> that died this turn"
+    /// aggregates the death-time power snapshot over this turn's battlefield→
+    /// graveyard records, not live battlefield objects.
+    #[test]
+    fn total_power_of_subtype_that_died_this_turn_is_zone_change_aggregate() {
+        assert_eq!(
+            parse_quantity_ref("the total power of Daleks that died this turn"),
+            Some(QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string())),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            })
+        );
+    }
+
+    /// CR 109.5: "under your control" scopes the aggregate to the source's
+    /// controller via `inject_controller_you` (controller=You + InZone Battlefield).
+    #[test]
+    fn total_toughness_died_under_your_control_injects_controller() {
+        let qty = parse_quantity_ref(
+            "the total toughness of creatures that died under your control this turn",
+        )
+        .expect("must parse");
+        let QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } = qty
+        else {
+            panic!("expected ZoneChangeAggregateThisTurn, got {qty:?}");
+        };
+        assert_eq!(from, Some(Zone::Battlefield));
+        assert_eq!(to, Some(Zone::Graveyard));
+        assert_eq!(function, AggregateFunction::Sum);
+        assert_eq!(property, ObjectProperty::Toughness);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+    }
+
+    /// Regression guard: a present-tense "total power of creatures you control"
+    /// (no "died this turn") still resolves to the live-battlefield `Aggregate`,
+    /// NOT the zone-change sibling.
+    #[test]
+    fn total_power_you_control_stays_live_aggregate() {
+        assert_eq!(
+            parse_quantity_ref("the total power of creatures you control"),
+            Some(QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            })
+        );
     }
 
     #[test]
@@ -3236,6 +3297,66 @@ mod tests {
                     }),
                 }
             }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_sacrificed_this_turn_permanents() {
+        let qty = parse_for_each_clause("permanent you've sacrificed this turn")
+            .expect("should parse for-each sacrificed-this-turn permanents");
+        assert_eq!(
+            qty,
+            QuantityRef::SacrificedThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    ..Default::default()
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cda_quantity_sacrificed_this_turn_creatures() {
+        let expr = parse_cda_quantity("the number of creatures you sacrificed this turn")
+            .expect("should parse cda quantity sacrificed-this-turn creatures");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::SacrificedThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_sacrificed_this_turn_no_contraction() {
+        // "you sacrificed" without "'ve" contraction
+        let qty = parse_for_each_clause("artifact you sacrificed this turn")
+            .expect("should parse for-each sacrificed-this-turn without contraction");
+        assert_eq!(
+            qty,
+            QuantityRef::SacrificedThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_sacrificed_this_turn_rejects_last_turn() {
+        // "last turn" is not "this turn" — must not parse
+        assert!(
+            parse_cda_quantity("the number of creatures you sacrificed last turn").is_none(),
+            "should not parse 'sacrificed last turn'"
         );
     }
 
@@ -5757,6 +5878,45 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 701.9a: "nonland card discarded this way" (Seasoned
+    /// Pyromancer) must emit `FilteredTrackedSetSize` with a `[Card, NonLand]`
+    /// filter, not the plain `TrackedSetSize` fallback. The filter must include
+    /// `TypeFilter::Card` (every card type) and `Non(Land)`, and must NOT be
+    /// narrowed to `TypeFilter::Permanent` — a discarded nonland INSTANT or
+    /// SORCERY is still a nonland card and must be counted, so the token count
+    /// equals every nonland card discarded (CR 701.9a).
+    /// (Primary engine fix for issue #740 is in `ability_or_branch_references_tracked_set`.)
+    #[test]
+    fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
+        let qty = parse_for_each_clause("nonland card discarded this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+                assert_eq!(
+                    caused_by,
+                    Some(crate::types::ability::ThisWayCause::Discarded),
+                    "cause must be Discarded"
+                );
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.type_filters
+                                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                            "filter must include NonLand; got {tf:?}"
+                        );
+                        // CR 701.9a: must NOT narrow to Permanent — a nonland
+                        // instant/sorcery discarded by Seasoned Pyromancer counts.
+                        assert!(
+                            !tf.type_filters.contains(&TypeFilter::Permanent),
+                            "filter must not exclude nonland instants/sorceries; got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
     /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"
     /// (Murktide Regent's Delve ETB counter). The type-phrase prefix intersects
     /// the linked-exile set; `ExiledBySource.extract_in_zone()` is Exile, so the
@@ -6000,6 +6160,32 @@ mod tests {
             "the number of spells you've cast this turn from anywhere other than your hand",
         )
         .expect("cast-origin CDA spell-history clause must parse");
+        match expr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+            } => {
+                assert_eq!(scope, CountScope::Controller);
+                let filter = filter.expect("cast-origin clause must carry a filter");
+                assert_eq!(
+                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
+                    &cast_capable_zones_except(Zone::Hand),
+                );
+            }
+            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cda_spells_cast_this_turn_cast_origin_qualifier_before_time() {
+        // CR 601.2a + CR 400.1: the cast-origin qualifier and the "this turn"
+        // timing window are independent axes and may appear in either order.
+        // Impending Flux uses qualifier-then-time ("…cast from anywhere other than
+        // your hand this turn"); the count must bind identically to the
+        // time-then-qualifier order above.
+        let expr = parse_cda_quantity(
+            "the number of spells you've cast from anywhere other than your hand this turn",
+        )
+        .expect("qualifier-then-time cast-origin clause must parse");
         match expr {
             QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCastThisTurn { scope, filter },

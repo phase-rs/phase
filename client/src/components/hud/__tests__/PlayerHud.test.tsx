@@ -74,14 +74,18 @@ describe("PlayerHud", () => {
 
     render(<PlayerHud />);
 
-    expect(screen.getByTitle("Poison counters: 8")).toHaveAttribute("aria-label", "8 poison counters");
-    expect(screen.getByTitle("Speed: 3")).toHaveAttribute("aria-label", "Speed 3");
+    // Badges now use the custom GameplayTooltip (text rendered in the DOM)
+    // rather than a native `title`; the aria-label stays on the badge element.
+    expect(screen.getByLabelText("8 poison counters")).toBeInTheDocument();
+    expect(screen.getByText("Poison counters: 8")).toBeInTheDocument();
+    expect(screen.getByLabelText("Speed 3")).toBeInTheDocument();
+    expect(screen.getByText("Speed: 3")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
   });
 
   it("hides local zero poison counters", () => {
     render(<PlayerHud />);
 
-    expect(screen.queryByTitle(/Poison counters:/)).toBeNull();
+    expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
 });

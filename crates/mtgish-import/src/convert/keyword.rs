@@ -12,10 +12,10 @@
 
 use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
-    BestowCost, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
-    ProtectionTarget, WardCost,
+    BestowCost, BloodthirstValue, BuybackCost, CyclingCost, EscapeCost, FlashbackCost,
+    HexproofFilter, ProtectionTarget, WardCost,
 };
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::Keyword;
 
 use crate::convert::result::{ConvResult, ConversionGap};
@@ -187,6 +187,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Fortify(c) => Keyword::Fortify(pure_mana(c, "Rule::Fortify", path)?),
         Rule::Foretell(c) => Keyword::Foretell(pure_mana(c, "Rule::Foretell", path)?),
         Rule::Harmonize(c) => Keyword::Harmonize(pure_mana(c, "Rule::Harmonize", path)?),
+        Rule::Mayhem(c) => Keyword::Mayhem(pure_mana(c, "Rule::Mayhem", path)?),
+        Rule::BasicMayhem => Keyword::Mayhem(ManaCost::SelfManaCost),
         Rule::Kicker(c) => Keyword::Kicker(pure_mana(c, "Rule::Kicker", path)?),
         Rule::Madness(c) => Keyword::Madness(pure_mana(c, "Rule::Madness", path)?),
         Rule::Megamorph(c) => Keyword::Megamorph(pure_mana(c, "Rule::Megamorph", path)?),
@@ -402,8 +404,9 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
 
         // CR 702.138a: Escape — alternative casting cost from graveyard.
         // mtgish encodes the cost as `Cost::And([PayMana, ExileNumberGraveyardCards(N, ...)])`;
-        // the engine's `Keyword::Escape { cost, exile_count }` carries the
-        // mana payment and the literal exile count side-by-side.
+        // the engine's `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}]))`
+        // carries the mana payment and the graveyard-exile additional cost as a
+        // compound cost split at runtime.
         Rule::Escape(c) => extract_escape(c, path)?,
 
         // CR 702.106: Hidden Agenda — Conspiracy variant; deck-construction
@@ -855,7 +858,21 @@ fn extract_escape(cost: &Cost, path: &str) -> ConvResult<Keyword> {
         path: path.to_string(),
         detail: "missing ExileNumberGraveyardCards sub-cost".into(),
     })?;
-    Ok(Keyword::Escape { cost, exile_count })
+    // CR 702.138a: The engine models the escape cost as a compound
+    // `EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}])` so the mana
+    // sub-cost and the graveyard-exile additional cost split at runtime.
+    Ok(Keyword::Escape(EscapeCost::NonMana(
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana { cost },
+                AbilityCost::Exile {
+                    count: exile_count,
+                    zone: Some(engine::types::zones::Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        },
+    )))
 }
 
 fn int_or_gap(g: &GameNumber, idiom: &'static str, path: &str) -> ConvResult<u32> {

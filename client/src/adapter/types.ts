@@ -47,7 +47,8 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
-  | "Limited";
+  | "Limited"
+  | "Momir";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
@@ -69,6 +70,16 @@ export interface FormatConfig {
    * commander-style format strings client-side.
    */
   uses_commander: boolean;
+  /**
+   * Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`): true
+   * when the format's deck is fixed and supplied automatically by the engine,
+   * so the player builds/selects nothing (Momir's Madness). The engine always
+   * emits it in the format registry; it is optional here (like the engine's
+   * `#[serde(default)]`) so hand-built configs need not restate it. Read it via
+   * `formatSuppliesDeck`, which goes through the registry — never re-list
+   * fixed-deck formats client-side.
+   */
+  supplies_fixed_deck?: boolean;
   /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
@@ -302,6 +313,12 @@ export type PayCostKind =
   // `materials` is the engine-side `TargetFilter` the choices were drawn from;
   // the modal only renders `choices`, so it is opaque pass-through here.
   | { type: "ExileMaterials"; materials: unknown }
+  // CR 601.2h + CR 701.13: Exile a battlefield permanent you control as an
+  // additional/alternative cost (Food Chain class; Lunar Hatchling's escape
+  // "Exile a land you control"). `filter` is the engine-side
+  // `Option<TargetFilter>` the choices were drawn from; the modal only renders
+  // `choices`, so it is opaque pass-through here.
+  | { type: "ExilePermanent"; filter: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
   | { type: "TapCreatures" }
@@ -727,6 +744,9 @@ export interface GameObject {
   class_level?: number;
   devotion?: number;
   available_mana_pips?: ManaPip[];
+  /** CR 701.15c: players who have goaded this creature (it must attack a
+   *  player other than them, if able). Empty/omitted when not goaded. */
+  goaded_by?: PlayerId[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
   /**
@@ -1132,7 +1152,7 @@ export type WaitingFor =
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
-  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
+  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
@@ -1209,6 +1229,7 @@ export type WaitingFor =
   | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
+  | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number } }
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
   | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
@@ -1249,7 +1270,7 @@ export type WaitingFor =
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
-  | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
@@ -1726,6 +1747,33 @@ export interface CommanderDamageView {
 }
 
 /**
+ * Presentation-only discriminant for a player-affecting continuous condition.
+ * Mirrors `engine::game::derived_views::PlayerConditionKind` (serde
+ * tag="type", content="data"). The FE maps each kind to an icon + i18n label
+ * and never re-derives the condition from static abilities — the engine
+ * aggregates the authoritative state into `DerivedViews.player_status`.
+ */
+export type PlayerConditionKind =
+  | { type: "CantWin" }
+  | { type: "CantGainLife" }
+  | { type: "CantLoseLife" }
+  | { type: "CantPayLifeAsCost" }
+  | { type: "CantCastSpells" }
+  | { type: "CantActivateAbilities" }
+  | { type: "CastOnlyFromZones"; data: { allowed_zones: Zone[] } };
+
+/**
+ * One player-status row. Mirrors `engine::game::derived_views::PlayerStatusView`.
+ * `source` is the imposing permanent when the engine surfaces it (stored
+ * restrictions / epic locks); absent for statics-scanned life/cost conditions.
+ */
+export interface PlayerStatusView {
+  player: PlayerId;
+  kind: PlayerConditionKind;
+  source?: ObjectId | null;
+}
+
+/**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
  * consume this shape directly and never compute grouping/filtering
@@ -1762,7 +1810,49 @@ export interface DerivedViews {
    *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
    *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
   web_slinging_costs?: Record<string, ManaCost>;
+  /**
+   * Player-affecting continuous conditions (can't gain life, can't cast, etc.)
+   * the HUD renders as status icons. Engine-aggregated from static abilities +
+   * stored restrictions/epic locks so the FE never re-scans statics. Empty/
+   * omitted when no player is afflicted. Mirrors
+   * `engine::game::derived_views::DerivedViews::player_status`.
+   */
+  player_status?: PlayerStatusView[];
 }
+
+/** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
+export type NextSpellModifier =
+  | { type: "CantBeCountered" }
+  | { type: "HasKeyword"; keyword: Keyword }
+  | { type: "CastAsThoughFlash" }
+  | { type: "WithoutPayingManaCost" };
+
+/** CR 601.2f: a one-shot modifier applied to a player's next qualifying spell.
+ *  Mirrors `engine::types::game_state::PendingNextSpellModifier`. */
+export interface PendingNextSpellModifier {
+  player: PlayerId;
+  modifier: NextSpellModifier;
+  spell_filter?: TargetFilter | null;
+}
+
+/** CR 601.2f: a one-shot mana reduction for a player's next qualifying spell.
+ *  Mirrors `engine::types::game_state::PendingSpellCostReduction`. */
+export interface PendingSpellCostReduction {
+  player: PlayerId;
+  amount: number;
+  spell_filter?: TargetFilter | null;
+}
+
+/** CR 702.50a: a rest-of-game Epic effect locking its controller out of
+ *  casting. Mirrors `engine::types::game_state::EpicEffect` (`spell` omitted —
+ *  the FE only needs the controller + prototype for display). */
+export interface EpicEffect {
+  controller: PlayerId;
+  prototype_id: ObjectId;
+}
+
+/** CR 731: the day/night designation, absent when neither is in effect. */
+export type DayNight = "Day" | "Night";
 
 export interface GameState {
   turn_number: number;
@@ -1859,6 +1949,17 @@ export interface GameState {
   /** CR 701.20e: the player to whom `private_look_ids` is visible (the looker). */
   private_look_player?: PlayerId;
   restrictions?: GameRestriction[];
+  /** CR 601.2f: pending one-shot modifiers for each player's next qualifying
+   *  spell (copy, flash, can't-be-countered, free cast). Surfaced as a HUD
+   *  "next spell" badge. Empty/omitted when none pending. */
+  pending_next_spell_modifiers?: PendingNextSpellModifier[];
+  /** CR 601.2f: pending one-shot cost reductions for each player's next
+   *  qualifying spell. */
+  pending_next_spell_cost_reductions?: PendingSpellCostReduction[];
+  /** CR 702.50a: active rest-of-game Epic locks (controller can't cast). */
+  epic_effects?: EpicEffect[];
+  /** CR 731: current day/night designation, absent when neither is in effect. */
+  day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
   phase_stops?: Record<number, Phase[]>;

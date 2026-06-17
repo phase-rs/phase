@@ -52,6 +52,11 @@ pub enum GameFormat {
     HistoricBrawl,
     FreeForAll,
     TwoHeadedGiant,
+    /// Momir's Madness: 60 snow basic lands (12 each, no Snow-Covered Wastes),
+    /// 20 life, a game-start command-zone emblem granting "{X}, Discard a card:
+    /// Create a token that's a copy of a creature card with mana value X chosen
+    /// at random."
+    Momir,
 }
 
 /// CR 100.4 / CR 100.4a: Per-format sideboard rules.
@@ -111,6 +116,13 @@ pub struct FormatConfig {
     /// Historic Brawl. The frontend consumes this directly — it must never
     /// re-list commander-style formats client-side.
     pub uses_commander: bool,
+    /// Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`):
+    /// true when the format's deck is fixed and supplied automatically by the
+    /// engine, so the player builds/selects nothing. True only for Momir's
+    /// Madness. The frontend consumes this directly to bypass deck-selection
+    /// gates — it must never re-list fixed-deck formats client-side.
+    #[serde(default)]
+    pub supplies_fixed_deck: bool,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -143,6 +155,8 @@ impl GameFormat {
             | GameFormat::Oathbreaker
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
+            // Momir's pool is the entire creature corpus — no legality restriction.
+            | GameFormat::Momir
             | GameFormat::Limited => None,
         }
     }
@@ -168,6 +182,8 @@ impl GameFormat {
             | GameFormat::DuelCommander
             | GameFormat::Oathbreaker
             | GameFormat::Brawl
+            // Momir has no sideboard — the deck is exactly 60 snow basic lands.
+            | GameFormat::Momir
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
             GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
@@ -213,6 +229,17 @@ impl GameFormat {
         )
     }
 
+    /// Whether this format's deck is fixed by the format rules and supplied
+    /// automatically by the engine — the player never builds or selects one.
+    /// True only for Momir's Madness, whose deck is the fixed 60-card snow-basic
+    /// list (`deck_loading::momir_fixed_deck_names`); `load_and_hydrate_decks`
+    /// synthesizes it for every seat. The frontend consumes the derived
+    /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
+    /// and must never re-list fixed-deck formats client-side.
+    pub fn supplies_fixed_deck(self) -> bool {
+        matches!(self, GameFormat::Momir)
+    }
+
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
     pub fn label(self) -> &'static str {
         match self {
@@ -235,6 +262,7 @@ impl GameFormat {
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
             GameFormat::TwoHeadedGiant => "Two-Headed Giant",
+            GameFormat::Momir => "Momir's Madness",
         }
     }
 
@@ -389,6 +417,14 @@ impl GameFormat {
                 group: FormatGroup::Limited,
                 default_config: FormatConfig::limited(),
             },
+            FormatMetadata {
+                format: GameFormat::Momir,
+                label: "Momir's Madness",
+                short_label: "MOM",
+                description: "60 snow basic lands, random creature tokens",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::momir(),
+            },
         ]
     }
 }
@@ -407,6 +443,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -424,6 +461,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -513,6 +551,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -534,6 +573,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -568,6 +608,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -593,6 +634,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -612,6 +654,30 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+        }
+    }
+
+    /// Momir's Madness: 60 snow basic lands (12 each of Snow-Covered Plains/
+    /// Island/Swamp/Mountain/Forest, no Snow-Covered Wastes), 20 life, 2-player.
+    /// A game-start command-zone emblem grants the random-creature-token
+    /// activated ability. No sideboard, no commander. `command_zone: true` so
+    /// the command-zone activation surface and pool rehydration are enabled.
+    pub fn momir() -> Self {
+        FormatConfig {
+            format: GameFormat::Momir,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 2,
+            deck_size: 60,
+            singleton: false,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            uses_commander: false,
+            supplies_fixed_deck: true,
             allow_debug_actions: false,
         }
     }
@@ -629,6 +695,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: true,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -669,6 +736,7 @@ impl FormatConfig {
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
             GameFormat::TwoHeadedGiant => Self::two_headed_giant(),
+            GameFormat::Momir => Self::momir(),
         }
     }
 }
@@ -959,11 +1027,21 @@ mod tests {
                 "{:?}: commander_damage_threshold presence must match uses_commander",
                 meta.format
             );
+            // The derived `supplies_fixed_deck` field must agree with the
+            // predicate for every variant (engine is the single authority for
+            // which formats auto-supply their deck).
+            assert_eq!(
+                meta.default_config.supplies_fixed_deck,
+                meta.format.supplies_fixed_deck(),
+                "{:?}: registry default disagrees with supplies_fixed_deck predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
             let config = FormatConfig::for_format(format);
             assert_eq!(config.uses_commander, format.uses_commander());
+            assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
         }
     }
 

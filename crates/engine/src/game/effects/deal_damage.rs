@@ -584,6 +584,24 @@ pub(crate) fn apply_damage_after_replacement(
             record.source_zone = obj.zone;
         }
         state.damage_dealt_this_turn.push_back(record);
+        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // actually dealt damage (this branch is gated on `actual_amount > 0`, i.e.
+        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
+        // amount of CR 120.1a). Only battlefield-resident sources carry this
+        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
+        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // so `flush_layers` recomputes the materialized keyword set that
+        // `has_hexproof` reads — otherwise the conditional hexproof grant for
+        // "has hexproof if it hasn't dealt damage yet" would never drop at the
+        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
+        if state
+            .objects
+            .get(&ctx.source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+            && state.objects_that_dealt_damage.insert(ctx.source_id)
+        {
+            state.layers_dirty.mark_full();
+        }
     }
 
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
@@ -1036,10 +1054,13 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
-                    // CR 109.4: the parent-object-target anchor has no meaning
-                    // for a damage-each-player effect (no parent object target
-                    // is in scope); never matches.
-                    PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
+                    // the resolution-scoped chosen-player anchor have no meaning
+                    // for a damage-each-player effect (no parent object target /
+                    // chosen player is in scope here); never matches.
+                    PlayerFilter::ParentObjectTargetController
+                    | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.
@@ -1230,10 +1251,13 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                    // CR 109.4: the parent-object-target anchor has no meaning
-                    // for a damage-each-player effect (no parent object target
-                    // is in scope); never matches.
-                    PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
+                    // the resolution-scoped chosen-player anchor have no meaning
+                    // for a damage-each-player effect (no parent object target /
+                    // chosen player is in scope here); never matches.
+                    PlayerFilter::ParentObjectTargetController
+                    | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.
@@ -1346,8 +1370,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        ChosenAttribute, ContinuousModification, ControllerRef, Duration, FilterProp, ObjectScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -1409,6 +1433,196 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
             "a DamagePrevented event is emitted"
+        );
+    }
+
+    /// CR 702.11b + CR 613.1f + CR 120.3: DISCRIMINATING runtime test for
+    /// "has hexproof if it hasn't dealt damage yet" (Palladia-Mors, the Ruiner;
+    /// Karakyk Guardian). Proves the gate is read AT THE TARGETING CHECK:
+    ///   1. Before dealing damage, an opponent's bolt CANNOT target the creature
+    ///      (hexproof active → not in `target_slots[0].legal_targets`).
+    ///   2. After the creature deals combat damage, the same bolt CAN target it
+    ///      (hexproof gone) — this passes only because the `mark_full()` in the
+    ///      damage chokepoint forces `flush_layers` to recompute the materialized
+    ///      keyword set `has_hexproof` reads. Reverting that `mark_full()` leaves
+    ///      `layers_dirty == Clean`, the keyword set stale, and this step FAILS.
+    ///   3. A noncombat-damage source separately sets the same sticky flag.
+    ///   4. After the creature leaves and re-enters the battlefield (flicker), the
+    ///      flag is cleared and hexproof is restored (illegal target again).
+    #[test]
+    fn hexproof_if_hasnt_dealt_damage_drops_at_targeting_after_damage_restored_on_flicker() {
+        use crate::game::keywords::has_hexproof;
+        use crate::game::layers::flush_layers;
+        use crate::game::scenario::GameScenario;
+        use crate::game::zones::move_to_zone;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        // P1 controls the conditional-hexproof creature; P0 is the opponent.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let guardian = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Karakyk Guardian",
+                3,
+                3,
+                "Flying, vigilance, trample\nThis creature has hexproof if it hasn't dealt damage yet.",
+            )
+            .id();
+        // A vanilla P1 creature for the guardian to deal noncombat-style damage to.
+        let victim = scenario.add_creature(P1, "Bear", 2, 2).id();
+        let bolt1 = scenario.add_bolt_to_hand(P0);
+        let bolt2 = scenario.add_bolt_to_hand(P0);
+        let mut runner = scenario.build();
+
+        // Layer 6 (CR 613.1f): the conditional grant is active while the gate
+        // (Not(SourceHasDealtDamage)) holds — i.e. before any damage is dealt.
+        flush_layers(runner.state_mut());
+        assert!(
+            has_hexproof(&runner.state().objects[&guardian]),
+            "guardian must have hexproof before it has dealt damage"
+        );
+
+        // STEP 1 — at the targeting check, an opponent's bolt cannot target it.
+        let bolt1_card = runner.state().objects[&bolt1].card_id;
+        let before = runner
+            .act(GameAction::CastSpell {
+                object_id: bolt1,
+                card_id: bolt1_card,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast bolt 1 (players are still legal targets)");
+        if let WaitingFor::TargetSelection { target_slots, .. } = &before.waiting_for {
+            assert!(
+                !target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(guardian)),
+                "hexproof creature must NOT be a legal target before dealing damage"
+            );
+        } else {
+            panic!("expected TargetSelection, got {:?}", before.waiting_for);
+        }
+        // Resolve bolt 1 harmlessly at a player so it leaves the stack.
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("retarget bolt 1 at a player");
+
+        // STEP 2 — the guardian deals COMBAT damage. Drive the production
+        // chokepoint (`apply_damage_after_replacement`) so the BLOCKER-1
+        // `mark_full()` path executes.
+        {
+            let state = runner.state_mut();
+            let ctx = DamageContext::from_source(state, guardian).expect("guardian source ctx");
+            let event = ProposedEvent::Damage {
+                source_id: guardian,
+                target: TargetRef::Object(victim),
+                amount: 1,
+                is_combat: true,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(state, &ctx, event, true, &mut events);
+            assert!(
+                state.objects_that_dealt_damage.contains(&guardian),
+                "sticky flag set after combat damage actually dealt"
+            );
+            // BLOCKER 1: the chokepoint marked layers fully dirty on first insert.
+            assert!(
+                state.layers_dirty.is_dirty(),
+                "deal_damage must mark layers dirty so the keyword set recomputes"
+            );
+        }
+
+        // The next action flushes layers; hexproof must now be gone AT the
+        // targeting check (the bolt can now target the guardian).
+        let bolt2_card = runner.state().objects[&bolt2].card_id;
+        let after = runner
+            .act(GameAction::CastSpell {
+                object_id: bolt2,
+                card_id: bolt2_card,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast bolt 2");
+        if let WaitingFor::TargetSelection { target_slots, .. } = &after.waiting_for {
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(guardian)),
+                "hexproof must be GONE at the targeting check after the creature dealt damage"
+            );
+        } else {
+            panic!("expected TargetSelection, got {:?}", after.waiting_for);
+        }
+        assert!(
+            !has_hexproof(&runner.state().objects[&guardian]),
+            "materialized keywords must no longer include hexproof after damage"
+        );
+        // Clear the in-flight bolt 2 selection by retargeting at a player.
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("retarget bolt 2 at a player");
+
+        // STEP 3 — a NONCOMBAT-damage source also sets the sticky flag. Use a
+        // fresh creature so combat vs. noncombat is isolated.
+        {
+            let state = runner.state_mut();
+            let id = create_object(
+                state,
+                CardId(9001),
+                P1,
+                "Noncombat Pinger".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let ctx = DamageContext::from_source(state, id).expect("pinger source ctx");
+            let event = ProposedEvent::Damage {
+                source_id: id,
+                target: TargetRef::Player(P0),
+                amount: 1,
+                is_combat: false,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(state, &ctx, event, false, &mut events);
+            assert!(
+                state.objects_that_dealt_damage.contains(&id),
+                "noncombat damage also sets the sticky flag"
+            );
+        }
+
+        // STEP 4 — flicker the guardian (battlefield → exile → battlefield). The
+        // sticky flag is cleared on the battlefield exit, restoring hexproof.
+        {
+            let state = runner.state_mut();
+            let mut events = Vec::new();
+            move_to_zone(state, guardian, Zone::Exile, &mut events);
+            assert!(
+                !state.objects_that_dealt_damage.contains(&guardian),
+                "flag cleared when the guardian leaves the battlefield"
+            );
+            move_to_zone(state, guardian, Zone::Battlefield, &mut events);
+            flush_layers(state);
+        }
+        assert!(
+            has_hexproof(&runner.state().objects[&guardian]),
+            "hexproof restored after flicker (clean slate, no damage dealt yet)"
         );
     }
 
@@ -1531,6 +1745,68 @@ mod tests {
 
         assert_eq!(state.objects[&source].damage_marked, 0);
         assert_eq!(state.objects[&recipient].damage_marked, 3);
+    }
+
+    /// #699 (one-sided fight — full Ambuscade-class shape). The boosted creature
+    /// is `targets[0]` (power 5), the opponent's creature is `targets[1]`
+    /// (power 2). With `damage_source: Some(Target)` + `amount: Power{Target}`
+    /// the boosted creature deals damage equal to ITS OWN power (5, read from
+    /// targets[0], NOT the recipient's 2) to the recipient. Asserts: recipient
+    /// (targets[1]) takes 5, boosted creature (targets[0]) takes 0. Proves the
+    /// amount reads the boosted creature (Target == targets[0]) and the recipient
+    /// is targets[1] — the exact slot ordering the #699 parser fix relies on.
+    /// CR 120.1: the boosted creature is the damage source.
+    #[test]
+    fn one_sided_fight_amount_reads_boosted_creature_recipient_takes_damage() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Boosted Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source).unwrap();
+            s.card_types.core_types.push(CoreType::Creature);
+            s.power = Some(5);
+            s.base_power = Some(5);
+        }
+        {
+            let r = state.objects.get_mut(&recipient).unwrap();
+            r.card_types.core_types.push(CoreType::Creature);
+            r.power = Some(2);
+            r.base_power = Some(2);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source), TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Boosted creature deals its power (5), not the recipient's (2);
+        // recipient (targets[1]) receives it, boosted (targets[0]) is unscathed.
+        assert_eq!(state.objects[&source].damage_marked, 0);
+        assert_eq!(state.objects[&recipient].damage_marked, 5);
     }
 
     #[test]
@@ -1682,6 +1958,86 @@ mod tests {
             3,
             "expected 3 -1/-1 counters (one per damage prevented), events: {:?}",
             events
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
+            "must not emit DamageDealt for fully prevented damage"
+        );
+    }
+
+    /// CR 615.1a + CR 615.5 + CR 122.1 + CR 608.2h: Protean Hydra class — "If
+    /// damage would be dealt to ~, prevent that damage and remove that many
+    /// +1/+1 counters from it." The prevention shield absorbs the damage and
+    /// the rider removes one +1/+1 counter per damage prevented, resolving
+    /// `EventContextAmount` on `Effect::RemoveCounter.count` exactly as the
+    /// Phyrexian Hydra cohort does on `Effect::PutCounter.count`.
+    #[test]
+    fn protean_hydra_prevention_removes_that_many_plus_counters() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PreventionAmount, QuantityExpr, QuantityRef,
+            ReplacementDefinition,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let hydra = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(1),
+            "Protean Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&hydra).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            // Enters with five +1/+1 counters.
+            obj.counters.insert(CounterType::Plus1Plus1, 5);
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::RemoveCounter {
+                            counter_type: Some(CounterType::Plus1Plus1),
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextAmount,
+                            },
+                            target: TargetFilter::SelfRef,
+                        },
+                    ))
+                    .description("Protean Hydra prevention shield".to_string()),
+            );
+        }
+
+        let ability = make_ability(3, vec![TargetRef::Object(hydra)]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let hydra_obj = state.objects.get(&hydra).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 3, .. })),
+            "expected DamagePrevented event with amount 3, got {events:?}"
+        );
+        assert_eq!(
+            hydra_obj.damage_marked, 0,
+            "prevention must absorb the damage (no marked damage)"
+        );
+        assert_eq!(
+            hydra_obj
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "5 starting counters minus 3 prevented damage = 2 remaining, events: {events:?}"
         );
         assert!(
             !events
@@ -2453,6 +2809,69 @@ mod tests {
         // CR 120.3c: Damage to planeswalker removes loyalty, not damage_marked.
         assert_eq!(state.objects[&pw_id].loyalty, Some(2));
         assert_eq!(state.objects[&pw_id].damage_marked, 0);
+    }
+
+    /// Issue #3293: Joyful Stormsculptor — opponent+battle compound damage must
+    /// not hit opponent-controlled creatures.
+    #[test]
+    fn resolve_all_opponent_and_battle_they_protect_skips_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let creature_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.toughness = Some(3);
+            obj.base_toughness = Some(3);
+        }
+        let battle_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Protected Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.defense = Some(3);
+            obj.base_defense = Some(3);
+            obj.counters.insert(CounterType::Defense, 3);
+            obj.chosen_attributes
+                .push(ChosenAttribute::Player(PlayerId(1)));
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).properties(vec![
+                    FilterProp::ProtectorMatches {
+                        controller: ControllerRef::Opponent,
+                    },
+                ])),
+                player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let p1_life_before = state.players[1].life;
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&creature_id].damage_marked, 0,
+            "opponent creatures must not be damaged"
+        );
+        assert_eq!(state.objects[&battle_id].defense, Some(2));
+        assert_eq!(state.players[1].life, p1_life_before - 1);
     }
 
     #[test]

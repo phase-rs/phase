@@ -724,6 +724,32 @@ pub(crate) fn parse_attached_subject_target_filter(input: &str) -> OracleResult<
     ))
 }
 
+/// CR 508.1a + CR 509.1a + CR 611.3a: Parse "enchanted/equipped creature is
+/// attacking|blocking" into the attached-subject's `TargetFilter` plus the
+/// combat-state `FilterProp`. Unlike `parse_attached_subject_is_filter` (which
+/// folds a STATIC characteristic — color/type/supertype — into the subject
+/// filter), combat state is re-evaluated each layer cycle (CR 611.3a), so the
+/// caller must bind it as a `RecipientMatchesFilter` GATE on the recipient (the
+/// attached creature), NOT fold it into the affected filter.
+///
+/// "blocked" is intentionally NOT a branch: `FilterProp` has no recipient-side
+/// "blocked" prop (only `Attacking`, `Blocking`, `BlockingSource`,
+/// `CombatRelation`, `Unblocked`), and there are no in-class cards. Inventing a
+/// `Blocked` prop is a new-variant decision routed through /add-engine-variant.
+pub(crate) fn parse_attached_subject_combat_state(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, FilterProp)> {
+    let (rest, subject) = parse_attached_condition_subject(input)?;
+    let (rest, _) = tag("is ").parse(rest)?;
+    let (rest, prop) = alt((
+        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(FilterProp::Blocking, tag("blocking")),
+    ))
+    .parse(rest)?;
+    let filter = TargetFilter::Typed(attached_subject_typed_filter(&subject));
+    Ok((rest, (filter, prop)))
+}
+
 /// Parse a positive attached-subject characteristic predicate
 /// ("enchanted creature is white", "equipped creature is an artifact",
 /// "enchanted creature is legendary") into the merged attached-subject
@@ -966,6 +992,15 @@ fn parse_attached_object_is_filter_condition(input: &str) -> OracleResult<'_, St
 ///
 /// Subjects: "~", "this creature", "this permanent", "this land", "this artifact",
 /// "this enchantment", "equipped creature", "enchanted creature".
+///
+/// DEFER: the "equipped creature " / "enchanted creature " prefixes collapse to
+/// `Source*` checks for the HOST creature across the tapped/monstrous/saddled/
+/// equipped/attached-to-creature predicates that share this dispatcher too. For
+/// those the host creature (not the Equipment/Aura) is the real subject, so
+/// emitting a `Source*` condition is a suspected latent bug needing a dedicated
+/// audit + recipient-gating pass (CR 611.3a). Only the combat-state predicate is
+/// narrowed here — it uses `parse_self_source_subject` (below), which excludes
+/// the attached prefixes, because an Equipment/Aura is never an attacker.
 fn parse_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
         tag("~ "),
@@ -976,6 +1011,27 @@ fn parse_source_subject(input: &str) -> OracleResult<'_, &str> {
         tag("this enchantment "),
         tag("equipped creature "),
         tag("enchanted creature "),
+    ))
+    .parse(input)
+}
+
+/// CR 611.3a: Like `parse_source_subject` but WITHOUT the attached-subject
+/// prefixes ("equipped creature " / "enchanted creature "). The combat-state
+/// predicate references the static's SOURCE; for an Equipment/Aura the source is
+/// the attachment, which is never itself an attacker/blocker. Folding
+/// "equipped creature is attacking" into `SourceIsAttacking` would gate on the
+/// Equipment's (impossible) combat state instead of the host creature's. The
+/// attached-subject combat form is owned by the inverted-grant path, which binds
+/// it as a `RecipientMatchesFilter` gate on the host (see
+/// `parse_attached_subject_combat_state`).
+fn parse_self_source_subject(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("~ "),
+        tag("this creature "),
+        tag("this permanent "),
+        tag("this land "),
+        tag("this artifact "),
+        tag("this enchantment "),
     ))
     .parse(input)
 }
@@ -1012,7 +1068,12 @@ fn parse_tapped_untapped(input: &str) -> OracleResult<'_, StaticCondition> {
 /// `"attacking or blocking"` emits `Or([SourceIsAttacking, SourceIsBlocking])`
 /// via the existing `StaticCondition::Or` combinator — no dedicated variant.
 fn parse_combat_state_predicate(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = parse_source_subject(input)?;
+    // CR 611.3a: combat state references the SOURCE permanent. Exclude the
+    // attached-subject prefixes ("equipped/enchanted creature") so they are NOT
+    // collapsed into a `Source*` combat condition (an Equipment/Aura is never an
+    // attacker); the attached-subject combat form is owned by the inverted-grant
+    // path via `parse_attached_subject_combat_state`.
+    let (rest, _) = parse_self_source_subject(input)?;
     let (rest, negated) =
         alt((value(false, tag("is ")), value(true, tag("isn't ")))).parse(rest)?;
     let (rest, predicate) = alt((
@@ -1058,12 +1119,43 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsSaddled, tag("is saddled")).parse(rest)
 }
 
-/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature" → SourceAttachedToCreature.
+/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
+/// → SourceAttachedToCreature.
+///
+/// The optional " you control" suffix covers bestow-trigger gates like Springheart
+/// Nantuko ("if this permanent is attached to a creature you control"). All printed
+/// Oracle uses controller=You for this gate (the host of an Aura/bestow card is
+/// always under its controller by CR 303.4d/CR 702.103b), so the controller axis
+/// is parameter-free at the AST layer — the runtime evaluator checks the host's
+/// controller against the ability's controller.
 fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
+    let (rest, _) = tag("is attached to a creature").parse(rest)?;
+    // Optional trailing " you control" — consumed but not represented in the AST.
+    let (rest, _) = opt(tag(" you control")).parse(rest)?;
+    Ok((rest, StaticCondition::SourceAttachedToCreature))
+}
+
+/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
+/// `Not(SourceHasDealtDamage)` — the negated form of the sticky "has dealt
+/// damage since entering" gate (Palladia-Mors, the Ruiner; Karakyk Guardian:
+/// "has hexproof if it hasn't dealt damage yet"). Accepts the self-referential
+/// subjects the conditional-keyword templates use ("it", "~", "this creature",
+/// "this permanent"). Only the negated "hasn't" idiom appears in Oracle text, so
+/// no affirmative form is produced here.
+fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag("it "),
+        tag("~ "),
+        tag("this creature "),
+        tag("this permanent "),
+    ))
+    .parse(input)?;
     value(
-        StaticCondition::SourceAttachedToCreature,
-        tag("is attached to a creature"),
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        },
+        tag("hasn't dealt damage yet"),
     )
     .parse(rest)
 }
@@ -1097,6 +1189,10 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Must precede `parse_source_is_type` so "has … counters on it" wins over
         // any other interpretation.
         parse_source_has_counters,
+        // CR 120.3 + CR 702.11b: "<subject> hasn't dealt damage yet" →
+        // Not(SourceHasDealtDamage). Specific full-phrase tag; placed before the
+        // generic predicates so it is not shadowed.
+        parse_source_hasnt_dealt_damage,
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
@@ -1451,7 +1547,15 @@ fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
 /// canonical source phrasing (`~`, `this creature`, `this permanent`, …,
 /// `enchanted creature`, `equipped creature`) composes identically.
 fn parse_subject_has_property(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_source_subject(input)?;
+    let (rest, _) = alt((
+        parse_source_subject,
+        // CR 201.5: Pronouns in self-referential granted abilities refer to
+        // the object that has the ability. Keep this scoped to the property
+        // grammar so it does not steal recipient-bound "it has a counter"
+        // duration clauses from `parse_recipient_has_counters`.
+        tag("it "),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("has ").parse(rest)?;
     alt((
         value(
@@ -1932,18 +2036,41 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>(" or more cards in your graveyard").parse(rest)
-    {
-        return Ok((
-            rest,
-            make_quantity_ge(
-                QuantityRef::GraveyardSize {
-                    player: PlayerScope::Controller,
-                },
-                n,
-            ),
-        ));
+    if let Ok((after_or_more, _)) = tag::<_, _, OracleError<'_>>(" or more ").parse(rest) {
+        // CR 603.4 + CR 404.2: Oversold Cemetery's intervening-if predicate
+        // counts face-up creature cards in its controller's graveyard.
+        if let Ok((rest, type_filters)) =
+            parse_you_have_typed_cards_in_your_graveyard(after_or_more)
+        {
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: type_filters,
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                    n,
+                ),
+            ));
+        }
+        // CR 603.4 + CR 404.2: Generic "you have N or more cards in your
+        // graveyard" intervening-if predicates use the controller's graveyard
+        // size.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("cards in your graveyard").parse(after_or_more)
+        {
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
+                    n,
+                ),
+            ));
+        }
     }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more life").parse(rest) {
         return Ok((
@@ -1974,6 +2101,21 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// CR 404.2: Parse the typed card-count tail of a controller graveyard predicate.
+fn parse_you_have_typed_cards_in_your_graveyard(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (rest, type_text) =
+        take_until::<_, _, OracleError<'_>>(" cards in your graveyard").parse(input)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" cards in your graveyard").parse(rest)?;
+    let type_filters = parse_zone_card_type_text(type_text.trim());
+    if type_filters.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((rest, type_filters))
 }
 
 /// Parse "that player has" / "that opponent has" quantity conditions.
@@ -3931,13 +4073,14 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
 /// and an object ("life this turn"). Each verb maps to a QuantityRef, and the result
 /// is `StaticCondition::And { conditions: [lhs >= 1, rhs >= 1] }`.
 ///
-/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1, LifeLostThisTurn >= 1)
+/// "you [verb1] (and|or) [verb2] life this turn" where each verb is gained/lost.
+/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1,
+/// LifeLostThisTurn >= 1); "you gained or lost life this turn" → Or(...) (Star
+/// Charter, Starseer Mentor, Starlit Soothsayer).
 fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
-
-    // Map event verbs to their QuantityRef for the shared "life this turn" object.
-    fn life_verb(v: &str) -> Option<QuantityRef> {
-        let result: nom::IResult<&str, QuantityRef, OracleError<'_>> = alt((
+    // "gained"/"lost" → the matching controller-scoped "life this turn" QuantityRef.
+    fn life_verb(i: &str) -> OracleResult<'_, QuantityRef> {
+        alt((
             value(
                 QuantityRef::LifeGainedThisTurn {
                     player: PlayerScope::Controller,
@@ -3951,34 +4094,25 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
                 tag("lost"),
             ),
         ))
-        .parse(v);
-        let (rest, qty) = result.ok()?;
-        rest.is_empty().then_some(qty)
+        .parse(i)
     }
 
-    // Try "[verb1] and [verb2] life this turn"
-    if let Some(and_pos) = rest.find(" and ") {
-        let verb1 = &rest[..and_pos];
-        let after_and = &rest[and_pos + " and ".len()..];
-        // Find the shared object: " life this turn"
-        if let Some(obj_pos) = after_and.find(" life this turn") {
-            let verb2 = &after_and[..obj_pos];
-            if let (Some(lhs), Some(rhs)) = (life_verb(verb1), life_verb(verb2)) {
-                let remainder = &after_and[obj_pos + " life this turn".len()..];
-                return Ok((
-                    remainder,
-                    StaticCondition::And {
-                        conditions: vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)],
-                    },
-                ));
-            }
-        }
-    }
+    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+    let (rest, lhs) = life_verb(rest)?;
+    // CR 119: the connective selects the boolean shape — "and" requires both
+    // life changes, "or" requires either — over the shared LifeGained/LifeLost
+    // ThisTurn QuantityRef building blocks.
+    let (rest, is_or) = alt((value(false, tag(" and ")), value(true, tag(" or ")))).parse(rest)?;
+    let (rest, rhs) = life_verb(rest)?;
+    let (rest, _) = tag(" life this turn").parse(rest)?;
 
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    let conditions = vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)];
+    let condition = if is_or {
+        StaticCondition::Or { conditions }
+    } else {
+        StaticCondition::And { conditions }
+    };
+    Ok((rest, condition))
 }
 
 /// Parse "you gained [N or more] life this turn".
@@ -4507,7 +4641,20 @@ fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<Target
         .parse(type_text)
         .ok()?;
     let (props, consumed) = parse_spell_history_origin_props(suffix)?;
-    if !suffix[consumed..].trim().is_empty() {
+    // CR 601.2a + CR 400.1: The cast-origin qualifier ("from anywhere other than
+    // your hand") and the timing qualifier ("this turn") are independent axes and
+    // may appear in either order. The `SpellsCastThisTurn` ref already encodes the
+    // "this turn" window, so a trailing time qualifier after the cast-origin zone
+    // suffix carries no extra filter information — accept and discard it. This is
+    // the qualifier-then-time word order (Impending Flux: "spells you've cast from
+    // anywhere other than your hand this turn") versus the time-then-qualifier
+    // order ("spells you've cast this turn from anywhere other than your hand"),
+    // which strips "this turn" before the cast-origin suffix ever reaches here.
+    let remainder = suffix[consumed..].trim();
+    let remainder = opt(tag::<_, _, OracleError<'_>>("this turn"))
+        .parse(remainder)
+        .map_or(remainder, |(rest, _)| rest);
+    if !remainder.trim().is_empty() {
         return None;
     }
 
@@ -5804,6 +5951,50 @@ mod tests {
         }
     }
 
+    /// CR 108.3 + CR 109.4 + CR 603.4: "you control N or more permanents you
+    /// don't own" — the bare negated-ownership suffix must be consumed by the
+    /// type-phrase parser so the whole count condition is recognized (Agent of
+    /// Treachery #3304). Before the fix "you don't own" was left unconsumed,
+    /// leaving a non-empty remainder that aborted intervening-if hoisting.
+    #[test]
+    fn parse_control_count_ge_permanents_you_dont_own() {
+        for text in [
+            "you control three or more permanents you don't own",
+            "you control three or more permanents you do not own",
+        ] {
+            let (rest, cond) = parse_control_count_ge(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "controller pinned to You via inject_controller_you for {text:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }),
+                "filter must carry Owned{{Opponent}} (\"you don't own it\") for {text:?}, \
+                 got {:?}",
+                tf.properties
+            );
+        }
+    }
+
     #[test]
     fn parse_quantity_quantity_comparison_x_ge_library() {
         // CR 107.3 + CR 608.2c: Thassa's Oracle trailing intervening-if.
@@ -6873,6 +7064,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_typed_graveyard_creature_count_ge() {
+        let (rest, c) =
+            parse_inner_condition("you have four or more creature cards in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                card_types,
+                                scope: CountScope::Controller,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {
+                assert_eq!(card_types, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected ZoneCardCount Creature GE 4, got {other:?}"),
+        }
+    }
+
     // -- Zone condition tests (Phase 1) --
 
     #[test]
@@ -7086,6 +7304,21 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
     }
 
+    // CR 120.3 + CR 702.11b: "it hasn't dealt damage yet" (Palladia-Mors,
+    // Karakyk Guardian conditional hexproof) → Not(SourceHasDealtDamage),
+    // fully consumed.
+    #[test]
+    fn test_it_hasnt_dealt_damage_yet() {
+        let (rest, c) = parse_inner_condition("it hasn't dealt damage yet").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            }
+        );
+    }
+
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").
     // After `this aura` → `~` normalization, the condition parser sees the canonical
     // `~` form of the abbreviated phrase.
@@ -7191,18 +7424,40 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceIsAttacking);
     }
 
+    /// CR 611.3a: An ATTACHED-subject combat phrase must NOT collapse to a
+    /// `Source*` combat condition (an Equipment/Aura is never an attacker). The
+    /// combat-state predicate now excludes the attached prefixes, so
+    /// `parse_inner_condition` fails on these; the dedicated
+    /// `parse_attached_subject_combat_state` combinator binds the state to the
+    /// host recipient instead (see the inverted-grant path).
     #[test]
-    fn test_equipped_creature_is_attacking() {
-        let (rest, c) = parse_inner_condition("equipped creature is attacking").unwrap();
+    fn test_equipped_creature_is_attacking_not_source_condition() {
+        assert!(parse_inner_condition("equipped creature is attacking").is_err());
+        let (rest, (filter, prop)) =
+            parse_attached_subject_combat_state("equipped creature is attacking").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::SourceIsAttacking);
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EquippedBy])
+            )
+        );
+        assert_eq!(prop, FilterProp::Attacking { defender: None });
     }
 
     #[test]
-    fn test_enchanted_creature_is_attacking() {
-        let (rest, c) = parse_inner_condition("enchanted creature is attacking").unwrap();
+    fn test_enchanted_creature_is_attacking_not_source_condition() {
+        assert!(parse_inner_condition("enchanted creature is attacking").is_err());
+        let (rest, (filter, prop)) =
+            parse_attached_subject_combat_state("enchanted creature is attacking").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::SourceIsAttacking);
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::EnchantedBy])
+            )
+        );
+        assert_eq!(prop, FilterProp::Attacking { defender: None });
     }
 
     #[test]
@@ -7332,6 +7587,17 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
 
         let (rest, c) = parse_inner_condition("this creature is attached to a creature").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceAttachedToCreature);
+
+        // CR 303.4 + CR 702.103: Springheart Nantuko's bestow landfall gate
+        // — the optional " you control" suffix must be consumed and treated
+        // the same as the bare form (the host of a bestow Aura is always under
+        // its controller, so the controller axis adds no AST information; the
+        // evaluator already binds the host's controller to the ability's
+        // controller).
+        let (rest, c) =
+            parse_inner_condition("this permanent is attached to a creature you control").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
     }
@@ -9102,6 +9368,27 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 7 },
             } => {}
             other => panic!("expected SelfPower GE 7, got {other:?}"),
+        }
+    }
+
+    /// Level Up: granted attack trigger uses the pronoun "it" in the draw gate.
+    #[test]
+    fn test_it_has_power_ge() {
+        let (rest, c) = parse_inner_condition("it has power 10 or greater").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            } => {}
+            other => panic!("expected SelfPower GE 10, got {other:?}"),
         }
     }
 

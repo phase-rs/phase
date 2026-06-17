@@ -669,10 +669,15 @@ pub fn build_prompt(
             insert_json(&mut fields, "numToDiscard", count);
             "chooseDiscard"
         }
-        WaitingFor::ModeChoice { modal, .. } => {
+        WaitingFor::ModeChoice {
+            modal,
+            unavailable_modes,
+            ..
+        } => {
             insert_json(&mut fields, "options", modal_options(modal));
             insert_json(&mut fields, "minChoices", modal.min_choices);
             insert_json(&mut fields, "maxChoices", modal.max_choices);
+            insert_json(&mut fields, "unavailableModes", unavailable_modes);
             "chooseMode"
         }
         WaitingFor::AbilityModeChoice { modal, .. } => {
@@ -1267,7 +1272,7 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::ChooseFromZoneChoice { player, cards, .. }
         | WaitingFor::EffectZoneChoice { player, cards, .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { player, cards, .. }
-        | WaitingFor::ManifestDreadChoice { player, cards }
+        | WaitingFor::ManifestDreadChoice { player, cards, .. }
         | WaitingFor::WardDiscardChoice { player, cards, .. }
         | WaitingFor::ConniveDiscard { player, cards, .. }
         | WaitingFor::PairChoice {
@@ -2243,6 +2248,7 @@ mod tests {
                         ..Default::default()
                     },
                     pending_cast: dummy_pending_cast(),
+                    unavailable_modes: vec![],
                 },
             ),
             (

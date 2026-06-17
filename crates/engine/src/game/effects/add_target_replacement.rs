@@ -28,7 +28,41 @@ fn replacement_with_ability_expiry(
     if replacement.expiry.is_none() {
         replacement.expiry = expiry_from_duration(ability.duration.as_ref(), ability.controller);
     }
+    // CR 109.4 + CR 614.1a: Anchor the installing player onto the replacement so
+    // global pending damage replacements (pushed under the sentinel `ObjectId(0)`,
+    // which has no controller in `state.objects`) can resolve a controller-relative
+    // `damage_source_filter` ("a source you control"). Without this anchor,
+    // `ControllerRef::You` never matches because the sentinel source has no
+    // controller, so the boost silently never fires (I Call for Slaughter, Rankle
+    // and Torbran, Taii Wakeen's +X boost). Guarded on `is_none` so a replacement
+    // that already specified a controller is never clobbered.
+    if replacement.source_controller.is_none() {
+        replacement.source_controller = Some(ability.controller);
+    }
+    freeze_damage_modification_x(&mut replacement, ability);
     replacement
+}
+
+/// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
+/// much damage plus X" replacement at activation time. The parser emits
+/// `DamageModification::Plus { value: 0 }` as a placeholder (the `u32`-typed
+/// modification cannot carry a symbolic X); here the announced X (held on the
+/// activating ability as `chosen_x`) replaces the placeholder so the replacement
+/// applies the locked-in value for the rest of the turn (Taii Wakeen's second
+/// ability). The `chosen_x.is_some()` guard ensures a genuine literal "plus 0"
+/// (no X in the cost) is never clobbered. (CR 107.3a: an activated ability's X
+/// equals its announced value while on the stack and beyond.)
+fn freeze_damage_modification_x(
+    replacement: &mut ReplacementDefinition,
+    ability: &ResolvedAbility,
+) {
+    if let (Some(crate::types::ability::DamageModification::Plus { value }), Some(chosen_x)) =
+        (replacement.damage_modification.as_mut(), ability.chosen_x)
+    {
+        if *value == 0 {
+            *value = chosen_x;
+        }
+    }
 }
 
 fn replacement_targets(
@@ -348,6 +382,107 @@ mod tests {
         // inference (which would scope to a specific player).
         assert_eq!(pending.damage_target_filter, None);
         assert_eq!(pending.expiry, Some(RestrictionExpiry::EndOfTurn));
+    }
+
+    /// CR 109.4 + CR 614.1a: discriminating runtime test for the
+    /// controller-anchor fix. A global "If a source you control would deal
+    /// damage this turn, it deals that much damage plus 1 instead." replacement
+    /// (`damage_source_filter = controller You`) is pushed under the sentinel
+    /// `ObjectId(0)`. The boost MUST fire for damage from a source controlled by
+    /// the installing player, and MUST NOT fire for damage from an opponent's
+    /// source.
+    ///
+    /// The boosted-amount assertion (`amount, 3`) flips if the anchor read at
+    /// `replacement.rs` is reverted: without it, `from_source(state, ObjectId(0))`
+    /// yields `source_controller = None`, `ControllerRef::You` never matches, and
+    /// the replacement is skipped (amount stays 2).
+    #[test]
+    fn global_source_you_control_boost_fires_for_own_source_only() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // A source we control, and a source the opponent controls.
+        let my_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "My Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let their_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Their Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+
+        let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_source_filter(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ));
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            Vec::new(),
+            // Installing ability controlled by PlayerId(0) — the anchor source.
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.duration = Some(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_controller,
+            Some(PlayerId(0)),
+            "install chokepoint must stamp the activating ability's controller"
+        );
+
+        // Positive: damage from OUR source is boosted 2 -> 3.
+        let proposed = ProposedEvent::Damage {
+            source_id: my_source,
+            target: TargetRef::Object(victim),
+            amount: 2,
+            is_combat: false,
+            applied: Default::default(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
+            panic!("expected modified damage event, got {result:?}");
+        };
+        assert_eq!(
+            amount, 3,
+            "a source we control must deal damage plus 1 (anchor read at the match site)"
+        );
+
+        // Negative: damage from the OPPONENT's source is unchanged.
+        let proposed = ProposedEvent::Damage {
+            source_id: their_source,
+            target: TargetRef::Object(victim),
+            amount: 2,
+            is_combat: false,
+            applied: Default::default(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
+            panic!("expected unmodified damage event, got {result:?}");
+        };
+        assert_eq!(
+            amount, 2,
+            "an opponent's source must not be boosted by 'a source you control'"
+        );
     }
 
     // Crafty Cutpurse end-to-end: a self-installed CreateToken replacement

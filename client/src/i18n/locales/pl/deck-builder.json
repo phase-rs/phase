@@ -5,6 +5,8 @@
     "reset": "Resetuj",
     "textPlaceholder": "Szukaj kart...",
     "allTypes": "Wszystkie typy",
+    "cardType": "Typ karty",
+    "browseFormatFilter": "Legalny w formacie",
     "cmcMax": "Maks. CMC:",
     "sets": "Dodatki",
     "addSetPlaceholder": "Dodaj kod dodatku...",

@@ -221,18 +221,40 @@ pub fn resolve(
         });
     }
 
+    drive_copy_token_batches(
+        state,
+        remaining,
+        EffectKind::from(&ability.effect),
+        ability.source_id,
+        events,
+    );
+
+    Ok(())
+}
+
+/// CR 707.2 + CR 614.1a: Route a queue of `PendingCopyTokenBatch`es through the
+/// `CreateToken` replacement pipeline and apply path. Single authority shared by
+/// `CopyTokenOf` (battlefield-sourced copies) and `CreateTokenCopyFromPool`
+/// (format-pool-sourced copies) so the replacement + apply path is never
+/// duplicated. The drain can pause and resume when a CR 616.1 replacement choice
+/// is required.
+pub(crate) fn drive_copy_token_batches(
+    state: &mut GameState,
+    remaining: VecDeque<PendingCopyTokenBatch>,
+    effect_kind: EffectKind,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
     drain_copy_token_resolution(
         state,
         PendingCopyTokenResolution {
             created_ids: Vec::new(),
             remaining,
-            effect_kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
+            effect_kind,
+            source_id,
         },
         events,
     );
-
-    Ok(())
 }
 
 pub(crate) fn drain_pending_copy_token_resolution(
@@ -412,9 +434,18 @@ pub(crate) fn apply_copy_token_after_replacement(
     // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
     // counters and dies immediately to CR 704.5i. Copies don't track battle
     // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
+    // CR 306.5b loyalty + CR 614.1c "~ enters with N counters" self-replacement
+    // (Atraxa's Skitterfang's three oil counters, Hangarback/Walking Ballista
+    // +1/+1, etc.) + any explicit counters the creating effect added. The copy
+    // path bypasses the ZoneChange replacement pass, so the copied card's
+    // intrinsic "enters with counters" replacement is seeded here from its
+    // copiable replacement set rather than firing during entry.
     let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
         crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None)
             .into_iter()
+            .chain(crate::game::printed_cards::self_etb_counter_replacements(
+                &values.replacement_definitions,
+            ))
             .chain(enter_with_counters.iter().cloned())
             .collect();
 

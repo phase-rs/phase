@@ -260,7 +260,9 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // is the object-filter variant; zone / linked-exile sources do not.
         QuantityRef::DistinctCardTypes { source } => match source {
             CardTypeSetSource::Objects { .. } => true,
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         // Player-level, single-object, history-record, payment, and choice
         // references: unaffected by another object's battlefield entry/exit.
@@ -303,6 +305,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -405,9 +408,12 @@ fn entered_object_perturbs_quantity_ref(
             CardTypeSetSource::Objects { filter } => {
                 matches_target_filter(state, entered.id, filter, ctx)
             }
-            // Zone / linked-exile sources are not battlefield population — the
-            // classifier returns false for them, so they cannot be perturbed.
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            // Zone / linked-exile / tracked-set sources are not battlefield
+            // population — the classifier returns false for them, so they cannot
+            // be perturbed.
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         // CR 700.5: devotion is perturbed iff the entered object's mana cost
         // contributes a symbol for one of the fixed colors. `ChosenColor`'s
@@ -475,6 +481,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -531,6 +538,8 @@ fn filter_prop_uses_recipient(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::AttachedToRecipient | FilterProp::Another => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_recipient),
+        // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
+        FilterProp::Not { prop } => filter_prop_uses_recipient(prop),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
@@ -760,6 +769,13 @@ fn resolve_event_scoped_ref(
                 &FilterContext::from_source(state, id),
             )
         }
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: _,
+                },
+        } => None,
         _ => None,
     }
 }
@@ -1607,6 +1623,36 @@ fn resolve_ref(
                         }
                     }
                 }
+                // CR 608.2c + CR 205.2a/205.2b: distinct card types among the most
+                // recent chain tracked set. A merged Draw->Discard set is
+                // disambiguated by CAUSE: `Some(cause)` (e.g. Discarded) tallies
+                // only members whose recorded producer action equals the bound
+                // cause; drawn members are unstamped and excluded. `None` counts
+                // every member. Mirrors `FilteredTrackedSetSize`'s set selection
+                // (highest set id) and cause filter (`tracked_set_member_causes`).
+                CardTypeSetSource::TrackedSet { caused_by } => {
+                    if let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    {
+                        for &oid in ids {
+                            let cause_ok = match caused_by {
+                                None => true,
+                                Some(cause) => state
+                                    .tracked_set_member_causes
+                                    .get(set_id)
+                                    .and_then(|causes| causes.get(&oid))
+                                    .is_some_and(|member_cause| member_cause == cause),
+                            };
+                            if cause_ok {
+                                if let Some(obj) = state.objects.get(&oid) {
+                                    for ct in &obj.card_types.core_types {
+                                        seen.insert(*ct);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             usize_to_i32_saturating(seen.len())
         }
@@ -1759,6 +1805,18 @@ fn resolve_ref(
                     .as_ref()
                     .and_then(crate::game::targeting::extract_amount_from_event)
             })
+            // CR 603.4: An intervening-`if` condition is checked at trigger
+            // *detection* (when `current_trigger_event` is still `None`) and
+            // re-checked at resolution. `EventContextAmount` must resolve at
+            // both times, so fall back to the detection-time event the same way
+            // `object_id_for_scope`'s `EventSource` arm does — otherwise the
+            // damage==toughness gate (Taii Wakeen) reads 0 at detection and
+            // never triggers.
+            .or_else(|| {
+                detection_trigger_event()
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -1825,6 +1883,13 @@ fn resolve_ref(
                     .current_trigger_event
                     .as_ref()
                     .and_then(crate::game::targeting::extract_source_from_event),
+                CastManaObjectScope::AbilityTarget => targets.iter().find_map(|target| {
+                    if let crate::types::ability::TargetRef::Object(id) = target {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                }),
             };
             cast_object
                 .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
@@ -2027,6 +2092,41 @@ fn resolve_ref(
                 })
                 .count(),
         ),
+        // CR 400.7 + CR 603.10a: Reduce `property` over this turn's matching
+        // zone-change snapshots. Mirrors ZoneChangeCountThisTurn's population scan
+        // but sums/maxes/mins the per-record P/T/MV (CR 208.1 / CR 202.3) instead
+        // of counting.
+        QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } => {
+            let vals = state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    from.is_none_or(|zone| record.from_zone == Some(zone))
+                        && to.is_none_or(|zone| record.to_zone == zone)
+                        && matches_target_filter_on_zone_change_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
+                })
+                .filter_map(|record| match property {
+                    ObjectProperty::Power => record.power,
+                    ObjectProperty::Toughness => record.toughness,
+                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(record.mana_value)),
+                });
+            match function {
+                AggregateFunction::Max => vals.max().unwrap_or(0),
+                AggregateFunction::Min => vals.min().unwrap_or(0),
+                AggregateFunction::Sum => vals.sum(),
+            }
+        }
         // CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching the
         // supplied source/target filters. `group_by` selects whether records are
         // partitioned (per CR 120.9 "by a specific source") before `aggregate`
@@ -2301,6 +2401,9 @@ fn resolve_ref(
                                 crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::ParentTargetOwner) => ability
+                            .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
@@ -2358,6 +2461,9 @@ fn damage_source_controller_matches(
             .and_then(|ability| {
                 crate::game::ability_utils::parent_target_controller(ability, state)
             })
+            .is_some_and(|player| actual == player),
+        ControllerRef::ParentTargetOwner => ability
+            .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
@@ -2657,6 +2763,16 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
+            .and_then(|id| state.objects.get(&id)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to a live `GameObject` here — both are snapshot
@@ -2696,6 +2812,15 @@ fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
@@ -2720,10 +2845,31 @@ pub(crate) fn distinct_counter_kinds_among(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
+    let mut seen: HashSet<CounterType> = HashSet::new();
+    // CR 608.2c + CR 122.1: a `ParentTarget` iteration source ("for each kind of
+    // counter on target permanent" — Dramatist's Puppet, Quarry Hauler) resolves
+    // to the chosen target(s) carried on the resolving ability, not via
+    // battlefield object matching (`matches_target_filter` returns false for
+    // `ParentTarget` by design — it is resolution-time context, not a predicate).
+    if matches!(filter, TargetFilter::ParentTarget) {
+        if let Some(ability) = filter_ctx.ability {
+            for target in &ability.targets {
+                if let TargetRef::Object(id) = target {
+                    if let Some(obj) = state.objects.get(id) {
+                        for counter_type in positive_counter_types(&obj.counters) {
+                            seen.insert(counter_type);
+                        }
+                    }
+                }
+            }
+        }
+        let mut kinds: Vec<CounterType> = seen.into_iter().collect();
+        kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        return kinds;
+    }
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: HashSet<CounterType> = HashSet::new();
     for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
         if !matches_target_filter(state, id, filter, filter_ctx) {
             continue;
@@ -2995,6 +3141,22 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        // CR 603.2 + CR 208.1: the power/toughness of the object that received
+        // the triggering damage ("that creature's toughness"). Same live-then-LKI
+        // resolution as `EventSource`, keyed on the recipient object.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .and_then(&obj_extract)
+                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
+                .unwrap_or(0)
+        }
         // CR 608.2k: An ability's effect referring to a specific untargeted
         // object previously referred to by that ability's cost OR trigger
         // condition still affects it. Resolved (first match wins) via:
@@ -3113,6 +3275,30 @@ fn resolve_object_mana_value(
         ObjectScope::EventSource => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&object_id)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
+        // CR 603.2 + CR 202.3: mana value of the object that received the
+        // triggering damage. Same live-then-LKI resolution as `EventSource`.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
             else {
                 return 0;
             };
@@ -3690,10 +3876,13 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                        // CR 109.4: the parent-object-target anchor has no
-                        // single-player-count meaning here (no parent object
-                        // target is in scope for a player-count quantity).
-                        PlayerFilter::ParentObjectTargetController => false,
+                        // CR 109.4 + CR 108.3 + CR 608.2c: the parent-object-target
+                        // anchors and the resolution-scoped chosen-player anchor
+                        // have no single-player-count meaning here (these resolve
+                        // to a single anchored player, not a counted set).
+                        PlayerFilter::ParentObjectTargetController
+                        | PlayerFilter::ParentObjectTargetOwner
+                        | PlayerFilter::ChosenPlayer { .. } => false,
                         // CR 109.4 + CR 109.5: "each [player class] who controls
                         // [comparator] [count] [filter]" — count candidates that
                         // satisfy both the `relation` predicate and the
@@ -5204,6 +5393,82 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    /// CR 400.7 + CR 700.4 + CR 208.1: aggregate the death-time power snapshot
+    /// over this turn's battlefield→graveyard records matching the filter. Sum
+    /// adds matching records; Max picks the largest; a non-matching destination
+    /// is excluded (returns 0 when none match).
+    #[test]
+    fn resolve_zone_change_aggregate_this_turn_sums_dies_power() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Genesis of the Daleks".to_string(),
+            Zone::Battlefield,
+        );
+        let dalek_a = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let dalek_b = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let non_dalek = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Human".to_string()],
+            power: Some(7),
+            ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        state
+            .zone_changes_this_turn
+            .extend([dalek_a, dalek_b, non_dalek]);
+
+        let dalek_filter = TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string()));
+
+        let sum = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &sum, PlayerId(0), source), 6);
+
+        let max = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &max, PlayerId(0), source), 3);
+
+        // A destination the records never matched yields 0.
+        let none_match = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: dalek_filter,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &none_match, PlayerId(0), source),
+            0
+        );
     }
 
     #[test]
@@ -7754,6 +8019,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -7766,6 +8032,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -10262,6 +10529,167 @@ mod tests {
             count_for(None),
             4,
             "None must count every member of the set (legacy parity)"
+        );
+    }
+
+    /// Occult Epiphany #3307: "Draw X, then discard X. Create a 1/1 Spirit for
+    /// each card type among cards discarded this way." Draw and Discard MERGE
+    /// into one chain tracked set; the token count must be DISTINCT CARD TYPES
+    /// among the DISCARDED members only (drawn members are unstamped and must be
+    /// excluded). CR 608.2c + CR 205.2a/205.2b.
+    #[test]
+    fn distinct_card_types_tracked_set_counts_discarded_members_by_cause() {
+        let mut state = GameState::new_two_player(42);
+        // Two drawn INSTANTS (unstamped) and two discarded CREATURES (stamped
+        // Discarded) merged into a single Draw->Discard chain tracked set.
+        let drawn_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Drawn-A".into(),
+            Zone::Hand,
+        );
+        let drawn_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Drawn-B".into(),
+            Zone::Hand,
+        );
+        let disc_creature_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Disc-Creature-A".into(),
+            Zone::Graveyard,
+        );
+        let disc_creature_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Disc-Creature-B".into(),
+            Zone::Graveyard,
+        );
+        let disc_instant = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Disc-Instant".into(),
+            Zone::Graveyard,
+        );
+        for id in [drawn_a, drawn_b, disc_instant] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Instant];
+        }
+        for id in [disc_creature_a, disc_creature_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        // A higher-id (later) set: the resolver must pick THIS merged set, the
+        // highest id, exactly like FilteredTrackedSetSize.
+        state.tracked_object_sets.insert(
+            set_id,
+            vec![
+                drawn_a,
+                drawn_b,
+                disc_creature_a,
+                disc_creature_b,
+                disc_instant,
+            ],
+        );
+        state.chain_tracked_set_id = Some(set_id);
+        // Only the DISCARDED members carry a cause; drawn members are unstamped.
+        let mut causes = HashMap::new();
+        causes.insert(disc_creature_a, ThisWayCause::Discarded);
+        causes.insert(disc_creature_b, ThisWayCause::Discarded);
+        causes.insert(disc_instant, ThisWayCause::Discarded);
+        state.tracked_set_member_causes.insert(set_id, causes);
+
+        let count_for = |caused_by| {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::TrackedSet { caused_by },
+                },
+            };
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))
+        };
+
+        // The canonical Occult Epiphany reading: distinct card types among the
+        // DISCARDED members = {Creature, Instant} = 2. The two drawn Instants are
+        // unstamped and excluded; the discarded Instant DOES contribute Instant.
+        assert_eq!(
+            count_for(Some(ThisWayCause::Discarded)),
+            2,
+            "distinct card types among discarded members = Creature + Instant (drawn unstamped)"
+        );
+
+        // Discriminating bug check: the OLD behavior (TrackedSetSize) would have
+        // returned 5 (all members); a naive distinct-types-of-WHOLE-set would be
+        // 2 as well but for the wrong reason, so also assert the all-creature
+        // variant differs from the merged-instant variant via the next test.
+        assert_eq!(
+            count_for(None),
+            2,
+            "None counts distinct types of every member: Instant + Creature = 2"
+        );
+    }
+
+    /// Companion to the above: discarding exactly one creature + one instant
+    /// (2 distinct types) yields 2; discarding two creatures (1 distinct type)
+    /// yields 1 — proving the count is DISTINCT TYPES, not member count.
+    #[test]
+    fn distinct_card_types_tracked_set_is_distinct_types_not_member_count() {
+        let mut state = GameState::new_two_player(7);
+        let drawn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Drawn".into(),
+            Zone::Hand,
+        );
+        let cr_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cr-A".into(),
+            Zone::Graveyard,
+        );
+        let cr_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Cr-B".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&drawn).unwrap().card_types.core_types = vec![CoreType::Sorcery];
+        for id in [cr_a, cr_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![drawn, cr_a, cr_b]);
+        state.chain_tracked_set_id = Some(set_id);
+        let mut causes = HashMap::new();
+        causes.insert(cr_a, ThisWayCause::Discarded);
+        causes.insert(cr_b, ThisWayCause::Discarded);
+        state.tracked_set_member_causes.insert(set_id, causes);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            },
+        };
+        // Two discarded CREATURES -> 1 distinct card type (NOT 2 members).
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999)),
+            1,
+            "two discarded creatures share one card type -> 1 token, not 2"
         );
     }
 }

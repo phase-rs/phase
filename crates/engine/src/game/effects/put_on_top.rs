@@ -118,6 +118,20 @@ pub fn resolve(
                 return Ok(());
             }
         }
+        // CR 701.23b: A search/forward continuation that found nothing — fail to
+        // find, or no instant/sorcery left in the library for a top-of-library
+        // tutor (Mystical/Vampiric/Worldly/Personal/Enlightened Tutor) — leaves
+        // `target: Any` with no forwarded card. There is nothing to position, so
+        // resolve as a legal no-op: the spell still shuffled, it just placed no
+        // card on top. Only `Any` (the "the card you found" forward target) is
+        // treated this way; a concrete filter resolving to nothing is a real bug.
+        if matches!(target_filter, TargetFilter::Any) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
         return Err(EffectError::InvalidParam(
             "PutAtLibraryPosition requires a target".to_string(),
         ));

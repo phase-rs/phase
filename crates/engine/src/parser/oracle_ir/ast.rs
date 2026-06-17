@@ -90,6 +90,7 @@ pub(crate) struct AnimationSpec {
     pub(crate) colors: Option<Vec<ManaColor>>,
     pub(crate) keywords: Vec<Keyword>,
     pub(crate) types: Vec<String>,
+    pub(crate) supertypes: Vec<crate::types::card_type::Supertype>,
     pub(crate) remove_all_abilities: bool,
 }
 
@@ -451,6 +452,14 @@ pub(crate) enum ImperativeFamilyAst {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Two players exchange life totals (Soul Conduit, Axis of
+    /// Mortality, Magus of the Mirror, Mirror Universe). `player_a`/`player_b`
+    /// select each player (`Controller` for "you", an opponent filter for "target
+    /// opponent", `Player` for "target player").
+    ExchangeLifeTotals {
+        player_a: TargetFilter,
+        player_b: TargetFilter,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
@@ -488,6 +497,10 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
+    /// CR 701.31c: An ability instructs a player to planeswalk (TARDIS, Start
+    /// the TARDIS, TARDIS Bay). Resolves to a no-op outside a Planechase game
+    /// (CR 701.31a).
+    Planeswalk,
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -814,6 +827,12 @@ pub(crate) enum TargetedImperativeAst {
     },
     Fight {
         target: TargetFilter,
+        /// CR 115.6: "up to N target …" cardinality (min=0) preserved from
+        /// `strip_optional_target_prefix`; `None` for the mandatory "fights
+        /// target …" form. Lowered onto `ParsedEffectClause.multi_target` in
+        /// `lower_imperative_family_ast`, never onto `Effect::Fight` (the spec
+        /// is an ability-level target-count axis, not an effect field).
+        multi_target: Option<MultiTargetSpec>,
     },
     GainControl {
         target: TargetFilter,
@@ -890,6 +909,12 @@ pub(crate) enum SearchCreationImperativeAst {
         reveal: bool,
         player: TargetFilter,
     },
+    /// CR 701.20e + CR 701.13a + CR 406.3: Fused "look at the top N ... and exiles it face down".
+    ExileTopLookedAt {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
     CopyTokenOf {
         target: TargetFilter,
         /// CR 107.1 + CR 707.2: Number of copy tokens to create.
@@ -928,9 +953,10 @@ pub(crate) enum SearchCreationImperativeAst {
     /// and library for any number of cards with that name and exile them."
     /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
     /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the owner of the parent target's exiled card. Used by
-    /// Deadly Cover-Up.
-    MultiZoneSameNameExile,
+    /// scoped to the player named by the possessive zone phrase.
+    MultiZoneSameNameExile {
+        owner: ControllerRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1079,6 +1105,15 @@ pub(crate) enum PutImperativeAst {
         target: TargetFilter,
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 401.4: Specific library placement for mass library moves.
+        /// `Some` suppresses the default library shuffle and places each moved
+        /// object at that position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_position: Option<LibraryPosition>,
+        /// CR 401.4: The owner may randomize/arrange simultaneous library
+        /// placement for mass moves.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        random_order: bool,
         /// CR 608.2c: "and the rest into <zone>" complement for a tracked-set
         /// partition ("Put all <filter> revealed this way into your hand and
         /// the rest into your graveyard" — Winding Way). The primary move sends
@@ -1235,7 +1270,7 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     RemoveCounter {
         counter_type: Option<CounterType>,
-        count: i32,
+        count: QuantityExpr,
         target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.

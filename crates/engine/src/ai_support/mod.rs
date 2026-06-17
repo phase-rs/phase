@@ -337,12 +337,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 cards,
                 count,
                 up_to,
+                constraint,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            let exact = if *up_to { None } else { Some(*count) };
-            selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+            // CR 701.23b vs CR 701.23d: a stated-quality search (MatchEachFilter,
+            // etc.) may legally find fewer cards than requested — including none.
+            // Mirror the submission guard / candidate generation lower bound so
+            // the validated legal-action path does not drop the legal short/empty
+            // fail-to-find candidate and freeze the AI.
+            let lower_bounded = *up_to || constraint.permits_partial_find();
+            let exact = if lower_bounded { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || (lower_bounded && chosen.len() > *count)
         }
         (
             WaitingFor::ChooseFromZoneChoice {
@@ -507,7 +514,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(1)),
         (
-            WaitingFor::ManifestDreadChoice { player: _, cards },
+            WaitingFor::ManifestDreadChoice {
+                player: _, cards, ..
+            },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(1)),
         (
@@ -604,23 +613,55 @@ fn matches_waiting_target_choice(
     }
 }
 
+/// True when an `ActivateAbility` action is a meaningful priority decision.
+///
+/// Non-mana abilities are always meaningful. Mana abilities are meaningful only
+/// when their penalty axis says so (today: sacrifice-for-mana per CR 605.3a +
+/// CR 603.6, issue #544).
+fn activate_ability_is_meaningful_priority(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    state.objects.get(&source_id).is_some_and(|obj| {
+        obj.abilities.get(ability_index).is_some_and(|ability| {
+            !mana_abilities::is_mana_ability(ability)
+                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+        })
+    })
+}
+
 /// True when `actions` contains a priority action that materially changes the
 /// game beyond passing or producing standalone mana.
+///
+/// Sacrifice-for-mana activations are omitted from the flat `legal_actions`
+/// list (they live in `legal_actions_by_object` only) but remain meaningful
+/// priority decisions, so during `WaitingFor::Priority` this also scans
+/// `activatable_object_mana_actions`.
 pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
-    actions.iter().any(|action| match action {
+    if actions.iter().any(|action| match action {
         GameAction::PassPriority => false,
         GameAction::ActivateAbility {
             source_id,
             ability_index,
-        } => state.objects.get(source_id).is_some_and(|obj| {
-            obj.abilities.get(*ability_index).is_some_and(|ability| {
-                !mana_abilities::is_mana_ability(ability)
-                    || mana_sources::mana_ability_penalty(ability)
-                        .is_meaningful_priority_activation()
-            })
-        }),
+        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
         _ => true,
-    })
+    }) {
+        return true;
+    }
+
+    // Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
+    // excluded from the flat legal-actions list but must still block auto-pass.
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && activatable_object_mana_actions(state).iter().any(|action| {
+            matches!(
+                action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
+            )
+        })
 }
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
@@ -2008,6 +2049,53 @@ mod tests {
     }
 
     #[test]
+    fn cheap_reject_candidate_permits_partial_constrained_search() {
+        // CR 701.23b: a stated-quality (MatchEachFilter) search may legally find
+        // fewer cards than requested — including none. The validated legal-action
+        // path must NOT cheap-reject a short/empty pick, or the AI freezes.
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2)];
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: choices.clone(),
+            count: 2,
+            reveal: false,
+            up_to: false,
+            constraint: SearchSelectionConstraint::MatchEachFilter {
+                filters: vec![TargetFilter::Any, TargetFilter::Any],
+            },
+            split: None,
+        };
+
+        // Empty (full fail-to-find) is legal and must survive cheap-reject.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards { cards: vec![] }
+        ));
+        // Partial pick (one of two) is legal and must survive cheap-reject.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        // The full pick is still legal.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: choices.clone()
+            }
+        ));
+        // Over the requested count remains rejected.
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[1], ObjectId(3)]
+            }
+        ));
+    }
+
+    #[test]
     fn auto_pass_does_not_skip_non_mana_land_ability() {
         // Shifting Woodland pattern: a land with both a mana ability and a
         // non-mana activated ability (delirium BecomeCopy). Auto-pass must NOT
@@ -2196,6 +2284,34 @@ mod tests {
         assert!(
             !super::auto_pass_recommended(&state, &actions),
             "Auto-pass must not fire when only a sacrifice-for-mana ability is available (#544)"
+        );
+
+        // Production path: flat `legal_actions` omits mana abilities, so the
+        // auto-pass gate must consult `activatable_object_mana_actions` instead
+        // of relying on the caller to inject the activation.
+        let (flat, _, grouped) = legal_actions_full(&state);
+        assert!(
+            !flat.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == kci
+            )),
+            "precondition: KCI activation is grouped-only during priority"
+        );
+        assert!(
+            bucket_has(
+                &grouped,
+                kci,
+                &GameAction::ActivateAbility {
+                    source_id: kci,
+                    ability_index: 0,
+                },
+            ),
+            "KCI activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "Issue #544: auto-pass must not fire from flat legal_actions alone \
+             when grouped sacrifice-for-mana is available"
         );
     }
 

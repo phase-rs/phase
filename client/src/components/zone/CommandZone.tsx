@@ -1,10 +1,17 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
+import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
+import {
+  collectObjectActions,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
+import { RichLabel } from "../mana/RichLabel.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 
 /** Emblem chips are deliberately rendered well below card size (Arena-style):
@@ -25,9 +32,10 @@ interface GroupedEmblem {
 
 /** The emblem's granted rules text ("what it does"). The engine attaches it to
  *  the produced ability definition's `description` — a static for static
- *  emblems, the first trigger for triggered emblems (CR 114.4) — so pull from
- *  both definition lists. Falls back to the generic "Emblem" label only when no
- *  text is available. */
+ *  emblems, the first trigger for triggered emblems, and the activated ability
+ *  for activatable emblems (the Momir Basic `{X}, Discard a card: …` emblem,
+ *  CR 114.4) — so pull from all three definition lists. Falls back to the
+ *  generic "Emblem" label only when no text is available. */
 function descriptionOf(emblem: GameObject, fallback: string): string {
   const descriptionsOf = (defs: unknown[] | undefined): string[] =>
     ((defs as Array<{ description?: string }> | undefined) ?? [])
@@ -37,6 +45,7 @@ function descriptionOf(emblem: GameObject, fallback: string): string {
   const parts = [
     ...descriptionsOf(emblem.static_definitions),
     ...descriptionsOf(emblem.trigger_definitions),
+    ...descriptionsOf(emblem.abilities),
   ];
   return parts.join("; ") || fallback;
 }
@@ -103,23 +112,71 @@ export function CommandZone({ playerId }: CommandZoneProps) {
  */
 function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
   const isCompactHeight = useIsCompactHeight();
-  const printedRef = group.representative.emblem_source?.printed_ref ?? null;
+  const emblem = group.representative;
+  const printedRef = emblem.emblem_source?.printed_ref ?? null;
   const { src: artSrc } = useCardImage(group.sourceName ?? "", {
     size: "art_crop",
     oracleId: printedRef?.oracle_id,
     faceName: printedRef?.face_name,
   });
 
+  // CR 114.4 + CR 602.1: an emblem can carry an activated ability (the Momir
+  // Basic `{X}, Discard a card: …` emblem). The engine maps each legal
+  // `ActivateAbility` to its source via `GameAction::source_object()` and
+  // surfaces it in `legalActionsByObject` only when activation is legal now
+  // (sorcery speed, the controller's priority, once each turn). The chip is
+  // therefore clickable exactly when the engine reports a live action for it —
+  // no client-side legality inference. Static/triggered emblems never report
+  // actions here, so they stay display-only as before.
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const emblemActions = useMemo(
+    () => collectObjectActions(legalActionsByObject, emblem.id),
+    [legalActionsByObject, emblem.id],
+  );
+  const isActivatable = emblemActions.length > 0;
+
+  const handleActivate = useCallback(() => {
+    if (emblemActions.length === 0) return;
+    // Reuse the shared single-authority dispatch helper (issue #506): a
+    // card-consuming ability surfaces the confirmation modal; otherwise the
+    // lone action auto-fires, kicking off the engine's X / discard prompts.
+    const auto = resolveSingleActionDispatch(emblemActions, emblem);
+    if (auto) {
+      dispatchAction(auto);
+    } else {
+      setPendingAbilityChoice({ objectId: emblem.id, actions: emblemActions });
+    }
+  }, [emblemActions, emblem, setPendingAbilityChoice]);
+
   return (
     <div
       // `hover:z-50` lifts the chip above later DOM siblings (the commander
       // column) within the support column so its tooltip paints on top.
-      className="group relative select-none drop-shadow-[0_3px_5px_rgba(0,0,0,0.6)] hover:z-50"
+      className={`group relative select-none drop-shadow-[0_3px_5px_rgba(0,0,0,0.6)] hover:z-50 ${
+        isActivatable
+          ? "cursor-pointer rounded-[6px] ring-1 ring-amber-300/70 hover:ring-2 hover:ring-amber-200"
+          : ""
+      }`}
       style={{
         width: `calc(var(--art-crop-w) * ${EMBLEM_CHIP_SCALE})`,
         height: `calc(var(--art-crop-h) * ${EMBLEM_CHIP_SCALE})`,
       }}
       data-testid="emblem-card"
+      data-activatable={isActivatable || undefined}
+      role={isActivatable ? "button" : undefined}
+      tabIndex={isActivatable ? 0 : undefined}
+      onClick={isActivatable ? handleActivate : undefined}
+      onKeyDown={
+        isActivatable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                handleActivate();
+              }
+            }
+          : undefined
+      }
     >
       {/* No-delay custom hover tooltip — the chip is too small to show "where
           it came from" and "what it does" inline. */}
@@ -128,7 +185,14 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
           {label}
           {group.sourceName ? ` — ${group.sourceName}` : ""}
         </span>
-        <span className="mt-0.5 block text-slate-200">{group.description}</span>
+        {/* Interpolate `{X}`/`{1}`/`{R}`/`{T}` etc. into Scryfall SVG symbols
+            (RichLabel → ManaSymbol) so the emblem's `{X}, Discard a card: …`
+            rules text reads like printed card text instead of raw braces. */}
+        <RichLabel
+          text={group.description}
+          size="xs"
+          className="mt-0.5 block text-slate-200"
+        />
       </GameplayTooltip>
       {/* Outer black border + gold inlay so the chip reads as an emblem even
           over arbitrary source art. */}

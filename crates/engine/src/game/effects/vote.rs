@@ -23,7 +23,9 @@ use crate::types::ability::{
     ResolvedAbility, VoterScope,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingContinuation, VoteActor, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingContinuation, PendingVoteBallotIteration, VoteActor, WaitingFor,
+};
 use crate::types::player::PlayerId;
 
 use super::resolve_ability_chain;
@@ -201,7 +203,7 @@ pub fn resolve_tally(
         if *votes == 0 {
             continue;
         }
-        // CR 608.2c + CR 701.38 + CR 800.4g: Two distinct ways the per-choice
+        // CR 608.2c + CR 701.38 + CR 800.4g: Three distinct ways the per-choice
         // sub-effect resolves N voters' worth of work:
         //
         //   * `player_scope: Some(...)` — the parsed body fans out per-voter
@@ -210,88 +212,161 @@ pub fn resolve_tally(
         //     each Y" patterns. Each iteration runs once with the iterated
         //     voter as the rebound controller; `OriginalController` and
         //     `ScopedPlayer` route the two halves of the body distribution.
-        //   * `player_scope: None` — classic Council's-dilemma "For each
-        //     <choice> vote, <effect>" (Tivit / Capital Punishment). The body
-        //     runs N times against the SAME controller via `repeat_for`,
-        //     mirroring "fire effect once per ballot".
-        //
-        // The two paths must be mutually exclusive: stacking `player_scope`
-        // and `repeat_for` would multiply iterations (N voters × N votes) and
-        // break tally fan-out semantics.
+        //   * aggregate-tally — `QuantityRef::VoteCount` in the count slot.
+        //     Resolves once; `resolve_ref` sums the full tally.
+        //   * per-ballot iteration — classic Council's-dilemma "For each
+        //     <choice> vote, <effect>" (Tivit / Capital Punishment /
+        //     Expropriate). The body runs once per ballot. Each iteration
+        //     carries the ballot's voter as `scoped_player` so voter-
+        //     referential filters ("owned by the voter") resolve correctly
+        //     (CR 701.38d). `original_controller` preserves the spell caster
+        //     for effects like GainControl.
         let per_choice_player_scope = per_choice_effect[idx].player_scope.clone();
-        let repeat_for = if per_choice_player_scope.is_some() {
-            None
+        if per_choice_player_scope.is_some() {
+            // player_scope path — single dispatch, fan-out handled by
+            // resolve_ability_chain's player_scope driver.
+            let chain = ResolvedAbility {
+                effect: (*per_choice_effect[idx].effect).clone(),
+                targets: Vec::new(),
+                source_id,
+                source_incarnation: None,
+                controller,
+                original_controller: None,
+                scoped_player: None,
+                target_chooser: None,
+                kind: per_choice_effect[idx].kind,
+                sub_ability: per_choice_effect[idx]
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
+                else_ability: None,
+                duration: per_choice_effect[idx].duration.clone(),
+                condition: per_choice_effect[idx].condition.clone(),
+                context: Default::default(),
+                optional_targeting: per_choice_effect[idx].optional_targeting,
+                optional: per_choice_effect[idx].optional,
+                optional_for: None,
+                multi_target: None,
+                target_constraints: Vec::new(),
+                target_choice_timing: per_choice_effect[idx].target_choice_timing,
+                description: per_choice_effect[idx].description.clone(),
+                repeat_for: None,
+                min_x_value: per_choice_effect[idx].min_x_value,
+                cant_be_copied: per_choice_effect[idx].cant_be_copied,
+                copy_count_status: crate::types::ability::CopyCountStatus::Pending,
+                forward_result: per_choice_effect[idx].forward_result,
+                unless_pay: None,
+                distribution: None,
+                player_scope: per_choice_player_scope,
+                starting_with: per_choice_effect[idx].starting_with.clone(),
+                chosen_x: None,
+                cost_paid_object: None,
+                effect_context_object: None,
+                ability_index: None,
+                may_trigger_origin: None,
+                target_selection_mode: per_choice_effect[idx].target_selection_mode,
+                chosen_players: Vec::new(),
+                repeat_until: None,
+                sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                modal: None,
+                mode_abilities: vec![],
+            };
+            resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
             .effect
             .count_expr()
             .is_some_and(QuantityExpr::contains_vote_count)
         {
-            // CR 111.1 / CR 122.1 + CR 701.38 + CR 608.2c: aggregate-tally body
+            // CR 111.1 + CR 701.38 + CR 608.2c: aggregate-tally body
             // (Emissary Green). Its count slot is bound to a
             // `QuantityRef::VoteCount`, so the effect resolves as ONE aggregate
             // event whose `resolve_ref` sums the full tally — do NOT repeat it
             // per ballot, which would multiply the tally by itself.
-            None
+            let chain = ResolvedAbility {
+                effect: (*per_choice_effect[idx].effect).clone(),
+                targets: Vec::new(),
+                source_id,
+                source_incarnation: None,
+                controller,
+                original_controller: None,
+                scoped_player: None,
+                target_chooser: None,
+                kind: per_choice_effect[idx].kind,
+                sub_ability: per_choice_effect[idx]
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
+                else_ability: None,
+                duration: per_choice_effect[idx].duration.clone(),
+                condition: per_choice_effect[idx].condition.clone(),
+                context: Default::default(),
+                optional_targeting: per_choice_effect[idx].optional_targeting,
+                optional: per_choice_effect[idx].optional,
+                optional_for: None,
+                multi_target: None,
+                target_constraints: Vec::new(),
+                target_choice_timing: per_choice_effect[idx].target_choice_timing,
+                description: per_choice_effect[idx].description.clone(),
+                repeat_for: None,
+                min_x_value: per_choice_effect[idx].min_x_value,
+                cant_be_copied: per_choice_effect[idx].cant_be_copied,
+                copy_count_status: crate::types::ability::CopyCountStatus::Pending,
+                forward_result: per_choice_effect[idx].forward_result,
+                unless_pay: None,
+                distribution: None,
+                player_scope: None,
+                starting_with: per_choice_effect[idx].starting_with.clone(),
+                chosen_x: None,
+                cost_paid_object: None,
+                effect_context_object: None,
+                ability_index: None,
+                may_trigger_origin: None,
+                target_selection_mode: per_choice_effect[idx].target_selection_mode,
+                chosen_players: Vec::new(),
+                repeat_until: None,
+                sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                modal: None,
+                mode_abilities: vec![],
+            };
+            resolve_ability_chain(state, &chain, events, 1)?;
         } else {
-            // Classic "For each <choice> vote, <effect>" (Tivit / Capital
-            // Punishment): the body has a fixed count and fires once per ballot.
-            Some(QuantityExpr::Fixed {
-                value: *votes as i32,
-            })
-        };
-        let chain = ResolvedAbility {
-            effect: (*per_choice_effect[idx].effect).clone(),
-            targets: Vec::new(),
-            source_id,
-            source_incarnation: None,
-            controller,
-            original_controller: None,
-            scoped_player: None,
-            target_chooser: None,
-            kind: per_choice_effect[idx].kind,
-            sub_ability: per_choice_effect[idx]
-                .sub_ability
-                .as_ref()
-                .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
-            else_ability: None,
-            duration: per_choice_effect[idx].duration.clone(),
-            condition: per_choice_effect[idx].condition.clone(),
-            context: Default::default(),
-            optional_targeting: per_choice_effect[idx].optional_targeting,
-            optional: per_choice_effect[idx].optional,
-            optional_for: None,
-            multi_target: None,
-            target_constraints: Vec::new(),
-            target_choice_timing: per_choice_effect[idx].target_choice_timing,
-            description: per_choice_effect[idx].description.clone(),
-            repeat_for,
-            min_x_value: per_choice_effect[idx].min_x_value,
-            cant_be_copied: per_choice_effect[idx].cant_be_copied,
-            copy_count_status: crate::types::ability::CopyCountStatus::Pending,
-            forward_result: per_choice_effect[idx].forward_result,
-            unless_pay: None,
-            distribution: None,
-            player_scope: per_choice_player_scope,
-            // CR 101.4 + CR 800.4: Inherit the parent ability's turn-order
-            // override so per-vote-choice fan-out preserves it across the
-            // synthesized chain (vote sub-effects are children of the
-            // resolving ability and must share its iteration semantics).
-            starting_with: per_choice_effect[idx].starting_with.clone(),
-            chosen_x: None,
-            cost_paid_object: None,
-            effect_context_object: None,
-            ability_index: None,
-            may_trigger_origin: None,
-            target_selection_mode: per_choice_effect[idx].target_selection_mode,
-            chosen_players: Vec::new(),
-            repeat_until: None,
-            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
-            modal: None,
-            mode_abilities: vec![],
-        };
-        // CR 608.2c: depth = 1 so the chain entry doesn't clear
-        // `state.last_vote_ballots`; see ledger-publication note above.
-        resolve_ability_chain(state, &chain, events, 1)?;
+            // CR 701.38d + CR 608.2c: Per-ballot iteration. Each ballot that
+            // chose this option triggers one resolution of the sub-effect.
+            // The ballot's voter is carried as `scoped_player` so voter-
+            // referential filters ("owned by the voter" → ScopedPlayer)
+            // resolve to the correct player. `original_controller` preserves
+            // the spell caster for effects that grant control (Expropriate).
+            // For cards without voter-referential filters (Tivit, Capital
+            // Punishment), `scoped_player` is harmlessly set but never read.
+            let choice_ballots: Vec<PlayerId> = ballots
+                .iter()
+                .filter(|(_, choice)| *choice == idx as u8)
+                .map(|(voter, _)| *voter)
+                .collect();
+            // CR 701.38d: Process per-ballot interactive bodies one at a time.
+            // If a ballot parks an interactive choice (e.g. ChooseFromZoneChoice),
+            // stash remaining voters and return early; the drain function resumes.
+            let initial_waiting_for = state.waiting_for.clone();
+            let mut remaining_voters: Vec<PlayerId> = choice_ballots.clone();
+
+            while let Some(voter) = remaining_voters.first().copied() {
+                remaining_voters.remove(0);
+                let ballot_ability =
+                    build_per_ballot_ability(&per_choice_effect[idx], voter, source_id, controller);
+                resolve_ability_chain(state, &ballot_ability, events, 1)?;
+
+                // If the inner effect parked an interactive choice, suspend.
+                if state.waiting_for != initial_waiting_for {
+                    state.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
+                        ability_template: Box::new(per_choice_effect[idx].as_ref().clone()),
+                        remaining_voters,
+                        source_id,
+                        controller,
+                    });
+                    return Ok(());
+                }
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -442,11 +517,72 @@ fn title_case_word(s: &str) -> String {
     }
 }
 
+/// Build a `ResolvedAbility` for a single per-ballot vote body, binding
+/// `scoped_player` to the voter so that `ZoneOwner::ScopedPlayer` resolves
+/// to the correct player's permanents.
+fn build_per_ballot_ability(
+    template: &AbilityDefinition,
+    voter: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+    controller: PlayerId,
+) -> ResolvedAbility {
+    let mut ability = resolved_from_def(template, source_id, controller);
+    ability.scoped_player = Some(voter);
+    ability.original_controller = Some(controller);
+    ability
+}
+
+/// CR 701.38d: Resume per-ballot vote iteration after an interactive choice
+/// resolves. Processes the next voter's ballot; if it pauses again, re-stashes
+/// remaining voters. When all voters are processed, emits `EffectResolved`.
+pub(crate) fn drain_pending_vote_ballot_iteration(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let pending = match state.pending_vote_ballot_iteration.take() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let initial_waiting_for = state.waiting_for.clone();
+    let mut remaining_voters = pending.remaining_voters;
+    let source_id = pending.source_id;
+    let controller = pending.controller;
+    let template = pending.ability_template;
+
+    while let Some(voter) = remaining_voters.first().copied() {
+        remaining_voters.remove(0);
+        let ballot_ability = build_per_ballot_ability(&template, voter, source_id, controller);
+        if resolve_ability_chain(state, &ballot_ability, events, 1).is_err() {
+            // On error, drop remaining ballots (matches existing error handling).
+            return;
+        }
+
+        if state.waiting_for != initial_waiting_for {
+            // Re-stash remaining voters for the next drain cycle.
+            state.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
+                ability_template: template,
+                remaining_voters,
+                source_id,
+                controller,
+            });
+            return;
+        }
+    }
+
+    // All ballots processed — emit the deferred EffectResolved.
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Vote,
+        source_id,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::AbilityKind;
     use crate::types::identifiers::ObjectId;
+    use crate::types::zones::Zone;
 
     /// CR 701.38a + CR 101.4: Initiating a Vote sets `WaitingFor::VoteChoice`
     /// for the controller, queuing the opponent next, with no extra-vote
@@ -1163,5 +1299,176 @@ mod tests {
             actor: VoteActor::Delegated(controller),
         };
         assert_eq!(state.waiting_for.acting_player(), Some(controller));
+    }
+    /// CR 701.38d + CR 608.2c: Expropriate money votes suspend and resume
+    /// per ballot. Uses the production parser path (`parse_vote_block`) to
+    /// build the Vote effect from Expropriate's real Oracle text. With two
+    /// opponents both choosing money, the first ballot pauses at
+    /// `ChooseFromZoneChoice`, remaining voters are stashed in
+    /// `pending_vote_ballot_iteration`, and `EffectResolved { Vote }` is NOT
+    /// emitted until all ballots resolve.
+    #[test]
+    fn expropriate_money_votes_suspend_and_resume_per_ballot() {
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        // Parse Expropriate's Oracle text through the production parser.
+        let text = "starting with you, each player votes for time or money. \
+                    For each time vote, take an extra turn after this one. \
+                    For each money vote, choose a permanent owned by the voter \
+                    and gain control of it.";
+        let parsed_def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
+
+        // Extract per_choice_effect from the parsed Vote definition.
+        let (choices, per_choice_effect) = match *parsed_def.effect {
+            Effect::Vote {
+                choices,
+                per_choice_effect,
+                ..
+            } => (choices, per_choice_effect),
+            ref other => panic!("expected Vote, got {:?}", other),
+        };
+        assert_eq!(choices, vec!["time".to_string(), "money".to_string()]);
+
+        // Set up a 3-player game.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let controller = state.players[0].id;
+        let opp1 = state.players[1].id;
+        let opp2 = state.players[2].id;
+
+        // Place one permanent on the battlefield owned by each opponent.
+        // Must have a permanent core type so TypeFilter::Permanent matches.
+        let perm_opp1 = create_object(
+            &mut state,
+            CardId(101),
+            opp1,
+            "Opp1 Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&perm_opp1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let perm_opp2 = create_object(
+            &mut state,
+            CardId(102),
+            opp2,
+            "Opp2 Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&perm_opp2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        // Also place a permanent owned by the controller (should NOT appear
+        // in the candidate set when the voter is opp1 or opp2).
+        let perm_ctrl = create_object(
+            &mut state,
+            CardId(100),
+            controller,
+            "Controller Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&perm_ctrl)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Build ballots: all three players voted "money" (index 1).
+        let ballots: crate::im::Vector<(PlayerId, u8)> =
+            crate::im::Vector::from(vec![(controller, 1), (opp1, 1), (opp2, 1)]);
+        let tallies = vec![0u32, 3];
+        let options = choices.clone();
+
+        // Call resolve_tally with the parsed per_choice_effect.
+        let mut events = Vec::new();
+        resolve_tally(
+            &mut state,
+            ObjectId(1),
+            controller,
+            &options,
+            &per_choice_effect,
+            &tallies,
+            &ballots,
+            &mut events,
+        )
+        .expect("resolve_tally succeeds");
+
+        // After resolve_tally, the first money ballot (controller's) should
+        // have paused at ChooseFromZoneChoice.
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                // Controller makes the choice (Chooser::Controller).
+                assert_eq!(*player, controller);
+                assert_eq!(*count, 1);
+                // The candidate set should contain ONLY permanents owned by
+                // the first voter (controller). The controller owns perm_ctrl.
+                assert!(
+                    cards.contains(&perm_ctrl),
+                    "candidate set must include controller's permanent, got {:?}",
+                    cards
+                );
+                // Opponent permanents must NOT be in the candidate set.
+                assert!(
+                    !cards.contains(&perm_opp1),
+                    "opp1's permanent must not be in controller's ballot candidates"
+                );
+                assert!(
+                    !cards.contains(&perm_opp2),
+                    "opp2's permanent must not be in controller's ballot candidates"
+                );
+            }
+            other => panic!(
+                "Expected ChooseFromZoneChoice after first ballot, got {:?}",
+                other
+            ),
+        }
+
+        // Remaining voters should be stashed.
+        assert!(
+            state.pending_vote_ballot_iteration.is_some(),
+            "remaining voters must be stashed in pending_vote_ballot_iteration"
+        );
+        assert_eq!(
+            state
+                .pending_vote_ballot_iteration
+                .as_ref()
+                .unwrap()
+                .remaining_voters
+                .len(),
+            2,
+            "two voters (opp1 + opp2) remain after controller's ballot"
+        );
+
+        // No EffectResolved { Vote } yet.
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Vote,
+                    ..
+                }
+            )),
+            "EffectResolved(Vote) must NOT be emitted while ballots remain"
+        );
     }
 }

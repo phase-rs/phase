@@ -116,6 +116,24 @@ pub enum BestowCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.138a + CR 118.9 + CR 601.2f-h: Escape cost — an alternative cost paid
+/// to cast a card from the graveyard (CR 702.138a). Almost always a compound
+/// cost: a mana sub-cost plus "Exile N other cards from your graveyard". A few
+/// cards add further sub-costs (e.g. Lunar Hatchling: "Exile a land you control,
+/// Exile five other cards from your graveyard"). Mirrors
+/// `EvokeCost`/`FlashbackCost`/`BestowCost` so the compound cost composes through
+/// `AbilityCost::Composite` and is split at runtime by `split_escape_cost_components`
+/// (casting.rs): the mana sub-cost is paid via the normal mana flow (CR 601.2g)
+/// and the residual exile sub-cost(s) via `pay_additional_cost` (CR 601.2h).
+/// Exiling permanents/cards as a cost is CR 701.13 (exile), NOT CR 701.21
+/// (sacrifice) — no sacrifice/death triggers fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EscapeCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -213,6 +231,8 @@ pub enum KeywordKind {
     Escape,
     Morph,
     Megamorph,
+    /// CR 702.187: Mayhem — see `Keyword::Mayhem`.
+    Mayhem,
     Suspend,
     Blitz,
     Disturb,
@@ -224,7 +244,6 @@ pub enum KeywordKind {
     Dash,
     Craft,
     Harmonize,
-    Mayhem,
     Warp,
     Devour,
     Offspring,
@@ -597,6 +616,9 @@ pub enum Keyword {
     Prowl(ManaCost),
     Morph(ManaCost),
     Megamorph(ManaCost),
+    /// CR 702.187b: Mayhem {cost} — cast from graveyard if you discarded this
+    /// card this turn, paying the mayhem cost rather than its mana cost.
+    Mayhem(ManaCost),
     Madness(ManaCost),
     /// CR 702.94a: Miracle {cost} — static ability linked (CR 603.11) to a
     /// triggered ability. Static: "You may reveal this card from your hand as
@@ -611,20 +633,16 @@ pub enum Keyword {
     /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
     /// creature and reducing the emerge cost by that creature's mana value.
     Emerge(ManaCost),
-    /// CR 702.138: Escape — cast from graveyard for an alternative cost,
-    /// exiling N other cards from your graveyard as an additional cost.
-    Escape {
-        cost: ManaCost,
-        exile_count: u32,
-    },
+    /// CR 702.138a: Escape — cast from graveyard for an alternative cost. The
+    /// compound escape cost (mana sub-cost plus one or more exile sub-costs) is
+    /// modeled by `EscapeCost` and split at runtime by
+    /// `split_escape_cost_components` (casting.rs): the mana portion is paid via
+    /// the normal mana flow and the residual exile sub-cost(s) via
+    /// `pay_additional_cost`.
+    Escape(EscapeCost),
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
-    /// CR 702.187b: Mayhem {cost} — "As long as you discarded this card this
-    /// turn, you may cast it from your graveyard by paying [cost] rather than
-    /// paying its mana cost." Unlike Flashback/Harmonize, the spell is NOT
-    /// exiled on resolution — it resolves normally (like Escape).
-    Mayhem(ManaCost),
     /// CR 702.74a + CR 118.9: see `EvokeCost` for the mana / non-mana split.
     /// Pure-mana evoke (Lorwyn cycle) is `EvokeCost::Mana`; MH2 Incarnations
     /// (Solitude et al.) carry `EvokeCost::NonMana(AbilityCost::Exile { .. })`.
@@ -796,11 +814,17 @@ pub enum Keyword {
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (variable additional cost + ETB token-per-payment
-    /// not wired).
-    /// CR 702.157: Squad {cost} — as an additional cost to cast, you may pay {cost}
-    /// any number of times; ETB creates that many tokens.
+    /// CR 702.157a: Squad {cost} — "As an additional cost to cast this spell,
+    /// you may pay {cost} any number of times." "When this creature enters, if
+    /// its squad cost was paid, create a token that's a copy of it for each time
+    /// its squad cost was paid." (CR 702.157b: each instance triggers separately.)
+    ///
+    /// Runtime: `database::synthesis::synthesize_squad` builds a
+    /// `AdditionalCost::Optional { repeatability: Repeatable }` additional-cost
+    /// instance (origin: `AdditionalCostOrigin::Squad`) and an ETB copy trigger
+    /// keyed on `QuantityRef::AdditionalCostPaymentCountFor { origin: Squad }`.
+    /// `casting_costs::effective_squad_additional_cost_instances` surfaces the
+    /// per-instance additional costs during casting. Fully wired.
     Squad(ManaCost),
 
     /// CR 702.29: Typecycling — "{subtype}cycling {cost}": discard this card and pay {cost}
@@ -905,11 +929,17 @@ pub enum Keyword {
     /// mana cost.
     Replicate(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + awaken-paid branch not wired).
-    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts
-    /// N +1/+1 counters on target land, animating it as a 0/0 Elemental
-    /// creature with haste.
+    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts N +1/+1
+    /// counters on target land you control, animating it as a 0/0 Elemental
+    /// creature with haste (it's still a land). Casting with awaken follows
+    /// CR 601.2b and CR 601.2f–h. CR 702.113b: the land target exists only
+    /// when the awaken cost was paid.
+    ///
+    /// Runtime: `CastingVariant::Awaken` + `casting::handle_awaken_cost_choice`
+    /// substitutes the awaken mana cost for the printed cost and calls
+    /// `effects::awaken::append_awaken_rider` to append the resolution rider
+    /// (`PutCounter{N, land you control}` → `Animate{0/0 Elemental, Haste,
+    /// Permanent}`) at the tail of the spell's ability tree. Fully wired.
     Awaken {
         count: u32,
         cost: ManaCost,
@@ -921,40 +951,57 @@ pub enum Keyword {
     /// trigger semantics are synthesized in `database::synthesis`.
     ForMirrodin,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cost cast hook not wired).
     /// CR 702.162a: More Than Meets the Eye {cost} — alternative cost
-    /// (Transformers crossover). "You may cast this card converted by
-    /// paying [cost] rather than its mana cost." Stores the alt mana
-    /// cost; the runtime alt-cost cast hook is not yet wired.
+    /// (Transformers crossover). "You may cast this card converted by paying
+    /// [cost] rather than its mana cost." Follows CR 701.28 (Convert) —
+    /// the permanent enters the battlefield transformed (back face up).
+    /// Alternative cost rules: CR 601.2b, CR 601.2f–h, CR 118.9.
+    ///
+    /// Runtime: `CastingVariant::MoreThanMeetsTheEye` + `casting::handle_mtmte_cost_choice`
+    /// substitutes the MTMTE mana cost for the printed cost and routes through
+    /// `continue_cast_with_alternative_spell_face`, which sets the stack spell
+    /// to use back-face characteristics. On resolution, `enter_transformed`
+    /// ZoneChange seed ensures the permanent enters back face up.
+    /// `CastingVariant::restores_front_face_after_stack_exit` handles cleanup
+    /// if the spell leaves the stack without resolving. Fully wired.
     MoreThanMeetsTheEye(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + combat-damage-this-turn predicate
-    /// not wired).
-    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay
-    /// [cost] rather than pay this spell's mana cost if a player was
-    /// dealt combat damage this turn by a creature that, at the time it
-    /// dealt that damage, was an Assassin creature or a commander under
-    /// your control." Stores the alt mana cost; runtime alt-cast hook
-    /// (combat-damage-this-turn predicate) is not yet wired.
+    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay [cost]
+    /// rather than pay this spell's mana cost if a player was dealt combat damage
+    /// this turn by a creature that, at the time it dealt that damage, was an
+    /// Assassin creature or a commander under your control." Follows CR 601.2b
+    /// and CR 601.2f–h. A pure cost substitution — no resolution rider.
+    ///
+    /// Runtime: The eligibility predicate is tracked in
+    /// `GameState::assassin_or_commander_dealt_combat_damage_this_turn`
+    /// (a `HashSet<PlayerId>` seeded by `triggers::collect_pending_triggers`
+    /// when an Assassin or commander deals combat damage, per CR 702.173a).
+    /// The ledger is cleared at cleanup (CR 514) by `turns::run_cleanup`.
+    /// `casting::casting_variant_candidates` checks the ledger to surface
+    /// `CastingVariant::Freerunning`; `casting_costs` substitutes the
+    /// Freerunning cost for the printed cost. Fully wired.
     Freerunning(ManaCost),
 
     /// CR 702.191a: Increment — spell-cast trigger synthesized in
     /// `database::synthesis::synthesize_increment`.
     Increment,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (choose-color + transform hooks not wired).
-    /// CR ???: Specialize {cost} — not in CR text (needs manual
-    /// verification). Strixhaven student-into-mage transformation:
-    /// activated alt-cast that turns the source into a colour-specific
-    /// version. Stores the activation mana cost; the choose-color and
-    /// transform hooks are not yet wired. mtgish encodes activation
-    /// timing modifiers and from-graveyard variants separately; this
-    /// keyword carries only the cost (the engine drops the activation
-    /// modifier and the from-graveyard hint, mirroring how `LevelUp`
-    /// drops its `Vec<Level>` payload).
+    /// Digital-only Specialize (Alchemy Horizons: Baldur's Gate) — not in the
+    /// Comprehensive Rules; behavior follows MTG Arena. "{cost}, Discard a
+    /// colored card or a card with a basic land subtype: This permanent becomes
+    /// the matching color-specialized face permanently." Activated ability,
+    /// sorcery speed. The keyword carries only the activation mana cost; the
+    /// discard filter and color selection are built at synthesis time.
+    ///
+    /// Runtime: `database::synthesis::synthesize_specialize` builds a sorcery-
+    /// speed `AbilityKind::Activated` with `Effect::Specialize` and
+    /// `AbilityCost::Composite { Mana + Discard { filter: specialize_discard_filter } }`.
+    /// `effects::specialize::resolve` reads the discarded card's LKI snapshot to
+    /// determine eligible colors via `game::specialize::eligible_specialize_colors`,
+    /// then either calls `specialize_permanent` directly (one option) or sets
+    /// `WaitingFor::SpecializeColor` for the player to choose.
+    /// `engine_resolution_choices` dispatches `GameAction::ChooseSpecializeColor`
+    /// to complete the transformation. Fully wired.
     Specialize(ManaCost),
 
     /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
@@ -1092,9 +1139,10 @@ impl Keyword {
             Keyword::Ninjutsu(_) => KeywordKind::Ninjutsu,
             Keyword::Sneak(_) => KeywordKind::Sneak,
             Keyword::Mutate(_) => KeywordKind::Mutate,
-            Keyword::Escape { .. } => KeywordKind::Escape,
+            Keyword::Escape(_) => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
+            Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Suspend { .. } => KeywordKind::Suspend,
             Keyword::Blitz(_) => KeywordKind::Blitz,
             Keyword::Disturb(_) => KeywordKind::Disturb,
@@ -1106,7 +1154,6 @@ impl Keyword {
             Keyword::Dash(_) => KeywordKind::Dash,
             Keyword::Craft { .. } => KeywordKind::Craft,
             Keyword::Harmonize(_) => KeywordKind::Harmonize,
-            Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Warp(_) => KeywordKind::Warp,
             Keyword::Devour(_) => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
@@ -1237,7 +1284,7 @@ impl Keyword {
                 | Keyword::Sneak(_)
                 | Keyword::Ninjutsu(_)
                 | Keyword::Mutate(_)
-                | Keyword::Escape { .. }
+                | Keyword::Escape(_)
                 | Keyword::Foretell(_)
                 | Keyword::Plot(_)
                 | Keyword::Miracle(_)
@@ -1310,6 +1357,24 @@ impl Keyword {
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
+    }
+
+    /// CR 702.164b: Keywords whose multiple instances SUM their parameter values
+    /// into a single aggregate (e.g. a creature's total toxic value), rather than
+    /// collapsing identical instances. When such a keyword is granted on top of an
+    /// identical printed instance, BOTH must remain on the keyword list so the
+    /// aggregate reader counts every copy. Distinct from `instances_function_separately`
+    /// (which gates per-instance trigger installation — a different semantic axis).
+    /// Conservative/CR-driven: only Toxic sums today (CR 702.164b). Protection
+    /// (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do NOT sum — they keep
+    /// deduping identical instances. Add any future "sum of all N" keyword here.
+    ///
+    /// Out of scope (intentionally not gated by this predicate): cast-time spell
+    /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
+    /// Toxic is inert at cast time) and the layers `AddDynamicKeyword` arm
+    /// (`DynamicKeywordKind` is only Annihilator/Modular, never Toxic).
+    pub fn sums_across_instances(&self) -> bool {
+        matches!(self, Keyword::Toxic(_))
     }
 }
 
@@ -1821,19 +1886,21 @@ impl FromStr for Keyword {
                 "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
                 "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
                 "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
+                "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
                 "miracle" => return Ok(Keyword::Miracle(parse_keyword_mana_cost(p))),
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
                 "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
-                // CR 702.187b: Mayhem {cost} — cast from graveyard if discarded
-                // this turn for the mayhem (mana) cost.
-                "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "escape" => {
-                    return Ok(Keyword::Escape {
-                        cost: parse_keyword_mana_cost(p),
-                        exile_count: 0,
-                    })
+                    // CR 702.138a: MTGJSON's keywords array carries only the bare
+                    // escape mana cost. This placeholder (mana sub-cost, no exile
+                    // residual) is overwritten by the Oracle parser with the real
+                    // compound `EscapeCost::NonMana`. With no residual it is
+                    // rejected by `effective_escape_data` until overwritten.
+                    return Ok(Keyword::Escape(EscapeCost::Mana(parse_keyword_mana_cost(
+                        p,
+                    ))));
                 }
                 "evoke" => return Ok(Keyword::Evoke(EvokeCost::Mana(parse_keyword_mana_cost(p)))),
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
@@ -2285,7 +2352,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
     }
 }
 
-fn parse_protection_target(s: &str) -> ProtectionTarget {
+pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     // Lookup table on an atomic quality string (not Oracle-text dispatch) — the
     // caller has already isolated the quality token from "protection from X".
     let lower = s.to_ascii_lowercase();
@@ -2622,20 +2689,18 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
         "Morph" => Ok(Keyword::Morph(mana(data)?)),
         "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
+        // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
+        // overwrites with the real mana cost extracted from reminder text.
+        "Mayhem" => Ok(Keyword::Mayhem(mana(data)?)),
         "Madness" => Ok(Keyword::Madness(mana(data)?)),
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
-        // CR 702.138: MTGJSON provides bare "Escape" with no structured cost data.
-        // Placeholder values — the Oracle parser overwrites with real cost/exile_count.
+        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
+        // Placeholder (mana sub-cost, no exile residual) — the Oracle parser
+        // overwrites with the real compound `EscapeCost::NonMana`.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
-        // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
-        // overwrites with the real mana cost extracted from reminder text.
-        "Mayhem" => Ok(Keyword::Mayhem(mana(data)?)),
-        "Escape" => Ok(Keyword::Escape {
-            cost: ManaCost::default(),
-            exile_count: 0,
-        }),
+        "Escape" => Ok(Keyword::Escape(EscapeCost::Mana(ManaCost::default()))),
         "Evoke" => {
             // Accept both legacy ManaCost format and new EvokeCost tagged format.
             if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {

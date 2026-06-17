@@ -629,6 +629,13 @@ fn collect_matching_triggers(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if super::trigger_matchers::listens_on_aggregate_combat_damage_done(trig_def)
+                && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
+            {
+                super::trigger_matchers::matching_damage_done_events(event, trig_def, obj_id, state)
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -750,10 +757,11 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .filter(|id| {
                 state.objects.get(id).is_some_and(|o| {
                     !o.is_phased_out()
-                        && (o.is_emblem
-                            || o.trigger_definitions
-                                .iter_all()
-                                .any(super::functioning_abilities::trigger_opts_in_to_command_zone))
+                        && (o.is_emblem || o.trigger_definitions.iter_all().any(|def| {
+                            super::functioning_abilities::non_emblem_command_zone_trigger_functions(
+                                o, def,
+                            )
+                        }))
                 })
             })
             .collect(),
@@ -1806,11 +1814,24 @@ fn collect_pending_triggers(
                 }
             }
 
+            // CR 611.2f + CR 702.85a: count Cascade from the cast-time keyword
+            // snapshot (`obj.cast_spell_keywords`), NOT a fresh
+            // `effective_spell_keywords` query. The latter re-evaluates the
+            // grant's `SpellsCastThisTurn == 0` gate AFTER the spell was recorded,
+            // which would drop a first-qualifying-spell-each-turn Cascade grant on
+            // its own spell (Maelstrom Nexus / Wild-Magic Sorcerer / Tardis Bay).
+            // Only `SpellsCastThisTurn`-gated `CastWithKeyword` grants require this
+            // snapshot; the Storm/Ripple/Casualty/Conspire/Replicate seams stay on
+            // the live query because their gates are point-stable. For printed
+            // Cascade and unconditional grants the snapshot is behavior-preserving:
+            // printed Cascade is in `obj.keywords` (captured by the snapshot) and
+            // unconditional grants evaluate identically pre- and post-record.
             let (instance_count, controller) = state
                 .objects
                 .get(cast_obj_id)
                 .map(|obj| {
-                    let n = super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
+                    let n = obj
+                        .cast_spell_keywords
                         .iter()
                         .filter(|k| matches!(k, Keyword::Cascade))
                         .count();
@@ -2152,6 +2173,60 @@ fn collect_pending_triggers(
                         die_result: None,
                     }));
                 }
+            }
+
+            // CR 702.144a: Demonstrate's copy trigger is synthesized onto printed
+            // Demonstrate spells by `synthesize_demonstrate`. Dynamically granted
+            // Demonstrate (StaticMode::CastWithKeyword — The Twelfth Doctor) has no
+            // face-level trigger and no additional cost, so mirror the dynamic
+            // copy-keyword seams here (minus the cost gate) and reuse the canonical
+            // Demonstrate copy ability definition. Gate on the cast-time keyword
+            // snapshot (CR 611.2f) rather than a fresh `effective_spell_keywords`
+            // query, so a first-qualifying-spell grant is not dropped by the
+            // post-record `SpellsCastThisTurn == 0` gate. Count only the granted
+            // delta: printed Demonstrate instances are handled by the face trigger,
+            // while a printed-Demonstrate spell with an extra dynamic Demonstrate
+            // still gets the extra CR 702.144a trigger.
+            let dynamically_granted_demonstrate_instances = state
+                .objects
+                .get(cast_obj_id)
+                .map(|obj| {
+                    let printed_count = obj
+                        .keywords
+                        .iter()
+                        .filter(|k| matches!(k, Keyword::Demonstrate))
+                        .count();
+                    let cast_count = obj
+                        .cast_spell_keywords
+                        .iter()
+                        .filter(|k| matches!(k, Keyword::Demonstrate))
+                        .count();
+                    (cast_count.saturating_sub(printed_count), obj.controller)
+                })
+                .unwrap_or((0, PlayerId(0)));
+            for _ in 0..dynamically_granted_demonstrate_instances.0 {
+                let demonstrate_ability = build_resolved_from_def(
+                    &crate::database::synthesis::demonstrate_copy_ability_definition(),
+                    *cast_obj_id,
+                    dynamically_granted_demonstrate_instances.1,
+                );
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller: dynamically_granted_demonstrate_instances.1,
+                    condition: None,
+                    ability: demonstrate_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some("Demonstrate".to_string()),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }));
             }
         }
 
@@ -4212,8 +4287,7 @@ fn delayed_trigger_event(
             })
             .cloned(),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
-        DelayedTriggerCondition::WheneverEvent { trigger }
-        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+        DelayedTriggerCondition::WheneverEvent { trigger } => {
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events
                     .iter()
@@ -4223,6 +4297,24 @@ fn delayed_trigger_event(
                 None
             }
         }
+        // CR 603.7: "When you next [event] this turn" — one-shot; optional
+        // `or_trigger` covers disjunctive clauses (Magus Lucea Kane).
+        // Scan newest-to-oldest so a batch containing several events binds
+        // the most recent match (the activation/cast that fired the trigger).
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } => events.iter().rev().find_map(|event| {
+            for t in std::iter::once(trigger.as_ref()).chain(or_trigger.iter().map(|b| b.as_ref()))
+            {
+                if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {
+                    if matcher(event, t, source_id, state) {
+                        return Some(event.clone());
+                    }
+                }
+            }
+            None
+        }),
     }
 }
 
@@ -4303,6 +4395,35 @@ fn check_trigger_constraint(
         TriggerConstraint::OnlyDuringYourMainPhase => {
             state.active_player == controller
                 && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        }
+        // CR 109.5 + CR 603.2: Fires only when the triggering discard was caused
+        // by a spell/ability controlled by `ctrl_ref` relative to the trigger's
+        // controller (mirrors the replacement-side `EventSourceControlledBy`).
+        TriggerConstraint::EventSourceControlledBy {
+            controller: ctrl_ref,
+        } => {
+            let event_source = match event {
+                GameEvent::Discarded {
+                    source_id: Some(source_id),
+                    ..
+                } => *source_id,
+                _ => return false,
+            };
+            let Some(event_source_controller) = state
+                .objects
+                .get(&event_source)
+                .map(|o| o.controller)
+                .or_else(|| state.lki_cache.get(&event_source).map(|lki| lki.controller))
+            else {
+                return false;
+            };
+            match ctrl_ref {
+                crate::types::ability::ControllerRef::You => event_source_controller == controller,
+                crate::types::ability::ControllerRef::Opponent => {
+                    event_source_controller != controller
+                }
+                _ => false,
+            }
         }
         // CR 603.2: Per-caster spell count. The caster is extracted from the SpellCast
         // event; the count comes from the per-player map (not the global counter).
@@ -4647,6 +4768,27 @@ pub(crate) fn check_trigger_condition(
                 _ => false,
             }
         }
+        // CR 700.4 + CR 120.1 + CR 608.2i: "another creature dealt damage this turn
+        // by [source filter] dies" — match the dying creature against damage records
+        // whose source satisfies the filter (Spider you controlled, etc.).
+        TriggerCondition::DealtDamageThisTurnBySource { source } => {
+            let dying_creature = trigger_event.and_then(|e| match e {
+                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            let Some(subj) = dying_creature else {
+                return false;
+            };
+            let ctx = FilterContext::from_source_with_controller(
+                source_id.unwrap_or(ObjectId(0)),
+                controller,
+            );
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.target == TargetRef::Object(subj)
+                    && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
+            })
+        }
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
         TriggerCondition::WasType { card_type } => source_id
@@ -4727,6 +4869,34 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some(),
+        // CR 120.1 + CR 108.3: "deals combat damage to its owner" — the damaged
+        // player must be the owner of the object that dealt the damage (CR 120.1:
+        // the object that deals damage is the source of that damage). Two event
+        // shapes reach this gate: the per-source synthetic `DamageDealt` produced
+        // by `matching_damage_done_events` after aggregate expansion, AND the
+        // un-expanded aggregate `CombatDamageDealtToPlayer` itself, which the
+        // early intervening-if gate in `collect_matching_triggers` evaluates
+        // BEFORE per-source expansion. The aggregate arm must return true when
+        // any of its `source_amounts` sources is owned by the damaged player, or
+        // a non-SelfRef aggregate listener (e.g. The Beast, Deathless Prince)
+        // would be dropped at the early gate and never expanded. Damage to an
+        // object recipient never satisfies this (owner is a player), so the
+        // Player-only match arm is exhaustive for the relation.
+        TriggerCondition::DamagedPlayerIsEventSourceOwner => match trigger_event {
+            Some(GameEvent::DamageDealt {
+                source_id: dmg_src,
+                target: TargetRef::Player(pid),
+                ..
+            }) => state.objects.get(dmg_src).map(|o| o.owner) == Some(*pid),
+            Some(GameEvent::CombatDamageDealtToPlayer {
+                player_id,
+                source_amounts,
+                ..
+            }) => source_amounts.iter().any(|(dmg_src, _)| {
+                state.objects.get(dmg_src).map(|o| o.owner) == Some(*player_id)
+            }),
+            _ => false,
+        },
         // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
         // persisted `ChosenAttribute::Label` (set when the anchor-word
         // permanent entered the battlefield) matches the linked anchor word.
@@ -4799,6 +4969,11 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
+            // CR 108.3 + CR 608.2c: parent-target-owner and resolution-scoped
+            // chosen-player anchors are effect-resolution references, not
+            // turn-binding predicates — no "whose turn" semantic. Fail-closed.
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
             // Fail-closed alongside the other set-valued variants.
@@ -4813,7 +4988,10 @@ pub(crate) fn check_trigger_condition(
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
-            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            let ctx = FilterContext::from_source_with_controller(
+                source_id.unwrap_or(ObjectId(0)),
+                controller,
+            );
             let count = state
                 .battlefield
                 .iter()
@@ -5326,8 +5504,9 @@ fn record_trigger_fired(
         | TriggerConstraint::OnlyDuringYourMainPhase
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::EventSourceControlledBy { .. }
         | TriggerConstraint::AtClassLevel { .. } => {
-            // No tracking needed — checked at fire time via game/object state
+            // No tracking needed — checked at fire time via game/object/event state
         }
         // CR 603.4: Increment fire count for MaxTimesPerTurn tracking.
         TriggerConstraint::MaxTimesPerTurn { .. } => {
@@ -5578,9 +5757,9 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp, KickerVariant,
-        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+        DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp,
+        KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
         TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
@@ -5588,8 +5767,8 @@ pub mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
-        DelayedTrigger, DistributionUnit, GameState, SpellCastRecord, StackEntry, StackEntryKind,
-        WaitingFor, ZoneChangeRecord,
+        DamageRecord, DelayedTrigger, DistributionUnit, GameState, SpellCastRecord, StackEntry,
+        StackEntryKind, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -5666,6 +5845,169 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    /// CR 109.5 + CR 603.2: the `EventSourceControlledBy { Opponent }` trigger
+    /// constraint (Guerrilla Tactics) fires only when the discard's cause is a
+    /// spell/ability controlled by an opponent — not a self-caused discard or one
+    /// with no recorded cause. (issue67)
+    #[test]
+    fn event_source_controlled_by_opponent_gates_discard_trigger() {
+        use crate::types::ability::{ControllerRef, TriggerConstraint};
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Guerrilla Tactics", 0, 0);
+        let opp_cause = make_creature(&mut state, PlayerId(1), "Opponent's Spell", 0, 0);
+        let own_cause = make_creature(&mut state, PlayerId(0), "Your Own Spell", 0, 0);
+
+        let mut def = make_trigger(TriggerMode::Discarded);
+        def.constraint = Some(TriggerConstraint::EventSourceControlledBy {
+            controller: ControllerRef::Opponent,
+        });
+
+        let opp = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: Some(opp_cause),
+        };
+        assert!(
+            check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &opp),
+            "an opponent-controlled cause must satisfy the constraint"
+        );
+
+        let own = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: Some(own_cause),
+        };
+        assert!(
+            !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &own),
+            "a self-controlled cause must NOT satisfy the constraint"
+        );
+
+        let no_cause = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: None,
+        };
+        assert!(
+            !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &no_cause),
+            "a discard with no recorded cause must NOT satisfy the constraint"
+        );
+    }
+
+    /// CR 113.6k + CR 701.9a + CR 109.5: end-to-end proof that an
+    /// "a spell or ability an opponent controls causes you to discard this card"
+    /// trigger (Sand Golem) actually fires through the real discard pipeline.
+    /// `complete_discard_to_graveyard` moves the card hand->graveyard BEFORE
+    /// pushing `GameEvent::Discarded`, so the trigger can only be observed by the
+    /// off-zone (graveyard) scan in `process_triggers`. This discriminates the
+    /// `trigger_zones = [Graveyard, Exile]` fix: with the empty `trigger_zones`
+    /// bug the definition is battlefield-only and never reaches the
+    /// `EventSourceControlledBy` constraint, so the positive case would fail.
+    ///
+    /// Installs the *parsed* trigger (not a hand-built one) on a card in HAND and
+    /// varies only the discard's cause across the three cases.
+    #[test]
+    fn opponent_caused_self_discard_trigger_fires_through_real_pipeline() {
+        use crate::game::effects::discard;
+
+        // Build the printed trigger from Oracle text — this is the production
+        // parser output, including the `trigger_zones = [Graveyard, Exile]` fix.
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "When a spell or ability an opponent controls causes you to discard this card, \
+             this card deals 4 damage to any target.",
+            "Sand Golem",
+        );
+        assert_eq!(parsed.mode, TriggerMode::Discarded);
+        assert_eq!(parsed.trigger_zones, vec![Zone::Graveyard, Zone::Exile]);
+
+        // Fresh state with the Sand Golem card in PlayerId(0)'s HAND carrying the
+        // parsed trigger, plus a live source object whose controller we vary.
+        // Returns whether the trigger fired (reached the stack or pending target
+        // selection with `card` as its source).
+        let run_case = |source_controller: PlayerId, with_cause: bool| -> bool {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Sand Golem".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .trigger_definitions
+                .push(parsed.clone());
+
+            // A live source object on the battlefield, controlled by whichever
+            // player this case wants to be the discard's cause.
+            let source = make_creature(&mut state, source_controller, "Discard Source", 2, 2);
+
+            let mut events = Vec::new();
+            if with_cause {
+                // Real "caused by a spell/ability" discard seam — records the
+                // cause as `source_id`.
+                discard::discard_caused_by_effect_with_source(
+                    &mut state,
+                    card,
+                    PlayerId(0),
+                    Some(source),
+                    &mut events,
+                );
+            } else {
+                // Cost-style discard with no recorded cause (source_id = None).
+                discard::discard_as_cost(&mut state, card, PlayerId(0), &mut events);
+            }
+
+            // The card must have actually moved hand->graveyard so the off-zone
+            // scan can observe it.
+            assert_eq!(
+                state.objects.get(&card).map(|o| o.zone),
+                Some(Zone::Graveyard),
+                "complete_discard_to_graveyard must move the card to the graveyard \
+                 before the Discarded event is scanned"
+            );
+            assert!(
+                events.iter().any(
+                    |e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)
+                ),
+                "the real discard seam must emit a Discarded event for the card"
+            );
+
+            process_triggers(&mut state, &events);
+
+            let on_stack = state.stack.iter().any(|entry| {
+                entry.source_id == card
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+            });
+            let pending = state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|p| p.source_id == card);
+            on_stack || pending
+        };
+
+        // Positive: opponent-controlled cause => trigger fires.
+        assert!(
+            run_case(PlayerId(1), true),
+            "an opponent-caused self-discard must fire the trigger from the graveyard"
+        );
+
+        // Negative (a): self-caused (PlayerId(0)) => constraint rejects, no trigger.
+        assert!(
+            !run_case(PlayerId(0), true),
+            "a self-caused discard must NOT fire the opponent-gated trigger"
+        );
+
+        // Negative (b): no recorded cause (discard_as_cost) => no trigger.
+        assert!(
+            !run_case(PlayerId(1), false),
+            "a discard with no recorded cause must NOT fire the trigger"
+        );
     }
 
     /// CR 702.149a + CR 508.1a: the synthesized Training condition is a filtered
@@ -6039,6 +6381,37 @@ pub mod tests {
             None,
             None,
         ));
+    }
+
+    #[test]
+    fn control_count_condition_uses_trigger_controller_not_source_controller() {
+        // CR 603.4: Agent of Treachery — "if you control three or more permanents
+        // you don't own". The `ControlCount` filter must resolve the controller-
+        // relative scope ("you") against the TRIGGER controller, not the source
+        // object's controller. Here the source is controlled by P1 while the
+        // trigger fires for P0, who controls two creatures: with the source-
+        // derived context the "creatures you control" filter counted P1's
+        // creatures (1 — the source) and the condition failed; with the explicit
+        // trigger controller it correctly counts P0's two creatures.
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(1), "Source", 2, 2);
+        make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        make_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+
+        let condition = TriggerCondition::ControlCount {
+            minimum: 2,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), None),
+            "ControlCount must count the trigger controller's permanents, not the source controller's"
+        );
+        // The same board fails for P1 (controls only the source creature).
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(1), Some(source), None),
+            "P1 controls only one matching creature, so minimum 2 is not met"
+        );
     }
 
     fn make_soulbond_creature(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
@@ -7120,6 +7493,7 @@ pub mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -7132,6 +7506,7 @@ pub mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -9658,6 +10033,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -9670,6 +10046,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -10397,6 +10774,306 @@ pub mod tests {
             Some(source),
             None,
         ));
+    }
+
+    /// CR 120.1 + CR 108.3: `DamagedPlayerIsEventSourceOwner` holds only when the
+    /// damaged player is the OWNER of the damaging object (The Beast). A creature
+    /// owned by P0 dealing combat damage to P0 satisfies it; to P1 does not; an
+    /// object recipient never does; an absent event does not.
+    #[test]
+    fn test_damaged_player_is_event_source_owner_condition() {
+        let mut state = setup();
+        // Creature owned by P0.
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Owned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // Some other object (the trigger source need not be the damage source).
+        let beast = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "The Beast".to_string(),
+            Zone::Battlefield,
+        );
+
+        let condition = TriggerCondition::DamagedPlayerIsEventSourceOwner;
+
+        // Creature owned by P0 deals combat damage to P0 (its owner) → true.
+        let to_owner = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_owner),
+        ));
+
+        // Same creature deals combat damage to P1 (not its owner) → false.
+        let to_non_owner = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_non_owner),
+        ));
+
+        // Object recipient → false (owner is a player, never an object).
+        let to_object = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Object(beast),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_object),
+        ));
+
+        // Absent event → false.
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            None,
+        ));
+    }
+
+    /// CR 120.1 + CR 108.3 + CR 603.4: production firing path for The Beast,
+    /// Deathless Prince. The Beast is a non-SelfRef aggregate combat-damage
+    /// listener (`valid_source = creature`), so `collect_pending_triggers`
+    /// passes it the UN-expanded `CombatDamageDealtToPlayer` aggregate through
+    /// the early intervening-if gate BEFORE per-source expansion. The
+    /// `DamagedPlayerIsEventSourceOwner` condition must hold against that
+    /// aggregate shape, or the trigger is dropped before expansion. This test
+    /// drives the real `collect_pending_triggers` path the engine uses (the
+    /// per-source `check_trigger_condition` unit test does not), proving the
+    /// trigger is collected when the damaged player owns the source and dropped
+    /// when they do not.
+    #[test]
+    fn the_beast_owner_relation_fires_through_aggregate_early_gate() {
+        fn beast_trigger() -> TriggerDefinition {
+            let mut trigger = make_trigger(TriggerMode::DamageDone);
+            trigger.valid_source = Some(TargetFilter::Typed(TypedFilter::creature()));
+            trigger.condition = Some(TriggerCondition::DamagedPlayerIsEventSourceOwner);
+            trigger.damage_kind = DamageKindFilter::CombatOnly;
+            trigger
+        }
+
+        // Damaged player (P0) owns the creature that dealt the damage → fires.
+        {
+            let mut state = setup();
+            let beast = make_creature(&mut state, PlayerId(0), "The Beast, Deathless Prince", 7, 7);
+            // Damage source is owned by P0 — the damaged player.
+            let source = make_creature(&mut state, PlayerId(0), "Owned Attacker", 4, 4);
+            state
+                .objects
+                .get_mut(&beast)
+                .unwrap()
+                .trigger_definitions
+                .push(beast_trigger());
+
+            let events = vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(source, 4)],
+                total_damage: 4,
+            }];
+            let pending = collect_pending_triggers(&mut state, &events);
+            assert_eq!(
+                pending
+                    .iter()
+                    .filter(|ctx| ctx.pending.source_id == beast)
+                    .count(),
+                1,
+                "The Beast must fire when the damaged player owns the damaging creature"
+            );
+        }
+
+        // Damaged player (P0) does NOT own the source (owned by P1) → no fire.
+        {
+            let mut state = setup();
+            let beast = make_creature(&mut state, PlayerId(0), "The Beast, Deathless Prince", 7, 7);
+            let source = make_creature(&mut state, PlayerId(1), "Unowned Attacker", 4, 4);
+            state
+                .objects
+                .get_mut(&beast)
+                .unwrap()
+                .trigger_definitions
+                .push(beast_trigger());
+
+            let events = vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(source, 4)],
+                total_damage: 4,
+            }];
+            let pending = collect_pending_triggers(&mut state, &events);
+            assert_eq!(
+                pending
+                    .iter()
+                    .filter(|ctx| ctx.pending.source_id == beast)
+                    .count(),
+                0,
+                "The Beast must NOT fire when the damaged player does not own the damaging creature"
+            );
+        }
+    }
+
+    #[test]
+    fn dealt_damage_this_turn_by_source_trigger_condition() {
+        // Issue #1206 — Shelob's Spider damage gate on another creature's death.
+        let mut state = setup();
+        let shelob = ObjectId(10);
+        let spider = ObjectId(11);
+        let victim = ObjectId(20);
+
+        let mut spider_obj = GameObject::new(
+            spider,
+            CardId(1),
+            PlayerId(0),
+            "Spider".to_string(),
+            Zone::Battlefield,
+        );
+        spider_obj.controller = PlayerId(0);
+        spider_obj.card_types.subtypes.push("Spider".to_string());
+        state.objects.insert(spider, spider_obj);
+
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: spider,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: false,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_subtypes: vec!["Spider".to_string()],
+            ..Default::default()
+        });
+
+        let condition = TriggerCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spider".to_string())
+                    .controller(ControllerRef::You),
+            ),
+        };
+        let event = GameEvent::CreatureDestroyed { object_id: victim };
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(shelob),
+            Some(&event),
+        ));
+
+        let wrong_victim = GameEvent::CreatureDestroyed {
+            object_id: ObjectId(99),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(shelob),
+            Some(&wrong_victim),
+        ));
+    }
+
+    #[test]
+    fn shelob_spider_damage_death_trigger_end_to_end() {
+        use crate::game::sba;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::game_state::TriggerIndex;
+        use crate::types::triggers::TriggerMode;
+
+        const SHELOB_DEATH_TRIGGER: &str = "Whenever another creature dealt damage this turn by a Spider you controlled dies, create a token that's a copy of that creature, except it's a Food artifact with \"{2}, {T}, Sacrifice ~: You gain 3 life,\" and it loses all other card types.";
+
+        let mut scenario = GameScenario::new();
+        let shelob_id = scenario
+            .add_creature(P0, "Shelob, Child of Ungoliant", 4, 4)
+            .id();
+        let spider_id = scenario.add_creature(P0, "Acid Web Spider", 3, 3).id();
+        let victim_id = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&spider_id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Spider".to_string());
+
+        let death_trigger = parse_trigger_line(SHELOB_DEATH_TRIGGER, "Shelob, Child of Ungoliant");
+        assert_eq!(death_trigger.mode, TriggerMode::ChangesZone);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&shelob_id)
+            .unwrap()
+            .trigger_definitions
+            .push(death_trigger);
+
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+
+        runner
+            .state_mut()
+            .damage_dealt_this_turn
+            .push_back(DamageRecord {
+                source_id: spider_id,
+                source_controller: P0,
+                target: TargetRef::Object(victim_id),
+                target_controller: P0,
+                amount: 2,
+                is_combat: false,
+                source_controller_snapshot: P0,
+                source_owner: P0,
+                source_subtypes: vec!["Spider".to_string()],
+                ..Default::default()
+            });
+
+        let mut death_events = Vec::new();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .damage_marked = 99;
+        sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+
+        let pending = collect_pending_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !pending.is_empty(),
+            "Shelob's spider-damage death trigger must collect pending entries"
+        );
+        process_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !runner.state().stack.is_empty(),
+            "Shelob trigger must reach the stack"
+        );
     }
 
     #[test]
@@ -12068,6 +12745,7 @@ pub mod tests {
             &[],   // effect_enter_with_counters
             None,  // face_down_profile
             false, // track_exiled_by_source
+            None,  // library_placement
             &mut events,
         );
 
@@ -12960,6 +13638,7 @@ pub mod tests {
                 has_x_in_cost: true,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
         assert!(
@@ -12981,6 +13660,7 @@ pub mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
         assert!(
@@ -13003,6 +13683,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13015,6 +13696,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13040,6 +13722,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13052,6 +13735,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13075,6 +13759,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13087,6 +13772,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13099,6 +13785,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13122,6 +13809,7 @@ pub mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }
         }
 
@@ -13479,10 +14167,12 @@ pub mod tests {
                 GameEvent::Discarded {
                     player_id: PlayerId(0),
                     object_id: discarded_creature,
+                    source_id: None,
                 },
                 GameEvent::Discarded {
                     player_id: PlayerId(0),
                     object_id: discarded_instant,
+                    source_id: None,
                 },
             ],
         );
@@ -14387,6 +15077,11 @@ pub mod tests {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot
+            // (`cast_spell_keywords`) stamped by `finalize_cast`. This test bypasses
+            // finalize and pushes a synthetic SpellCast, so set the snapshot to the
+            // keyword the static would have granted at cast time.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14427,6 +15122,11 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Sorcery);
             obj.keywords.push(Keyword::Cascade);
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot.
+            // For a printed-Cascade spell `finalize_cast` snapshots the printed
+            // keyword (`effective_spell_keyword_instances` includes `obj.keywords`);
+            // mirror that here since this test bypasses finalize.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14486,6 +15186,9 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.card_types.subtypes.push("Sliver".into());
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot;
+            // mirror the grant the First Sliver static would have stamped at cast.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14506,6 +15209,177 @@ pub mod tests {
                 )
             }),
             "Sliver spells cast with The First Sliver on the battlefield should trigger cascade"
+        );
+    }
+
+    #[test]
+    fn dynamically_granted_demonstrate_enqueues_copy_trigger() {
+        // CR 702.144a + CR 611.2f: a spell whose cast-time snapshot carries a
+        // granted Demonstrate (The Twelfth Doctor) and has NO printed Demonstrate
+        // must get a synthesized Demonstrate copy trigger from the seam.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { description, .. }
+                    if description.as_deref() == Some("Demonstrate")
+            )),
+            "dynamically granted Demonstrate should enqueue a copy trigger"
+        );
+    }
+
+    fn count_demonstrate_triggers(state: &GameState) -> usize {
+        state
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { description, .. }
+                        if description.as_deref() == Some("Demonstrate")
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn printed_demonstrate_does_not_double_enqueue_via_seam() {
+        // CR 702.144a: a printed-Demonstrate spell already carries its face
+        // copy trigger. A cast-time snapshot with only that printed instance has
+        // no granted delta, so this seam must not enqueue an extra trigger.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Printed Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            0,
+            "printed Demonstrate must not get a second copy trigger from the dynamic seam"
+        );
+    }
+
+    #[test]
+    fn printed_demonstrate_with_dynamic_grant_enqueues_delta_trigger() {
+        // CR 702.144a: multiple Demonstrate instances trigger separately. The
+        // printed instance is covered by the face-synthesized trigger; an extra
+        // cast-time Demonstrate instance from a static grant still needs one seam
+        // trigger.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Printed Plus Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            1,
+            "one granted Demonstrate beyond the printed instance should enqueue one seam trigger"
+        );
+    }
+
+    #[test]
+    fn multiple_dynamic_demonstrate_grants_enqueue_multiple_triggers() {
+        // CR 702.144a: each Demonstrate instance is a separate triggered ability.
+        // With no printed instance, two cast-time granted instances require two
+        // seam triggers.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Double Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            2,
+            "two dynamically granted Demonstrate instances should enqueue two seam triggers"
         );
     }
 
@@ -16620,6 +17494,7 @@ pub mod tests {
                         },
                     }],
                     condition: None,
+                    duration_subject: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
                 },
             );
@@ -18217,6 +19092,8 @@ pub mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             Vec::new(),
             ObjectId(9002),
@@ -18600,6 +19477,8 @@ pub mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             Vec::new(),
             ObjectId(9100),

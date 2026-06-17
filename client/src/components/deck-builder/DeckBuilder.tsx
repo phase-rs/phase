@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -220,6 +221,40 @@ export function DeckBuilder({
   const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
   const infoVisible = activeSurface === "info" ? "flex" : "hidden md:flex";
 
+  const filterPanel = filtersOpen ? (
+    <div
+      ref={filterPanelRef}
+      role={filtersAsDialog ? "dialog" : undefined}
+      aria-modal={filtersAsDialog ? true : undefined}
+      aria-label={filtersAsDialog ? t("filters.title") : undefined}
+      className={
+        filtersAsDialog
+          ? "fixed inset-y-0 left-0 z-[56] flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 pt-[env(safe-area-inset-top)] backdrop-blur-md"
+          : "flex w-64 flex-col border-r border-white/10 bg-black/12"
+      }
+    >
+      <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
+        <span className="text-sm font-semibold text-white">{t("filters.title")}</span>
+        <button
+          type="button"
+          onClick={() => setFiltersOpen(false)}
+          className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+        >
+          {t("filters.done")}
+        </button>
+      </div>
+      <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto pb-16">
+        <CardSearch
+          onResults={handleSearchResults}
+          onSearchTrigger={handleSearchTrigger}
+          filters={searchFilters}
+          onFiltersChange={onSearchFiltersChange}
+          onReset={onResetSearch}
+        />
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-transparent">
       <DeckBuilderToolbar
@@ -244,56 +279,24 @@ export function DeckBuilder({
       />
 
       <div className="flex min-h-0 flex-1">
-        {/* Filter rail backdrop (mobile overlay). */}
-        {filtersOpen && (
-          <button
-            type="button"
-            aria-label={t("filters.close")}
-            onClick={() => setFiltersOpen(false)}
-            className="fixed inset-0 z-30 bg-black/60 min-[820px]:hidden"
-          />
-        )}
-
-        {/* Collapsible filter rail: inline sidebar at lg+ when open, overlay
-            sheet below lg, hidden when closed. A single CardSearch instance
-            (kept mounted so filter-driven searches keep running). */}
-        <div
-          ref={filterPanelRef}
-          role={filtersAsDialog ? "dialog" : undefined}
-          aria-modal={filtersAsDialog ? true : undefined}
-          aria-label={filtersAsDialog ? t("filters.title") : undefined}
-          className={
-            filtersOpen
-              ? // Overlay sheet below 820px (where the shell rail is hidden, so a
-                // fixed left-0 sheet is unobstructed). At ≥820px — exactly where the
-                // rail appears — the sheet becomes an inline `static` sidebar that
-                // flows inside the rail-offset content column, so it can never be
-                // painted over by the rail. Breakpoint matches the rail's so there
-                // is no in-between band.
-                "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 backdrop-blur-md min-[820px]:static min-[820px]:left-auto min-[820px]:z-auto min-[820px]:w-64 min-[820px]:bg-black/12"
-              : "hidden"
-          }
-        >
-          <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
-            <span className="text-sm font-semibold text-white">{t("filters.title")}</span>
-            <button
-              type="button"
-              onClick={() => setFiltersOpen(false)}
-              className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
-            >
-              {t("filters.done")}
-            </button>
-          </div>
-          <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto pb-16">
-            <CardSearch
-              onResults={handleSearchResults}
-              onSearchTrigger={handleSearchTrigger}
-              filters={searchFilters}
-              onFiltersChange={onSearchFiltersChange}
-              onReset={onResetSearch}
-            />
-          </div>
-        </div>
+        {/* Mobile filter sheet: portaled to `document.body` so it paints above
+            AppShell ChromeControls (z-40) and TabBar (z-50), which live outside
+            the shell content column's `relative z-10` stacking context. */}
+        {filtersAsDialog &&
+          createPortal(
+            <>
+              <button
+                type="button"
+                aria-label={t("filters.close")}
+                onClick={() => setFiltersOpen(false)}
+                className="fixed inset-0 z-[55] bg-black/60"
+              />
+              {filterPanel}
+            </>,
+            document.body,
+          )}
+        {/* Desktop inline filter rail (≥820px). */}
+        {filtersOpen && !isNarrow && filterPanel}
 
         {/* Main canvas: the deck (idle) or search results (searching). Tab panel
             for the phone tab bar; on md+ it's simply a visible column (the

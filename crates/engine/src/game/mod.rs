@@ -77,6 +77,13 @@ mod meld_tests;
 pub mod merge;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
+pub mod archenemy;
+pub mod conspiracy;
+// Tests for `conspiracy` live in a sibling file (declared here, not in
+// `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "conspiracy_tests.rs"]
+mod conspiracy_tests;
 #[cfg(test)]
 #[path = "merge_tests.rs"]
 mod merge_tests;
@@ -85,6 +92,11 @@ pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
+// Tests for `archenemy` live in a sibling file (declared here, not in
+// `archenemy.rs`, so `archenemy.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "archenemy_tests.rs"]
+mod archenemy_tests;
 pub mod phasing;
 pub mod planechase;
 // Tests for `planechase` live in a sibling file (declared here, not in

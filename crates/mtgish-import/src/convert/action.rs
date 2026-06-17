@@ -555,6 +555,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         } => win_effect
             .iter_mut()
             .chain(lose_effect.iter_mut())
@@ -564,6 +565,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
             count,
             win_effect,
             lose_effect,
+            ..
         } => {
             win_effect
                 .iter_mut()
@@ -2813,7 +2815,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::RemoveACounterOfTypeFromPermanent(ct, target) => Effect::RemoveCounter {
             counter_type: Some(counter_type_name(ct)),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanent(target)?,
         },
 
@@ -3939,7 +3941,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // existing `players_to_controller` bridge for opponent detection.
         Action::ChooseAPlayer(players) => {
             let choice_type = match filter_mod::players_to_controller(players.as_ref()) {
-                Ok(ControllerRef::Opponent) => ChoiceType::Opponent,
+                Ok(ControllerRef::Opponent) => ChoiceType::Opponent { restriction: None },
                 _ => ChoiceType::Player,
             };
             Effect::Choose {

@@ -207,6 +207,8 @@ pub fn record_spell_cast_from_zone(
         // spell-history conditions ("a spell was warped this turn") can
         // resolve after the spell has left the stack.
         cast_variant,
+        // CR 702.33d: Kicker-paid state captured at cast time.
+        was_kicked: !obj.kickers_paid.is_empty(),
     };
     state
         .spells_cast_this_turn_by_player
@@ -1845,8 +1847,16 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
-        // CR 506.2: "can't attack its owner" — compare against the permanent's owner.
+        // CR 506.2 + CR 508.1c: "can't attack its owner" — compare against the
+        // permanent's owner, distinct from its controller.
         (AttackTargetFilter::Owner, AttackTarget::Player(p)) => *p == source_owner,
+        // CR 506.2 + CR 508.1c: "can't attack its owner or planeswalkers its
+        // owner controls" also restricts attacks against the owning player's
+        // planeswalkers.
+        (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Player(p)) => *p == source_owner,
+        (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_owner)
+        }
         _ => false,
     }
 }
@@ -2544,6 +2554,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
 
@@ -2578,6 +2589,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2590,6 +2602,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2602,6 +2615,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );

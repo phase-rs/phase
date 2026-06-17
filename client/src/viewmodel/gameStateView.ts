@@ -130,8 +130,6 @@ export function getWaitingForObjectChoiceIds(
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
-    case "PairChoice":
-      return waitingFor.data.choices;
     default:
       return [];
   }

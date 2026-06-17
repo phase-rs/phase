@@ -16,6 +16,7 @@ import {
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { CombatLine } from "./CombatLine.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
+import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 interface GameBoardProps {
   oppHud?: React.ReactNode;
@@ -242,8 +243,17 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
           )
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            {/* Keep opponent controls above overflowing command-zone cards. */}
-            <div className="relative z-40 shrink-0">{oppHud}</div>
+            {/* Keep opponent controls above overflowing command-zone cards.
+                The multiplayer opponent HUD is the table-size-keyed widget —
+                repositioning it stores under the "multiplayer" slot, distinct
+                from the 1v1 opponent HUD (wired in PlayerArea). */}
+            <DraggableWidget
+              target={{ kind: "opponentHud", tableSize: "multiplayer" }}
+              flexZone="opponentHud"
+              className="relative z-40 shrink-0"
+            >
+              {oppHud}
+            </DraggableWidget>
             {focusedId != null ? (
               <PlayerArea
                 battlefieldView={focusedBattlefieldView ?? undefined}

@@ -5,13 +5,16 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
-    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_recipient_attacking_owner_target,
+    eval_source_entered_this_turn, eval_source_has_dealt_damage, eval_source_in_zone,
+    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
-use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
+use crate::game::printed_cards::{
+    apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
+};
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
@@ -546,6 +549,24 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 509.1b + CR 506.2: the attacking creature (recipient) is the subject
+        // of the owner-attack check, so this MUST route through the recipient-eval
+        // path. The `Not` wrapper above already recurses, so the positive inner
+        // condition is what must report `true`. This match carries a `_ => false`
+        // wildcard, so the compiler will NOT flag an omission here — it is
+        // functionally required: without it `recipient_id` arrives `None`, the
+        // evaluator returns `false`, and the `Not` inverts it to "always blockable".
+        StaticCondition::RecipientAttackingOwnerTarget { .. } => true,
+        // CR 110.5b + CR 611.2b: a target/recipient-scoped tap condition must
+        // route through the recipient-eval path so the captured `duration_subject`
+        // (the copy target) binds — relying on the `_ => false` default would
+        // route `Target` to the source binding and reintroduce the bug.
+        // `Source`-scoped (never emitted; spelled `SourceIsTapped`) stays source-bound.
+        StaticCondition::IsTapped { scope } => matches!(
+            scope,
+            crate::types::ability::ObjectScope::Target
+                | crate::types::ability::ObjectScope::Recipient
+        ),
         _ => false,
     }
 }
@@ -617,6 +638,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
+        // CR 509.1b: combat-status gate on the recipient's attack target — per-object
+        // combat state, never board-population-dependent (like `SourceIsAttacking`).
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
@@ -630,10 +654,14 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        // Tap status is per-object state, never board-population-dependent —
+        // non-population exactly like `SourceIsTapped`.
+        | StaticCondition::IsTapped { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
@@ -734,6 +762,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
+        // CR 509.1b: an entering object cannot perturb a per-object combat-status
+        // gate on the recipient's attack target — `false` like `SourceIsAttacking`.
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
@@ -747,10 +778,14 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        // An entering object cannot perturb a per-object tap gate — `false`
+        // exactly like `SourceIsTapped`.
+        | StaticCondition::IsTapped { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
@@ -911,6 +946,13 @@ fn evaluate_condition_with_context(
                 )
             })
             .unwrap_or(false),
+        // CR 509.1b + CR 506.2 + CR 108.3: the recipient (the attacking creature
+        // this static gates) is attacking its owner / a permanent its owner
+        // controls. Owner-relative (CR 108.3); no recipient → false (mirrors the
+        // RecipientMatchesFilter defensive default).
+        StaticCondition::RecipientAttackingOwnerTarget { target } => recipient_id
+            .map(|id| eval_recipient_attacking_owner_target(state, id, target))
+            .unwrap_or(false),
         // CR 716.2a + CR 716.3: Level abilities are active at or above the specified
         // level. No battlefield zone guard here — the functioning-abilities machinery
         // already constrains source availability before this static is evaluated.
@@ -927,6 +969,10 @@ fn evaluate_condition_with_context(
         }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
         StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
+        // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
+        // damage since entering the battlefield (sticky). The "hasn't dealt damage
+        // yet" hexproof grant wraps this in `StaticCondition::Not`.
+        StaticCondition::SourceHasDealtDamage => eval_source_has_dealt_damage(state, source_id),
         // CR 601.2 + CR 611.3a: True when the source permanent was cast.
         StaticCondition::WasCast { zone } => state
             .objects
@@ -946,6 +992,29 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 110.5b + CR 110.5d: scope-parameterized tap check (the non-source
+        // sibling of `SourceIsTapped`). Resolve the scope to a concrete object,
+        // then reuse the same zone-guarded battlefield tap predicate. The parser
+        // only ever emits `scope: Target` (the demonstrative "that creature
+        // remains tapped" case — Zygon Infiltrator), bound at resolution time to
+        // the copy target via `duration_subject` and surfaced here as the
+        // `recipient_id`. `Recipient` resolves identically. `Source` is spelled
+        // `SourceIsTapped` and never reaches this arm; the remaining scopes are
+        // never produced for a duration tap condition, so they fail safely.
+        StaticCondition::IsTapped { scope } => match scope {
+            crate::types::ability::ObjectScope::Source => {
+                eval_source_is_tapped_on_battlefield(state, source_id)
+            }
+            crate::types::ability::ObjectScope::Target
+            | crate::types::ability::ObjectScope::Recipient => {
+                recipient_id.is_some_and(|id| eval_source_is_tapped_on_battlefield(state, id))
+            }
+            crate::types::ability::ObjectScope::EventSource
+            | crate::types::ability::ObjectScope::EventTarget
+            | crate::types::ability::ObjectScope::CostPaidObject
+            | crate::types::ability::ObjectScope::Anaphoric
+            | crate::types::ability::ObjectScope::Demonstrative => false,
+        },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
             obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
@@ -2212,12 +2281,14 @@ fn for_each_static_effect_source(
                 visit(state, obj);
             }
         }
-        // CR 114.3: command-zone emblems have static abilities that affect the game.
+        // CR 114.3: command-zone emblems have static abilities that affect the
+        // game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
+        // function from the command zone too.
         for &id in &state.command_zone {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem {
+            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2236,13 +2307,15 @@ fn for_each_static_effect_source(
             visit(state, obj);
         }
         // CR 114.3: Emblems in the command zone have static abilities that affect
-        // the game. The index already filtered to `is_emblem` generators; the
-        // gate is re-asserted here for parity with the fallback path.
+        // the game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
+        // function from the command zone too. The index already filtered to these
+        // command-zone generators; the gate is re-asserted here for parity with
+        // the fallback path.
         for &id in &index.command_sources {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem {
+            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2643,7 +2716,19 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
     // tracks the controlled/granted creature's counters rather than the source.
     match (&tce.affected, condition_uses_recipient_context(condition)) {
         (TargetFilter::SpecificObject { id }, true) => {
-            evaluate_condition_with_recipient(state, condition, tce.controller, tce.source_id, *id)
+            // CR 611.2b: a target-relative duration tracks the captured
+            // `duration_subject` (the copy target for BecomeCopy — Zygon
+            // Infiltrator) when it diverges from `affected`; otherwise the
+            // affected object (Shield Broker's recipient-relative control
+            // duration, where the recipient IS the tracked object).
+            let recipient = tce.duration_subject.unwrap_or(*id);
+            evaluate_condition_with_recipient(
+                state,
+                condition,
+                tce.controller,
+                tce.source_id,
+                recipient,
+            )
         }
         _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
     }
@@ -3109,6 +3194,8 @@ fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
         | FilterProp::PowerGTSource
         | FilterProp::ToughnessGTPower => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
+        // CR 608.2c: Negation reads the inner prop's stats — recurse (mirrors AnyOf).
+        FilterProp::Not { prop } => filter_prop_references_pt_stat(prop),
         _ => false,
     }
 }
@@ -3313,6 +3400,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -3455,7 +3543,7 @@ fn apply_continuous_effect_filtered(
     // chosen-attribute scoping refactor.
     let chosen_keyword = if matches!(
         effect.modification,
-        ContinuousModification::RemoveChosenKeyword
+        ContinuousModification::RemoveChosenKeyword | ContinuousModification::AddChosenKeyword
     ) {
         state
             .objects
@@ -3678,7 +3766,17 @@ fn apply_continuous_effect_filtered(
                     },
                     other => other.clone(),
                 };
-                if !obj.keywords.contains(&resolved_keyword) {
+                // CR 702.164b: summing keywords (Toxic) accumulate even when an
+                // identical instance is already present (granted Toxic 1 on
+                // printed Toxic 1 -> total 2). All other parameterized keywords
+                // keep deduping identical instances per CR 702.16g (Protection
+                // A+B are separate abilities; Ward/Annihilator each apply
+                // independently). `evaluate_layers` resets `obj.keywords =
+                // obj.base_keywords.clone()` each pass, so this never accumulates
+                // unbounded across re-evaluations.
+                if resolved_keyword.sums_across_instances()
+                    || !obj.keywords.contains(&resolved_keyword)
+                {
                     obj.keywords.push(resolved_keyword.clone());
                 }
                 for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
@@ -3722,6 +3820,29 @@ fn apply_continuous_effect_filtered(
                     obj.trigger_definitions.retain(|trigger| {
                         !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, kw)
                     });
+                }
+            }
+            // CR 608.2d + CR 613.1f: Grant the *exact* keyword chosen at
+            // resolution time (read off the source's `chosen_attributes`
+            // above). The additive mirror of `RemoveChosenKeyword` — installs
+            // the keyword and its keyword-derived triggers (e.g. lifelink's
+            // lifegain hook) onto each recipient, matching the plain
+            // `AddKeyword` arm. Used by "choose [keyword]; creatures you
+            // control gain that ability until end of turn" (Angelic
+            // Skirmisher, Linvala, Shield of Sea Gate). If the source has no
+            // stored chosen keyword (e.g. the static is gathered before the
+            // choose effect has resolved), this is a no-op rather than a panic,
+            // mirroring `AddChosenColor` / `RemoveChosenKeyword`.
+            ContinuousModification::AddChosenKeyword => {
+                if let Some(kw) = chosen_keyword.as_ref() {
+                    // CR 702.164b: summing keywords (Toxic) accumulate rather
+                    // than dedup, mirroring the plain `AddKeyword` arm above.
+                    if kw.sums_across_instances() || !obj.keywords.contains(kw) {
+                        obj.keywords.push(kw.clone());
+                    }
+                    for trigger in KeywordTriggerInstaller::triggers_for(kw) {
+                        obj.trigger_definitions.push(trigger);
+                    }
                 }
             }
             ContinuousModification::RemoveAllAbilities => {
@@ -4233,6 +4354,9 @@ pub(crate) fn compute_current_copiable_values(
             _ => {}
         }
     }
+    // CR 707.2: Copies must receive synthesized keyword companion triggers when
+    // the copiable snapshot carries the keyword but omits its dies trigger.
+    ensure_keyword_triggers_for_copiable_values(&mut values);
     Some(values)
 }
 
@@ -8481,6 +8605,161 @@ mod tests {
         ));
     }
 
+    // -- RecipientAttackingOwnerTarget evaluator tests (CR 509.1b / CR 506.2 / CR 108.3) --
+
+    #[test]
+    fn recipient_attacking_owner_target_owner_player_matches_owner() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        // Owned by B(1), controlled by A(0).
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+
+        // Attacking its owner (B) → positive condition true.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+
+        // Attacking a non-owner player (A) → false.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_or_planeswalker_matches_owner_controlled_pw() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let owner_pw = make_creature(&mut state, "Owner Walker", 0, 4, PlayerId(1));
+        let controller_pw = make_creature(&mut state, "Controller Walker", 0, 4, PlayerId(0));
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::OwnerOrPlaneswalker,
+        };
+
+        // Planeswalker the OWNER (B) controls → true.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(owner_pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+
+        // Planeswalker the CONTROLLER (A, not owner) controls → false (CR 108.3).
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(controller_pw),
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_not_attacking() {
+        use crate::game::combat::CombatState;
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Idle", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::OwnerOrPlaneswalker,
+        };
+
+        // Combat exists but the creature is not an attacker → false.
+        state.combat = Some(CombatState::default());
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_no_combat() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Idle", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+        assert!(state.combat.is_none());
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_no_recipient() {
+        // CR 509.1b: routing through the source-binding path (recipient_id == None)
+        // must yield false — guards the `condition_uses_recipient_context` arm.
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        // No recipient supplied → defensive false, even though attacking owner.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+        ));
+    }
+
     #[test]
     fn evaluate_source_is_blocking_true_when_in_blocker_map() {
         use crate::game::combat::CombatState;
@@ -8572,6 +8851,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -8603,6 +8883,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -8776,6 +9057,88 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Desert".to_string()),
             "CR 305.7: Old land subtypes should be removed"
+        );
+    }
+
+    #[test]
+    fn song_style_set_card_types_and_basic_land_type_makes_nonland_a_forest() {
+        // CR 205.1a + CR 305.7: Song of the Dryads both makes the enchanted
+        // permanent a land and sets its basic land subtype, which removes its
+        // rules-text abilities and grants the Forest intrinsic mana ability.
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let creature_id = create_object(
+            &mut state,
+            CardId(0),
+            p0,
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            Arc::make_mut(&mut obj.base_abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+            obj.abilities = Arc::new((*obj.base_abilities).clone());
+        }
+
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Song of the Dryads".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Card)
+                            .properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::SetCardTypes {
+                            core_types: vec![CoreType::Land],
+                        },
+                        ContinuousModification::SetBasicLandType {
+                            land_type: BasicLandType::Forest,
+                        },
+                    ]),
+            );
+        }
+
+        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(creature_id.into());
+
+        evaluate_layers(&mut state);
+
+        let creature = state.objects.get(&creature_id).unwrap();
+        assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
+        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(
+            !creature
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
+            "CR 305.7: rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(creature, ManaColor::Green),
+            1,
+            "CR 305.7: Forest subtype should grant the intrinsic green mana ability"
         );
     }
 

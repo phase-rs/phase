@@ -206,6 +206,34 @@ describe("Discard cost modal", () => {
     expect(screen.getByText("Discard for mana ability")).toBeInTheDocument();
   });
 
+  it("describes untap selection without saying sacrifice", () => {
+    setWaitingFor(
+      {
+        type: "EffectZoneChoice",
+        data: {
+          player: 0,
+          cards: [10, 11],
+          count: 5,
+          min_count: 0,
+          up_to: true,
+          source_id: 1,
+          effect_kind: "Untap",
+          zone: "Battlefield",
+        },
+      } as unknown as WaitingFor,
+      {
+        10: { ...makeObject(10, "Island"), zone: "Battlefield" },
+        11: { ...makeObject(11, "Forest"), zone: "Battlefield" },
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Untap")).toBeInTheDocument();
+    expect(screen.getByText("Choose up to 5 permanents to untap")).toBeInTheDocument();
+    expect(screen.queryByText(/sacrifice/i)).not.toBeInTheDocument();
+  });
+
   it("describes library placement without saying battlefield", () => {
     setWaitingFor({
       type: "EffectZoneChoice",

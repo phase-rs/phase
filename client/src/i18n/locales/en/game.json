@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
+    "customizeLayout": "Customize layout…",
     "gameLog": "Game log",
     "debugLog": "Debug log",
     "waitingForGame": "Waiting for game...",
@@ -98,8 +99,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} of {{total}} untapped",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +175,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Lnd",
     "otherAbbr": "Oth",
+    "manaAvailable": "{{untapped}} of {{total}} lands untapped",
     "out": "OUT",
     "eliminated": "Eliminated",
     "phasedOut": "Phased Out",
@@ -293,6 +306,20 @@
     "experienceTooltip": "Experience counters: {{count}}",
     "speedAriaLabel": "Speed {{value}}",
     "speedTooltip": "Speed: {{value}}",
+    "condCantWin": "Can't win the game",
+    "condCantGainLife": "Can't gain life",
+    "condCantLoseLife": "Can't lose life",
+    "condCantPayLife": "Can't pay life",
+    "condCantCast": "Can't cast spells",
+    "condCantActivate": "Can't activate abilities",
+    "condCastOnlyFromZones": "Can cast only from limited zones",
+    "condFromSource": "{{condition}} — from {{name}}",
+    "pendingSpell": "Next spell",
+    "pendingCantBeCountered": "Next spell can't be countered",
+    "pendingHasKeyword": "Next spell has {{keyword}}",
+    "pendingFlash": "Next spell can be cast as though it had flash",
+    "pendingFree": "Next spell without paying its mana cost",
+    "pendingCheaper": "Next spell costs {{amount}} less",
     "companion": "Companion"
   },
   "avatar": {
@@ -894,6 +921,8 @@
       "discard": "Discard",
       "evidence": "Evidence",
       "manifest": "Manifest",
+      "untap": "Untap",
+      "tap": "Tap",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -916,6 +945,12 @@
     "ringBearer": {
       "title": "Choose Ring-bearer",
       "subtitle": "Choose a creature you control"
+    },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
     },
     "reorderHint": "Drag to reorder · the top card is drawn first",
     "scry": {
@@ -993,6 +1028,8 @@
       "titleTopdeck": "Put on Library",
       "titleBattlefield": "Put onto Battlefield",
       "titleHand": "Return",
+      "titleUntap": "Untap",
+      "titleTap": "Tap",
       "subtitleSacrificeExact_one": "Choose {{count}} permanent to sacrifice",
       "subtitleSacrificeExact_other": "Choose {{count}} permanents to sacrifice",
       "subtitleSacrificeUpTo_one": "Choose up to {{count}} permanent to sacrifice",
@@ -1017,6 +1054,18 @@
       "subtitleHandUpTo_other": "Choose up to {{count}} permanents to return to their owners' hands",
       "subtitleHandRange_one": "Choose {{min}}-{{count}} permanent to return to its owner's hand",
       "subtitleHandRange_other": "Choose {{min}}-{{count}} permanents to return to their owners' hands",
+      "subtitleUntapExact_one": "Choose {{count}} permanent to untap",
+      "subtitleUntapExact_other": "Choose {{count}} permanents to untap",
+      "subtitleUntapUpTo_one": "Choose up to {{count}} permanent to untap",
+      "subtitleUntapUpTo_other": "Choose up to {{count}} permanents to untap",
+      "subtitleUntapRange_one": "Choose {{min}}-{{count}} permanent to untap",
+      "subtitleUntapRange_other": "Choose {{min}}-{{count}} permanents to untap",
+      "subtitleTapExact_one": "Choose {{count}} permanent to tap",
+      "subtitleTapExact_other": "Choose {{count}} permanents to tap",
+      "subtitleTapUpTo_one": "Choose up to {{count}} permanent to tap",
+      "subtitleTapUpTo_other": "Choose up to {{count}} permanents to tap",
+      "subtitleTapRange_one": "Choose {{min}}-{{count}} permanent to tap",
+      "subtitleTapRange_other": "Choose {{min}}-{{count}} permanents to tap",
       "labelSkip": "Skip",
       "labelDecline": "Decline",
       "labelPutOnTop": "Put on top ({{order}})",
@@ -1125,6 +1174,12 @@
       "subtitle_other": "Exile {{count}} materials to craft",
       "subtitleRange": "Exile {{min}} to {{count}} materials to craft"
     },
+    "exilePermanent": {
+      "title": "Exile a permanent",
+      "subtitle_one": "Exile {{count}} permanent you control",
+      "subtitle_other": "Exile {{count}} permanents you control",
+      "subtitleRange": "Exile {{min}} to {{count}} permanents you control"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Exile a matching permanent or card",
@@ -1205,6 +1260,10 @@
       "title": "Choose Mana Combination",
       "subtitleAny": "Select each mana color to produce",
       "subtitle": "Select which combination of mana to produce"
+    },
+    "untapSubset": {
+      "title": "Choose permanents to untap",
+      "subtitle": "Untap up to {{count}} of these permanents."
     }
   },
   "specializeColor": {
@@ -1268,15 +1327,15 @@
     "emergeEyebrow": "Emerge",
     "emergeNormalLabel": "Cast Normally",
     "emergeAltLabel": "Cast with Emerge",
-    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost, reduced by the mana value of a creature you sacrifice.",
+    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost by sacrificing a creature, reducing the cost by that creature's mana value.",
     "impendingEyebrow": "Impending",
-    "impendingNormalLabel": "Cast as Creature",
+    "impendingNormalLabel": "Cast Normally",
     "impendingAltLabel": "Cast with Impending",
-    "impendingSubtitle": "Cast {{name}} normally as a creature, or pay its Impending cost — it enters with time counters and isn't a creature until the last is removed.",
+    "impendingSubtitle": "Cast {{name}} normally, or pay its Impending cost — it enters with time counters and isn't a creature until the last one is removed.",
     "prototypeEyebrow": "Prototype",
     "prototypeNormalLabel": "Cast Normally",
     "prototypeAltLabel": "Cast with Prototype",
-    "prototypeSubtitle": "Cast {{name}} normally, or pay its Prototype cost to cast it with its prototype color, mana value, power, and toughness.",
+    "prototypeSubtitle": "Cast {{name}} normally, or pay its Prototype cost to cast it with its smaller power, toughness, and color.",
     "spectacleEyebrow": "Spectacle",
     "spectacleNormalLabel": "Cast Normally",
     "spectacleAltLabel": "Cast with Spectacle",
@@ -1301,22 +1360,6 @@
     "mtmteNormalLabel": "Cast Normally",
     "mtmteAltLabel": "Cast Converted",
     "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
-    "emergeEyebrow": "Emerge",
-    "emergeNormalLabel": "Cast Normally",
-    "emergeAltLabel": "Cast with Emerge",
-    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost by sacrificing a creature, reducing the cost by that creature's mana value.",
-    "impendingEyebrow": "Impending",
-    "impendingNormalLabel": "Cast Normally",
-    "impendingAltLabel": "Cast with Impending",
-    "impendingSubtitle": "Cast {{name}} normally, or pay its Impending cost — it enters with time counters and isn't a creature until the last one is removed.",
-    "prototypeEyebrow": "Prototype",
-    "prototypeNormalLabel": "Cast Normally",
-    "prototypeAltLabel": "Cast with Prototype",
-    "prototypeSubtitle": "Cast {{name}} normally, or pay its Prototype cost to cast it with its smaller power, toughness, and color.",
-    "spectacleEyebrow": "Spectacle",
-    "spectacleNormalLabel": "Cast Normally",
-    "spectacleAltLabel": "Cast with Spectacle",
-    "spectacleSubtitle": "Cast {{name}} normally, or pay its Spectacle cost (available because an opponent lost life this turn).",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1332,6 +1375,18 @@
   "clashOpponent": {
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Card Data Missing",

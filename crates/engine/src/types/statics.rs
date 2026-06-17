@@ -965,6 +965,29 @@ pub enum StaticMode {
         #[serde(default)]
         timing: ExileCastTiming,
     },
+    /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
+    /// "play a card from exile with a collection counter on it" permission is
+    /// live (Evelyn, the Covetous). Per CR 113.6, that play permission is a
+    /// static ability of the source and functions only while the source is on
+    /// the battlefield under the player's control; this marker is what
+    /// `casting.rs::source_has_collection_counter_play_permission` consults so
+    /// the per-card `CastingPermission::PlayFromExile` (collection-counter +
+    /// controller provenance) is honored only while a live source remains.
+    /// CR 601.2a: the permission authorizes moving a matching exiled card to
+    /// the stack / battlefield (playing it).
+    ///
+    /// Distinct from `ExileCastPermission`: that static is self-contained and
+    /// grants the cast itself, keyed on a source-identity exile pool. This is a
+    /// nullary marker; the actual permission lives on each exiled card as a
+    /// `CastingPermission::PlayFromExile`, linked by the collection counter
+    /// (not source identity), so the authority winks out if every source
+    /// leaves but the counter persists.
+    ///
+    /// RUNTIME: handled by direct match in
+    /// `casting.rs::source_has_collection_counter_play_permission`; coverage
+    /// support is via `is_data_carrying_static()` (mirrors the cast-permission
+    /// cluster, which is also runtime-by-direct-match, not registry-keyed).
+    LinkedCollectionCounterPlayPermission,
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -1316,6 +1339,21 @@ pub enum StaticMode {
     /// CR 602.5a activation restriction is lifted, combat attacker validation
     /// (CR 508.1a) is untouched. Canonical card: Tyvar, Jubilant Brawler.
     CanActivateAbilitiesAsThoughHaste,
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Per-source block permission that lifts
+    /// the shadow blocker-side restriction for the affected creature only — it may
+    /// block creatures with shadow despite not having shadow itself. Shadow is the
+    /// unique evasion keyword (CR 702.28b) with a symmetric "without-shadow can't
+    /// block with-shadow" pairing, so this is keyword-specific (mirrors
+    /// `CanAttackWithDefender`) rather than a generic keyword-parameterized form,
+    /// which would cross keyword CR sections with distinct runtime resolvers.
+    ///
+    /// Captures both printed phrasings of the same CR 509.1b outcome: "can block
+    /// creatures with shadow as though they didn't have shadow" (Heartwood Dryad)
+    /// and "can block creatures with shadow as though it had shadow" (Wall of
+    /// Diffusion). `affected: SelfRef` (per-source, not the global rule
+    /// modification `IgnoreLandwalkForBlocking` uses). Enforced inside the shadow
+    /// block-legality seam in `combat.rs`, not as a layer-6 keyword grant.
+    CanBlockShadow,
     /// CR 510.1a: This creature assigns no combat damage.
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
@@ -1329,6 +1367,30 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 502.3: "Players can't untap more than `max` `filter` during their
+    /// untap steps." A continuous restriction on the untap turn-based action:
+    /// while any source with this static is on the battlefield, the active
+    /// player may untap at most `max` permanents matching `filter` during their
+    /// untap step. CR 502.3 makes the untap a player-determined choice ("the
+    /// active player determines which permanents they control will untap"), so
+    /// when more than `max` matching permanents are tapped the active player
+    /// chooses which `max` untap; the rest stay tapped.
+    ///
+    /// Built for the class — `filter` carries the permanent type (creature,
+    /// artifact, nonbasic land, …) and `max` the cap, covering Smoke /
+    /// Stoic Angel (creature), Damping Field / Imi Statue (artifact), and the
+    /// Winter Orb / nonbasic-land family in one variant. The restriction is a
+    /// global rule modification keyed on the active player, not on the source's
+    /// controller — Smoke restricts every player — so the affected-permanent
+    /// scope rides inline on `filter` rather than `StaticDefinition::affected`
+    /// (mirroring `BlockRestriction` / `CantBeBlockedBy`). Runtime enforcement
+    /// is in `turns::execute_untap_with_choices`, which clamps each matching
+    /// group to `max`, and `turns::untap_choice_candidates`, which surfaces the
+    /// over-cap members for the CR 502.3 player determination.
+    MaxUntapPerType {
+        filter: TargetFilter,
+        max: u32,
+    },
     /// CR 614.1c + CR 122.1: Continuous "enters with an additional counter"
     /// replacement static. A permanent matching `StaticDefinition::affected`
     /// (e.g. "Other creatures you control", "Legendary creatures you control",
@@ -1390,6 +1452,13 @@ impl Hash for StaticMode {
             StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
+            // CR 502.3: filter is a non-Hash TargetFilter; hash the enum
+            // discriminant alongside the cap so creature/artifact/land caps
+            // with the same max don't collide.
+            StaticMode::MaxUntapPerType { filter, max } => {
+                std::mem::discriminant(filter).hash(state);
+                max.hash(state);
+            }
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -1575,9 +1644,12 @@ impl StaticMode {
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::CanBlockShadow
             | StaticMode::AssignNoCombatDamage
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::Other(_) => None,
         }
     }
@@ -1858,9 +1930,15 @@ impl fmt::Display for StaticMode {
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
+            StaticMode::CanBlockShadow => write!(f, "CanBlockShadow"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
+            // CR 502.3: Debug format, one-way (mirrors BlockRestriction). The
+            // `filter` carries a TargetFilter, so no from_str reconstruction.
+            StaticMode::MaxUntapPerType { filter, max } => {
+                write!(f, "MaxUntapPerType({max},{filter:?})")
             }
             // CR 614.1c + CR 122.1: "enters with an additional [counter] counter"
             // — Display carries both the counter type and the fixed count.
@@ -1869,6 +1947,9 @@ impl fmt::Display for StaticMode {
                 count,
             } => {
                 write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
+            }
+            StaticMode::LinkedCollectionCounterPlayPermission => {
+                write!(f, "LinkedCollectionCounterPlayPermission")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -1885,6 +1966,9 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "LinkedCollectionCounterPlayPermission" => {
+                StaticMode::LinkedCollectionCounterPlayPermission
+            }
             s if parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").is_some() => {
                 StaticMode::MaxAttackersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").unwrap(),
@@ -2185,6 +2269,7 @@ impl FromStr for StaticMode {
                 StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
             }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
+            "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep

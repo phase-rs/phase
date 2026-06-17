@@ -32,7 +32,6 @@
       "customUrl": "Eigene URL",
       "none": "Keiner"
     },
-    "commandZone": "Kommandozone",
     "commandZoneOptions": {
       "compact": "Kompakt",
       "inline": "Inline",
@@ -79,6 +78,34 @@
       "full": "Voll",
       "reduced": "Reduziert",
       "minimal": "Minimal"
+    }
+  },
+  "flexLayout": {
+    "title": "Flexibles Layout",
+    "description": "Ziehe Panels und HUDs beliebig und ändere die Größe der Spielfeldzonen.",
+    "edit": "Layout anpassen…",
+    "done": "Fertig",
+    "reset": "Layout zurücksetzen",
+    "preset": "Vorlage",
+    "hint": "Ziehe ein Panel, um es zu verschieben. Ziehe die leuchtenden Balken, um Zonen zu skalieren.",
+    "align": {
+      "left": "Linksbündig",
+      "center": "Zentriert",
+      "right": "Rechtsbündig"
+    },
+    "presets": {
+      "default": { "label": "Layout 1", "description": "Das ausgewogene Standardlayout." },
+      "layout2": { "label": "Layout 2", "description": "Ein größeres Spielfeld mit eingeklappten Händen." },
+      "layout3": { "label": "Layout 3", "description": "Ein höheres unteres Drittel." }
+    },
+    "zones": {
+      "playerHud": "Dein HUD",
+      "opponentHud": "Gegner-HUD",
+      "stackPanel": "Stapel",
+      "logPanel": "Spielprotokoll",
+      "actionRail": "Aktionen",
+      "playerPiles": "Deine Zonen",
+      "opponentPiles": "Gegnerzonen"
     }
   },
   "audio": {

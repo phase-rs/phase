@@ -111,7 +111,6 @@ pub(super) fn handle_opponent_may_choice(
         if let Some(mut ability) = state.pending_optional_effect.take() {
             ability.optional = false;
             ability.optional_for = None;
-            ability.context.optional_effect_performed = true;
             ability.context.accepting_player = Some(promptee);
 
             let target_selection = match &ability.effect {
@@ -158,7 +157,19 @@ pub(super) fn handle_opponent_may_choice(
 
             if let Some(legal) = target_selection {
                 if !legal.is_empty() {
-                    if let Some(sub) = ability.sub_ability.take() {
+                    ability.context.optional_effect_performed = true;
+                    if let Some(mut sub) = ability.sub_ability.take() {
+                        // CR 608.2c + CR 608.2d: the "If a player does, …"
+                        // consequence runs because the player accepted. Carry the
+                        // accepted ability's context (with
+                        // `optional_effect_performed = true`) onto the stashed
+                        // continuation so its `OptionalEffectPerformed` gate
+                        // evaluates true when the continuation drains after the
+                        // sacrifice/tap target is chosen — otherwise the
+                        // consequence (e.g. "put this creature on top of its
+                        // owner's library") is silently skipped.
+                        sub.context = ability.context.clone();
+                        sub.context.optional_effect_performed = true;
                         state.pending_continuation = Some(PendingContinuation::new(sub));
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
@@ -171,10 +182,23 @@ pub(super) fn handle_opponent_may_choice(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
 
+                if !remaining.is_empty() {
+                    let next = remaining[0];
+                    let rest = remaining[1..].to_vec();
+                    state.pending_optional_effect = Some(ability);
+                    state.waiting_for = WaitingFor::OpponentMayChoice {
+                        player: next,
+                        source_id,
+                        description,
+                        remaining: rest,
+                    };
+                    return Ok(action_result(events, state.waiting_for.clone()));
+                }
+
                 set_active_priority(state);
-                effects::resolve_ability_chain(state, &ability, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                resolve_all_declined_opponent_may(state, &ability, events)?;
             } else {
+                ability.context.optional_effect_performed = true;
                 if matches!(ability.effect, Effect::DealDamage { .. }) {
                     ability.targets = vec![TargetRef::Player(promptee)];
                 }
@@ -196,25 +220,52 @@ pub(super) fn handle_opponent_may_choice(
     } else {
         set_active_priority(state);
         if let Some(ability) = state.pending_optional_effect.take() {
-            if let Some(ref sub) = ability.sub_ability {
-                if sub
-                    .condition
-                    .as_ref()
-                    .is_some_and(AbilityCondition::is_optional_effect_performed)
-                {
-                    if let Some(ref else_branch) = sub.else_ability {
-                        let mut else_resolved = else_branch.as_ref().clone();
-                        else_resolved.context = ability.context.clone();
-                        effects::resolve_ability_chain(state, &else_resolved, events, 1)
-                            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                    }
-                }
-            }
+            resolve_all_declined_opponent_may(state, &ability, events)?;
         }
     }
 
     resume_pending_continuation_if_priority(state, events)?;
     Ok(action_result(events, state.waiting_for.clone()))
+}
+
+fn resolve_all_declined_opponent_may(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if let Some(ref sub) = ability.sub_ability {
+        if sub
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+        {
+            // CR 608.2d: "If a player does, X. If no one does, Y." — no one
+            // performed the optional action, so fire Y (the else branch of the
+            // OptionalEffectPerformed sub).
+            if let Some(ref else_branch) = sub.else_ability {
+                let mut else_resolved = else_branch.as_ref().clone();
+                else_resolved.context = ability.context.clone();
+                effects::resolve_ability_chain(state, &else_resolved, events, 1)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            }
+        } else if sub
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+        {
+            // CR 608.2d + CR 101.4: standalone "If no one does, Y" reward on
+            // an "any opponent/player may" head (Browbeat, Book Burning). The
+            // reward is carried directly on the `Not(OptionalEffectPerformed)`
+            // gated sub. No one performed the optional action, so fire the
+            // sub's effect now. (On accept, the head's own chain resolution
+            // evaluates this same negated condition as false and skips it.)
+            let mut sub_resolved = sub.as_ref().clone();
+            sub_resolved.context = ability.context.clone();
+            effects::resolve_ability_chain(state, &sub_resolved, events, 1)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        }
+    }
+    Ok(())
 }
 
 /// CR 702.104a: Resolve the chosen opponent's pay/decline decision for a Tribute
@@ -1193,9 +1244,6 @@ pub(super) fn handle_ward_discard_choice(
         ));
     }
 
-    // CR 614.6: the discard's inner hand → graveyard move consults `Moved`
-    // redirects (RIP class) through the pipeline. A redirect that itself needs a
-    // CR 616.1 choice parks `state.waiting_for`; surface it and return.
     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
         effects::discard::complete_discard_to_graveyard(
             state,

@@ -12,7 +12,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
@@ -107,9 +107,8 @@ export function PlayerHud() {
             ) : null}
             {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
             {designations.ringLevel > 0 ? (
-              <CounterBadge
-                kind="ring"
-                value={designations.ringLevel}
+              <RingBenefitsBadge
+                level={designations.ringLevel}
                 ringBearerName={designations.ringBearerName}
               />
             ) : null}
@@ -118,6 +117,19 @@ export function PlayerHud() {
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+            {designations.pendingSpellModifiers.length > 0
+            || designations.pendingSpellReductions.length > 0 ? (
+              <PendingSpellBadge
+                modifiers={designations.pendingSpellModifiers}
+                reductions={designations.pendingSpellReductions}
+              />
+            ) : null}
+            {designations.statusConditions.map((condition, i) => (
+              <ConditionBadge
+                key={`${condition.kind.type}-${condition.source ?? "x"}-${i}`}
+                condition={condition}
+              />
+            ))}
           </>
         }
       >

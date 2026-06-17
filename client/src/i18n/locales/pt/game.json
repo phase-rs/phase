@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Alterar plano de fundo…",
+    "customizeLayout": "Personalizar layout…",
     "gameLog": "Registro do jogo",
     "debugLog": "Registro de depuração",
     "waitingForGame": "Aguardando o jogo...",
@@ -98,8 +99,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} de {{total}} desviradas",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +175,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Trr",
     "otherAbbr": "Out",
+    "manaAvailable": "{{untapped}} de {{total}} terrenos desvirados",
     "out": "FORA",
     "eliminated": "Eliminado",
     "phasedOut": "Em Fase Inativa",
@@ -293,6 +306,20 @@
     "experienceTooltip": "Contadores de experiência: {{count}}",
     "speedAriaLabel": "Velocidade {{value}}",
     "speedTooltip": "Velocidade: {{value}}",
+    "condCantWin": "Não pode vencer o jogo",
+    "condCantGainLife": "Não pode ganhar vida",
+    "condCantLoseLife": "Não pode perder vida",
+    "condCantPayLife": "Não pode pagar vida",
+    "condCantCast": "Não pode conjurar mágicas",
+    "condCantActivate": "Não pode ativar habilidades",
+    "condCastOnlyFromZones": "Só pode conjurar de zonas limitadas",
+    "condFromSource": "{{condition}} — de {{name}}",
+    "pendingSpell": "Próxima mágica",
+    "pendingCantBeCountered": "A próxima mágica não pode ser anulada",
+    "pendingHasKeyword": "A próxima mágica tem {{keyword}}",
+    "pendingFlash": "A próxima mágica pode ser conjurada como se tivesse lampejo",
+    "pendingFree": "A próxima mágica sem pagar seu custo de mana",
+    "pendingCheaper": "A próxima mágica custa {{amount}} a menos",
     "companion": "Companheiro"
   },
   "avatar": {
@@ -889,6 +916,8 @@
       "discard": "Descartar",
       "evidence": "Evidência",
       "manifest": "Manifestar",
+      "untap": "Desvirar",
+      "tap": "Virar",
       "crew": "Tripular ({{power}})",
       "saddle": "Selar ({{power}})",
       "station": "Estação (+{{power}})"
@@ -911,6 +940,12 @@
     "ringBearer": {
       "title": "Escolher Portador do Anel",
       "subtitle": "Escolha uma criatura que você controla"
+    },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
     },
     "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
     "scry": {
@@ -988,6 +1023,8 @@
       "titleTopdeck": "Colocar no Grimório",
       "titleBattlefield": "Colocar no Campo de Batalha",
       "titleHand": "Devolver",
+      "titleUntap": "Desvirar",
+      "titleTap": "Virar",
       "subtitleSacrificeExact_one": "Escolha {{count}} permanente para sacrificar",
       "subtitleSacrificeExact_other": "Escolha {{count}} permanentes para sacrificar",
       "subtitleSacrificeUpTo_one": "Escolha até {{count}} permanente para sacrificar",
@@ -1012,6 +1049,18 @@
       "subtitleHandUpTo_other": "Escolha até {{count}} permanentes para devolver à mão dos donos",
       "subtitleHandRange_one": "Escolha {{min}}-{{count}} permanente para devolver à mão do dono",
       "subtitleHandRange_other": "Escolha {{min}}-{{count}} permanentes para devolver à mão dos donos",
+      "subtitleUntapExact_one": "Escolha {{count}} permanente para desvirar",
+      "subtitleUntapExact_other": "Escolha {{count}} permanentes para desvirar",
+      "subtitleUntapUpTo_one": "Escolha até {{count}} permanente para desvirar",
+      "subtitleUntapUpTo_other": "Escolha até {{count}} permanentes para desvirar",
+      "subtitleUntapRange_one": "Escolha {{min}}-{{count}} permanente para desvirar",
+      "subtitleUntapRange_other": "Escolha {{min}}-{{count}} permanentes para desvirar",
+      "subtitleTapExact_one": "Escolha {{count}} permanente para virar",
+      "subtitleTapExact_other": "Escolha {{count}} permanentes para virar",
+      "subtitleTapUpTo_one": "Escolha até {{count}} permanente para virar",
+      "subtitleTapUpTo_other": "Escolha até {{count}} permanentes para virar",
+      "subtitleTapRange_one": "Escolha {{min}}-{{count}} permanente para virar",
+      "subtitleTapRange_other": "Escolha {{min}}-{{count}} permanentes para virar",
       "labelSkip": "Pular",
       "labelDecline": "Recusar",
       "labelPutOnTop": "Colocar no topo ({{order}})",
@@ -1120,6 +1169,12 @@
       "subtitle_other": "Exile {{count}} materiais para criar",
       "subtitleRange": "Exile de {{min}} a {{count}} materiais para criar"
     },
+    "exilePermanent": {
+      "title": "Exile uma permanente",
+      "subtitle_one": "Exile {{count}} permanente que você controla",
+      "subtitle_other": "Exile {{count}} permanentes que você controla",
+      "subtitleRange": "Exile de {{min}} a {{count}} permanentes que você controla"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exile um permanente ou carta correspondente",
@@ -1200,6 +1255,10 @@
       "title": "Escolher Combinação de Mana",
       "subtitleAny": "Selecione cada cor de mana a produzir",
       "subtitle": "Selecione qual combinação de mana produzir"
+    },
+    "untapSubset": {
+      "title": "Choose permanents to untap",
+      "subtitle": "Untap up to {{count}} of these permanents."
     }
   },
   "specializeColor": {
@@ -1263,19 +1322,19 @@
     "emergeEyebrow": "Emergir",
     "emergeNormalLabel": "Conjurar Normalmente",
     "emergeAltLabel": "Conjurar com Emergir",
-    "emergeSubtitle": "Conjure {{name}} normalmente ou pague seu custo de Emergir, reduzido pelo valor de mana de uma criatura que você sacrificar.",
+    "emergeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Emergir sacrificando uma criatura, reduzindo o custo pelo valor de mana daquela criatura.",
     "impendingEyebrow": "Iminente",
-    "impendingNormalLabel": "Conjurar como Criatura",
+    "impendingNormalLabel": "Conjurar Normalmente",
     "impendingAltLabel": "Conjurar com Iminente",
-    "impendingSubtitle": "Conjure {{name}} normalmente como criatura ou pague seu custo de Iminente — ela entra com marcadores de tempo e não é uma criatura até que o último seja removido.",
+    "impendingSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Iminente — ele entra com marcadores de tempo e não é uma criatura até que o último seja removido.",
     "prototypeEyebrow": "Protótipo",
     "prototypeNormalLabel": "Conjurar Normalmente",
     "prototypeAltLabel": "Conjurar com Protótipo",
-    "prototypeSubtitle": "Conjure {{name}} normalmente ou pague seu custo de Protótipo para conjurá-la com sua cor, valor de mana, poder e resistência de protótipo.",
+    "prototypeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Protótipo para conjurá-lo com seu poder, resistência e cor menores.",
     "spectacleEyebrow": "Espetáculo",
     "spectacleNormalLabel": "Conjurar Normalmente",
     "spectacleAltLabel": "Conjurar com Espetáculo",
-    "spectacleSubtitle": "Conjure {{name}} normalmente ou pague seu custo de Espetáculo (disponível porque um oponente perdeu pontos de vida neste turno).",
+    "spectacleSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Espetáculo (disponível porque um oponente perdeu pontos de vida neste turno).",
     "overloadEyebrow": "Sobrecarregar",
     "overloadNormalLabel": "Conjurar Normalmente",
     "overloadAltLabel": "Conjurar com Sobrecarregar",
@@ -1296,22 +1355,6 @@
     "mtmteNormalLabel": "Cast Normally",
     "mtmteAltLabel": "Cast Converted",
     "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
-    "emergeEyebrow": "Emergir",
-    "emergeNormalLabel": "Conjurar Normalmente",
-    "emergeAltLabel": "Conjurar com Emergir",
-    "emergeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Emergir sacrificando uma criatura, reduzindo o custo pelo valor de mana daquela criatura.",
-    "impendingEyebrow": "Iminente",
-    "impendingNormalLabel": "Conjurar Normalmente",
-    "impendingAltLabel": "Conjurar com Iminente",
-    "impendingSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Iminente — ele entra com marcadores de tempo e não é uma criatura até que o último seja removido.",
-    "prototypeEyebrow": "Protótipo",
-    "prototypeNormalLabel": "Conjurar Normalmente",
-    "prototypeAltLabel": "Conjurar com Protótipo",
-    "prototypeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Protótipo para conjurá-lo com seu poder, resistência e cor menores.",
-    "spectacleEyebrow": "Espetáculo",
-    "spectacleNormalLabel": "Conjurar Normalmente",
-    "spectacleAltLabel": "Conjurar com Espetáculo",
-    "spectacleSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Espetáculo (disponível porque um oponente perdeu pontos de vida neste turno).",
     "additionalExile": "+ Exile uma carta",
     "additionalSacrifice": "+ Sacrifique um permanente",
     "additionalPayLife": "+ Pague vida",
@@ -1327,6 +1370,18 @@
   "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Dados das Cartas Ausentes",

@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
+    "customizeLayout": "Dostosuj układ…",
     "gameLog": "Dziennik gry",
     "debugLog": "Dziennik debugowania",
     "waitingForGame": "Oczekiwanie na grę...",
@@ -98,8 +99,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} z {{total}} odtapowanych",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +175,7 @@
     "creaturesAbbr": "Stw",
     "landsAbbr": "Ziem",
     "otherAbbr": "Inne",
+    "manaAvailable": "{{untapped}} z {{total}} ziem odtapowanych",
     "out": "POZA GRĄ",
     "eliminated": "Wyeliminowany",
     "phasedOut": "Przefazowany",
@@ -293,6 +306,20 @@
     "experienceTooltip": "Znaczniki doświadczenia: {{count}}",
     "speedAriaLabel": "Prędkość {{value}}",
     "speedTooltip": "Prędkość: {{value}}",
+    "condCantWin": "Nie może wygrać gry",
+    "condCantGainLife": "Nie może zyskiwać życia",
+    "condCantLoseLife": "Nie może tracić życia",
+    "condCantPayLife": "Nie może płacić życiem",
+    "condCantCast": "Nie może rzucać czarów",
+    "condCantActivate": "Nie może aktywować zdolności",
+    "condCastOnlyFromZones": "Może rzucać tylko z określonych stref",
+    "condFromSource": "{{condition}} — od {{name}}",
+    "pendingSpell": "Następny czar",
+    "pendingCantBeCountered": "Następny czar nie może zostać skontrowany",
+    "pendingHasKeyword": "Następny czar ma {{keyword}}",
+    "pendingFlash": "Następny czar można rzucić tak, jakby miał błysk",
+    "pendingFree": "Następny czar bez płacenia jego kosztu many",
+    "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
     "companion": "Towarzysz"
   },
   "avatar": {
@@ -889,6 +916,8 @@
       "discard": "Odrzuć",
       "evidence": "Dowody",
       "manifest": "Manifest",
+      "untap": "Odkręć",
+      "tap": "Przekręć",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -911,6 +940,12 @@
     "ringBearer": {
       "title": "Wybierz Nosiciela Pierścienia",
       "subtitle": "Wybierz stwora, którego kontrolujesz"
+    },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
     },
     "reorderHint": "Przeciągnij, aby zmienić kolejność · karta na wierzchu jest dobierana pierwsza",
     "scry": {
@@ -988,6 +1023,8 @@
       "titleTopdeck": "Połóż na bibliotekę",
       "titleBattlefield": "Połóż na pole bitwy",
       "titleHand": "Zwróć",
+      "titleUntap": "Odkręć",
+      "titleTap": "Przekręć",
       "subtitleSacrificeExact_one": "Wybierz {{count}} trwałego do poświęcenia",
       "subtitleSacrificeExact_other": "Wybierz {{count}} trwałych do poświęcenia",
       "subtitleSacrificeUpTo_one": "Wybierz do {{count}} trwałego do poświęcenia",
@@ -1012,6 +1049,18 @@
       "subtitleHandUpTo_other": "Wybierz do {{count}} trwałych do zwrócenia do ręki właścicieli",
       "subtitleHandRange_one": "Wybierz {{min}}-{{count}} trwałego do zwrócenia do ręki właściciela",
       "subtitleHandRange_other": "Wybierz {{min}}-{{count}} trwałych do zwrócenia do ręki właścicieli",
+      "subtitleUntapExact_one": "Wybierz {{count}} trwałego do odkręcenia",
+      "subtitleUntapExact_other": "Wybierz {{count}} trwałych do odkręcenia",
+      "subtitleUntapUpTo_one": "Wybierz do {{count}} trwałego do odkręcenia",
+      "subtitleUntapUpTo_other": "Wybierz do {{count}} trwałych do odkręcenia",
+      "subtitleUntapRange_one": "Wybierz {{min}}-{{count}} trwałego do odkręcenia",
+      "subtitleUntapRange_other": "Wybierz {{min}}-{{count}} trwałych do odkręcenia",
+      "subtitleTapExact_one": "Wybierz {{count}} trwałego do przekręcenia",
+      "subtitleTapExact_other": "Wybierz {{count}} trwałych do przekręcenia",
+      "subtitleTapUpTo_one": "Wybierz do {{count}} trwałego do przekręcenia",
+      "subtitleTapUpTo_other": "Wybierz do {{count}} trwałych do przekręcenia",
+      "subtitleTapRange_one": "Wybierz {{min}}-{{count}} trwałego do przekręcenia",
+      "subtitleTapRange_other": "Wybierz {{min}}-{{count}} trwałych do przekręcenia",
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
@@ -1120,6 +1169,12 @@
       "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
       "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
     },
+    "exilePermanent": {
+      "title": "Wygnaj trwałą kartę",
+      "subtitle_one": "Wygnaj {{count}} trwałą kartę, którą kontrolujesz",
+      "subtitle_other": "Wygnaj {{count}} trwałe karty, które kontrolujesz",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} trwałych kart, które kontrolujesz"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",
@@ -1200,6 +1255,10 @@
       "title": "Wybierz kombinację many",
       "subtitleAny": "Wybierz każdy kolor many do wytworzenia",
       "subtitle": "Wybierz, jaką kombinację many wytworzyć"
+    },
+    "untapSubset": {
+      "title": "Choose permanents to untap",
+      "subtitle": "Untap up to {{count}} of these permanents."
     }
   },
   "specializeColor": {
@@ -1263,15 +1322,15 @@
     "emergeEyebrow": "Emerge",
     "emergeNormalLabel": "Rzuć normalnie",
     "emergeAltLabel": "Rzuć z Emerge",
-    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, zmniejszony o wartość many poświęconego stwora.",
+    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając stwora, co zmniejsza koszt o wartość many tego stwora.",
     "impendingEyebrow": "Impending",
-    "impendingNormalLabel": "Rzuć jako stwora",
+    "impendingNormalLabel": "Rzuć normalnie",
     "impendingAltLabel": "Rzuć z Impending",
-    "impendingSubtitle": "Rzuć {{name}} normalnie jako stwora lub zapłać jego koszt Impending — wchodzi ze znacznikami czasu i nie jest stworem, dopóki nie zostanie usunięty ostatni z nich.",
+    "impendingSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Impending — wchodzi ze znacznikami czasu i nie jest stworem, dopóki nie zostanie usunięty ostatni z nich.",
     "prototypeEyebrow": "Prototype",
     "prototypeNormalLabel": "Rzuć normalnie",
     "prototypeAltLabel": "Rzuć z Prototype",
-    "prototypeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Prototype, aby rzucić go z prototypowym kolorem, wartością many, siłą i wytrzymałością.",
+    "prototypeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Prototype, aby rzucić go z mniejszą siłą, wytrzymałością i kolorem.",
     "spectacleEyebrow": "Spectacle",
     "spectacleNormalLabel": "Rzuć normalnie",
     "spectacleAltLabel": "Rzuć z Spectacle",
@@ -1296,22 +1355,6 @@
     "mtmteNormalLabel": "Cast Normally",
     "mtmteAltLabel": "Cast Converted",
     "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
-    "emergeEyebrow": "Emerge",
-    "emergeNormalLabel": "Rzuć normalnie",
-    "emergeAltLabel": "Rzuć z Emerge",
-    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając stwora, co zmniejsza koszt o wartość many tego stwora.",
-    "impendingEyebrow": "Impending",
-    "impendingNormalLabel": "Rzuć normalnie",
-    "impendingAltLabel": "Rzuć z Impending",
-    "impendingSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Impending — wchodzi ze znacznikami czasu i nie jest stworem, dopóki nie zostanie usunięty ostatni z nich.",
-    "prototypeEyebrow": "Prototype",
-    "prototypeNormalLabel": "Rzuć normalnie",
-    "prototypeAltLabel": "Rzuć z Prototype",
-    "prototypeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Prototype, aby rzucić go z mniejszą siłą, wytrzymałością i kolorem.",
-    "spectacleEyebrow": "Spectacle",
-    "spectacleNormalLabel": "Rzuć normalnie",
-    "spectacleAltLabel": "Rzuć z Spectacle",
-    "spectacleSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Spectacle (dostępny, ponieważ przeciwnik stracił życie w tej turze).",
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
@@ -1327,6 +1370,18 @@
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Brak danych kart",

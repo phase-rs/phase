@@ -56,6 +56,11 @@ pub fn resolve(
         copy_obj.is_token = true;
         copy_obj.additional_cost_payment_count = 0;
         copy_obj.kickers_paid.clear();
+        // CR 707.10: A copy of a spell is put on the stack; it is not cast.
+        // Inherit no cast-from-zone provenance — otherwise "if this spell was
+        // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
+        // re-fire when a flashback copy resolves.
+        copy_obj.cast_from_zone = None;
         state.objects.insert(copy_id, copy_obj);
     }
 
@@ -73,16 +78,22 @@ pub fn resolve(
     //     (Twincast, Gogo) resolve under the copying player.
     let copy_kind = {
         let mut kind = top_entry.kind.clone();
-        if let StackEntryKind::Spell {
-            ability: Some(ref mut a),
-            ..
-        } = kind
-        {
-            set_resolved_source_recursive(a, copy_id);
-            a.context.additional_cost_paid = false;
-            a.context.alternative_mana_cost_paid = false;
-            a.context.additional_cost_payment_count = 0;
-            a.context.kickers_paid.clear();
+        match &mut kind {
+            StackEntryKind::Spell {
+                ability: Some(ref mut a),
+                ..
+            } => {
+                set_resolved_source_recursive(a, copy_id);
+                clear_cast_from_zone_recursive(a);
+                a.context.additional_cost_paid = false;
+                a.context.alternative_mana_cost_paid = false;
+                a.context.additional_cost_payment_count = 0;
+                a.context.kickers_paid.clear();
+            }
+            StackEntryKind::ActivatedAbility { ability, .. } => {
+                set_resolved_source_recursive(ability, copy_id);
+            }
+            _ => {}
         }
         set_copied_kind_controller(&mut kind, copy_controller);
         kind
@@ -319,6 +330,7 @@ fn resolve_copier_player(
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
         | ControllerRef::ParentTargetController
+        | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
@@ -379,6 +391,7 @@ pub(crate) fn copy_count_with_replacements(
         }
         count = match def.quantity_modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value as usize),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value as usize),
             // `Prevent` / unspecified is not a copy-count increase — leave as-is.
@@ -397,7 +410,18 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
         return state
             .stack
             .iter()
-            .find(|entry| entry.id == target_id)
+            .rev()
+            .find(|entry| {
+                entry.id == target_id
+                    || entry.source_id == target_id
+                    || matches!(
+                        &entry.kind,
+                        StackEntryKind::ActivatedAbility {
+                            source_id: activated_id,
+                            ..
+                        } if *activated_id == target_id
+                    )
+            })
             .cloned();
     }
     if matches!(
@@ -443,8 +467,21 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
 fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
     let event = state.current_trigger_event.as_ref()?;
     let object_id = crate::game::targeting::extract_source_from_event(event)?;
+    if matches!(event, GameEvent::AbilityActivated { .. }) {
+        if let Some(entry) = state.stack.iter().rev().find(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::ActivatedAbility {
+                    source_id: activated_id,
+                    ..
+                } if activated_id == object_id
+            ) || entry.source_id == object_id
+        }) {
+            return Some(entry.clone());
+        }
+    }
     let mut fallback = None;
-    for entry in &state.stack {
+    for entry in state.stack.iter().rev() {
         if entry.id == object_id {
             return Some(entry.clone());
         }
@@ -515,12 +552,25 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+/// CR 707.10: Spell copies are not cast, so strip cast-origin metadata from
+/// the copied ability chain before the copy resolves.
+fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
+    ability.context.cast_from_zone = None;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        clear_cast_from_zone_recursive(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        clear_cast_from_zone_recursive(else_ability);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, TargetFilter, TargetRef,
+        ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, QuantityRef, TargetFilter,
+        TargetRef,
     };
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1590,6 +1640,130 @@ mod tests {
             copy_entry.controller,
             PlayerId(0),
             "a copy of a targeted spell is controlled by the copier (P0)"
+        );
+    }
+
+    #[test]
+    fn copy_spell_triggering_source_copies_activated_ability_on_stack() {
+        let mut state = GameState::new_two_player(42);
+        let source_creature = ObjectId(10);
+        let magus = ObjectId(20);
+
+        let mut draw_resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_creature,
+            PlayerId(0),
+        );
+        draw_resolved.chosen_x = Some(2);
+
+        state.stack.push_back(StackEntry {
+            id: ObjectId(100),
+            source_id: source_creature,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source_creature,
+                ability: draw_resolved,
+            },
+        });
+
+        state.current_trigger_event = Some(GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: source_creature,
+        });
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            },
+            vec![],
+            magus,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_effect, &mut events).unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            2,
+            "copy must remain on stack below the copy"
+        );
+        let copied = state.stack.back().unwrap().ability().expect("copy entry");
+        assert_eq!(
+            copied.chosen_x,
+            Some(2),
+            "activated-ability copies must preserve announced X"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::StackPushed { .. })),
+            "copying an activated ability must push a stack entry"
+        );
+    }
+
+    #[test]
+    fn copy_spell_hydrated_triggering_source_finds_activated_ability_by_permanent_id() {
+        let mut state = GameState::new_two_player(42);
+        let source_creature = ObjectId(10);
+        let magus = ObjectId(20);
+
+        let mut draw_resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_creature,
+            PlayerId(0),
+        );
+        draw_resolved.chosen_x = Some(2);
+
+        state.stack.push_back(StackEntry {
+            id: ObjectId(100),
+            source_id: source_creature,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source_creature,
+                ability: draw_resolved,
+            },
+        });
+
+        state.current_trigger_event = Some(GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: source_creature,
+        });
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+            },
+            vec![TargetRef::Object(source_creature)],
+            magus,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_effect, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 2);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::StackPushed { .. })),
+            "hydrated TriggeringSource must copy the activated ability on stack"
         );
     }
 

@@ -102,7 +102,14 @@ pub fn resolve(
     }];
     modifications.extend(layered_mods);
 
-    state.add_transient_continuous_effect(
+    // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
+    // (`affected = SpecificObject { source_id }`), but a "for as long as that
+    // creature remains tapped" duration (Zygon Infiltrator) tracks the copy
+    // *target*'s tap state — a third object distinct from both source and
+    // affected. The parser cannot know the target's runtime `ObjectId`; capture
+    // it here and bind it as the duration subject so the target-relative
+    // `IsTapped { scope: Target }` condition resolves against the copy target.
+    let tce_id = state.add_transient_continuous_effect(
         ability.source_id,
         ability.controller,
         duration,
@@ -112,6 +119,7 @@ pub fn resolve(
         modifications,
         None,
     );
+    state.set_transient_duration_subject(tce_id, target_id);
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -206,12 +214,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::database::synthesis::KeywordTriggerInstaller;
     use crate::game::layers::{compute_current_copiable_values, evaluate_layers};
     use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::turns::execute_cleanup;
     use crate::game::zones::{create_object, move_to_zone};
-    use crate::types::ability::{Effect, TargetFilter, TargetRef};
+    use crate::types::ability::{Effect, StaticCondition, TargetFilter, TargetRef};
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1798,6 +1808,208 @@ mod tests {
         assert!(
             marit_lage.keywords.contains(&Keyword::Indestructible),
             "Marit Lage has indestructible"
+        );
+    }
+
+    // ---- Zygon Infiltrator: target-relative `ForAsLongAs { IsTapped }` ----
+
+    /// CR 611.2b + CR 110.5d: a `BecomeCopy` with a "for as long as that creature
+    /// remains tapped" duration tracks the COPY TARGET's tap state. The copy
+    /// holds while the target is tapped and lapses when the target untaps — even
+    /// though the copy modification applies to the SOURCE and the source's own
+    /// tap state never changes. This is the exact Zygon Infiltrator bug.
+    #[test]
+    fn become_copy_for_as_long_as_target_tapped_tracks_target() {
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new_two_player(7);
+        // Target: a tapped 3/3 the source will copy.
+        let target_id = create_creature(&mut state, 1, PlayerId(0), "Tapped Bear", 3, 3);
+        state.objects.get_mut(&target_id).unwrap().tapped = true;
+        // Source: a 1/1 that becomes the copy. It is UNTAPPED and stays untapped
+        // (Zygon's activation cost has no {T}).
+        let source_id = create_creature(&mut state, 2, PlayerId(0), "Zygon", 1, 1);
+        state.objects.get_mut(&source_id).unwrap().tapped = false;
+
+        let duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::IsTapped {
+                scope: ObjectScope::Target,
+            },
+        });
+        let ability = make_copy_ability(target_id, source_id, PlayerId(0), duration);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // While the target is tapped, the copy applies even though the source is
+        // untapped — the duration tracks the target, not the source.
+        let source = state.objects.get(&source_id).unwrap();
+        assert_eq!(
+            source.power,
+            Some(3),
+            "copy must apply while the TARGET is tapped (source is untapped)"
+        );
+        assert_eq!(source.name, "Tapped Bear");
+
+        // Untap the target → the `ForAsLongAs { IsTapped { Target } }` duration
+        // ends and the copy lapses.
+        state.objects.get_mut(&target_id).unwrap().tapped = false;
+        evaluate_layers(&mut state);
+        let source = state.objects.get(&source_id).unwrap();
+        assert_eq!(
+            source.power,
+            Some(1),
+            "copy must lapse once the target untaps (CR 611.2b)"
+        );
+        assert_eq!(source.name, "Zygon");
+    }
+
+    /// Divergence guard: with `affected = SpecificObject { source }` but the
+    /// duration subject bound to the TARGET, toggling the SOURCE's tap state must
+    /// have NO effect on the duration — only the target's tap state matters. This
+    /// pins the exact bug (source-binding) so it cannot silently return.
+    #[test]
+    fn become_copy_duration_ignores_source_tap_state() {
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new_two_player(11);
+        let target_id = create_creature(&mut state, 1, PlayerId(0), "Tapped Bear", 3, 3);
+        state.objects.get_mut(&target_id).unwrap().tapped = true;
+        let source_id = create_creature(&mut state, 2, PlayerId(0), "Zygon", 1, 1);
+        // Source starts UNTAPPED — under the old (buggy) SourceIsTapped binding
+        // the copy would never apply.
+        state.objects.get_mut(&source_id).unwrap().tapped = false;
+
+        let duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::IsTapped {
+                scope: ObjectScope::Target,
+            },
+        });
+        let ability = make_copy_ability(target_id, source_id, PlayerId(0), duration);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&source_id).unwrap().power,
+            Some(3),
+            "copy applies with untapped source because the TARGET is tapped"
+        );
+
+        // Tap the source (target still tapped) → still applies.
+        state.objects.get_mut(&source_id).unwrap().tapped = true;
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&source_id).unwrap().power,
+            Some(3),
+            "tapping the source must not change the duration"
+        );
+
+        // Untap the source while the target stays tapped → STILL applies. Source
+        // tap state is irrelevant; only the target's matters.
+        state.objects.get_mut(&source_id).unwrap().tapped = false;
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&source_id).unwrap().power,
+            Some(3),
+            "source tap state must not gate a target-relative duration"
+        );
+    }
+
+    /// `duration_subject` is captured at resolution time and carried on the TCE.
+    #[test]
+    fn become_copy_captures_duration_subject_on_tce() {
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new_two_player(13);
+        let target_id = create_creature(&mut state, 1, PlayerId(0), "Tapped Bear", 3, 3);
+        state.objects.get_mut(&target_id).unwrap().tapped = true;
+        let source_id = create_creature(&mut state, 2, PlayerId(0), "Zygon", 1, 1);
+
+        let duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::IsTapped {
+                scope: ObjectScope::Target,
+            },
+        });
+        let ability = make_copy_ability(target_id, source_id, PlayerId(0), duration);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let tce = state
+            .transient_continuous_effects
+            .iter()
+            .find(|t| t.source_id == source_id)
+            .expect("BecomeCopy must register a TCE");
+        assert_eq!(
+            tce.duration_subject,
+            Some(target_id),
+            "the copy TARGET must be captured as the duration subject"
+        );
+        assert_eq!(
+            tce.affected,
+            TargetFilter::SpecificObject { id: source_id },
+            "the copy modification still applies to the SOURCE"
+        );
+    }
+
+    /// CR 707.2: Keyword abilities such as Persist are copiable values. When
+    /// the copied object carries the keyword but its printed trigger list was
+    /// not populated (or was stripped before the copy snapshot), the copy must
+    /// still receive the synthesized dies trigger so Persist/Undying function.
+    #[test]
+    fn become_copy_installs_keyword_triggers_for_copied_keywords() {
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Persist Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.base_keywords = vec![Keyword::Persist];
+            obj.keywords = vec![Keyword::Persist];
+        }
+
+        let clone = create_creature(&mut state, 2, PlayerId(0), "Clone", 0, 0);
+        let ability = make_copy_ability(target, clone, PlayerId(0), None);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&clone].keywords.contains(&Keyword::Persist),
+            "copy must receive Persist keyword"
+        );
+        assert!(
+            state.objects[&clone]
+                .trigger_definitions
+                .iter_all()
+                .any(|trigger| {
+                    KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                        trigger,
+                        &Keyword::Persist,
+                    )
+                }),
+            "copy must carry Persist's dies trigger even when the target had no printed trigger entry"
+        );
+
+        state.objects.get_mut(&clone).unwrap().damage_marked = 99;
+        let mut death_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut death_events);
+        crate::game::triggers::process_triggers(&mut state, &death_events);
+        while !state.stack.is_empty() {
+            crate::game::stack::resolve_top(&mut state, &mut Vec::new());
+        }
+
+        assert_eq!(
+            state.objects[&clone].zone,
+            Zone::Battlefield,
+            "Persist copy must return to the battlefield"
+        );
+        assert!(
+            state.objects[&clone]
+                .counters
+                .get(&CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0)
+                >= 1,
+            "Persist copy must re-enter with a -1/-1 counter"
         );
     }
 }

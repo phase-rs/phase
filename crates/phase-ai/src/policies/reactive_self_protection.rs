@@ -1,7 +1,8 @@
 //! Reactive self-protection tactical policy.
 //!
-//! Penalises the AI for casting OR activating "save yourself" effects when
-//! there is no immediate threat to react to. Empirically observed: AI casting
+//! Rejects the AI casting OR activating "save yourself" effects when there is
+//! no immediate threat to react to and it is not the combat phase. Empirically
+//! observed: AI casting
 //! Teferi's Protection on turn 3 against an empty board; AI repeatedly paying
 //! "discard a card: ~ gains protection from everything" until its hand is
 //! empty; AI activating Sylvan Safekeeper ("sacrifice a land: target creature
@@ -30,6 +31,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 
@@ -42,9 +44,6 @@ use crate::features::DeckFeatures;
 /// `threat_level` is normalised 0..1; 0.45 corresponds to a meaningfully
 /// developed opposing board (creatures + power) or a low life total.
 const THREAT_FLOOR: f64 = 0.45;
-
-/// Penalty applied when the AI tries to cast self-protection with no threat.
-const NO_THREAT_PENALTY: f64 = -8.0;
 
 pub struct ReactiveSelfProtectionPolicy;
 
@@ -98,9 +97,33 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
             };
         }
 
-        PolicyVerdict::Score {
-            delta: NO_THREAT_PENALTY,
-            reason: PolicyReason::new("reactive_self_protection_no_threat"),
+        // CR 508/509 + CR 510: a protective grant has a real payoff only once
+        // creatures are actually in combat — to dodge a blocker's color
+        // (CR 509.1b), survive a block, or shrug off combat damage. Restrict the
+        // carve-out to the declare-attackers/declare-blockers/combat-damage
+        // steps: at beginning- and end-of-combat there are no attackers or
+        // blockers (yet / any longer), so activating there is the same wasted
+        // tap as the main phase. Opponent-turn board pressure is already covered
+        // by `any_immediate_threat`; this preserves the AI's *own* combat, where
+        // CR 508.1a board pressure is intentionally ignored.
+        if matches!(
+            ctx.state.phase,
+            Phase::DeclareAttackers | Phase::DeclareBlockers | Phase::CombatDamage
+        ) {
+            return PolicyVerdict::Score {
+                delta: 0.0,
+                reason: PolicyReason::new("reactive_self_protection_combat_payoff"),
+            };
+        }
+
+        // CR 117.1a + CR 514.2: outside combat, with no threat on the stack and
+        // healthy life, an "until end of turn" protective grant expires before
+        // it can ever matter — spending a tap / sacrifice / discard on it is
+        // strictly wasted. Hard-`Reject` rather than soft-penalise: as a prior,
+        // an -8.0 penalty was repeatedly overridden by the value search, which
+        // fired Mother of Runes (and friends) every turn for no reason.
+        PolicyVerdict::Reject {
+            reason: PolicyReason::new("reactive_self_protection_no_payoff"),
         }
     }
 }
@@ -127,6 +150,18 @@ fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
     let life_ratio = state.players[ai_player.0 as usize].life as f64 / starting_life;
     if life_ratio < 0.4 {
         return true;
+    }
+    // CR 508.1a: only the active player declares attackers, and CR 514.2: every
+    // "until end of turn" effect ends at the cleanup step. So an opponent's
+    // standing board can deal combat damage to the AI only on the *opponent's*
+    // turn — a protective grant activated on the AI's own turn (e.g. "discard a
+    // card: ~ gains indestructible until end of turn") expires before those
+    // creatures can ever attack, making board pressure no reason to react.
+    // Board pressure is therefore an immediate threat only when the AI is not
+    // the active player; on the AI's own turn the only reactive triggers are the
+    // stack signals above (removal / mass-removal already on the stack).
+    if state.active_player == ai_player {
+        return false;
     }
     state.players.iter().any(|p| {
         if p.id == ai_player || p.is_eliminated {
@@ -283,6 +318,7 @@ mod tests {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition, TypedFilter,
     };
+    use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::zones::Zone;
@@ -560,30 +596,29 @@ mod tests {
     }
 
     /// Runtime: activating a SelfRef defensive grant ("~ gains indestructible")
-    /// with no threat present is penalized. Discriminating for the
-    /// decision_kinds/guard widening (revert → `_na`).
+    /// with no threat present and outside combat is hard-rejected — the grant
+    /// expires (CR 514.2) before it can matter, so the AI must not burn the cost.
     #[test]
-    fn activation_self_ref_protection_no_threat_penalized() {
+    fn activation_self_ref_protection_no_threat_rejected() {
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
             grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
         );
         match activate_verdict(&state, id) {
-            PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "reactive_self_protection_no_threat");
-                assert_eq!(delta, NO_THREAT_PENALTY);
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
             }
-            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+            PolicyVerdict::Score { .. } => panic!("expected reject for no-payoff activation"),
         }
     }
 
     /// Runtime: activating a ParentTarget grant to a creature you control
     /// ("sac a land: target creature you control gains shroud", Sylvan
-    /// Safekeeper) with no threat is penalized. Discriminating for part 3
-    /// (revert the ParentTarget classifier branch → `_na`).
+    /// Safekeeper) with no threat outside combat is hard-rejected. This is the
+    /// Mother of Runes shape (ParentTarget + controller You + defensive grant).
     #[test]
-    fn activation_parent_target_protection_no_threat_penalized() {
+    fn activation_parent_target_protection_no_threat_rejected() {
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
             &mut state,
@@ -596,11 +631,10 @@ mod tests {
             ),
         );
         match activate_verdict(&state, id) {
-            PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "reactive_self_protection_no_threat");
-                assert_eq!(delta, NO_THREAT_PENALTY);
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
             }
-            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+            PolicyVerdict::Score { .. } => panic!("expected reject for no-payoff activation"),
         }
     }
 
@@ -672,6 +706,158 @@ mod tests {
                 assert_eq!(delta, 0.0);
             }
             PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Opponent creature strong enough that `threat_level` crosses
+    /// `THREAT_FLOOR` on board presence alone (power saturates `board_score`).
+    fn strong_opponent_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Big Threat".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(14);
+        obj.toughness = Some(14);
+        id
+    }
+
+    /// Regression (reported bug): the "discard a card: ~ gains indestructible
+    /// until end of turn. Tap it." defenders (Seasoned Hallowblade, Guardian of
+    /// New Benalia, Witch-king of Angmar, …) were activated on the AI's OWN turn
+    /// against a merely-standing opponent board — discarding a card and tapping
+    /// the creature to protect against nothing. `threat_level` is turn-agnostic
+    /// board strength, so a developed opponent board waived the no-threat
+    /// penalty even though (CR 508.1a) those creatures can't attack until the
+    /// opponent's turn and (CR 514.2) the grant expires at cleanup first. Board
+    /// pressure must count as an immediate threat only on the opponent's turn.
+    #[test]
+    fn board_pressure_not_a_threat_on_ai_own_turn() {
+        let mut state = GameState::new_two_player(42);
+        let opp = PlayerId(1);
+        strong_opponent_creature(&mut state, opp);
+        // Sanity: the opponent board really does cross the threat floor, so the
+        // turn ownership is the only thing distinguishing the two cases below.
+        assert!(threat_level(&state, AI, opp) >= THREAT_FLOOR);
+
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+
+        // AI's own (non-combat) turn: board pressure must NOT waive the gate —
+        // the grant expires before the opponent can attack, so it is rejected.
+        state.active_player = AI;
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => panic!("expected reject on own non-combat turn"),
+        }
+
+        // Opponent's turn: the same board IS an immediate threat → allowed.
+        state.active_player = opp;
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_threat_present");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Regression (reported bug): Mother of Runes ("{T}: Target creature you
+    /// control gains protection from the color of your choice until end of
+    /// turn.") parses to a `GenericEffect` with `affected = ParentTarget`, a
+    /// parent `target` of `controller: You`, and an `AddKeyword` of
+    /// `Protection(ChosenColor)`. On the AI's own main phase with no stack
+    /// threat, the AI tapped it every turn for nothing. It must now be rejected.
+    #[test]
+    fn mother_of_runes_own_main_phase_rejected() {
+        use engine::types::keywords::ProtectionTarget;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        // Default phase is `Untap` (non-combat); the reported activations were
+        // on the precombat main phase — both are gated identically.
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(
+                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                Keyword::Protection(ProtectionTarget::ChosenColor),
+            ),
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => panic!("Mother of Runes must be rejected on own main"),
+        }
+    }
+
+    /// During the combat phase, the same protective grant has a real payoff
+    /// (save an attacker / push damage) even with an empty stack — so it is
+    /// allowed, not rejected. Discriminates the `phase.is_combat()` carve-out.
+    #[test]
+    fn protection_allowed_during_own_combat() {
+        use engine::types::keywords::ProtectionTarget;
+        use engine::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        state.phase = Phase::DeclareBlockers;
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(
+                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                Keyword::Protection(ProtectionTarget::ChosenColor),
+            ),
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_combat_payoff");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("combat protection must be allowed"),
+        }
+    }
+
+    /// The beginning-of-combat step has no attackers or blockers yet, so the
+    /// carve-out must NOT fire there — otherwise the reported "tap Mother every
+    /// turn" bug just relocates from the main phase to own BeginCombat.
+    #[test]
+    fn protection_rejected_at_begin_combat() {
+        use engine::types::keywords::ProtectionTarget;
+        use engine::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        state.phase = Phase::BeginCombat;
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(
+                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                Keyword::Protection(ProtectionTarget::ChosenColor),
+            ),
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => panic!("begin-of-combat has no payoff; must reject"),
         }
     }
 }

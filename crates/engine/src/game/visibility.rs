@@ -36,7 +36,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
-        if let WaitingFor::ManifestDreadChoice { player, ref cards } = filtered.waiting_for {
+        if let WaitingFor::ManifestDreadChoice {
+            player, ref cards, ..
+        } = filtered.waiting_for
+        {
             let all_cards: HashSet<ObjectId> = cards.iter().copied().collect();
             if can_view_private_for_player(player) {
                 (all_cards.clone(), all_cards)
@@ -157,6 +160,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
+    // supplementary decks whose face-down cards live in the command zone. Redact
+    // every unrevealed card identity for all viewers, matching the library and
+    // Attraction deck treatment above.
+    let supplementary_deck_ids: Vec<ObjectId> = filtered
+        .planar_deck
+        .iter()
+        .chain(filtered.scheme_deck.iter())
+        .copied()
+        .collect();
+    for obj_id in supplementary_deck_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
     // CR 406.3: A card exiled face down can't be examined by any player
     // except when an instruction allows it. Two modeled look-permission classes:
     // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
@@ -233,11 +252,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    if let WaitingFor::ManifestDreadChoice { player, ref cards } = state.waiting_for {
+    if let WaitingFor::ManifestDreadChoice {
+        player,
+        ref cards,
+        source_id,
+    } = state.waiting_for
+    {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ManifestDreadChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                source_id,
             };
         }
     }
@@ -464,6 +489,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                         })
                         .collect(),
                 ),
+                // CR 400.2: Other PayCost kinds reveal only public-zone choices
+                // and need no redaction. `ExilePermanent` (battlefield exile-cost,
+                // Food Chain class) draws exclusively from the battlefield, a
+                // public zone, so its choices fall through here unredacted.
                 _ => None,
             };
             if let Some(redacted_choices) = redacted {
@@ -757,6 +786,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
+            x_residual_activation: false,
         })
     }
 
@@ -1132,6 +1162,58 @@ mod tests {
         assert!(commander.is_commander);
     }
 
+    #[test]
+    fn supplementary_deck_cards_are_hidden_from_all_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let plane_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Secret Plane".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&plane_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Plane);
+        state.planar_deck.push_back(plane_id);
+
+        let scheme_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Secret Scheme".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&scheme_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Scheme);
+        state.scheme_deck.push_back(scheme_id);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&plane_id).map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
+        );
+        assert_eq!(
+            filtered
+                .objects
+                .get(&scheme_id)
+                .map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
+        );
+        assert_eq!(filtered.planar_deck, im::vector![plane_id]);
+        assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
+    }
+
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
     // opponents see the caster, the spell, chosen targets, and mana payment progress
     // as it happens (the MTGA "Opponent is casting X" experience). The tests below guard
@@ -1219,6 +1301,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: pending.clone(),
+            unavailable_modes: vec![],
         };
         state.pending_cast = Some(pending);
 

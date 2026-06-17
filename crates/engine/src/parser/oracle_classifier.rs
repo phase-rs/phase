@@ -295,6 +295,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't cast spells of the chosen",
     "can't draw more than",
     "can't draw cards",
+    // CR 502.3: Smoke / Damping Field / Winter Orb class — "Players can't untap
+    // more than one <type> during their untap steps." Routes to the static
+    // parser so it lowers to StaticMode::MaxUntapPerType instead of an effect.
+    "can't untap more than",
     "can cast spells only during",
     // CR 602.5 + CR 117.1b: City of Solitude class — combined cast+activate
     // prohibition. The conjunction "and activate abilities" is the
@@ -327,6 +331,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "as though they had flash",
     "as though those creatures had haste",
     "as though that creature had haste",
+    // CR 509.1b + CR 702.28b: shadow block permission (Heartwood Dryad, Wall of
+    // Diffusion) — "can block creatures with shadow as though [they didn't|it] had
+    // shadow". Anchored on the full subject so it never false-matches a plain
+    // shadow grant or attacker-side restriction.
+    "block creatures with shadow as though",
     // CR 205.3 + CR 700.8: "<source> is also a[n] <subtype>(, <subtype>)*" —
     // self continuous type-grant (Burakos, Veteran Adventurer, and any future
     // printing whose first subtype opens with a vowel: "is also an Elf, …").
@@ -562,6 +571,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
+    // CR 110.2a + CR 614.1d: "[self] enters under the control of an opponent of
+    // your choice" (Xantcha, Sleeper Agent; Pendant of Prosperity; Abby,
+    // Merciless Soldier). A self-ETB controller-override replacement — route the
+    // line to `parse_replacement_line`/`parse_self_enters_under_opponent`, whose
+    // self-subject gate rejects external-subject false positives. Without this,
+    // the line falls through to the effect parser and emits Unimplemented.
+    "enters under the control of",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {

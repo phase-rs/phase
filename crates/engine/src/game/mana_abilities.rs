@@ -43,6 +43,9 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
+    if ability_def.multi_target.is_some() || target_attached.is_some() {
+        return false;
+    }
     ability_def.multi_target.is_none() && target_attached.is_none()
 }
 
@@ -2709,10 +2712,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
-        ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
-        LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
-        PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
+        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
+        ManaProduction, MultiTargetSpec, ObjectScope, PlayerScope, QuantityExpr, QuantityRef,
+        SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -2866,6 +2870,163 @@ mod tests {
         )
         .cost(AbilityCost::Tap);
         assert!(!is_mana_ability(&def));
+    }
+
+    #[test]
+    fn mana_with_delayed_trigger_sub_remains_mana_ability() {
+        let mut head = make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 2 },
+        });
+        head.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
+                    or_trigger: None,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::CopySpell {
+                        target: TargetFilter::TriggeringSource,
+                        retarget: CopyRetargetPermission::KeepOriginalTargets,
+                        copier: None,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        )));
+        assert!(
+            is_mana_ability(&head),
+            "CR 605.1: chained delayed triggers do not disqualify activated mana abilities"
+        );
+    }
+
+    #[test]
+    fn resolve_mana_ability_sub_chain_registers_delayed_trigger() {
+        use crate::types::ability::{
+            CopyRetargetPermission, DelayedTriggerCondition, FilterProp, TriggerDefinition,
+            TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Magus Lucea Kane".to_string(),
+            Zone::Battlefield,
+        );
+
+        let copy_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            },
+        );
+        let delayed = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new({
+                        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+                        trigger.valid_card = Some(TargetFilter::Typed(
+                            TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+                        ));
+                        trigger.valid_target = Some(TargetFilter::Controller);
+                        trigger
+                    }),
+                    or_trigger: None,
+                },
+                effect: Box::new(copy_effect),
+                uses_tracked_set: false,
+            },
+        );
+        let mut def = make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 2 },
+        });
+        def.sub_ability = Some(Box::new(delayed));
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert!(state.objects.get(&obj_id).unwrap().tapped);
+    }
+
+    #[test]
+    fn mana_with_roll_die_sub_remains_mana_ability() {
+        // CR 605.1: mana abilities remain mana abilities regardless of other
+        // generated effects (Vexing Puzzlebox rolls a d20 inline).
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        assert!(is_mana_ability(&def));
+    }
+
+    #[test]
+    fn resolve_mana_ability_sub_chain_emits_die_rolled() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1011),
+            PlayerId(0),
+            "Vexing Puzzlebox".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, source, PlayerId(0), &def, &mut events, None).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    sides: 20,
+                    result: Some(_),
+                    ..
+                }
+            )),
+            "RollDie sub_ability must resolve inline after mana production"
+        );
+    }
+
+    #[test]
+    fn mana_with_mana_sub_remains_mana_ability() {
+        let mut def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })));
+        assert!(is_mana_ability(&def));
     }
 
     #[test]

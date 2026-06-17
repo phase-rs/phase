@@ -27,8 +27,8 @@ use std::sync::Arc;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition,
 };
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{GameState, WaitingFor};
@@ -50,7 +50,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );

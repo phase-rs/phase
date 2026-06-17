@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
+    "customizeLayout": "Personnaliser la disposition…",
     "gameLog": "Journal de partie",
     "debugLog": "Journal de débogage",
     "waitingForGame": "En attente de la partie...",
@@ -98,8 +99,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} sur {{total}} dégagés",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +175,7 @@
     "creaturesAbbr": "Cré",
     "landsAbbr": "Ter",
     "otherAbbr": "Aut",
+    "manaAvailable": "{{untapped}} sur {{total}} terrains dégagés",
     "out": "ÉLIM",
     "eliminated": "Éliminé",
     "phasedOut": "Déphasé",
@@ -293,6 +306,20 @@
     "experienceTooltip": "Marqueurs d'expérience : {{count}}",
     "speedAriaLabel": "Vitesse {{value}}",
     "speedTooltip": "Vitesse : {{value}}",
+    "condCantWin": "Ne peut pas gagner la partie",
+    "condCantGainLife": "Ne peut pas gagner de points de vie",
+    "condCantLoseLife": "Ne peut pas perdre de points de vie",
+    "condCantPayLife": "Ne peut pas payer de points de vie",
+    "condCantCast": "Ne peut pas lancer de sorts",
+    "condCantActivate": "Ne peut pas activer de capacités",
+    "condCastOnlyFromZones": "Ne peut lancer que depuis certaines zones",
+    "condFromSource": "{{condition}} — de {{name}}",
+    "pendingSpell": "Prochain sort",
+    "pendingCantBeCountered": "Le prochain sort ne peut pas être contrecarré",
+    "pendingHasKeyword": "Le prochain sort a {{keyword}}",
+    "pendingFlash": "Le prochain sort peut être lancé comme s'il avait la flash",
+    "pendingFree": "Le prochain sort sans payer son coût de mana",
+    "pendingCheaper": "Le prochain sort coûte {{amount}} de moins",
     "companion": "Compagnon"
   },
   "avatar": {
@@ -889,6 +916,8 @@
       "discard": "Défausser",
       "evidence": "Preuves",
       "manifest": "Manifester",
+      "untap": "Dégager",
+      "tap": "Engager",
       "crew": "Équipage ({{power}})",
       "saddle": "Seller ({{power}})",
       "station": "Station (+{{power}})"
@@ -911,6 +940,12 @@
     "ringBearer": {
       "title": "Choisir le porteur de l'Anneau",
       "subtitle": "Choisissez une créature que vous contrôlez"
+    },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
     },
     "reorderHint": "Glissez pour réorganiser · la première carte est piochée en premier",
     "scry": {
@@ -988,6 +1023,8 @@
       "titleTopdeck": "Mettre sur la bibliothèque",
       "titleBattlefield": "Mettre sur le champ de bataille",
       "titleHand": "Renvoyer",
+      "titleUntap": "Dégager",
+      "titleTap": "Engager",
       "subtitleSacrificeExact_one": "Choisissez {{count}} permanent à sacrifier",
       "subtitleSacrificeExact_other": "Choisissez {{count}} permanents à sacrifier",
       "subtitleSacrificeUpTo_one": "Choisissez jusqu'à {{count}} permanent à sacrifier",
@@ -1012,6 +1049,18 @@
       "subtitleHandUpTo_other": "Choisissez jusqu'à {{count}} permanents à renvoyer dans la main de leur propriétaire",
       "subtitleHandRange_one": "Choisissez {{min}}-{{count}} permanent à renvoyer dans la main de son propriétaire",
       "subtitleHandRange_other": "Choisissez {{min}}-{{count}} permanents à renvoyer dans la main de leur propriétaire",
+      "subtitleUntapExact_one": "Choisissez {{count}} permanent à dégager",
+      "subtitleUntapExact_other": "Choisissez {{count}} permanents à dégager",
+      "subtitleUntapUpTo_one": "Choisissez jusqu'à {{count}} permanent à dégager",
+      "subtitleUntapUpTo_other": "Choisissez jusqu'à {{count}} permanents à dégager",
+      "subtitleUntapRange_one": "Choisissez {{min}}-{{count}} permanent à dégager",
+      "subtitleUntapRange_other": "Choisissez {{min}}-{{count}} permanents à dégager",
+      "subtitleTapExact_one": "Choisissez {{count}} permanent à engager",
+      "subtitleTapExact_other": "Choisissez {{count}} permanents à engager",
+      "subtitleTapUpTo_one": "Choisissez jusqu'à {{count}} permanent à engager",
+      "subtitleTapUpTo_other": "Choisissez jusqu'à {{count}} permanents à engager",
+      "subtitleTapRange_one": "Choisissez {{min}}-{{count}} permanent à engager",
+      "subtitleTapRange_other": "Choisissez {{min}}-{{count}} permanents à engager",
       "labelSkip": "Ignorer",
       "labelDecline": "Refuser",
       "labelPutOnTop": "Mettre au-dessus ({{order}})",
@@ -1120,6 +1169,12 @@
       "subtitle_other": "Exilez {{count}} matériaux pour façonner",
       "subtitleRange": "Exilez de {{min}} à {{count}} matériaux pour façonner"
     },
+    "exilePermanent": {
+      "title": "Exilez un permanent",
+      "subtitle_one": "Exilez {{count}} permanent que vous contrôlez",
+      "subtitle_other": "Exilez {{count}} permanents que vous contrôlez",
+      "subtitleRange": "Exilez de {{min}} à {{count}} permanents que vous contrôlez"
+    },
     "behold": {
       "title": "Contempler",
       "subtitleExile": "Exilez un permanent ou une carte correspondant",
@@ -1200,6 +1255,10 @@
       "title": "Choisir la combinaison de mana",
       "subtitleAny": "Sélectionnez chaque couleur de mana à produire",
       "subtitle": "Sélectionnez quelle combinaison de mana produire"
+    },
+    "untapSubset": {
+      "title": "Choose permanents to untap",
+      "subtitle": "Untap up to {{count}} of these permanents."
     }
   },
   "specializeColor": {
@@ -1263,19 +1322,19 @@
     "emergeEyebrow": "Émergence",
     "emergeNormalLabel": "Lancer normalement",
     "emergeAltLabel": "Lancer avec Émergence",
-    "emergeSubtitle": "Lancez {{name}} normalement ou payez son coût d'Émergence, réduit par la valeur de mana d'une créature que vous sacrifiez.",
+    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant une créature, ce qui réduit le coût de la valeur de mana de cette créature.",
     "impendingEyebrow": "Imminence",
-    "impendingNormalLabel": "Lancer comme créature",
+    "impendingNormalLabel": "Lancer normalement",
     "impendingAltLabel": "Lancer avec Imminence",
-    "impendingSubtitle": "Lancez {{name}} normalement comme une créature ou payez son coût d'Imminence : il arrive avec des marqueurs « temps » et n'est pas une créature tant que le dernier n'est pas retiré.",
+    "impendingSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Imminence : elle arrive avec des marqueurs temps et n'est pas une créature jusqu'à ce que le dernier soit retiré.",
     "prototypeEyebrow": "Prototype",
     "prototypeNormalLabel": "Lancer normalement",
     "prototypeAltLabel": "Lancer avec Prototype",
-    "prototypeSubtitle": "Lancez {{name}} normalement ou payez son coût de Prototype pour le lancer avec sa couleur, sa valeur de mana, sa force et son endurance de prototype.",
+    "prototypeSubtitle": "Lancez {{name}} normalement, ou payez son coût de Prototype pour la lancer avec sa force, son endurance et sa couleur réduites.",
     "spectacleEyebrow": "Spectacle",
     "spectacleNormalLabel": "Lancer normalement",
     "spectacleAltLabel": "Lancer avec Spectacle",
-    "spectacleSubtitle": "Lancez {{name}} normalement ou payez son coût de Spectacle (disponible car un adversaire a perdu des points de vie ce tour-ci).",
+    "spectacleSubtitle": "Lancez {{name}} normalement, ou payez son coût de Spectacle (disponible parce qu'un adversaire a perdu des points de vie ce tour-ci).",
     "overloadEyebrow": "Surcharge",
     "overloadNormalLabel": "Lancer normalement",
     "overloadAltLabel": "Lancer avec Surcharge",
@@ -1296,22 +1355,6 @@
     "mtmteNormalLabel": "Cast Normally",
     "mtmteAltLabel": "Cast Converted",
     "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
-    "emergeEyebrow": "Émergence",
-    "emergeNormalLabel": "Lancer normalement",
-    "emergeAltLabel": "Lancer avec Émergence",
-    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant une créature, ce qui réduit le coût de la valeur de mana de cette créature.",
-    "impendingEyebrow": "Imminence",
-    "impendingNormalLabel": "Lancer normalement",
-    "impendingAltLabel": "Lancer avec Imminence",
-    "impendingSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Imminence : elle arrive avec des marqueurs temps et n'est pas une créature jusqu'à ce que le dernier soit retiré.",
-    "prototypeEyebrow": "Prototype",
-    "prototypeNormalLabel": "Lancer normalement",
-    "prototypeAltLabel": "Lancer avec Prototype",
-    "prototypeSubtitle": "Lancez {{name}} normalement, ou payez son coût de Prototype pour la lancer avec sa force, son endurance et sa couleur réduites.",
-    "spectacleEyebrow": "Spectacle",
-    "spectacleNormalLabel": "Lancer normalement",
-    "spectacleAltLabel": "Lancer avec Spectacle",
-    "spectacleSubtitle": "Lancez {{name}} normalement, ou payez son coût de Spectacle (disponible parce qu'un adversaire a perdu des points de vie ce tour-ci).",
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",
@@ -1327,6 +1370,18 @@
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",
     "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Données de cartes manquantes",

@@ -234,8 +234,7 @@ fn bind_contextual_filter_to_condition(
         DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
             bind_parent_target_filter(filter, parent_targets);
         }
-        DelayedTriggerCondition::WheneverEvent { trigger }
-        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+        DelayedTriggerCondition::WheneverEvent { trigger } => {
             for filter in [
                 &mut trigger.valid_card,
                 &mut trigger.valid_source,
@@ -245,6 +244,33 @@ fn bind_contextual_filter_to_condition(
             .flatten()
             {
                 bind_parent_target_filter(filter, parent_targets);
+            }
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } => {
+            for filter in [
+                &mut trigger.valid_card,
+                &mut trigger.valid_source,
+                &mut trigger.valid_target,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bind_parent_target_filter(filter, parent_targets);
+            }
+            if let Some(alt) = or_trigger {
+                for filter in [
+                    &mut alt.valid_card,
+                    &mut alt.valid_source,
+                    &mut alt.valid_target,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    bind_parent_target_filter(filter, parent_targets);
+                }
             }
         }
         _ => {}
@@ -572,6 +598,8 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             };
         }
         _ => {}
@@ -1033,6 +1061,8 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
         );
         let ability = ResolvedAbility::new(

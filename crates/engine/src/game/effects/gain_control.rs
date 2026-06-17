@@ -133,7 +133,13 @@ fn gain_control_controller(ability: &ResolvedAbility, target: &TargetFilter) -> 
             return recipient;
         }
     }
-    ability.controller
+    // CR 701.38d + CR 108.3: When resolving per-ballot in a vote tally
+    // (Expropriate), the iteration rebinds `controller` to the voter so
+    // voter-referential filters scope correctly. The *original* controller
+    // (the spell caster) is the one who gains control. Fall back to
+    // `ability.controller` for non-vote contexts where `original_controller`
+    // is None.
+    ability.original_controller.unwrap_or(ability.controller)
 }
 
 fn gain_control_object_targets(

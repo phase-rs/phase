@@ -75,6 +75,83 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
+/// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
+/// each of your opponents." (Absolute Virtue) must emit a SINGLE
+/// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a
+/// permanent-targeting `Continuous`/`AddKeyword` def (which would grant nothing
+/// to the player).
+#[test]
+fn player_subject_protection_each_opponent_emits_player_protection() {
+    use crate::types::keywords::ProtectionTarget;
+
+    let def = parse_static_line("You have protection from each of your opponents.")
+        .expect("player-protection static def");
+    assert_eq!(
+        def.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::FromPlayer(ControllerRef::Opponent)),
+        "player subject must emit PlayerProtection(FromPlayer(Opponent)), got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+        "player-protection must affect the controller"
+    );
+}
+
+/// CR 702.16: the player-subject protection class is quality-general — the SAME
+/// `parse_protection_target` classifier handles color, everything, etc. for the
+/// player subject, not just the one card.
+#[test]
+fn player_subject_protection_handles_color_and_everything() {
+    use crate::types::keywords::ProtectionTarget;
+    use crate::types::mana::ManaColor;
+
+    let red = parse_static_line("You have protection from red.").expect("color def");
+    assert_eq!(
+        red.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Color(ManaColor::Red))
+    );
+
+    let everything =
+        parse_static_line("You have protection from everything.").expect("everything def");
+    assert_eq!(
+        everything.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Everything)
+    );
+}
+
+/// CR 702.16a: Regression — the permanent-SUBJECT path ("Creatures you control
+/// have protection from <X>") must NOT be claimed by the player-subject parser.
+/// It still emits a `Continuous`/`AddKeyword(Protection)` on permanents.
+#[test]
+fn permanent_subject_protection_still_continuous() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let defs = parse_static_line_multi("Creatures you control have protection from red.");
+    let cont = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("permanent path must remain a Continuous def, not PlayerProtection");
+    assert!(
+        defs.iter()
+            .all(|d| !matches!(d.mode, StaticMode::PlayerProtection(_))),
+        "permanent subject must NOT emit PlayerProtection, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        cont.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            }),
+        "permanent path must grant Protection(Color(Red)) on permanents, got {:?}",
+        cont.modifications
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
@@ -832,6 +909,134 @@ fn cant_be_blocked_static_split_keeps_trailing_condition() {
     );
 }
 
+/// CR 509.1b + CR 506.2 + CR 108.3: The compound "+N/+N and can't be blocked
+/// unless it's attacking its owner or a permanent its owner controls" must
+/// decompose into BOTH the P/T grant AND a `CantBeBlocked` static whose
+/// condition is `Not(RecipientAttackingOwnerTarget { OwnerOrPlaneswalker })`,
+/// both sharing the enchanted-creature filter. (Become the Pilot.)
+#[test]
+fn cant_be_blocked_static_split_unless_attacking_owner_or_permanent() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner or a permanent its owner controls.",
+    );
+
+    // Evasion companion: CantBeBlocked gated on Not(RecipientAttackingOwnerTarget).
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget {
+                        target: AttackTargetFilter::OwnerOrPlaneswalker
+                    }
+                )
+        ),
+        "expected Not(RecipientAttackingOwnerTarget {{ OwnerOrPlaneswalker }}), got {:?}",
+        evasion.condition
+    );
+
+    // The +2/+2 grant is preserved as a continuous P/T modification.
+    let pt = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("P/T grant must be preserved");
+    assert!(
+        pt.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { value: 2 }
+                | ContinuousModification::AddToughness { value: 2 }
+        )),
+        "expected AddPower(2)/AddToughness(2), got {:?}",
+        pt.modifications
+    );
+
+    // Both statics share the same EnchantedBy-creature affected filter.
+    let enchanted_by = |d: &StaticDefinition| {
+        matches!(
+            &d.affected,
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::EnchantedBy)
+        )
+    };
+    assert!(
+        enchanted_by(evasion) && enchanted_by(pt),
+        "both statics must share the EnchantedBy filter"
+    );
+
+    // No condition was dropped into an Unrecognized/None bucket.
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))),
+        "no Unrecognized condition should be emitted, got {:?}",
+        defs.iter().map(|d| &d.condition).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b + CR 506.2: The bare "unless it's attacking its owner" form (no
+/// "or a permanent its owner controls" tail) yields the `Owner` parameter.
+#[test]
+fn cant_be_blocked_static_split_unless_attacking_owner_bare() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner.",
+    );
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget {
+                        target: AttackTargetFilter::Owner
+                    }
+                )
+        ),
+        "expected Not(RecipientAttackingOwnerTarget {{ Owner }}), got {:?}",
+        evasion.condition
+    );
+}
+
+/// CR 509.1b: Negative guard — an unrelated "unless" tail must NOT be stolen by
+/// the new owner-attack arm; the "as long as" condition path still wins for the
+/// Gate condition card, so the new arm returns `None` for non-owner tails.
+#[test]
+fn cant_be_blocked_unless_owner_arm_does_not_steal_other_conditions() {
+    // The "as long as you control a Gate" condition still classifies via its own
+    // arm — proving the owner-attack arm is scoped to its exact phrase.
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        !matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget { .. }
+                )
+        ),
+        "owner-attack arm must not steal the Gate condition, got {:?}",
+        evasion.condition
+    );
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
@@ -1116,6 +1321,28 @@ fn continuous_mods_decompose_becomes_compound_type_phrase() {
         }),
         "must not emit whole-phrase AddSubtype"
     );
+}
+
+/// CR 608.2d + CR 613.1f: "gain that ability" / "the chosen ability" / "the
+/// chosen keyword" is a chosen-keyword anaphor referring back to a preceding
+/// `Effect::Choose { ChoiceType::Keyword }` clause (Angelic Skirmisher,
+/// Linvala, Shield of Sea Gate). It must lower to `AddChosenKeyword`, NOT a
+/// bare `AddKeyword` (the chosen value is unknown at parse time) and NOT a
+/// silent drop. Builds for the whole "gain the chosen keyword" class.
+#[test]
+fn continuous_mods_grant_chosen_keyword_anaphor() {
+    for phrase in [
+        "gain that ability",
+        "gain the chosen ability",
+        "gain the chosen keyword",
+    ] {
+        let mods = parse_continuous_modifications(phrase);
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddChosenKeyword],
+            "expected AddChosenKeyword for {phrase:?}, got {mods:?}"
+        );
+    }
 }
 
 #[test]
@@ -3316,21 +3543,50 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
 }
 
 /// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
-/// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
-/// kicker additional cost was paid — is not a representable spell-cost filter,
-/// so the parser must DECLINE the cost static rather than emit a filterless,
-/// conditionless reducer. A broad reducer would silently drop both the printed
-/// "first … each turn" once-per-turn gate and the "kicked" qualifier, reducing
-/// every spell the controller casts (the bug this guards against).
+/// less to cast." (Vine Gecko).
 #[test]
-fn static_first_kicked_spell_does_not_emit_broad_reducer() {
-    let parsed =
-        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
+fn static_first_kicked_spell_costs_less() {
+    let def =
+        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.")
+            .expect("Vine Gecko static should parse");
 
-    assert!(
-        parsed.is_none(),
-        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
-    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected WasKicked spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { properties, .. })
+            if properties.contains(&FilterProp::WasKicked)
+    ));
+
+    let condition = def.condition.expect("expected first-kicked-spell gate");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::WasKicked)
+        )
+    ));
 }
 
 #[test]
@@ -3756,6 +4012,59 @@ fn static_can_attack_despite_defender_self_unconditional() {
     assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_block_shadow_as_though_they_didnt_have_shadow() {
+    // CR 509.1b + CR 702.28b: Heartwood Dryad phrasing. After card-name
+    // normalization the subject is `~`.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though they didn't have shadow.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_block_shadow_as_though_it_had_shadow() {
+    // CR 509.1b + CR 702.28b: Wall of Diffusion phrasing — same block-legality
+    // outcome, different "as though" clause; both map to CanBlockShadow.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though it had shadow.").unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_block_shadow_as_though_keeps_subject_scope() {
+    // CR 509.1b + CR 609.4 + CR 702.28b: subject-scoped as-though permissions
+    // must keep their affected filter; runtime resolves this through
+    // `check_static_ability` against the blocker.
+    let def = parse_static_line(
+        "Creatures you control can block creatures with shadow as though they didn't have shadow.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_block_shadow_does_not_match_plain_shadow_grant() {
+    // Discriminating: a plain shadow keyword grant must NOT parse to CanBlockShadow.
+    let parsed = parse_static_line("~ has shadow.");
+    assert!(
+        !matches!(
+            parsed.as_ref().map(|d| &d.mode),
+            Some(StaticMode::CanBlockShadow)
+        ),
+        "plain shadow grant must not become CanBlockShadow: {parsed:?}"
+    );
 }
 
 #[test]
@@ -4657,6 +4966,23 @@ fn static_comma_rule_statics_share_subject() {
 }
 
 #[test]
+fn static_owner_or_planeswalker_rule_static_shares_subject() {
+    let defs = parse_static_line_multi(
+        "This creature attacks each combat if able and can't attack its owner or planeswalkers its owner controls.",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_eq!(defs[0].mode, StaticMode::MustAttack);
+    assert_eq!(defs[1].mode, StaticMode::CantAttack);
+    assert_eq!(
+        defs[1].attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::OwnerOrPlaneswalker)
+    );
+    assert!(defs
+        .iter()
+        .all(|def| def.affected == Some(TargetFilter::SelfRef)));
+}
+
+#[test]
 fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
     let defs =
         parse_static_line_multi("Enchanted creature gets +3/+3 and must be blocked if able.");
@@ -4730,6 +5056,290 @@ fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     assert_eq!(defs[2].mode, StaticMode::Goaded);
     assert_eq!(defs[1].affected, defs[0].affected);
     assert_eq!(defs[2].affected, defs[0].affected);
+}
+
+// --- Cluster 06: attached-creature combat-state gate + dropped-lure residual ---
+
+/// Helper: the `EquippedBy` creature filter used as the `affected` set for an
+/// Equipment's attached-subject grants.
+fn equipped_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+}
+
+/// Helper: is this static a `GrantAbility{Effect::Unimplemented}` residual whose
+/// description (raw Oracle fragment) contains `needle`? The `name` is the stable
+/// category key (`"attached_grant_unmodeled_conjunct"`); the dropped text lands
+/// in `description` via `Effect::unimplemented`.
+fn is_unimplemented_residual(def: &StaticDefinition, needle: &str) -> bool {
+    def.modifications.iter().any(|m| match m {
+        ContinuousModification::GrantAbility { definition } => matches!(
+            &*definition.effect,
+            Effect::Unimplemented { description: Some(frag), .. } if frag.contains(needle)
+        ),
+        _ => false,
+    })
+}
+
+/// CR 508.1a + CR 611.3a + CR 613.1f: "As long as equipped creature is
+/// attacking, it has first strike and must be blocked by a Dalek if able."
+/// (Ace's Baseball Bat). The first-strike grant must land on the EquippedBy
+/// creature gated on the recipient being attacking — NOT on SelfRef with
+/// SourceIsAttacking — and the unmodeled "must be blocked by a Dalek if able"
+/// lure must surface as an `Effect::Unimplemented` residual, not be dropped.
+#[test]
+fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.",
+    );
+    assert_eq!(defs.len(), 2, "expected supported + residual, got {defs:?}");
+
+    // Supported static: first strike on the host, gated on the host attacking.
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+    // Must NOT regress to the wrong subject/condition.
+    assert_ne!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_ne!(defs[0].condition, Some(StaticCondition::SourceIsAttacking));
+
+    // Residual static surfaces the dropped lure.
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert!(
+        is_unimplemented_residual(&defs[1], "must be blocked by a"),
+        "lure must surface as an Unimplemented residual, got {:?}",
+        defs[1]
+    );
+    // The lure must NOT be modeled as a (bare) MustBeBlocked mode.
+    assert_ne!(defs[1].mode, StaticMode::MustBeBlocked);
+}
+
+/// CR 611.3a: the Aura analog binds the gate to the EnchantedBy host.
+#[test]
+fn static_as_long_as_enchanted_creature_is_attacking_gate_binds_to_host() {
+    let defs =
+        parse_static_line_multi("As long as enchanted creature is attacking, it has trample.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "no lure → single supported static, got {defs:?}"
+    );
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+        )),
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+}
+
+/// CR 509.1a + CR 611.3a: the blocking branch of the combat-state gate.
+#[test]
+fn static_as_long_as_equipped_creature_is_blocking_grants_to_host() {
+    let defs = parse_static_line_multi("As long as equipped creature is blocking, it gets +2/+2.");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Blocking])
+            ),
+        }),
+    );
+}
+
+/// CR 508.1d / CR 509.1c: a BARE recognized combat requirement conjunct ("must
+/// be blocked if able" — The Masamune) inside the combat-state grant is modeled
+/// as a `MustBeBlocked` sibling gated on the same combat condition, NOT surfaced
+/// as an Unimplemented residual.
+#[test]
+fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it has first strike and must be blocked if able.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "supported grant + MustBeBlocked, got {defs:?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    // The requirement is also gated on the combat condition (CR 611.3a).
+    assert_eq!(
+        defs[1].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+    // No Unimplemented residual for a fully-modeled requirement.
+    assert!(!defs
+        .iter()
+        .any(|d| is_unimplemented_residual(d, "must be blocked")));
+}
+
+/// CR 509.1c + CR 611.3a: a pure combat-requirement predicate still belongs to
+/// the attached host and must not fall through to the generic source-gated
+/// inverted parser.
+#[test]
+fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it must be blocked if able.",
+    );
+    assert_eq!(defs.len(), 1, "pure requirement, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+}
+
+/// CR 613.1f: residual splitting must recognize already-verbed conjuncts
+/// ("gets", "has", "gains", etc.) and avoid false `Unimplemented` residuals.
+#[test]
+fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it gets +1/+1 and has first strike.",
+    );
+    assert_eq!(defs.len(), 1, "fully modeled grant, got {defs:?}");
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert!(!defs
+        .iter()
+        .any(|d| is_unimplemented_residual(d, "first strike")));
+}
+
+/// CR 509.1c: the un-gated direct attached-subject grant lure (Slayer's Cleaver:
+/// "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.")
+/// surfaces the filtered lure as an Unimplemented residual. The first def carries
+/// the P/T grant and no condition; the residual carries no condition either.
+#[test]
+fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.",
+    );
+    assert_eq!(defs.len(), 2, "P/T grant + residual, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 3 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert_eq!(defs[0].condition, None);
+    assert!(
+        is_unimplemented_residual(&defs[1], "must be blocked by an"),
+        "lure must surface as an Unimplemented residual, got {:?}",
+        defs[1]
+    );
+    assert_eq!(defs[1].condition, None);
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+}
+
+/// CR 509.1c: a direct attached-subject filtered lure with no continuous grant
+/// sibling is still an explicit unsupported residual, not a silent drop.
+#[test]
+fn attached_subject_pure_filtered_lure_surfaces_as_unimplemented_residual() {
+    let defs = parse_static_line_multi("Equipped creature must be blocked by an Eldrazi if able.");
+    assert_eq!(defs.len(), 1, "pure filtered lure residual, got {defs:?}");
+    assert!(
+        is_unimplemented_residual(&defs[0], "must be blocked by an"),
+        "filtered lure must surface as an Unimplemented residual, got {:?}",
+        defs[0]
+    );
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+}
+
+/// Building-block: the filtered-lure detector recognizes ONLY the by-filter form,
+/// never the bare form (which is a modeled requirement).
+#[test]
+fn must_be_blocked_by_filter_lure_detector_excludes_bare_form() {
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by a Dalek if able").is_ok());
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by an Eldrazi if able").is_ok());
+    // Bare form has no "by <filter>" — must NOT match.
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked if able").is_err());
+}
+
+/// Building-block (Step 3 backstop): `parse_static_condition` for combat state
+/// must no longer collapse an ATTACHED subject into a `Source*` condition, while
+/// the genuine source-referential forms are preserved unchanged.
+#[test]
+fn combat_state_condition_does_not_collapse_attached_subject() {
+    // Attached subject is no longer a Source* combat condition.
+    assert_ne!(
+        parse_static_condition("equipped creature is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    assert_ne!(
+        parse_static_condition("enchanted creature is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    // Source-referential forms preserved.
+    assert_eq!(
+        parse_static_condition("~ is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    assert_eq!(
+        parse_static_condition("~ isn't attacking"),
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsAttacking),
+        }),
+    );
+    assert_eq!(
+        parse_static_condition("~ is attacking or blocking"),
+        Some(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceIsAttacking,
+                StaticCondition::SourceIsBlocking,
+            ],
+        }),
+    );
 }
 
 #[test]
@@ -4831,6 +5441,58 @@ fn static_you_may_choose_not_to_untap_self() {
             .unwrap();
     assert_eq!(def.mode, StaticMode::MayChooseNotToUntap);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+// CR 502.3: Smoke / Stoic Angel — "Players can't untap more than one creature
+// during their untap steps." Lowers to a creature-filtered MaxUntapPerType cap.
+#[test]
+fn static_max_untap_one_creature() {
+    let def =
+        parse_static_line("Players can't untap more than one creature during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3: Damping Field / Imi Statue — artifact form.
+#[test]
+fn static_max_untap_one_artifact() {
+    let def =
+        parse_static_line("Players can't untap more than one artifact during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3 + CR 205.4a: Winter Orb family — nonbasic-land form parses the
+// "nonbasic" supertype-negation property, proving the type filter is general.
+#[test]
+fn static_max_untap_one_nonbasic_land() {
+    let def = parse_static_line(
+        "Players can't untap more than one nonbasic land during their untap steps.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                FilterProp::NotSupertype {
+                    value: crate::types::card_type::Supertype::Basic,
+                }
+            ])),
+            max: 1,
+        }
+    );
 }
 
 #[test]
@@ -5504,6 +6166,56 @@ fn static_legend_rule_creature_tokens_scope() {
 }
 
 #[test]
+fn static_legend_rule_creatures_you_control() {
+    // CR 704.5j: Council of Reeds — bare permanent type "creatures you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creatures you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    match def.affected {
+        Some(TargetFilter::Typed(ref typed)) => {
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(typed
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)));
+        }
+        other => panic!("expected typed creature filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_legend_rule_tokens_you_control() {
+    // CR 111.1 + CR 704.5j: Cadric, Soul Kindler — "tokens you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to tokens you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_legend_rule_commanders_you_control() {
+    // CR 903.3 + CR 704.5j: "commanders you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to commanders you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::IsCommander)
+    ));
+}
+
+#[test]
 fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
     // CR 603.2 + CR 609.3: The Master, Multiplied.
     let def = parse_static_line(
@@ -5532,8 +6244,10 @@ fn static_legend_rule_defers_unparseable_scopes() {
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
     // deferred (left Unimplemented), never misparsed into a no-op exemption.
     for text in [
-            "The \"legend rule\" doesn't apply to tokens you control.", // Cadric
-            "The \"legend rule\" doesn't apply to commanders you control.", // Try-My-Deck Elemental
+            // Bare pronoun scope with no concrete filter — must defer, not be
+            // emitted as a no-op exemption.
+            "The \"legend rule\" doesn't apply to them.",
+            // Conditional form that doesn't begin with the exemption clause.
             "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them.",
         ] {
             assert!(
@@ -10121,6 +10835,49 @@ fn gain_all_creature_types_produces_add_keyword_changeling() {
 }
 
 #[test]
+fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
+    // CR 305.7: Song of the Dryads pattern - should use SetBasicLandType to trigger ability removal
+    let def = parse_static_line("Enchanted permanent is a colorless Forest land.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
+            }),
+        "Song-style type change must make the permanent a land: {:?}",
+        def.modifications
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetBasicLandType {
+            land_type: crate::types::ability::BasicLandType::Forest,
+        }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetColor { colors: vec![] }));
+}
+
+#[test]
+fn enchanted_permanent_is_forest_land_produces_set_basic_land_type() {
+    // CR 305.7: Without color prefix, should still use SetBasicLandType
+    let def = parse_static_line("Enchanted permanent is a Forest land.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
+            }),
+        "Song-style type change must make the permanent a land: {:?}",
+        def.modifications
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetBasicLandType {
+            land_type: crate::types::ability::BasicLandType::Forest,
+        }));
+}
+
+#[test]
 fn static_condition_source_in_graveyard() {
     let cond = parse_static_condition("this card is in your graveyard");
     assert!(
@@ -12113,6 +12870,30 @@ fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
 }
 
 #[test]
+fn ghostfire_colorless_cda_via_oracle_text() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "Ghostfire is colorless.",
+        "Ghostfire",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("Ghostfire colorless CDA should parse via oracle text");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.characteristic_defining);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+}
+
+#[test]
 fn static_self_is_multicolor_cda() {
     let def = parse_static_line("~ is white and blue.").unwrap();
     assert_eq!(
@@ -12313,10 +13094,7 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
             "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.",
         )
         .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::Other("LinkedCollectionCounterPlayPermission".to_string())
-    );
+    assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
 // --- Group B: Generic activated ability cost reduction ---
@@ -12454,6 +13232,314 @@ fn static_spells_from_exile_have_convoke() {
             );
         }
         other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
+// --- Group C': "The first <qualifier> spell you cast [from <zone>] each turn
+// has [keyword]" once-per-turn keyword grants (cluster-04). ---
+
+/// CR 611.2f: assert a `CastWithKeyword` static's condition is the
+/// `SpellsCastThisTurn(filter) == 0` first-spell gate, optionally wrapped in an
+/// `And` with `DuringYourTurn`. Returns the inner spell filter for further
+/// assertions.
+fn assert_first_spell_gate(
+    condition: &StaticCondition,
+    expect_during_your_turn: bool,
+) -> TargetFilter {
+    let gate = if expect_during_your_turn {
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected And condition with DuringYourTurn, got {condition:?}");
+        };
+        assert!(
+            conditions.contains(&StaticCondition::DuringYourTurn),
+            "expected DuringYourTurn in {conditions:?}"
+        );
+        conditions
+            .iter()
+            .find(|c| matches!(c, StaticCondition::QuantityComparison { .. }))
+            .expect("expected a QuantityComparison alongside DuringYourTurn")
+            .clone()
+    } else {
+        condition.clone()
+    };
+    let StaticCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(inner),
+                    },
+            },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    } = gate
+    else {
+        panic!("expected SpellsCastThisTurn(filter) == 0 gate, got {gate:?}");
+    };
+    inner
+}
+
+#[test]
+fn static_peri_brown_first_historic_spell_each_turn_has_convoke() {
+    // CR 700.6 + CR 702.51a: Peri Brown — bare "historic" is a card-property
+    // adjective; the grant is gated to the first historic spell each turn.
+    let def =
+        parse_static_line("The first historic spell you cast each turn has convoke.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.contains(&FilterProp::Historic),
+        "expected Historic property, got {:?}",
+        tf.properties
+    );
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected typed inner filter");
+    };
+    assert!(inner_tf.properties.contains(&FilterProp::Historic));
+}
+
+#[test]
+fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
+    // CR 601.2a + CR 702.144a: The Twelfth Doctor — cast-origin "from anywhere
+    // other than your hand" lowers to InAnyZone over the cast-capable non-hand
+    // zones; gated to the first such spell each turn.
+    let def = parse_static_line(
+        "The first spell you cast from anywhere other than your hand each turn has demonstrate.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Demonstrate,
+        }
+    );
+    let expected_zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.contains(&FilterProp::InAnyZone {
+            zones: expected_zones.clone(),
+        }),
+        "expected InAnyZone({expected_zones:?}), got {:?}",
+        tf.properties
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_wild_magic_sorcerer_first_spell_from_exile_each_turn_has_cascade() {
+    // CR 601.2a + CR 702.85a: Wild-Magic Sorcerer — "from exile" lowers to
+    // InZone(Exile); the once-per-turn gate is now present (was condition-null).
+    let def =
+        parse_static_line("The first spell you cast from exile each turn has cascade.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }),
+        "expected InZone(Exile), got {:?}",
+        tf.properties
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_maelstrom_nexus_first_spell_each_turn_has_cascade() {
+    // CR 611.2f: Maelstrom Nexus — bare "the first spell you cast each turn" now
+    // carries the once-per-turn gate (was condition-null = every spell).
+    let def = parse_static_line("The first spell you cast each turn has cascade.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_current_curriculum_first_merfolk_spell_each_turn_has_convoke() {
+    // CR 205.3: Current Curriculum — subtype "Merfolk" qualifier preserved, gated.
+    let def = parse_static_line("The first Merfolk spell you cast each turn has convoke.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Merfolk")),
+        "expected Merfolk subtype, got {:?}",
+        tf.type_filters
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_tardis_bay_post_timing_mv_qualifier_declined_to_existing() {
+    // CR 601.2f: TARDIS Bay — "with mana value 2 or greater" sits AFTER the timing
+    // phrase ("during each of your turns"), which the shared first-spell parser
+    // discards. The keyword-grant trailing-residue guard therefore declines the
+    // gated form and falls through to the existing gateless static (no regression,
+    // no MV-blind gate). Tracked coverage gap, like Rain of Riches.
+    let def = parse_static_line(
+        "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    assert_eq!(
+        def.condition, None,
+        "post-timing MV residue must fall through to the gateless static, not emit an MV-blind gate"
+    );
+}
+
+#[test]
+fn static_rain_of_riches_treasure_qualifier_declined_to_existing() {
+    // CR 601.2f: Rain of Riches — "that mana from a Treasure was spent to cast" is
+    // unrepresentable and sits in the post-timing discarded region. The trailing-
+    // residue guard declines the gated form (no Treasure-blind gate); the existing
+    // gateless static is preserved (unchanged-broken, not regressed).
+    let def = parse_static_line(
+        "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    assert_eq!(
+        def.condition, None,
+        "unrepresentable Treasure qualifier must fall through to the gateless static"
+    );
+}
+
+#[test]
+fn first_qualified_spell_filter_bare_historic_supported() {
+    // CR 700.6: bare "historic spell" must lower to a Historic-property filter.
+    let result = super::grammar::parse_first_qualified_spell_filter(
+        "the first historic spell you cast each turn",
+    );
+    let super::grammar::FirstQualifiedSpell::Supported(filter, timing) = result else {
+        panic!("expected Supported, got a non-Supported FirstQualifiedSpell");
+    };
+    assert_eq!(
+        timing,
+        super::oracle_trigger::NthEventTimingKind::Unrestricted
+    );
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter");
+    };
+    assert!(tf.properties.contains(&FilterProp::Historic));
+}
+
+#[test]
+fn first_qualified_spell_subject_residue_rejected() {
+    // CR 601.2f: a subject with non-empty post-timing residue is NOT fully
+    // consumed; a clean "...each turn" subject is.
+    assert!(
+        !super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast each turn that mana from a treasure was spent to cast"
+        ),
+        "Treasure residue must report not-fully-consumed"
+    );
+    assert!(
+        !super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast during each of your turns with mana value 2 or greater"
+        ),
+        "post-timing MV residue must report not-fully-consumed"
+    );
+    assert!(
+        super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast each turn"
+        ),
+        "clean subject must report fully-consumed"
+    );
+    assert!(
+        super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast from exile each turn"
+        ),
+        "clean from-exile subject must report fully-consumed"
+    );
+}
+
+#[test]
+fn apply_spell_keyword_subject_constraints_recurses_and() {
+    // CR 601.2a: an And of two Typed leaves must receive ControllerRef::You on
+    // every leaf, not just the first.
+    let compound = TargetFilter::And {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+            ),
+        ],
+    };
+    let scoped = apply_spell_keyword_subject_constraints(compound, None, None, Vec::new());
+    let TargetFilter::And { filters } = scoped else {
+        panic!("expected And preserved");
+    };
+    assert_eq!(filters.len(), 2);
+    for leaf in &filters {
+        let TargetFilter::Typed(tf) = leaf else {
+            panic!("expected Typed leaf, got {leaf:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "every And leaf must carry ControllerRef::You"
+        );
     }
 }
 
@@ -13753,10 +14839,25 @@ fn cant_search_library_each_player_may_not_variant() {
 }
 
 #[test]
-fn cant_search_library_opponents_form_deferred() {
-    // Opponent-scoped direct-search phrasing remains deferred until the runtime
-    // cause-vs-searcher axis is split.
-    assert!(parse_static_line("Your opponents can't search libraries.").is_none());
+fn cant_search_library_opponents_form() {
+    // CR 701.23 + CR 609.3: opponent-scoped direct search prohibition.
+    let def = parse_static_line("Your opponents can't search libraries.")
+        .expect("opponent-scoped direct search prohibition should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CantSearchLibrary {
+            cause: ProhibitionScope::Opponents,
+        }
+    );
+
+    let each = parse_static_line("Each opponent can't search libraries.")
+        .expect("each-opponent variant should parse");
+    assert_eq!(
+        each.mode,
+        StaticMode::CantSearchLibrary {
+            cause: ProhibitionScope::Opponents,
+        }
+    );
 }
 
 // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
@@ -16046,4 +17147,195 @@ fn continuous_gets_for_each_counter_on_source_equipment() {
         )),
         "expected AddDynamicToughness(CountersOn{{Source, None}}), got {mods:?}"
     );
+}
+
+#[test]
+fn level_up_enchanted_creature_grant_attack_trigger_parses_multiply_counter() {
+    use crate::types::ability::{AbilityCondition, Comparator, Effect, QuantityExpr};
+
+    let def = parse_static_line(
+        "Enchanted creature has \"Whenever this creature attacks, double the number of +1/+1 counters on it. Then if it has power 10 or greater, draw a card.\"",
+    )
+    .expect("Level Up granted trigger should parse");
+
+    let grant = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+            _ => None,
+        })
+        .expect("expected GrantTrigger");
+    let execute = grant.execute.as_ref().expect("execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::MultiplyCounter { .. }
+    ));
+    let draw = execute.sub_ability.as_ref().expect("draw sibling");
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    assert!(
+        matches!(
+            draw.condition.as_ref(),
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+                ..
+            })
+        ),
+        "draw must be gated on power >= 10, got {:?}",
+        draw.condition
+    );
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.3: "<self> has hexproof if it hasn't dealt
+/// damage yet" (Palladia-Mors, the Ruiner) must lower to a single Continuous
+/// `AddKeyword(Hexproof)` on `SelfRef`, gated on `Not(SourceHasDealtDamage)`.
+/// The card-name self-reference is normalized to `~` before `parse_static_line`
+/// (see `normalize_card_name_refs`), so the AST test feeds the `~` form.
+#[test]
+fn self_has_hexproof_if_it_hasnt_dealt_damage_palladia_mors() {
+    let def =
+        parse_static_line("~ has hexproof if it hasn't dealt damage yet.").expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        }),
+        "hexproof must be gated on Not(SourceHasDealtDamage), got {:?}",
+        def.condition
+    );
+}
+
+/// CR 702.11b + CR 613.1f: Karakyk Guardian's "This creature has hexproof if it
+/// hasn't dealt damage yet" — the "this creature" subject form normalizes the
+/// same as the card-name form and lowers identically.
+#[test]
+fn self_has_hexproof_if_it_hasnt_dealt_damage_karakyk_guardian() {
+    let def = parse_static_line("This creature has hexproof if it hasn't dealt damage yet.")
+        .expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        })
+    );
+}
+
+/// CR 702.11b + CR 613.1f: FULL-CARD flip — Palladia-Mors, the Ruiner and
+/// Karakyk Guardian must parse their conditional-hexproof line into a real
+/// Hexproof grant gated on `Not(SourceHasDealtDamage)`, with NO `Unimplemented`
+/// residual static and no swallowed-clause diagnostic.
+#[test]
+fn palladia_mors_and_karakyk_guardian_conditional_hexproof_full_card_flip() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::Effect;
+
+    let cards = [
+        (
+            "Palladia-Mors, the Ruiner",
+            "Flying, vigilance, trample\nPalladia-Mors, the Ruiner has hexproof if it hasn't dealt damage yet.",
+        ),
+        (
+            "Karakyk Guardian",
+            "Flying, vigilance, trample\nThis creature has hexproof if it hasn't dealt damage yet.",
+        ),
+    ];
+    for (name, text) in cards {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &["Dragon".to_string()],
+        );
+        // The conditional hexproof grant is present and correctly gated.
+        let hexproof = parsed.statics.iter().find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        });
+        let hexproof = hexproof.unwrap_or_else(|| panic!("{name}: missing hexproof static"));
+        assert_eq!(
+            hexproof.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            }),
+            "{name}: hexproof must be gated on Not(SourceHasDealtDamage)"
+        );
+        assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+        // No Unimplemented residual rode into a granted ability on any static.
+        for def in &parsed.statics {
+            for m in &def.modifications {
+                if let ContinuousModification::GrantAbility { definition } = m {
+                    assert!(
+                        !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }),
+                        "{name}: static carries an Unimplemented residual: {def:?}"
+                    );
+                }
+            }
+        }
+        // No clause was silently swallowed.
+        let swallowed: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+            .collect();
+        assert!(
+            swallowed.is_empty(),
+            "{name}: unexpected swallowed-clause diagnostics: {swallowed:?}"
+        );
+    }
+}
+
+/// CR 611.3a + CR 613.1f + CR 509.1b + CR 702.11b: Ratonhnhaké꞉ton uses the
+/// inverted condition form and gates two sibling statics with the same "hasn't
+/// dealt damage yet" condition. The multi-static path must preserve both the
+/// Hexproof grant and the CantBeBlocked mode under `Not(SourceHasDealtDamage)`.
+#[test]
+fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
+    let defs = parse_static_line_multi(
+        "As long as ~ hasn't dealt damage yet, it has hexproof and can't be blocked.",
+    );
+    assert_eq!(defs.len(), 2, "expected hexproof grant plus evasion static");
+
+    let expected_condition = Some(StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceHasDealtDamage),
+    });
+
+    let hexproof = defs
+        .iter()
+        .find(|def| {
+            def.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing conditional hexproof grant");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(hexproof.condition, expected_condition);
+
+    let evasion = defs
+        .iter()
+        .find(|def| def.mode == StaticMode::CantBeBlocked)
+        .expect("missing conditional can't-be-blocked static");
+    assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(evasion.condition, expected_condition);
 }

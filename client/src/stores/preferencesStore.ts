@@ -93,6 +93,132 @@ export type OpponentHudDensity = "comfortable" | "compact";
  *  Any other string is a battlefield or plain-color ID. */
 export type BoardBackground = "auto-wubrg" | "random" | "none" | "custom" | (string & {});
 
+// ── Flex layout ──────────────────────────────────────────────────────────────
+/** A pixel delta from a widget's docked default position. The *absence* of an
+ *  entry means the widget sits exactly where it does today, so a fresh store and
+ *  every legacy store render byte-identically (zero-regression default). */
+export interface WidgetOffset {
+  dx: number;
+  dy: number;
+}
+/** Draggable widgets whose position is shared across all table sizes. The
+ *  opponent HUD is intentionally absent here — it's the one element whose
+ *  structure differs by table size, so it's keyed separately (see
+ *  {@link FlexTableSize}). */
+export type FlexWidgetKey =
+  | "playerHud"
+  | "stackPanel"
+  | "logPanel"
+  | "actionRail"
+  | "playerPiles"
+  | "opponentPiles";
+/** The three reorderable cells of the battlefield middle row. Stored as an
+ *  order so the user can permute them (drag-to-reorder); flexbox reflows. */
+export type MiddleCell = "lands" | "support" | "command";
+/** Default left-to-right order — reproduces today's lands · support · command. */
+export const DEFAULT_MIDDLE_ROW_ORDER: readonly MiddleCell[] = ["lands", "support", "command"];
+/** Table sizes the opponent HUD position is keyed by: 1v1 renders a single pill,
+ *  multiplayer a tab strip, so a shared offset wouldn't fit both. */
+export type FlexTableSize = "oneVsOne" | "multiplayer";
+/** A board grid row capped at `min(pct%, pxCap px)` — mirrors today's
+ *  `minmax(0,min(12%,100px))` track. The middle (battlefield) row is always
+ *  `1fr` and absorbs the remainder, so only the top/bottom bands are stored. */
+export interface CappedTrack {
+  pct: number;
+  pxCap: number;
+}
+export interface GridBands {
+  top: CappedTrack;
+  bottom: CappedTrack;
+}
+/** Preset ids are intentionally neutral ("Layout N"): the alternative layouts
+ *  carry no principled design rationale, so naming them by use-case ("Streamer")
+ *  would overclaim. `default` is load-bearing — it is the {@link defaultFlexLayout}
+ *  seed and the Reset target — so only the two editorial slots are neutralized. */
+export type FlexPresetId = "default" | "layout2" | "layout3" | "custom";
+/** An aspect-preserving size multiplier. Two flavours share one map:
+ *  content-scales — `stack` (the stack's cards, over the viewport
+ *  `responsiveScale`) and `summaryTile` (the collapsed lands/support overflow
+ *  pills) — and widget box-scales — `actionRail` and `playerPiles` — applied as
+ *  a `transform: scale()` on the whole `DraggableWidget`. Absent ⇒ 1. */
+export type FlexScaleKey = "stack" | "summaryTile" | "actionRail" | "playerPiles";
+/** Content alignment within a middle-row cell — maps to flexbox `justify-*`. */
+export type CellAlign = "start" | "center" | "end";
+/** Per-cell default alignment, reproducing the prior hardcoded layout: lands hug
+ *  the left, support the right, command centered. Absent key ⇒ this. */
+export const DEFAULT_CELL_ALIGN: Record<MiddleCell, CellAlign> = {
+  lands: "start",
+  support: "end",
+  command: "center",
+};
+/** Persisted board layout. One shared global config; only the opponent HUD is
+ *  table-size-keyed. Presets are authoritative — applying one replaces every
+ *  field wholesale. Any manual edit flips `activePreset` to "custom".
+ *
+ *  `landSupportRatio` and `scales` are optional so a config persisted before
+ *  they existed (or cloud-synced from an older client) reads as the neutral
+ *  default rather than `undefined`; consumers apply `?? 0.5` / `?? 1`. */
+export interface FlexLayoutConfig {
+  gridBands: GridBands;
+  /** Lands' share of the lands↔support middle row, 0..1. Support takes the
+   *  remainder (`1 - ratio`). Absent ⇒ 0.5 (the prior equal `flex-1` split). */
+  landSupportRatio?: number;
+  /** Left-to-right order of the middle-row cells. Absent ⇒
+   *  {@link DEFAULT_MIDDLE_ROW_ORDER} (lands · support · command). */
+  middleRowOrder?: MiddleCell[];
+  /** Per-zone aspect-preserving size multipliers. Absent key ⇒ 1.0. */
+  scales?: Partial<Record<FlexScaleKey, number>>;
+  /** Per-cell content alignment. Absent key ⇒ {@link DEFAULT_CELL_ALIGN}. */
+  cellAlign?: Partial<Record<MiddleCell, CellAlign>>;
+  widgets: Partial<Record<FlexWidgetKey, WidgetOffset>>;
+  opponentHudByTableSize: Partial<Record<FlexTableSize, WidgetOffset>>;
+  activePreset: FlexPresetId;
+}
+
+/** Neutral default for the lands↔support split — equal halves, matching the
+ *  prior hardcoded `flex-1` / `flex-1`. */
+export const DEFAULT_LAND_SUPPORT_RATIO = 0.5;
+
+/** Factory for the default layout. This IS the "default" preset baseline and the
+ *  reset target; `presets.ts` imports it rather than redefining it. The band
+ *  values reproduce today's desktop `gridTemplateRows` exactly (see
+ *  {@link useResolvedGridRows}). Returned as a function so nested objects are
+ *  never shared between the store and the defaults snapshot. */
+export function defaultFlexLayout(): FlexLayoutConfig {
+  return {
+    gridBands: { top: { pct: 12, pxCap: 100 }, bottom: { pct: 18, pxCap: 150 } },
+    landSupportRatio: DEFAULT_LAND_SUPPORT_RATIO,
+    middleRowOrder: [...DEFAULT_MIDDLE_ROW_ORDER],
+    scales: {},
+    cellAlign: {},
+    widgets: {},
+    opponentHudByTableSize: {},
+    activePreset: "default",
+  };
+}
+
+/** Deep-clone a layout config so applying a preset constant can never let a
+ *  later in-store mutation corrupt the shared preset object. */
+function cloneFlexLayout(config: FlexLayoutConfig): FlexLayoutConfig {
+  return {
+    gridBands: {
+      top: { ...config.gridBands.top },
+      bottom: { ...config.gridBands.bottom },
+    },
+    landSupportRatio: config.landSupportRatio,
+    middleRowOrder: config.middleRowOrder ? [...config.middleRowOrder] : undefined,
+    scales: { ...config.scales },
+    cellAlign: { ...config.cellAlign },
+    widgets: Object.fromEntries(
+      Object.entries(config.widgets).map(([k, v]) => [k, { ...v }]),
+    ),
+    opponentHudByTableSize: Object.fromEntries(
+      Object.entries(config.opponentHudByTableSize).map(([k, v]) => [k, { ...v }]),
+    ),
+    activePreset: config.activePreset,
+  };
+}
+
 function defaultAiSeat(): AiSeatPref {
   return { difficulty: DEFAULT_AI_DIFFICULTY, deckId: AI_DECK_RANDOM };
 }
@@ -167,6 +293,7 @@ function buildDefaultPreferences(): PreferencesState {
     dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
+    flexLayout: defaultFlexLayout(),
   };
 }
 
@@ -236,6 +363,9 @@ interface PreferencesState {
   dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
   artOverrides: Record<string, CardArtOverride>;
+  /** Persisted board layout (grid bands + per-widget offsets + active preset).
+   *  See {@link FlexLayoutConfig}. Edited only in Flex Layout mode. */
+  flexLayout: FlexLayoutConfig;
 }
 
 interface PreferencesActions {
@@ -298,6 +428,32 @@ interface PreferencesActions {
   setArtOverride: (oracleId: string, override: CardArtOverride) => void;
   clearArtOverride: (oracleId: string) => void;
   clearAllArtOverrides: () => void;
+  /** Resize one board grid band (top or bottom); the `1fr` middle absorbs the
+   *  change. Flips `activePreset` to "custom". */
+  setFlexBand: (side: "top" | "bottom", track: CappedTrack) => void;
+  /** Reposition a shared-global widget. Flips `activePreset` to "custom". */
+  setFlexWidgetOffset: (key: FlexWidgetKey, offset: WidgetOffset) => void;
+  /** Reposition the opponent HUD for the current table size only (so 1v1 and
+   *  multiplayer keep distinct spots). Flips `activePreset` to "custom". */
+  setFlexOpponentHudOffset: (tableSize: FlexTableSize, offset: WidgetOffset) => void;
+  /** Set the lands↔support split (lands' share, clamped 0..1). The support
+   *  column takes the remainder. Flips `activePreset` to "custom". */
+  setFlexLandSupportRatio: (ratio: number) => void;
+  /** Set the left-to-right order of the middle-row cells (drag-to-reorder).
+   *  Flips `activePreset` to "custom". */
+  setFlexMiddleRowOrder: (order: MiddleCell[]) => void;
+  /** Set a zone's aspect-preserving size multiplier. Flips `activePreset` to
+   *  "custom". */
+  setFlexScale: (key: FlexScaleKey, scale: number) => void;
+  /** Set a middle-row cell's content alignment. Flips `activePreset` to
+   *  "custom". */
+  setFlexCellAlign: (cell: MiddleCell, align: CellAlign) => void;
+  /** Apply a preset wholesale — replaces every field, including the opponent
+   *  HUD, and sets `activePreset` to the preset's id. Caller resolves the id to
+   *  a config (from `presets.ts`) to keep the store free of a preset import. */
+  applyFlexPreset: (config: FlexLayoutConfig) => void;
+  /** Reset the layout to the default preset (clears all offsets). */
+  resetFlexLayout: () => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -476,10 +632,73 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { artOverrides: rest };
         }),
       clearAllArtOverrides: () => set({ artOverrides: {} }),
+      setFlexBand: (side, track) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            gridBands: { ...state.flexLayout.gridBands, [side]: track },
+            activePreset: "custom",
+          },
+        })),
+      setFlexWidgetOffset: (key, offset) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            widgets: { ...state.flexLayout.widgets, [key]: offset },
+            activePreset: "custom",
+          },
+        })),
+      setFlexOpponentHudOffset: (tableSize, offset) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            opponentHudByTableSize: {
+              ...state.flexLayout.opponentHudByTableSize,
+              [tableSize]: offset,
+            },
+            activePreset: "custom",
+          },
+        })),
+      setFlexLandSupportRatio: (ratio) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            // Clamp so neither column starves (each keeps ≥20% of the row).
+            landSupportRatio: Math.min(0.8, Math.max(0.2, ratio)),
+            activePreset: "custom",
+          },
+        })),
+      setFlexMiddleRowOrder: (order) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            middleRowOrder: order,
+            activePreset: "custom",
+          },
+        })),
+      setFlexScale: (key, scale) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            // Clamp to a sane, readable range (half to double the auto-size).
+            scales: { ...state.flexLayout.scales, [key]: Math.min(2, Math.max(0.5, scale)) },
+            activePreset: "custom",
+          },
+        })),
+      setFlexCellAlign: (cell, align) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            cellAlign: { ...state.flexLayout.cellAlign, [cell]: align },
+            activePreset: "custom",
+          },
+        })),
+      applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
+      resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
     }),
     {
       name: "phase-preferences",
-      version: 15,
+      version: 16,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -504,6 +723,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          (instant — the prior behavior) via the shallow merge.
       // v14 → v15: Add commandZoneDisplay; legacy stores default to "auto"
       //          via the shallow merge.
+      // v15 → v16: Add flexLayout; legacy stores default to defaultFlexLayout()
+      //          via the shallow merge. The default bands reproduce today's
+      //          gridTemplateRows exactly, so this is a zero-regression seed —
+      //          no explicit migration block needed.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

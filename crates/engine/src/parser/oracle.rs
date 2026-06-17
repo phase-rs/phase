@@ -17,7 +17,7 @@ use crate::types::ability::{
     TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -660,10 +660,26 @@ fn parse_graveyard_keyword_continuation(
             if !continuation_fully_consumed(rest) {
                 return None;
             }
-            Some(Keyword::Escape {
-                cost: ManaCost::SelfManaCost,
-                exile_count,
-            })
+            // CR 702.138a: The granted escape cost is "[card's mana cost] plus
+            // exile N other cards from your graveyard". Build the compound
+            // `EscapeCost::NonMana(Composite[Mana(SelfManaCost), Exile{N,gy}])`
+            // so the runtime split (`split_escape_cost_components`) extracts the
+            // mana sub-cost for normal payment and routes the exile residual
+            // through `pay_additional_cost`.
+            Some(Keyword::Escape(EscapeCost::NonMana(
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::SelfManaCost,
+                        },
+                        AbilityCost::Exile {
+                            count: exile_count,
+                            zone: Some(Zone::Graveyard),
+                            filter: None,
+                        },
+                    ],
+                },
+            )))
         }
         GraveyardGrantedKeywordKind::Mayhem => {
             // CR 702.187b: "The mayhem cost is equal to [its/that card's/the
@@ -3230,6 +3246,23 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
+            // CR 702.29a/e + CR 702.27a: Keyword-cost lines (cycling, flashback,
+            // suspend, …) are not spell resolution instructions. Without this
+            // guard, a sorcery whose Oracle text prints a spell effect followed
+            // by a cycling line (Fractured Sanity, Decree of Justice) routes
+            // "Cycling {cost}" through the spell catch-all and produces an
+            // `Unimplemented` spell ability instead of extracting the keyword
+            // for `synthesize_cycling`. Continuation-line protection already
+            // lives in `is_spell_resolution_instruction_line`; this covers the
+            // case where the keyword-cost line is its own main-loop iteration.
+            if is_keyword_cost_line(&lower) {
+                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
+
             // B7: Strip ability-word prefix and attach condition for spell effects.
             let mut spell_body_lines = Vec::new();
             let mut spell_description_lines = Vec::new();
@@ -4965,6 +4998,56 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::CountScope;
 
+    /// Test helper: pull the graveyard-exile sub-cost count out of a compound
+    /// `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{count,...}]))`.
+    /// Asserts exactly one `Exile` sub-cost is present and returns its count.
+    fn escape_graveyard_exile_count(kw: &Keyword) -> u32 {
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        let exiles: Vec<u32> = costs
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCost::Exile { count, .. } => Some(*count),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exiles.len(), 1, "expected one Exile sub-cost: {costs:?}");
+        exiles[0]
+    }
+
+    /// Test helper: pull the mana sub-cost out of a compound escape cost.
+    fn escape_mana_cost(kw: &Keyword) -> ManaCost {
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        costs
+            .iter()
+            .find_map(|c| match c {
+                AbilityCost::Mana { cost } => Some(cost.clone()),
+                _ => None,
+            })
+            .expect("compound escape cost must contain a mana sub-cost")
+    }
+
+    /// Test helper: the granted-escape `EscapeCost` (card's mana cost plus exile
+    /// N other cards from your graveyard) produced by the "The escape cost is
+    /// equal to ... plus exile N other cards" continuation.
+    fn granted_escape_cost(exile_count: u32) -> Keyword {
+        Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                },
+                AbilityCost::Exile {
+                    count: exile_count,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        }))
+    }
+
     /// CR 601.2c (#2344): a single "target opponent" governs the whole verb list
     /// ("sacrifices …, discards …, and loses 3 life") — the player is chosen once
     /// and every conjugated continuation shares that target via `ParentTarget`,
@@ -5043,6 +5126,67 @@ mod tests {
         let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
         let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+
+    /// CR 608.2d + CR 113.3 + CR 611.2: Linvala, Shield of Sea Gate's
+    /// activated ability — "{W/U}, Sacrifice ~: Choose hexproof or
+    /// indestructible. Creatures you control gain that ability until end of
+    /// turn." The activated ability's effect chain must prompt a typed
+    /// `Effect::Choose { ChoiceType::Keyword }` and then grant
+    /// `AddChosenKeyword` — never `Effect::Unimplemented`. Confirms the
+    /// chosen-keyword anaphor works in the activated-ability frame as well as
+    /// the trigger frame (Angelic Skirmisher).
+    #[test]
+    fn parse_linvala_shield_activated_choose_then_grant_chosen_keyword() {
+        use crate::types::ability::ChoiceType;
+        let text = "Flying\n{W/U}, Sacrifice Linvala, Shield of Sea Gate: Choose \
+                    hexproof or indestructible. Creatures you control gain that \
+                    ability until end of turn.";
+        let result = parse(
+            text,
+            "Linvala, Shield of Sea Gate",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Angel", "Wizard"],
+        );
+
+        // Collect every effect across all parsed abilities and their sub_ability chains.
+        let mut effects: Vec<&Effect> = Vec::new();
+        for ability in &result.abilities {
+            let mut node = Some(ability);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+        }
+
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::Keyword { options },
+                    persist: true,
+                } if options.as_slice()
+                    == [Keyword::Hexproof, Keyword::Indestructible]
+            )),
+            "expected a persisting keyword Choose(hexproof|indestructible), got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| s
+                        .modifications
+                        .contains(&ContinuousModification::AddChosenKeyword))
+            )),
+            "expected an AddChosenKeyword grant, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "no clause may be Unimplemented, got {effects:?}"
+        );
     }
 
     /// Issue #2385 — the free-cast window class must parse its resolution text to a real
@@ -8977,6 +9121,71 @@ mod tests {
         );
     }
 
+    /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry — the passive-voice
+    /// "When that mana is spent to cast a creature spell that shares a creature
+    /// type with your commander, scry 1" clause folds into the
+    /// commander-color-identity mana ability's `grants` as a `TriggerOnSpend`
+    /// with the relational `SharesCreatureTypeWithCommander` restriction. The
+    /// whole card parses with no `Effect::Unimplemented` anywhere.
+    #[test]
+    fn path_of_ancestry_full_parse_no_unimplemented() {
+        use crate::types::ability::ManaProduction;
+        use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+        let r = parse(
+            "This land enters tapped.\n{T}: Add one mana of any color in your commander's color identity. When that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
+            "Path of Ancestry",
+            &[],
+            &["Land"],
+            &["Path of Ancestry"],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+        let Effect::Mana {
+            produced, grants, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert!(
+            matches!(
+                produced,
+                ManaProduction::AnyInCommandersColorIdentity { .. }
+            ),
+            "expected commander-color-identity mana, got {produced:?}"
+        );
+        // CR 605.1a: the delayed-trigger rider doesn't disqualify the mana ability.
+        assert!(
+            crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+            "must stay a mana ability"
+        );
+        assert_eq!(grants.len(), 1, "grants: {grants:?}");
+        let ManaSpellGrant::TriggerOnSpend {
+            restriction,
+            ability,
+        } = &grants[0]
+        else {
+            panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+        };
+        assert_eq!(
+            *restriction,
+            Some(ManaRestriction::SharesCreatureTypeWithCommander)
+        );
+        assert!(matches!(*ability.effect, Effect::Scry { .. }));
+        assert!(
+            r.abilities[0].sub_ability.is_none(),
+            "the spend-trigger clause must be folded out of the chain"
+        );
+        // No Unimplemented anywhere in the ability tree.
+        assert!(
+            !matches!(*r.abilities[0].effect, Effect::Unimplemented { .. }),
+            "ability effect must not be Unimplemented"
+        );
+        // The "enters tapped" replacement is preserved.
+        assert!(
+            !r.replacements.is_empty(),
+            "enters-tapped replacement must be present"
+        );
+    }
+
     /// CR 106.6 + CR 603.3: a spell-referencing reflexive effect (Jade Orb of
     /// Dragonkind — "it enters with an additional +1/+1 counter on it") is NOT
     /// folded into a grant in the first pass — it stays a loud gap rather than
@@ -9910,6 +10119,44 @@ mod tests {
             !has_unimplemented,
             "Typecycling keyword line should not produce Unimplemented effects"
         );
+    }
+
+    /// Issue #629: Sorcery whose Oracle text prints a spell effect then a cycling
+    /// line must extract `Keyword::Cycling` and a `TriggerMode::Cycled` trigger,
+    /// not mis-route the cycling line through the spell catch-all.
+    #[test]
+    fn fractured_sanity_sorcery_cycling_line_not_spell_effect() {
+        use crate::types::triggers::TriggerMode;
+
+        let oracle = "Each opponent mills fourteen cards.\n\
+                      Cycling {1}{U} ({1}{U}, Discard this card: Draw a card.)\n\
+                      When you cycle this card, each opponent mills four cards.";
+        let r = parse_with_keyword_names(oracle, "Fractured Sanity", &[], &["Sorcery"], &[]);
+        assert!(
+            r.extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Cycling(_))),
+            "cycling line must extract Keyword::Cycling"
+        );
+        assert!(
+            !r.abilities.iter().any(|a| {
+                matches!(
+                    *a.effect,
+                    crate::types::ability::Effect::Unimplemented { .. }
+                )
+            }),
+            "cycling line must not become an Unimplemented spell ability"
+        );
+        let cycle_trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Cycled)
+            .expect("must parse when-you-cycle-this-card trigger");
+        assert!(cycle_trigger.execute.is_some());
+        assert!(matches!(
+            &*r.abilities[0].effect,
+            crate::types::ability::Effect::Mill { .. }
+        ));
     }
 
     #[test]
@@ -10945,6 +11192,84 @@ mod tests {
         let etb = &result.replacements[0];
         assert_eq!(etb.event, ReplacementEvent::Moved);
         assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 714.2b (Saga chapter) → CR 701.15 (goad) → CR 201.2a/201.4
+    /// (chosen-name). Day of the Moon's three chapters each "Choose a creature
+    /// card name, then goad all creatures with a name chosen for this
+    /// enchantment." Regression: the chosen-name suffix used to be dropped, so
+    /// GoadAll targeted a bare Typed[Creature] (every creature). It must lower
+    /// to a chained Choose{CardName, persist} → GoadAll whose target is
+    /// And[Typed[Creature], HasChosenName].
+    #[test]
+    fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
+        use crate::types::ability::TypeFilter;
+        let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II, III — Choose a creature card name, then goad all creatures with a name chosen for this enchantment. (Until your next turn, they attack each combat if able and attack a player other than you if able.)";
+        let result = parse_oracle_text(
+            oracle,
+            "Day of the Moon",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+
+        assert_eq!(
+            result.triggers.len(),
+            3,
+            "Expected 3 chapter triggers, got: {:?}",
+            result.triggers.len()
+        );
+
+        for (i, trigger) in result.triggers.iter().enumerate() {
+            assert_eq!(trigger.mode, TriggerMode::CounterAdded);
+            let execute = trigger
+                .execute
+                .as_ref()
+                .unwrap_or_else(|| panic!("chapter {i} should have an execute ability"));
+
+            // Chapter: Choose a creature card name (persisted) ...
+            assert!(
+                matches!(
+                    *execute.effect,
+                    Effect::Choose {
+                        choice_type: ChoiceType::CardName,
+                        persist: true,
+                        ..
+                    }
+                ),
+                "chapter {i} effect should be Choose{{CardName, persist}}, got {:?}",
+                execute.effect
+            );
+
+            // ... then goad all creatures WITH THE CHOSEN NAME.
+            let sub = execute
+                .sub_ability
+                .as_ref()
+                .unwrap_or_else(|| panic!("chapter {i} should chain a goad-all sub-ability"));
+            let target = match &*sub.effect {
+                Effect::GoadAll { target } => target,
+                other => panic!("chapter {i} sub-effect should be GoadAll, got {other:?}"),
+            };
+            match target {
+                TargetFilter::And { filters } => {
+                    assert!(
+                        filters.contains(&TargetFilter::HasChosenName),
+                        "chapter {i} GoadAll target must include HasChosenName, got {filters:?}"
+                    );
+                    assert!(
+                        filters.iter().any(|inner| matches!(
+                            inner,
+                            TargetFilter::Typed(tf)
+                                if tf.type_filters.contains(&TypeFilter::Creature)
+                        )),
+                        "chapter {i} GoadAll target must include Typed(Creature), got {filters:?}"
+                    );
+                }
+                other => panic!(
+                    "chapter {i} GoadAll target must be And[Typed(Creature), HasChosenName], got {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -12343,15 +12668,13 @@ mod tests {
         let escape_kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }));
+            .find(|k| matches!(k, Keyword::Escape(_)));
         assert!(escape_kw.is_some(), "Escape keyword should be extracted");
-        match escape_kw.unwrap() {
-            Keyword::Escape { cost, exile_count } => {
-                assert_eq!(*exile_count, 2);
-                assert!(matches!(cost, ManaCost::Cost { generic: 0, shards } if shards.len() == 1));
-            }
-            _ => unreachable!(),
-        }
+        let kw = escape_kw.unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 2);
+        assert!(
+            matches!(escape_mana_cost(kw), ManaCost::Cost { generic: 0, shards } if shards.len() == 1)
+        );
         // No Unimplemented abilities for the escape line
         assert!(
             !r.abilities
@@ -12374,15 +12697,13 @@ mod tests {
         let escape_kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }));
+            .find(|k| matches!(k, Keyword::Escape(_)));
         assert!(escape_kw.is_some());
-        match escape_kw.unwrap() {
-            Keyword::Escape { cost, exile_count } => {
-                assert_eq!(*exile_count, 5);
-                assert!(matches!(cost, ManaCost::Cost { generic: 3, shards } if shards.len() == 2));
-            }
-            _ => unreachable!(),
-        }
+        let kw = escape_kw.unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 5);
+        assert!(
+            matches!(escape_mana_cost(kw), ManaCost::Cost { generic: 3, shards } if shards.len() == 2)
+        );
     }
 
     #[test]
@@ -12395,15 +12716,75 @@ mod tests {
             &["Creature"],
             &[],
         );
-        match r
+        let kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }))
-            .unwrap()
-        {
-            Keyword::Escape { exile_count, .. } => assert_eq!(*exile_count, 8),
-            _ => unreachable!(),
-        }
+            .find(|k| matches!(k, Keyword::Escape(_)))
+            .unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 8);
+    }
+
+    /// CR 702.138a regression (WHO cluster #9 — Lunar Hatchling): a multi-clause
+    /// escape additional cost must compose ALL exile clauses, not just the first.
+    /// "Escape—{4}{G}{U}, Exile a land you control, Exile five other cards from
+    /// your graveyard" parses to a Composite of the mana sub-cost plus BOTH exile
+    /// sub-costs: the count-1 "land you control" battlefield clause (zone: None,
+    /// land-permanent filter) and the count-5 graveyard clause. Neither sub-cost
+    /// may be Unimplemented.
+    #[test]
+    fn parse_escape_lunar_hatchling_multi_clause_cost() {
+        let r = parse(
+            "Escape\u{2014}{4}{G}{U}, Exile a land you control, Exile five other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)",
+            "Lunar Hatchling",
+            &[],
+            &["Creature"],
+            &["Alien", "Beast"],
+        );
+        let kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::Escape(_)))
+            .expect("Escape keyword should be extracted");
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        // No sub-cost may be Unimplemented.
+        assert!(
+            !costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Unimplemented { .. })),
+            "escape cost has Unimplemented sub-cost: {costs:?}"
+        );
+        // Mana sub-cost: {4}{G}{U}.
+        assert_eq!(
+            escape_mana_cost(kw).mana_value(),
+            6,
+            "mana sub-cost: {costs:?}"
+        );
+        // Two exile sub-costs: a count-1 battlefield "land you control" clause
+        // (zone None, land-permanent filter) and a count-5 graveyard clause.
+        let exiles: Vec<(&u32, &Option<crate::types::zones::Zone>)> = costs
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCost::Exile { count, zone, .. } => Some((count, zone)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exiles.len(), 2, "expected two exile sub-costs: {costs:?}");
+        // The land clause is count 1 with no explicit zone (battlefield-implying
+        // filter resolves to battlefield at runtime); the graveyard clause is
+        // count 5 from the graveyard.
+        let land_clause = exiles
+            .iter()
+            .find(|(c, z)| **c == 1 && z.is_none())
+            .unwrap_or_else(|| panic!("missing count-1 battlefield land clause: {costs:?}"));
+        let _ = land_clause;
+        assert!(
+            exiles
+                .iter()
+                .any(|(c, z)| **c == 5 && **z == Some(crate::types::zones::Zone::Graveyard)),
+            "missing count-5 graveyard clause: {costs:?}"
+        );
     }
 
     #[test]
@@ -13974,10 +14355,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 }),
             "missing escape grant: {:?}",
             static_def.modifications
@@ -13999,10 +14377,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 })
         }));
     }
@@ -14185,10 +14560,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 }),
             "missing escape grant: {:?}",
             static_def.modifications
@@ -14202,13 +14574,7 @@ mod tests {
             GraveyardGrantedKeywordKind::Escape,
         )
         .expect("continuation should parse");
-        assert_eq!(
-            keyword,
-            Keyword::Escape {
-                cost: ManaCost::SelfManaCost,
-                exile_count: 3,
-            }
-        );
+        assert_eq!(keyword, granted_escape_cost(3));
     }
 
     #[test]
@@ -16502,6 +16868,35 @@ mod tests {
     }
 
     /// CR 702.94a + CR 400.3: End-to-end reproduction of Sliver Weftwinder's
+    /// CR 509.1b + CR 702.28b: both shadow-block cards reach a `CanBlockShadow`
+    /// static through the full pipeline (card-name → `~` normalization included),
+    /// instead of falling to `Effect::Unimplemented`.
+    #[test]
+    fn block_shadow_cards_reach_can_block_shadow_static() {
+        for (oracle, name) in [
+            (
+                "Heartwood Dryad can block creatures with shadow as though they didn't have shadow.",
+                "Heartwood Dryad",
+            ),
+            (
+                "Wall of Diffusion can block creatures with shadow as though it had shadow.",
+                "Wall of Diffusion",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+            assert!(
+                parsed
+                    .statics
+                    .iter()
+                    .any(|s| s.mode == StaticMode::CanBlockShadow
+                        && s.affected == Some(TargetFilter::SelfRef)),
+                "{name}: expected a SelfRef CanBlockShadow static, got statics={:?}, abilities={:?}",
+                parsed.statics,
+                parsed.abilities,
+            );
+        }
+    }
+
     /// hand-grant line through the full `parse_oracle_text` pipeline.
     #[test]
     fn hand_grant_reaches_statics_through_full_pipeline() {

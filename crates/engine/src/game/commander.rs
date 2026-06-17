@@ -125,6 +125,13 @@ pub fn commander_lethal_headroom(
 /// CR 903.9b (hand/library) is also covered here — while the CR models it as a
 /// replacement effect, the SBA approach is functionally equivalent and avoids
 /// deep interception of every `move_to_zone` call site.
+///
+/// CR 903.9c (merged/melded commander): when a commander is a component of a
+/// merged or melded permanent that leaves to hand or library, `split_merged_permanent_on_leave`
+/// places the absorbed commander component into the destination zone with
+/// `is_commander` intact. This function then finds that component here and
+/// returns it — the owner's choice and the subsequent `Zone::Command` move
+/// proceed identically to the standalone case.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
         // Oathbreaker RC: signature spells return to the command zone just like
@@ -211,6 +218,72 @@ fn card_face_color_identity(face: &CardFace) -> Vec<ManaColor> {
 fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
     if !identity.contains(&color) {
         identity.push(color);
+    }
+}
+
+/// CR 205.3m + CR 903.3: The set of creature subtypes ("creature types") across
+/// `player`'s commander(s).
+///
+/// CR 205.3m: creature types are the subtypes shared by creatures and kindreds,
+/// so only commanders that are creatures contribute. Reads
+/// `deck_pools.current_commander` first (pre-game registration), falling back to
+/// live `is_commander && owner == player` objects — the same precedence as
+/// [`commander_color_identity`]. Partner commanders merge their type sets.
+/// Subtypes are deduplicated case-insensitively, preserving first-seen casing.
+///
+/// Returns an empty vector when the player has no commander (CR 903.3: a card
+/// must be designated a commander for this reference to resolve). Callers that
+/// gate a spend on "shares a creature type with your commander" treat an empty
+/// set as "no type shared" — the spend simply doesn't qualify.
+//
+// TODO(strict): CR 702.73a — a Changeling commander is every creature type and
+// should match any creature subtype. Mirrors the color-identity helper's scope:
+// printed/effective subtypes only, no CDA expansion, until that is generalized.
+pub fn commander_creature_types(state: &GameState, player: PlayerId) -> Vec<String> {
+    let mut types: Vec<String> = Vec::new();
+
+    if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
+        for entry in pool.current_commander.iter() {
+            if entry
+                .card
+                .card_type
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            {
+                for subtype in &entry.card.card_type.subtypes {
+                    push_creature_type(&mut types, subtype);
+                }
+            }
+        }
+        if !types.is_empty() {
+            return types;
+        }
+    }
+
+    for obj in state
+        .objects
+        .values()
+        .filter(|obj| obj.is_commander && obj.owner == player)
+    {
+        if obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+        {
+            for subtype in &obj.card_types.subtypes {
+                push_creature_type(&mut types, subtype);
+            }
+        }
+    }
+    types
+}
+
+fn push_creature_type(types: &mut Vec<String>, subtype: &str) {
+    if !types
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(subtype))
+    {
+        types.push(subtype.to_string());
     }
 }
 
@@ -678,6 +751,61 @@ mod tests {
         assert_eq!(identity.len(), 2);
         assert!(identity.contains(&ManaColor::White));
         assert!(identity.contains(&ManaColor::Black));
+    }
+
+    #[test]
+    fn commander_creature_types_empty_without_commander() {
+        // CR 903.3: No commander designated → empty creature-type set.
+        let state = setup_commander_game();
+        assert!(commander_creature_types(&state, PlayerId(0)).is_empty());
+    }
+
+    #[test]
+    fn commander_creature_types_returns_live_commander_subtypes() {
+        // CR 205.3m: a creature commander contributes its subtypes as creature types.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Elf Lord",
+            vec![ManaColor::Green],
+        );
+        state.objects.get_mut(&cmd_id).unwrap().card_types.subtypes =
+            vec!["Elf".to_string(), "Warrior".to_string()];
+
+        let types = commander_creature_types(&state, PlayerId(0));
+        assert_eq!(types.len(), 2);
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Elf")));
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Warrior")));
+    }
+
+    #[test]
+    fn commander_creature_types_merges_partner_commanders() {
+        // CR 205.3m + CR 903.3: partner commanders union their creature-type sets.
+        let mut state = setup_commander_game();
+        let a = create_commander_in_command_zone(&mut state, PlayerId(0), "Partner A", vec![]);
+        state.objects.get_mut(&a).unwrap().card_types.subtypes = vec!["Elf".to_string()];
+        let b = create_commander_in_command_zone(&mut state, PlayerId(0), "Partner B", vec![]);
+        state.objects.get_mut(&b).unwrap().card_types.subtypes = vec!["Goblin".to_string()];
+
+        let types = commander_creature_types(&state, PlayerId(0));
+        assert_eq!(types.len(), 2);
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Elf")));
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Goblin")));
+    }
+
+    #[test]
+    fn commander_creature_types_ignores_noncreature_commander() {
+        // CR 205.3m: creature types only belong to creatures. A Vehicle commander
+        // (permitted by CR 903.3) that is not a creature contributes no creature
+        // types.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Vehicle", vec![]);
+        let obj = state.objects.get_mut(&cmd_id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Artifact];
+        obj.card_types.subtypes = vec!["Vehicle".to_string()];
+
+        assert!(commander_creature_types(&state, PlayerId(0)).is_empty());
     }
 
     #[test]
@@ -1596,6 +1724,256 @@ mod tests {
             commander_lethal_headroom(&state, PlayerId(1), cmd_a),
             Some(16),
             "Only damage from cmd_a to player 1 counts toward cmd_a's headroom vs player 1"
+        );
+    }
+
+    // --- CR 903.9c: Merged/Melded Commander Zone Return Tests ---
+
+    /// Helper: create a named creature on the battlefield with `is_commander` optionally set.
+    fn make_creature(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        is_commander: bool,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.is_commander = is_commander;
+        id
+    }
+
+    /// CR 903.9c: when a merged permanent with a commander component leaves to
+    /// hand, the SBA offers the owner CommanderZoneChoice for the commander
+    /// component (survivor case: the survivor itself is the commander).
+    ///
+    /// Discriminating: if `commander_eligible_for_zone_return` stops covering
+    /// Zone::Hand, or if `is_commander` is cleared on zone exit, this test fails.
+    #[test]
+    fn cr903_9c_merged_commander_to_hand_sba_offers_zone_choice() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+
+        // Non-commander on battlefield (will merge on top as rider).
+        let rider_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
+        // Commander on battlefield (merge TARGET — keeps its ObjectId as survivor).
+        let cmd_id = make_creature(&mut state, PlayerId(0), "Surrak Dragonclaw", true);
+
+        // Merge rider on top of the commander — survivor stays as cmd_id (CR 730.2c).
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider_id,
+            cmd_id,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+        assert!(
+            state.objects[&cmd_id].merged_components.contains(&rider_id),
+            "rider is absorbed into the commander pile"
+        );
+
+        // Simulate a bounce effect: merged permanent goes to hand.
+        events.clear();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
+
+        // Survivor (cmd_id, the commander) should now be in hand with is_commander intact.
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Hand);
+        assert!(
+            state.objects[&cmd_id].is_commander,
+            "is_commander must survive the zone transition"
+        );
+
+        // SBA should detect the commander in hand and offer zone-return choice.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CommanderZoneChoice {
+                    commander_id,
+                    current_zone: Zone::Hand,
+                    ..
+                } if commander_id == cmd_id
+            ),
+            "CR 903.9c: SBA offers CommanderZoneChoice for commander in hand; got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// CR 903.9c: accepting CommanderZoneChoice for a merged commander in hand
+    /// moves the commander component to Zone::Command.
+    ///
+    /// Discriminating: reverts if the accept branch no longer calls
+    /// `move_to_zone(Zone::Command)` or if the SBA path is broken.
+    #[test]
+    fn cr903_9c_merged_commander_to_hand_accept_moves_to_command() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let rider_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
+        let cmd_id = make_creature(&mut state, PlayerId(0), "Surrak Dragonclaw", true);
+
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider_id,
+            cmd_id,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
+
+        check_state_based_actions(&mut state, &mut events);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "SBA must pause with CommanderZoneChoice"
+        );
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        );
+        assert!(result.is_ok(), "accepting zone choice must not error");
+
+        assert_eq!(
+            state.objects[&cmd_id].zone,
+            Zone::Command,
+            "CR 903.9c: commander component must be in Zone::Command after accepting"
+        );
+    }
+
+    /// CR 903.9c: declining CommanderZoneChoice for a merged commander in hand
+    /// leaves the commander component in hand (not moved to command zone).
+    ///
+    /// Discriminating: reverts if the decline branch stops setting
+    /// `commander_declined_zone_return` or incorrectly moves to command zone.
+    #[test]
+    fn cr903_9c_merged_commander_to_hand_decline_stays_in_hand() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let rider_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
+        let cmd_id = make_creature(&mut state, PlayerId(0), "Surrak Dragonclaw", true);
+
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider_id,
+            cmd_id,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
+        check_state_based_actions(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ));
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            state.objects[&cmd_id].zone,
+            Zone::Hand,
+            "CR 903.9c: declining zone choice must leave commander in hand"
+        );
+    }
+
+    /// CR 903.9c: absorbed (non-survivor) commander component is found by the SBA
+    /// after the merged pile leaves to hand.
+    ///
+    /// Discriminating: the commander is the MERGING object, so it becomes an
+    /// absorbed component routed exclusively through `merge::put_component_into_zone`
+    /// (not `zones::move_to_zone`). If `put_component_into_zone` or
+    /// `apply_zone_exit_cleanup` dropped `is_commander`, the SBA would find nothing
+    /// and the assertion would fail. This is the novel path not covered by the
+    /// survivor-case tests above.
+    ///
+    /// Setup:
+    ///   host_id  = non-commander = TARGET  → survivor (keeps ObjectId, travels
+    ///              through normal `move_to_zone`, ends in hand)
+    ///   cmd_id   = commander     = MERGING → absorbed component (travels through
+    ///              `put_component_into_zone`, ends in hand with is_commander intact)
+    #[test]
+    fn cr903_9c_absorbed_commander_component_in_hand_found_by_sba() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+
+        // Non-commander is the TARGET — it keeps its ObjectId as the survivor
+        // (CR 730.2c). It travels through move_to_zone on leave.
+        let host_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
+        // Commander is the MERGING object — it becomes an absorbed component
+        // routed through put_component_into_zone on leave.
+        let cmd_id = make_creature(&mut state, PlayerId(0), "Surrak Dragonclaw", true);
+
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            cmd_id,  // merging object → absorbed component
+            host_id, // target → survivor (keeps host_id as ObjectId)
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+        assert!(
+            state.objects[&host_id].merged_components.contains(&cmd_id),
+            "commander (cmd_id) is an absorbed component of the merged pile"
+        );
+
+        // Bounce to hand: host_id (survivor) → hand via move_to_zone;
+        // cmd_id (absorbed commander) → hand via put_component_into_zone.
+        crate::game::zones::move_to_zone(&mut state, host_id, Zone::Hand, &mut events);
+
+        // put_component_into_zone must preserve is_commander through
+        // apply_zone_exit_cleanup / snapshot_for_zone_change.
+        assert!(
+            state.objects[&cmd_id].is_commander,
+            "is_commander must survive put_component_into_zone"
+        );
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Hand);
+
+        // SBA must find the absorbed commander component in hand.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CommanderZoneChoice {
+                    commander_id,
+                    current_zone: Zone::Hand,
+                    ..
+                } if commander_id == cmd_id
+            ),
+            "CR 903.9c: SBA must find the absorbed commander component in hand; got {:?}",
+            state.waiting_for
         );
     }
 }
