@@ -1358,6 +1358,24 @@ impl Keyword {
                 | Keyword::DoubleTeam
         )
     }
+
+    /// CR 702.164b: Keywords whose multiple instances SUM their parameter values
+    /// into a single aggregate (e.g. a creature's total toxic value), rather than
+    /// collapsing identical instances. When such a keyword is granted on top of an
+    /// identical printed instance, BOTH must remain on the keyword list so the
+    /// aggregate reader counts every copy. Distinct from `instances_function_separately`
+    /// (which gates per-instance trigger installation — a different semantic axis).
+    /// Conservative/CR-driven: only Toxic sums today (CR 702.164b). Protection
+    /// (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do NOT sum — they keep
+    /// deduping identical instances. Add any future "sum of all N" keyword here.
+    ///
+    /// Out of scope (intentionally not gated by this predicate): cast-time spell
+    /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
+    /// Toxic is inert at cast time) and the layers `AddDynamicKeyword` arm
+    /// (`DynamicKeywordKind` is only Annihilator/Modular, never Toxic).
+    pub fn sums_across_instances(&self) -> bool {
+        matches!(self, Keyword::Toxic(_))
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).

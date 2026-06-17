@@ -526,6 +526,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_distinct_card_types_among_tracked_set,
             parse_distinct_card_types_among_objects,
+            // CR 201.2 + CR 603.4: "different <power|mana value> among <type>"
+            // distinct-by-quality count (nested here to stay within nom's
+            // tuple arity).
+            parse_distinct_quality_among_objects,
         )),
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
@@ -759,13 +763,20 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_distinct_card_types_among_tracked_set,
             parse_distinct_card_types_among_objects,
         )),
-        // CR 201.2 + CR 603.4: "differently named <type-phrase>" — distinct-by-
-        // name population count. Must precede `parse_number_of_controlled_type`
+        // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
+        // and "different <power|mana value> among <type>" (distinct-by-quality —
+        // Celebrate the Harvest's "the number of different powers among ..."
+        // routes here after the "the number of " prefix strip). Distinct-
+        // population counts that must precede `parse_number_of_controlled_type`
         // so the adjective prefix is consumed before the generic typed-filter
-        // fallback. Class: Gimbal, Audience with Trostani, Awakened Amalgam,
-        // Sandsteppe War Riders, All-Fates Scroll, Fungal Colossus, Euroakus,
-        // Neriv, Emil, and other "differently named X" counters.
-        parse_distinct_named_objects,
+        // fallback. Nested to stay within nom's tuple arity. Named class: Gimbal,
+        // Audience with Trostani, Awakened Amalgam, Sandsteppe War Riders,
+        // All-Fates Scroll, Fungal Colossus, Euroakus, Neriv, Emil, and other
+        // "differently named X" counters.
+        alt((
+            parse_distinct_named_objects,
+            parse_distinct_quality_among_objects,
+        )),
         // CR 122.1: "[kind] counters <possessor>" must be tried BEFORE the
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
@@ -2206,6 +2217,36 @@ fn parse_for_each_differently_named(input: &str) -> OracleResult<'_, QuantityRef
     ))
 }
 
+/// Parse "different <quality> among <type-phrase>" patterns (distinct-value
+/// population count). Used for "for each different power among creatures you
+/// control" (Golden Ratio), "different mana value among nonland permanents you
+/// control" (Lunar Insight), "different mana value among nonland cards in your
+/// graveyard" (Sudden Insight), and the "the number of different powers among
+/// creatures you control" form (Celebrate the Harvest). The quality-generalized
+/// sibling of `parse_for_each_differently_named` (which is the Name case).
+/// CR 201.2 + CR 603.4: Distinct-by-quality population count.
+fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("different ").parse(input)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![quality],
+        },
+    ))
+}
+
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -2234,6 +2275,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         // CR 201.2: "for each differently named <type>" — distinct-by-name
         // iteration. Must precede generic type-filter arm.
         parse_for_each_differently_named,
+        // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
+        // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
+        // Insight). Must precede the generic type-filter arm so the "different
+        // <quality>" adjective prefix is consumed before the bare type word.
+        parse_distinct_quality_among_objects,
         // CR 700.8: "creature in your party" must precede the generic
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
@@ -5465,6 +5511,85 @@ mod tests {
         assert_eq!(controller, Some(ControllerRef::You));
         assert!(properties.contains(&FilterProp::Token));
         assert_eq!(qualities, vec![SharedQuality::Name]);
+    }
+
+    /// Helper: pull `qualities` out of an `ObjectCountDistinct`, panicking (so
+    /// the test fails loudly) on `Fixed`/`Variable`/any other shape — the exact
+    /// misparse this fix corrects.
+    fn distinct_qualities(q: &QuantityRef) -> Vec<SharedQuality> {
+        match q {
+            QuantityRef::ObjectCountDistinct { qualities, .. } => qualities.clone(),
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_different_power_among_creatures_you_control() {
+        // Golden Ratio: "Draw a card for each different power among creatures
+        // you control." Must be a distinct-power count, not Fixed(1).
+        let (rest, q) =
+            parse_for_each_clause_ref("different power among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(qualities, vec![SharedQuality::Power]);
+    }
+
+    #[test]
+    fn for_each_different_powers_plural_among_creatures() {
+        // Plural "powers" must parse identically (Celebrate the Harvest uses it).
+        let (rest, q) =
+            parse_for_each_clause_ref("different powers among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(distinct_qualities(&q), vec![SharedQuality::Power]);
+    }
+
+    #[test]
+    fn for_each_different_mana_value_among_nonland_permanents() {
+        // Lunar Insight: "for each different mana value among nonland permanents
+        // you control."
+        let (rest, q) =
+            parse_for_each_clause_ref("different mana value among nonland permanents you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(distinct_qualities(&q), vec![SharedQuality::ManaValue]);
+    }
+
+    #[test]
+    fn for_each_different_mana_value_among_graveyard_nonland_cards() {
+        // Sudden Insight: "for each different mana value among nonland cards in
+        // your graveyard." The graveyard zone must survive into the filter so
+        // the runtime counts graveyard cards (not the default battlefield).
+        let (rest, q) =
+            parse_for_each_clause_ref("different mana value among nonland cards in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCountDistinct { filter, qualities } => {
+                assert_eq!(qualities, vec![SharedQuality::ManaValue]);
+                assert_eq!(
+                    filter.extract_in_zone(),
+                    Some(crate::types::zones::Zone::Graveyard),
+                    "graveyard zone must survive into the filter: {filter:?}"
+                );
+            }
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn number_of_different_powers_among_creatures_celebrate_the_harvest() {
+        // Celebrate the Harvest: "...where X is the number of different powers
+        // among creatures you control." Routes through the "the number of" path.
+        let (rest, q) =
+            parse_quantity_ref("the number of different powers among creatures you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(qualities, vec![SharedQuality::Power]);
     }
 
     #[test]

@@ -253,6 +253,20 @@ pub enum ProposedEvent {
         count: u32,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+    /// effects can modify the explore action (e.g., add a scry prelude).
+    Explore {
+        object_id: ObjectId,
+        applied: HashSet<ReplacementId>,
+    },
+    /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
+    /// effects can modify how many times the proliferate action is performed
+    /// (Tekuthal, Inquiry Dominus — "proliferate twice instead").
+    Proliferate {
+        player_id: PlayerId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
@@ -453,6 +467,15 @@ impl ProposedEvent {
         }
     }
 
+    /// CR 701.34a + CR 614.1a: Construct a `Proliferate` proposed event.
+    pub fn proliferate(player_id: PlayerId, count: u32) -> Self {
+        Self::Proliferate {
+            player_id,
+            count,
+            applied: HashSet::new(),
+        }
+    }
+
     /// CR 106.3 + CR 614.1a: Construct a `ProduceMana` proposed event.
     pub fn produce_mana(source_id: ObjectId, player_id: PlayerId, mana_type: ManaType) -> Self {
         Self::produce_mana_with_context(source_id, player_id, mana_type, false)
@@ -501,6 +524,8 @@ impl ProposedEvent {
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -527,6 +552,8 @@ impl ProposedEvent {
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -574,7 +601,8 @@ impl ProposedEvent {
             ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
-            | ProposedEvent::RemoveCounter { object_id, .. } => state
+            | ProposedEvent::RemoveCounter { object_id, .. }
+            | ProposedEvent::Explore { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
@@ -615,6 +643,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { player_id, .. }
             | ProposedEvent::Scry { player_id, .. }
             | ProposedEvent::Mill { player_id, .. }
+            | ProposedEvent::Proliferate { player_id, .. }
             | ProposedEvent::CoinFlip { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
@@ -637,7 +666,8 @@ impl ProposedEvent {
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
-            | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            | ProposedEvent::Sacrifice { object_id, .. }
+            | ProposedEvent::Explore { object_id, .. } => Some(*object_id),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
@@ -658,6 +688,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { .. }
             | ProposedEvent::Scry { .. }
             | ProposedEvent::Mill { .. }
+            | ProposedEvent::Proliferate { .. }
             | ProposedEvent::CoinFlip { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }

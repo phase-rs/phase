@@ -439,6 +439,11 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
 /// CR 903.9a: If a commander is in a graveyard or exile (and was put there
 /// since the last SBA check), its owner may put it into the command zone.
 /// CR 903.9b: Hand and library are also covered (see `commander_eligible_for_zone_return`).
+/// CR 903.9c: Also handles merged/melded permanents — after
+/// `merge::split_merged_permanent_on_leave` places each absorbed component
+/// in its destination zone with `is_commander` intact, the next SBA pass
+/// finds the commander component here and presents the choice identically to
+/// the standalone case.
 ///
 /// Pauses the SBA loop by setting `WaitingFor::CommanderZoneChoice` so the
 /// player can accept (move to command zone) or decline (leave in place).

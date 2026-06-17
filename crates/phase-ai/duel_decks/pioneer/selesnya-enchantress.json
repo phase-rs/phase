@@ -1,0 +1,20 @@
+{
+  "name": "Selesnya Enchantress",
+  "format": "pioneer",
+  "frozen_date": "2026-06-16",
+  "source": "hand-built enchantments-matter gate fixture (enchantress + constellation payoffs)",
+  "main": [
+    { "name": "Eidolon of Blossoms", "count": 4 },
+    { "name": "Setessan Champion", "count": 4 },
+    { "name": "Sythis, Harvest's Hand", "count": 4 },
+    { "name": "Enchantress's Presence", "count": 3 },
+    { "name": "Sigil of the Empty Throne", "count": 2 },
+    { "name": "Archon of Sun's Grace", "count": 2 },
+    { "name": "Wild Growth", "count": 4 },
+    { "name": "Utopia Sprawl", "count": 4 },
+    { "name": "Sanctum Weaver", "count": 4 },
+    { "name": "Banishing Light", "count": 3 },
+    { "name": "Forest", "count": 14 },
+    { "name": "Plains", "count": 12 }
+  ]
+}

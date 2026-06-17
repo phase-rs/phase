@@ -1569,6 +1569,69 @@ fn scry_applier(
     }
 }
 
+// --- 4d. Explore (Twists and Turns / Topography Tracker) ---
+
+// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+// effects can modify the explore action (e.g., add a scry prelude or double explore).
+fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Explore { .. })
+}
+
+fn explore_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Explore { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+    let Some(execute) = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone())
+    else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::types::ability::TargetRef;
+
+    let controller = source.controller;
+    let mut current = Some(execute.as_ref());
+    while let Some(def) = current {
+        match &*def.effect {
+            Effect::Scry { .. } => {
+                let ability = build_resolved_from_def(def, rid.source, controller);
+                let _ = crate::game::effects::scry::resolve(state, &ability, events);
+            }
+            Effect::Explore => {
+                let ability = ResolvedAbility::new(
+                    Effect::Explore,
+                    vec![TargetRef::Object(object_id)],
+                    rid.source,
+                    controller,
+                );
+                let _ = crate::game::effects::explore::resolve_explore_effect(
+                    state, &ability, object_id, events,
+                );
+            }
+            _ => {
+                let mut ability = build_resolved_from_def(def, rid.source, controller);
+                ability.targets = vec![TargetRef::Object(object_id)];
+                let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            }
+        }
+        current = def.sub_ability.as_deref();
+    }
+
+    ApplyResult::Prevented
+}
+
 // --- 4c. CoinFlip (Krark's Thumb) ---
 
 // CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
@@ -1612,6 +1675,52 @@ fn coin_flip_applier(
     };
 
     ApplyResult::Modified(ProposedEvent::CoinFlip {
+        player_id,
+        count: new_count,
+        applied,
+    })
+}
+
+// --- 4c2. Proliferate (Tekuthal, Inquiry Dominus) ---
+
+// CR 701.34a + CR 614.1a: A proliferate action is about to happen. Count-
+// modifying replacements ("proliferate twice instead") substitute the action
+// count before the chooser opens.
+fn proliferate_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Proliferate { count, .. } if *count > 0)
+}
+
+fn proliferate_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Proliferate {
+        player_id,
+        count,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    let new_count = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref())
+        .and_then(|execute| match &*execute.effect {
+            Effect::Proliferate if execute.sub_ability.is_none() => execute
+                .repeat_for
+                .as_ref()
+                .and_then(|qty| resolve_event_replacement_quantity(qty, count)),
+            _ => None,
+        })
+        .map(|resolved| resolved.max(0) as u32)
+        .unwrap_or(count);
+
+    ApplyResult::Modified(ProposedEvent::Proliferate {
         player_id,
         count: new_count,
         applied,
@@ -2666,10 +2775,24 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
     registry.insert(
+        ReplacementEvent::Explore,
+        ReplacementHandlerEntry {
+            matcher: explore_matcher,
+            applier: explore_applier,
+        },
+    );
+    registry.insert(
         ReplacementEvent::CoinFlip,
         ReplacementHandlerEntry {
             matcher: coin_flip_matcher,
             applier: coin_flip_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::Proliferate,
+        ReplacementHandlerEntry {
+            matcher: proliferate_matcher,
+            applier: proliferate_applier,
         },
     );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
@@ -3170,6 +3293,39 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|o| o.cast_from_zone == Some(*zone)),
+        // CR 614.1d + CR 601: entry-origin gate on the ENTERING object
+        // (`affected_object_id`), NOT the replacement source. The physical half
+        // delegates to the shared `OriginConstraint::matches_from` predicate.
+        // NOTE: `ProposedEvent::ZoneChange.from` is a non-optional `Zone`, so it
+        // is wrapped as `Some(*from)` to match the predicate's `&Option<Zone>`
+        // signature (the trigger-matcher caller passes a real `Option` because
+        // CR 111.1 token entry has `from = None`). The cast half (CR 601) reads
+        // the entering object's `cast_from_zone` — the "after being cast from
+        // <zone>" case, where the object enters from the Stack but originated in
+        // `cast_origin`. OR-combined: Don't Blink fires for both "enter from
+        // exile" and "cast from exile then enter".
+        ReplacementCondition::EnteredFromZone {
+            origin_constraint,
+            cast_origin,
+        } => {
+            // CR 614.1d: the physical half matches only when a physical origin
+            // constraint is present. A cast-origin-only clause leaves
+            // `origin_constraint` `None`, so the physical path is inert and the
+            // condition can fire solely via the cast half below.
+            let physical = matches!(
+                event,
+                ProposedEvent::ZoneChange { from, .. }
+                    if origin_constraint
+                        .as_ref()
+                        .is_some_and(|c| c.matches_from(&Some(*from)))
+            );
+            let cast = cast_origin.is_some_and(|cz| {
+                affected_object_id
+                    .and_then(|oid| state.objects.get(&oid))
+                    .is_some_and(|o| o.cast_from_zone == Some(cz))
+            });
+            physical || cast
+        }
         // CR 207.2c (Raid): "if you attacked this turn" — applies only when
         // the controller's `creatures_attacked_this_turn` set is non-empty
         // for any owned creature. Tracked on GameState and reset each turn.
@@ -3355,6 +3511,64 @@ fn evaluate_replacement_condition(
         // so it conservatively taps the land.
         ReplacementCondition::Unrecognized { .. } => true,
     }
+}
+
+/// CR 614.1d + CR 614.6: Evaluate the event-class-agnostic applicability gates
+/// (`valid_card`, `destination_zone`, `condition`) for a replacement against an
+/// event. Factored from the per-object scan (which runs the same three gates
+/// inline) so the global state-level store can run identical logic for
+/// non-damage events. `source` is the replacement's source object (the sentinel
+/// `ObjectId(0)` for a global install); `source_controller` anchors
+/// controller-relative filters/conditions. Returns `true` when all gates pass.
+fn apply_state_level_gates(
+    repl_def: &ReplacementDefinition,
+    event: &ProposedEvent,
+    source: ObjectId,
+    source_controller: PlayerId,
+    state: &GameState,
+) -> bool {
+    // CR 614.1d: valid_card filter — the event's affected object must match.
+    if let Some(ref filter) = repl_def.valid_card {
+        let ctx = FilterContext::from_source_with_controller(source, source_controller);
+        let matches = if repl_def.event == ReplacementEvent::ChangeZone {
+            matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
+        } else {
+            event
+                .affected_object_id()
+                .map(|oid| matches_target_filter(state, oid, filter, &ctx))
+                .unwrap_or(false)
+        };
+        if !matches {
+            return false;
+        }
+    }
+    // CR 614.6: Zone-change replacements may be scoped to a specific destination.
+    if let Some(ref dest_zone) = repl_def.destination_zone {
+        let matches_dest = match event {
+            ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
+            ProposedEvent::CreateToken { .. } => {
+                repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
+            }
+            _ => false,
+        };
+        if !matches_dest {
+            return false;
+        }
+    }
+    // CR 614.1d: Evaluate the replacement condition (e.g. EnteredFromZone).
+    if let Some(ref cond) = repl_def.condition {
+        if !evaluate_replacement_condition(
+            cond,
+            source_controller,
+            source,
+            state,
+            event.affected_object_id(),
+            event,
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn find_applicable_replacements(
@@ -3694,6 +3908,7 @@ pub fn find_applicable_replacements(
                     | ProposedEvent::Draw { player_id, .. }
                     | ProposedEvent::Scry { player_id, .. }
                     | ProposedEvent::Mill { player_id, .. }
+                    | ProposedEvent::Proliferate { player_id, .. }
                     | ProposedEvent::CoinFlip { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
@@ -3738,8 +3953,44 @@ pub fn find_applicable_replacements(
                             if !player_ok {
                                 continue;
                             }
-                        } else if repl_def.valid_player.is_some() {
-                            continue;
+                        } else if let Some(valid_player) = &repl_def.valid_player {
+                            // Quantity-modifying counter replacements (Halving Season
+                            // class) may scope by permanent controller; player-counter
+                            // prohibitions with valid_player stay player-only.
+                            if !matches!(
+                                repl_def.quantity_modification,
+                                Some(
+                                    QuantityModification::Double
+                                        | QuantityModification::Half
+                                        | QuantityModification::Plus { .. }
+                                        | QuantityModification::Minus { .. }
+                                )
+                            ) {
+                                continue;
+                            }
+                            // CR 614.1a: Opponent-scoped counter replacements
+                            // (Halving Season) apply to counters on permanents
+                            // controlled by an opponent, not only player counters.
+                            let Some(object_id) = placement.object_id() else {
+                                continue;
+                            };
+                            let Some(affected_controller) =
+                                state.objects.get(&object_id).map(|o| o.controller)
+                            else {
+                                continue;
+                            };
+                            let player_ok = match valid_player {
+                                crate::types::ability::ReplacementPlayerScope::Opponent => {
+                                    affected_controller != obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::You => {
+                                    affected_controller == obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
+                            };
+                            if !player_ok {
+                                continue;
+                            }
                         }
                     } else if repl_def.event == ReplacementEvent::AddCounter
                         && repl_def.valid_player.is_some()
@@ -3817,10 +4068,25 @@ pub fn find_applicable_replacements(
         }
     }
 
-    // CR 614.1a + CR 615.3: Also scan game-state-level pending damage
-    // replacements. These use a sentinel source ObjectId(0) to distinguish
-    // them from object-attached replacements.
-    if matches!(event, ProposedEvent::Damage { .. }) {
+    // CR 614.1a + CR 615.3: Also scan game-state-level (floating) replacements
+    // installed by spells/abilities with a duration. These use a sentinel source
+    // `ObjectId(0)` to distinguish them from object-attached replacements.
+    //
+    // Damage entries (prevention shields, damage modification — CR 615.3) run
+    // ONLY the damage-specific gates, byte-for-byte identical to the prior
+    // damage-only scan. Non-damage entries (zone-change/enter redirects —
+    // CR 614.1a, the event is replaced "instead", e.g. enter-from-exile →
+    // shuffle into owner's library, Don't Blink) run the
+    // valid_card/destination_zone/condition gates shared with the per-object
+    // loop via `apply_state_level_gates`.
+    //
+    // Safety: every existing pending entry's registry matcher is event-specific
+    // (a damage entry uses `damage_done_matcher`, matching only `Damage`; a
+    // zone-change entry uses `change_zone_matcher`, matching only
+    // `ZoneChange{to: Battlefield}`/`CreateToken`). So a damage entry can never
+    // be a candidate for a non-damage event and vice versa — the new gates are
+    // reachable only by non-damage entries on non-damage events.
+    {
         for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
             if repl_def.is_consumed {
                 continue;
@@ -3836,57 +4102,79 @@ pub fn find_applicable_replacements(
             }
 
             if let Some(handler) = registry.get(&repl_def.event) {
-                // CR 615.3: Check combat scope, target filters, and source filters.
-                // CR 614.1a: Damage source filter — matches the damage *source* object
-                // against the filter (e.g., "sources of the chosen color").
-                if let Some(ref sf) = repl_def.damage_source_filter {
-                    if let ProposedEvent::Damage { source_id, .. } = event {
-                        // CR 109.4 + CR 614.1a: The pending replacement lives under
-                        // the sentinel `ObjectId(0)`, which has no entry in
-                        // `state.objects`, so `from_source` cannot derive a
-                        // controller. When the installing player was anchored at
-                        // install time (`source_controller`), use it so a
-                        // controller-relative source filter ("a source you control")
-                        // resolves; otherwise fall back to the bare source context.
-                        let ctx = match repl_def.source_controller {
-                            Some(pid) => {
-                                FilterContext::from_source_with_controller(ObjectId(0), pid)
+                if let ProposedEvent::Damage { .. } = event {
+                    // CR 615.3: Check combat scope, target filters, and source filters.
+                    // CR 614.1a: Damage source filter — matches the damage *source* object
+                    // against the filter (e.g., "sources of the chosen color").
+                    if let Some(ref sf) = repl_def.damage_source_filter {
+                        if let ProposedEvent::Damage { source_id, .. } = event {
+                            // CR 109.4 + CR 614.1a: The pending replacement lives under
+                            // the sentinel `ObjectId(0)`, which has no entry in
+                            // `state.objects`, so `from_source` cannot derive a
+                            // controller. When the installing player was anchored at
+                            // install time (`source_controller`), use it so a
+                            // controller-relative source filter ("a source you control")
+                            // resolves; otherwise fall back to the bare source context.
+                            let ctx = match repl_def.source_controller {
+                                Some(pid) => {
+                                    FilterContext::from_source_with_controller(ObjectId(0), pid)
+                                }
+                                None => FilterContext::from_source(state, ObjectId(0)),
+                            };
+                            if !matches_target_filter(state, *source_id, sf, &ctx) {
+                                continue;
                             }
-                            None => FilterContext::from_source(state, ObjectId(0)),
-                        };
-                        if !matches_target_filter(state, *source_id, sf, &ctx) {
-                            continue;
                         }
                     }
-                }
-                if let Some(ref scope) = repl_def.combat_scope {
-                    if let ProposedEvent::Damage { is_combat, .. } = event {
-                        match scope {
-                            CombatDamageScope::CombatOnly if !is_combat => continue,
-                            CombatDamageScope::NoncombatOnly if *is_combat => continue,
-                            _ => {}
+                    if let Some(ref scope) = repl_def.combat_scope {
+                        if let ProposedEvent::Damage { is_combat, .. } = event {
+                            match scope {
+                                CombatDamageScope::CombatOnly if !is_combat => continue,
+                                CombatDamageScope::NoncombatOnly if *is_combat => continue,
+                                _ => {}
+                            }
                         }
                     }
-                }
-                if let Some(ref tf) = repl_def.damage_target_filter {
-                    if let ProposedEvent::Damage { target, .. } = event {
-                        if !matches_damage_target_filter(
-                            tf,
-                            target,
-                            PlayerId(0),
-                            ObjectId(0),
-                            state,
-                        ) {
-                            continue;
+                    if let Some(ref tf) = repl_def.damage_target_filter {
+                        if let ProposedEvent::Damage { target, .. } = event {
+                            if !matches_damage_target_filter(
+                                tf,
+                                target,
+                                PlayerId(0),
+                                ObjectId(0),
+                                state,
+                            ) {
+                                continue;
+                            }
                         }
                     }
+                    if is_damage_prevention_replacement(state, &rid, &repl_def.event)
+                        && is_prevention_disabled(state, event)
+                    {
+                        continue;
+                    }
+                } else {
+                    // CR 614.1a + CR 614.1d: Non-damage floating replacements run
+                    // the per-object applicability gates. `source_controller` is
+                    // anchored at install time; fall back to the active player
+                    // when absent (the EnteredFromZone condition reads the
+                    // entering object, so the controller is not load-bearing for
+                    // it, but a controller-relative valid_card filter would need
+                    // it).
+                    let source_controller =
+                        repl_def.source_controller.unwrap_or(state.active_player);
+                    if !apply_state_level_gates(
+                        repl_def,
+                        event,
+                        ObjectId(0),
+                        source_controller,
+                        state,
+                    ) {
+                        continue;
+                    }
                 }
-                if is_damage_prevention_replacement(state, &rid, &repl_def.event)
-                    && is_prevention_disabled(state, event)
-                {
-                    continue;
-                }
-                // Verify the handler matcher still matches (for DamageDone events)
+                // Verify the handler matcher still matches (DamageDone for damage
+                // entries, ChangeZone for zone-redirect entries).
                 if (handler.matcher)(event, ObjectId(0), state) {
                     candidates.push(rid);
                 }
@@ -4495,6 +4783,7 @@ fn apply_single_replacement(
                     (ProposedEvent::Draw { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
+                        | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
                 )
             });
@@ -4867,6 +5156,22 @@ fn candidate_materiality(
         }
         return CandidateMateriality::Disjoint;
     };
+    // CR 616.1: a proliferate count-doubler ("proliferate twice instead",
+    // Tekuthal) multiplies the proliferate action count via a `Multiply`
+    // `repeat_for`. Two such doublers commute (x2 then x2 == x2 then x2 == x4),
+    // so the ordering is immaterial and they must auto-apply — mirroring the
+    // `QuantityModification::Double` -> `Multiplicative` count-write path. Without
+    // this they fall to the conservative `Unconditional` default below and force
+    // a degenerate CR 616.1 ordering choice. (A non-`Multiply` `repeat_for` is not
+    // a doubler and correctly falls through to the conservative default.)
+    if matches!(&*execute.effect, Effect::Proliferate)
+        && matches!(execute.repeat_for, Some(QuantityExpr::Multiply { .. }))
+    {
+        return CandidateMateriality::Writes {
+            field: EventField::Count,
+            commute: CommuteClass::Multiplicative,
+        };
+    }
     let mut field: Option<EventField> = None;
     let mut current = Some(execute);
     while let Some(def) = current {
@@ -5341,8 +5646,8 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, FilterProp,
-        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
-        ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        OriginConstraint, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
+        ReplacementMode, ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::DamageRecord;
@@ -7383,6 +7688,27 @@ mod tests {
             .valid_card(TargetFilter::Typed(
                 TypedFilter::new(crate::types::ability::TypeFilter::Land)
                     .controller(ControllerRef::You),
+            ))
+            .destination_zone(Zone::Battlefield)
+    }
+
+    fn uphill_battle_replacement() -> ReplacementDefinition {
+        use crate::types::ability::{
+            AbilityKind, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+        };
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::WasPlayed]),
             ))
             .destination_zone(Zone::Battlefield)
     }
@@ -10389,6 +10715,96 @@ mod tests {
         );
     }
 
+    /// CR 305.1 + CR 601.2a: Uphill Battle WasPlayed filter discriminates cast
+    /// creatures from tokens and from nontokens put onto the battlefield.
+    #[test]
+    fn uphill_battle_was_played_filter_matches_cast_creature_not_token() {
+        use crate::types::card_type::CoreType;
+
+        let uphill_id = ObjectId(10);
+        let mut state = test_state_with_object(
+            uphill_id,
+            Zone::Battlefield,
+            vec![uphill_battle_replacement()],
+        );
+        let registry = build_replacement_registry();
+
+        let cast_creature = ObjectId(20);
+        let mut creature = GameObject::new(
+            cast_creature,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        creature.card_types.core_types.push(CoreType::Creature);
+        creature.cast_from_zone = Some(Zone::Hand);
+        state.objects.insert(cast_creature, creature);
+
+        let cast_event = ProposedEvent::ZoneChange {
+            object_id: cast_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            face_down_profile: None,
+            applied: HashSet::new(),
+        };
+        let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
+        assert!(
+            cast_matches.iter().any(|rid| rid.source == uphill_id),
+            "cast creature must match Uphill Battle WasPlayed filter"
+        );
+
+        let token_event = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            count: 1,
+            spec: Box::new(test_token_spec(PlayerId(1), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            applied: HashSet::new(),
+        };
+        let token_matches = find_applicable_replacements(&state, &token_event, &registry);
+        assert!(
+            !token_matches.iter().any(|rid| rid.source == uphill_id),
+            "tokens put directly onto the battlefield must not match WasPlayed filter"
+        );
+
+        let put_creature = ObjectId(30);
+        let mut put_obj = GameObject::new(
+            put_creature,
+            CardId(3),
+            PlayerId(1),
+            "Runeclaw Bear".to_string(),
+            Zone::Hand,
+        );
+        put_obj.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(put_creature, put_obj);
+
+        let put_event = ProposedEvent::ZoneChange {
+            object_id: put_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            face_down_profile: None,
+            applied: HashSet::new(),
+        };
+        let put_matches = find_applicable_replacements(&state, &put_event, &registry);
+        assert!(
+            !put_matches.iter().any(|rid| rid.source == uphill_id),
+            "nontoken creatures put onto the battlefield without being cast must not match WasPlayed filter"
+        );
+    }
+
     /// CR 614.1a + CR 111.1: Halving Season halves opponent token batches.
     #[test]
     fn halving_season_halves_opponent_token_creation() {
@@ -10452,6 +10868,199 @@ mod tests {
             panic!("expected CreateToken");
         };
         assert_eq!(count, 2, "five tokens halved (rounded down) → two");
+    }
+
+    /// CR 614.1a: Halving Season halves opponent counter batches on permanents.
+    #[test]
+    fn halving_season_halves_opponent_counter_placement_on_permanents() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+        use crate::types::proposed_event::CounterPlacement;
+
+        let halving_season = ObjectId(10);
+        let opponent_creature = ObjectId(20);
+        let halver_repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Half);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut hs = GameObject::new(
+            halving_season,
+            CardId(1),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(halving_season, hs);
+        state.battlefield.push_back(halving_season);
+
+        let creature = GameObject::new(
+            opponent_creature,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(opponent_creature, creature);
+        state.battlefield.push_back(opponent_creature);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(1),
+                object_id: opponent_creature,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 5,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute, got {:?}", result);
+        };
+        let ProposedEvent::AddCounter { count, .. } = primary else {
+            panic!("expected AddCounter");
+        };
+        assert_eq!(count, 2, "five counters halved (rounded down) → two");
+    }
+
+    /// CR 614.1a: Halving Season must not halve counters on permanents you control.
+    #[test]
+    fn halving_season_skips_controller_owned_permanent_counters() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+        use crate::types::proposed_event::CounterPlacement;
+
+        let halving_season = ObjectId(10);
+        let own_creature = ObjectId(20);
+        let halver_repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Half);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut hs = GameObject::new(
+            halving_season,
+            CardId(1),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(halving_season, hs);
+        state.battlefield.push_back(halving_season);
+
+        let creature = GameObject::new(
+            own_creature,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(own_creature, creature);
+        state.battlefield.push_back(own_creature);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: own_creature,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 5,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::AddCounter { count, .. }) = result else {
+            panic!("expected Execute, got {:?}", result);
+        };
+        assert_eq!(
+            count, 5,
+            "controller-owned counters must pass through unchanged"
+        );
+    }
+
+    /// CR 614.1a: Bloodletter of Aclazotz doubles opponent life loss on the
+    /// source controller's turn via the LoseLife replacement pipeline.
+    #[test]
+    fn bloodletter_doubles_opponent_life_loss_during_your_turn() {
+        let bloodletter = ObjectId(10);
+        let repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Double);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let mut card = GameObject::new(
+            bloodletter,
+            CardId(1),
+            PlayerId(0),
+            "Bloodletter of Aclazotz".to_string(),
+            Zone::Battlefield,
+        );
+        card.replacement_definitions = vec![repl].into();
+        state.objects.insert(bloodletter, card);
+        state.battlefield.push_back(bloodletter);
+
+        let proposed = ProposedEvent::LifeLoss {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::LifeLoss { amount, .. }) = result else {
+            panic!("expected doubled LifeLoss, got {:?}", result);
+        };
+        assert_eq!(amount, 6);
+    }
+
+    /// CR 614.1a: Bloodletter only doubles during the source controller's turn.
+    #[test]
+    fn bloodletter_does_not_double_on_opponents_turn() {
+        let bloodletter = ObjectId(10);
+        let repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Double);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let mut card = GameObject::new(
+            bloodletter,
+            CardId(1),
+            PlayerId(0),
+            "Bloodletter of Aclazotz".to_string(),
+            Zone::Battlefield,
+        );
+        card.replacement_definitions = vec![repl].into();
+        state.objects.insert(bloodletter, card);
+        state.battlefield.push_back(bloodletter);
+
+        let proposed = ProposedEvent::LifeLoss {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::LifeLoss { amount, .. }) = result else {
+            panic!("expected LifeLoss passthrough, got {:?}", result);
+        };
+        assert_eq!(amount, 3);
     }
 
     /// CR 616.1: Mixed `Double` and `Plus` quantity modifications do NOT commute
@@ -11557,6 +12166,255 @@ mod tests {
         assert!(
             (entry.matcher)(&pool, ObjectId(0), &state),
             "LoseMana registry must use the promoted empty_mana_pool_matcher, not the stub"
+        );
+    }
+
+    // ---- Don't Blink: floating zone-redirect replacement (CR 614.1a/d, CR 601) ----
+
+    /// Build the Don't Blink global `ChangeZone` redirect: a floating
+    /// replacement installed under the sentinel `ObjectId(0)` that redirects a
+    /// creature entering the battlefield to its owner's library, gated by
+    /// `EnteredFromZone { Equals(Exile), cast_origin: Exile }`.
+    fn dont_blink_global_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            ))
+            .condition(ReplacementCondition::EnteredFromZone {
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
+                cast_origin: Some(Zone::Exile),
+            })
+    }
+
+    /// A cast-origin-ONLY redirect: the clause carried no physical "would enter
+    /// from <zone>" half, so `origin_constraint` is `None`. Mirrors
+    /// `dont_blink_global_replacement` but isolates the cast half — used to
+    /// prove the physical path stays inert when there is no physical constraint.
+    fn cast_origin_only_global_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            ))
+            .condition(ReplacementCondition::EnteredFromZone {
+                origin_constraint: None,
+                cast_origin: Some(Zone::Exile),
+            })
+    }
+
+    /// Insert a creature object and return a two-player state holding it on the
+    /// battlefield-bound entry path. `cast_from_zone` seeds the cast-origin half.
+    fn state_with_entering_creature(
+        obj_id: ObjectId,
+        from: Zone,
+        cast_from_zone: Option<Zone>,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let mut obj = GameObject::new(obj_id, CardId(1), PlayerId(0), "Creature".to_string(), from);
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.cast_from_zone = cast_from_zone;
+        state.objects.insert(obj_id, obj);
+        state
+    }
+
+    #[test]
+    fn dont_blink_matches_creature_entering_from_exile() {
+        // CR 614.1d: physical-from half — a creature moving from exile to the
+        // battlefield is a candidate for the global redirect.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Exile, None);
+        state
+            .pending_damage_replacements
+            .push(dont_blink_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Exile, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert_eq!(
+            candidates,
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "creature entering from exile must match the global zone redirect"
+        );
+    }
+
+    #[test]
+    fn dont_blink_rejects_creature_entering_from_hand() {
+        // The EnteredFromZone gate must exclude non-exile origins; the Some(*from)
+        // wrap correctly rejects Some(Hand) against Equals(Exile), and the cast
+        // half is inert (no cast_from_zone).
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Hand, None);
+        state
+            .pending_damage_replacements
+            .push(dont_blink_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert!(
+            candidates.is_empty(),
+            "creature entering from hand must NOT match (got {candidates:?})"
+        );
+    }
+
+    #[test]
+    fn dont_blink_matches_creature_cast_from_exile_entering_from_stack() {
+        // CR 601: cast-origin half (HARD GATE). A creature cast from exile enters
+        // the battlefield FROM THE STACK (from = Stack, so the physical half is
+        // Some(Stack) != Some(Exile) and is false), but cast_from_zone == Exile.
+        // This isolates the cast half and proves the condition reads
+        // affected_object_id (the entering object), NOT source_id (the sentinel
+        // ObjectId(0), which has no cast_from_zone). Without this the cast arm
+        // would ship dead.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Stack, Some(Zone::Exile));
+        state
+            .pending_damage_replacements
+            .push(dont_blink_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Stack, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert_eq!(
+            candidates,
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "creature cast from exile (entering from stack) must match via the cast half"
+        );
+    }
+
+    #[test]
+    fn cast_origin_only_rejects_ordinary_exile_entry_without_cast_from_zone() {
+        // CR 614.1d (blocker guard, PR #3419): a cast-origin-ONLY clause
+        // (`origin_constraint: None`) must NOT match an ordinary creature
+        // entering from exile that was not cast from exile. Pre-fix the absent
+        // physical half collapsed to `OriginConstraint::Any`, so the OR-combined
+        // physical path matched EVERY entry — this entry would have wrongly
+        // matched. With the physical half modelled as `None`, only the cast half
+        // is live, and this object has no `cast_from_zone`.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Exile, None);
+        state
+            .pending_damage_replacements
+            .push(cast_origin_only_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Exile, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert!(
+            candidates.is_empty(),
+            "cast-origin-only condition must NOT match an ordinary exile entry \
+             with no cast_from_zone (pre-fix this matched via the Any physical \
+             half); got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn cast_origin_only_matches_creature_cast_from_exile() {
+        // CR 601: the live half of a cast-origin-only clause — a creature cast
+        // from exile (entering from the stack) matches via `cast_from_zone`,
+        // confirming the condition is not inert after the physical half became
+        // optional.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Stack, Some(Zone::Exile));
+        state
+            .pending_damage_replacements
+            .push(cast_origin_only_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Stack, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert_eq!(
+            candidates,
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "cast-origin-only condition must still match a creature cast from exile"
+        );
+    }
+
+    #[test]
+    fn dont_blink_excludes_noncreature_via_valid_card_gate() {
+        // The valid_card gate (Typed creature) runs for non-damage global
+        // entries: a land entering from exile must NOT match.
+        let registry = build_replacement_registry();
+        let mut state = GameState::new_two_player(42);
+        let mut land = GameObject::new(
+            ObjectId(21),
+            CardId(2),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Exile,
+        );
+        land.card_types.core_types = vec![CoreType::Land];
+        state.objects.insert(ObjectId(21), land);
+        state
+            .pending_damage_replacements
+            .push(dont_blink_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(21), Zone::Exile, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert!(
+            candidates.is_empty(),
+            "non-creature must be excluded by the valid_card gate (got {candidates:?})"
+        );
+    }
+
+    #[test]
+    fn global_store_damage_path_ignores_valid_card_filter() {
+        // REGRESSION (BLOCKER guard): the prevent_damage typed-recipient shield
+        // sets a `valid_card` recipient filter that is DELIBERATELY not enforced
+        // for damage (prevent_damage.rs: "global shields must match any damage
+        // event"). The generalized scan must still prevent a damage event whose
+        // recipient does NOT match that typed filter — i.e. the new valid_card
+        // gate must NOT run on the Damage path.
+        let registry = build_replacement_registry();
+        let mut state = GameState::new_two_player(42);
+        // Global prevention shield carrying a typed recipient valid_card filter
+        // that the damage target will NOT match.
+        let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(2))
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+        state.pending_damage_replacements.push(shield);
+        let event = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert_eq!(
+            candidates,
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "damage prevention shield must remain a candidate despite a non-matching valid_card recipient filter"
         );
     }
 }

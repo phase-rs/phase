@@ -27,10 +27,10 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
-    TypedFilter, ZoneOwner,
+    EffectScope, FaceDownProfile, FilterProp, LibraryPosition, MultiTargetSpec,
+    OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TapStateChange,
+    TargetFilter, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1307,7 +1307,21 @@ pub(super) fn parse_targeted_action_ast(
         // chains, etc. The count is a game-state integer reference, not the
         // CR 609.3 "do as much as possible" rule.
         let after_discard_lower = after_discard.to_ascii_lowercase();
-        if let Some(count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+        if let Some(mut count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+            // CR 608.2c: "If you do, discard that many cards" anaphorizes the
+            // count from the preceding draw (Hordewing Skaab). EventContextAmount
+            // incorrectly prefers the combat-damage trigger's match count and
+            // can discard the entire hand (issue #3296).
+            if matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }
+            ) {
+                count = QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                };
+            }
             let filter = parse_discard_card_filter(after_discard);
             return Some(TargetedImperativeAst::Discard {
                 count,
@@ -4079,6 +4093,61 @@ pub(super) fn parse_put_ast(
                 .unwrap_or(1);
             return Some(PutImperativeAst::Mill { count });
         }
+
+        // CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+        // library onto the battlefield face down [under your control]" is the
+        // put-clause surface form of manifest (Cybership). It carries a count
+        // (top-N), a library-owner binding ("that player's library"), an optional
+        // face-down profile seed, and an optional controller override — none of
+        // which the generic `try_parse_put_zone_change_parts` ChangeZone path
+        // preserves. Intercept it here, before that fallback.
+        let (rem, count) = match nom_primitives::parse_number.parse(after) {
+            Ok((rem, n)) => (rem, QuantityExpr::Fixed { value: n as i32 }),
+            Err(_) => match tag::<_, _, OracleError<'_>>("x").parse(after) {
+                Ok((rem, _)) => (
+                    rem,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                ),
+                Err(_) => (after, QuantityExpr::Fixed { value: 1 }),
+            },
+        };
+        // CR 701.40a: This is the manifest surface form, so the dispatch
+        // condition is "<library-owner suffix> onto the battlefield face down".
+        // The library-owner suffix must match AND the tail must continue with
+        // "onto the battlefield face down" — `face down` is part of the dispatch
+        // because a put-onto-battlefield that is NOT face down is a regular
+        // ChangeZone, not a manifest. Forms that fail any of these fall through
+        // to the non-battlefield ("on top/bottom") and generic ChangeZone paths.
+        if let Some((tail, target)) = parse_library_player_suffix(rem.trim_start(), ctx) {
+            let battlefield_face_down = (
+                tag::<_, _, OracleError<'_>>("onto the battlefield"),
+                space1,
+                tag("face down"),
+            )
+                .parse(tail.trim_start())
+                .is_ok();
+            if battlefield_face_down {
+                // CR 110.2a: presence-flag detection of "under your control" —
+                // mirrors the accepted Dig presence-flag detection; the dispatch
+                // decision itself is the combinators above, not this flag.
+                let enters_under = nom_primitives::scan_contains(lower, "under your control")
+                    .then_some(ControllerRef::You);
+                // CR 708.2a: seed the vanilla 2/2 profile (the manifest default)
+                // so a trailing "They're 2/2 Cyberman artifact creatures." spec
+                // has a profile to refine in the back-walk patcher.
+                let profile = Some(FaceDownProfile::vanilla_2_2());
+                return Some(PutImperativeAst::Manifest {
+                    target,
+                    count,
+                    profile,
+                    enters_under,
+                });
+            }
+        }
     }
 
     let has_mass_zone_origin = (nom_primitives::scan_contains(lower, "all")
@@ -4341,6 +4410,21 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             },
             target: TargetFilter::Controller,
             destination: Zone::Hand,
+        },
+        // CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+        // library onto the battlefield face down [under your control]" lowers 1:1
+        // onto `Effect::Manifest`, preserving the count, the library-owner
+        // binding, the face-down profile seed, and the controller override.
+        PutImperativeAst::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
+        } => Effect::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
         },
     }
 }
@@ -5151,6 +5235,56 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
     inner(rest_lower).is_ok()
 }
 
+/// CR 400.12 + CR 115.1: Match a "[card|cards] of [a player]'s library" suffix
+/// and return the matched-suffix tail plus the resolved library-owner filter.
+///
+/// This is the player-binding half of the twelve top-of-library suffix patterns
+/// shared by the exile and put-onto-battlefield (manifest) paths. It maps each
+/// possessive form to its canonical `TargetFilter`:
+/// - "your library" → `Controller`
+/// - "that player's" / "their" library → the relative player from `ctx`
+///   (`TriggeringPlayer` for DamageDone triggers via `that_player_library_filter`)
+/// - "target opponent's library" → `Typed{controller: Opponent}`
+/// - "target player's library" → `Player`
+/// - "each player's library" → `ScopedPlayer`
+///
+/// The helper performs only the player-suffix match; callers own any trailing
+/// face-down / where-X / destination parsing (the exile and manifest epilogues
+/// differ).
+pub(super) fn parse_library_player_suffix<'a>(
+    remainder: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter)> {
+    let that_player = that_player_library_filter(ctx);
+    let target_opponent_filter =
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    for (pattern, player) in [
+        ("card of your library", TargetFilter::Controller),
+        ("cards of your library", TargetFilter::Controller),
+        ("card of that player's library", that_player.clone()),
+        ("cards of that player's library", that_player.clone()),
+        ("card of their library", that_player.clone()),
+        ("cards of their library", that_player.clone()),
+        (
+            "card of target opponent's library",
+            target_opponent_filter.clone(),
+        ),
+        (
+            "cards of target opponent's library",
+            target_opponent_filter.clone(),
+        ),
+        ("card of target player's library", TargetFilter::Player),
+        ("cards of target player's library", TargetFilter::Player),
+        ("card of each player's library", TargetFilter::ScopedPlayer),
+        ("cards of each player's library", TargetFilter::ScopedPlayer),
+    ] {
+        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
+            return Some((tail, player));
+        }
+    }
+    None
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
@@ -5172,65 +5306,33 @@ pub(super) fn parse_exile_ast(
             } else {
                 (QuantityExpr::Fixed { value: 1 }, rest)
             };
-        let that_player = that_player_library_filter(ctx);
-        // CR 608.2: "their library" inside an outer "each player" / "each opponent"
-        // player_scope iteration binds to the iterating player. The chunk_ctx
-        // surfaces this via `relative_player_scope = ScopedPlayer`, which
-        // `that_player_library_filter` already maps to `TargetFilter::ScopedPlayer`.
-        // For the third-person "each player's library" alternate phrasing,
-        // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
-        // `player_scope: All` so the existing scoped resolver exiles from each
-        // player's own library without target selection.
-        // CR 400.12 + CR 115.1: "target opponent's library" / "target player's
-        // library" are zone-as-operand phrases on a *chosen* player. They
-        // reuse the canonical leaves produced by `parse_target` for the
-        // bare phrases ("target opponent" → Typed{controller: Opponent},
-        // "target player" → TargetFilter::Player) so the runtime selector
-        // applies the same legality/targeting machinery used elsewhere
-        // (Maralen, Fae Ascendant ETB; Court of Locthwain ETB).
-        let target_opponent_filter =
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
-        for (pattern, player) in [
-            ("card of your library", TargetFilter::Controller),
-            ("cards of your library", TargetFilter::Controller),
-            ("card of that player's library", that_player.clone()),
-            ("cards of that player's library", that_player.clone()),
-            ("card of their library", that_player.clone()),
-            ("cards of their library", that_player.clone()),
-            (
-                "card of target opponent's library",
-                target_opponent_filter.clone(),
-            ),
-            (
-                "cards of target opponent's library",
-                target_opponent_filter.clone(),
-            ),
-            ("card of target player's library", TargetFilter::Player),
-            ("cards of target player's library", TargetFilter::Player),
-            ("card of each player's library", TargetFilter::ScopedPlayer),
-            ("cards of each player's library", TargetFilter::ScopedPlayer),
-        ] {
-            if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
-                // CR 406.3: Detect the "face down" suffix Oracle text uses to
-                // mark hidden-information exiles (Necropotence / Bomat Courier
-                // / Asmodeus the Archfiend / Knowledge Vault class). The
-                // resolver propagates this to the moved object's `face_down`
-                // flag so `visibility.rs` redacts the card for non-owners.
-                let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
-                // CR 107.3i: Optional ", where x is <quantity expr>" suffix
-                // overrides the leading `Variable { "X" }` binding with the
-                // dynamic quantity expression. Mirrors the
-                // try_parse_token_enters_with_counters / put-counters-on-token
-                // followup patterns. Without this, the trigger has no chosen X
-                // (it's an ETB-triggered ability, not a cast), and the count
-                // would default to 0 at resolution time.
-                let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
-                return Some(ZoneCounterImperativeAst::ExileTop {
-                    player,
-                    count,
-                    face_down,
-                });
-            }
+        // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
+        // library" suffix and resolve the library owner via the shared
+        // `parse_library_player_suffix` helper (also used by the manifest
+        // put-onto-battlefield path). It maps "your" → Controller, "that
+        // player's"/"their" → the relative player (`TriggeringPlayer` for
+        // DamageDone), "target opponent's" → Typed{Opponent}, "target player's"
+        // → Player, "each player's" → ScopedPlayer.
+        if let Some((after_lib, player)) = parse_library_player_suffix(remainder, ctx) {
+            // CR 406.3: Detect the "face down" suffix Oracle text uses to
+            // mark hidden-information exiles (Necropotence / Bomat Courier
+            // / Asmodeus the Archfiend / Knowledge Vault class). The
+            // resolver propagates this to the moved object's `face_down`
+            // flag so `visibility.rs` redacts the card for non-owners.
+            let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
+            // CR 107.3i: Optional ", where x is <quantity expr>" suffix
+            // overrides the leading `Variable { "X" }` binding with the
+            // dynamic quantity expression. Mirrors the
+            // try_parse_token_enters_with_counters / put-counters-on-token
+            // followup patterns. Without this, the trigger has no chosen X
+            // (it's an ETB-triggered ability, not a cast), and the count
+            // would default to 0 at resolution time.
+            let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
+            return Some(ZoneCounterImperativeAst::ExileTop {
+                player,
+                count,
+                face_down,
+            });
         }
 
         // CR 701.13: Exile — "exile the top card[s]" with NO "of <player>'s
@@ -6086,6 +6188,32 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
+    // of Mortality). The subject ("two target players") precedes the verb, so
+    // `first_word` is "two"/"target"/"have" rather than a verb keyword —
+    // intercept it as an anchored whole-phrase production before the first-word
+    // dispatch. Accept three optional leading wrinkles:
+    //   - "have " — the causative construction from "you may have <players>
+    //     exchange ..." (Axis of Mortality), which keeps its full surface form.
+    //   - "two " — the cardinality quantifier, which may already be stripped
+    //     upstream by `strip_any_number_quantifier`.
+    // Both players are `Player` targets.
+    if all_consuming(terminated(
+        preceded(
+            (opt(tag::<_, _, OracleError<'_>>("have ")), opt(tag("two "))),
+            tag("target players exchange life totals"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::ExchangeLifeTotals {
+            player_a: TargetFilter::Player,
+            player_b: TargetFilter::Player,
+        });
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -6736,6 +6864,12 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
+            // CR 701.12a: player-to-player "exchange life totals" (Soul Conduit,
+            // Axis of Mortality, Magus of the Mirror, Mirror Universe) — checked
+            // before the life-with-stat shape since both begin "exchange life".
+            if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
+                return Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b });
+            }
             // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
             // (Tree of Perdition, Tree of Redemption, Evra) — checked before
             // "exchange control of" since the two shapes share only the verb.
@@ -7010,6 +7144,33 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
     ))
     .parse(input)
     .ok()
+}
+
+/// CR 701.12a: Player-to-player "exchange life totals", verb-initial shape:
+/// "exchange life totals with target opponent" / "... target player" — the
+/// controller (`Controller`) exchanges with that opponent/player (Magus of the
+/// Mirror, Mirror Universe). The subject-initial "two target players exchange
+/// life totals" shape (Soul Conduit, Axis of Mortality) is intercepted earlier
+/// in `parse_imperative_family_ast` because its first word is not a verb.
+/// Returns `(player_a, player_b)` or `None` for unrecognised shapes.
+fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFilter)> {
+    // "exchange life totals with <target opponent | target player>".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange life totals with ").parse(lower) {
+        let (rest, other) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("target opponent"),
+            ),
+            value(TargetFilter::Player, tag("target player")),
+        ))
+        .parse(rest)
+        .ok()?;
+        if rest.trim().trim_end_matches(['.', ';']).trim().is_empty() {
+            return Some((TargetFilter::Controller, other));
+        }
+    }
+
+    None
 }
 
 /// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
@@ -7870,6 +8031,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
             Effect::ExchangeLifeWithStat { player, stat }
         }
+        // CR 701.12a: Two players exchange life totals. The two player filters
+        // come from the parser; resolution reads ability.targets in declaration
+        // order for any non-context-ref slots.
+        ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
+            Effect::ExchangeLifeTotals { player_a, player_b }
+        }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
@@ -7889,7 +8056,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
+        // CR 701.40a: The plain "manifest the top N cards" surface form carries
+        // neither an effect-specified face-down profile nor a controller
+        // override — those are only set by the "put ... onto the battlefield face
+        // down [under your control]" path (see `lower_put_ast`).
+        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest {
+            target,
+            count,
+            profile: None,
+            enters_under: None,
+        },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward {2}).
         ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
@@ -8442,7 +8618,7 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
 /// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
 /// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
 /// "you" to the resolving ability controller and grants `MustAttackPlayer`.
-fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
@@ -8532,7 +8708,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 /// must be carried by an explicit `AddStaticMode` modification to actually reach
 /// the layer system and `combat.rs` enforcement. Mirrors the block path's
 /// `ImperativeFamilyAst::MustBeBlocked` lowering.
-fn must_attack_static_definition() -> StaticDefinition {
+pub(super) fn must_attack_static_definition() -> StaticDefinition {
     use crate::types::statics::StaticMode;
     StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
         ContinuousModification::AddStaticMode {
@@ -13549,5 +13725,78 @@ mod tests {
             !def.optional,
             "expected optional: false for 'then planeswalk'"
         );
+    }
+
+    /// CR 701.12a: Soul Conduit / Axis of Mortality body — "two target players
+    /// exchange life totals" lowers to ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Two target players exchange life totals.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Axis of Mortality causative body — "have two target players
+    /// exchange life totals" (from "you may have …") lowers to
+    /// ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn have_two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Have two target players exchange life totals.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Magus of the Mirror / Mirror Universe body — "exchange life
+    /// totals with target opponent" lowers to ExchangeLifeTotals{Controller,
+    /// Typed(Opponent)}.
+    #[test]
+    fn exchange_life_totals_with_target_opponent_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target opponent.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(
+                    *player_b,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+                );
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: "exchange life totals with target player" form lowers to
+    /// ExchangeLifeTotals{Controller, Player}.
+    #[test]
+    fn exchange_life_totals_with_target_player_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target player.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
     }
 }

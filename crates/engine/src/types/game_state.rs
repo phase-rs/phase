@@ -397,6 +397,13 @@ pub struct ZoneChangeRecord {
     /// on the battlefield, emblem creation in the command zone). For normal
     /// zone moves this carries the origin zone.
     pub from_zone: Option<Zone>,
+    /// CR 601.2a: Cast origin as of the zone change — distinct from `from_zone`
+    /// for objects put onto the battlefield without being cast (reanimate, etc.).
+    #[serde(default)]
+    pub cast_from_zone: Option<Zone>,
+    /// CR 305.1: Land-play provenance as of the zone change.
+    #[serde(default)]
+    pub played_from_zone: Option<Zone>,
     pub to_zone: Zone,
     /// CR 603.10a + CR 603.6e: Snapshot of attachments on the object at the moment
     /// of the zone change. Required by look-back triggers of the form
@@ -530,6 +537,8 @@ impl ZoneChangeRecord {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: from,
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: to,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
@@ -1516,6 +1525,17 @@ pub struct PendingCounterAdditionQueue {
     pub remaining: Vec<PendingCounterAddition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<PendingEffectResolved>,
+}
+
+/// CR 701.34a + CR 614.1a: Remaining proliferate actions after a replacement
+/// effect (Tekuthal class) doubles the count. Each completed `ProliferateChoice`
+/// drains one action; when `remaining` reaches zero the originating effect
+/// resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProliferateActions {
+    pub actor: PlayerId,
+    pub source_id: ObjectId,
+    pub remaining: u32,
 }
 
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
@@ -3181,6 +3201,10 @@ pub enum WaitingFor {
         player: PlayerId,
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
+        /// Mode indices unavailable due to NoRepeat constraints or unsatisfied
+        /// targeting requirements (CR 700.2a-b). Mirrors `AbilityModeChoice`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// Player must choose which cards to discard down to maximum hand size (cleanup step).
     DiscardToHandSize {
@@ -6170,6 +6194,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_counter_additions: Option<PendingCounterAdditionQueue>,
 
+    /// CR 701.34a + CR 614.1a: Remaining proliferate actions after a count-
+    /// modifying replacement (Tekuthal class). Resumed after each
+    /// `ProliferateChoice` completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_proliferate_actions: Option<PendingProliferateActions>,
+
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
@@ -7050,6 +7080,7 @@ impl GameState {
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,
+            pending_proliferate_actions: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
@@ -7520,6 +7551,7 @@ impl PartialEq for GameState {
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
+            && self.pending_proliferate_actions == other.pending_proliferate_actions
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
@@ -7995,6 +8027,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: dummy_pending(),
+            unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::DiscardToHandSize {
             player: PlayerId(0),

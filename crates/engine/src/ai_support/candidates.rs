@@ -1287,12 +1287,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             modal,
             pending_cast,
+            unavailable_modes,
         } => {
+            let available: Vec<usize> = (0..modal.mode_count)
+                .filter(|i| !unavailable_modes.contains(i))
+                .collect();
             let actions = if modal.allow_repeat_modes {
-                // CR 700.2d: Use sequence generation that allows repeated indices.
-                crate::game::ability_utils::generate_modal_index_sequences(modal)
+                // Build a filtered ModalChoice for sequence generation with repeats.
+                let filtered = crate::types::ability::ModalChoice {
+                    mode_count: available.len(),
+                    min_choices: modal.min_choices,
+                    max_choices: modal.max_choices,
+                    allow_repeat_modes: true,
+                    ..modal.clone()
+                };
+                crate::game::ability_utils::generate_modal_index_sequences(&filtered)
                     .into_iter()
-                    .map(|indices| {
+                    .map(|local_indices| {
+                        let indices = local_indices.into_iter().map(|i| available[i]).collect();
                         candidate(
                             GameAction::SelectModes { indices },
                             TacticalClass::Selection,
@@ -1301,9 +1313,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     })
                     .collect()
             } else {
-                mode_actions(
+                mode_actions_from_available(
                     *player,
-                    modal.mode_count,
+                    &available,
                     modal.min_choices,
                     modal.max_choices,
                 )
@@ -3620,16 +3632,6 @@ fn remove_counter_cost_distribution_candidate(
     } else {
         Vec::new()
     }
-}
-
-fn mode_actions(
-    player: PlayerId,
-    mode_count: usize,
-    min: usize,
-    max: usize,
-) -> Vec<CandidateAction> {
-    let indices: Vec<usize> = (0..mode_count).collect();
-    mode_actions_from_available(player, &indices, min, max)
 }
 
 fn mode_actions_from_available(

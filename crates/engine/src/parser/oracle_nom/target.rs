@@ -276,6 +276,20 @@ fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 
 /// Parse an event context reference from Oracle text.
 ///
+/// CR 506.2 + CR 603.7c: "that attacking player" — the player who declared
+/// attackers in the triggering `AttackersDeclared` event (Ellie, Brick Master;
+/// Breena, the Demagogue).
+pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::TriggeringPlayer, tag("that attacking player")).parse(input)
+}
+
+/// CR 506.3d + CR 508.1: "that opponent" inside an attack trigger's effect —
+/// the opponent being attacked in the triggering event (token enters attacking
+/// that opponent; Adeline / Ellie class).
+pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
+}
+
 /// Matches "that spell", "that player", "that creature", "defending player",
 /// "the defending player", "that card", "that permanent".
 /// Returns a `TargetFilter` for the referenced entity.
@@ -294,6 +308,9 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::TriggeringSource, tag("that creature")),
         value(TargetFilter::TriggeringSource, tag("that permanent")),
         value(TargetFilter::TriggeringSource, tag("that card")),
+        parse_attacking_player_event_ref,
+        // CR 506.3d: "that opponent" before the shorter "that player" arm.
+        parse_attacked_opponent_event_ref,
         value(TargetFilter::TriggeringPlayer, tag("that player")),
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
@@ -834,6 +851,16 @@ mod tests {
         let (rest6, f6) = parse_event_context_ref("the defending player gains").unwrap();
         assert_eq!(rest6, " gains");
         assert_eq!(f6, TargetFilter::DefendingPlayer);
+
+        // CR 506.2 + CR 603.7c: attack-trigger actor anaphor (Ellie, Breena).
+        let (rest7, f7) = parse_event_context_ref("that attacking player creates").unwrap();
+        assert_eq!(rest7, " creates");
+        assert_eq!(f7, TargetFilter::TriggeringPlayer);
+
+        // CR 506.3d: attacked opponent anaphor in token-enter-attacking clauses.
+        let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
+        assert_eq!(rest8, ".");
+        assert_eq!(f8, TargetFilter::DefendingPlayer);
     }
 
     #[test]

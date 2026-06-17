@@ -1059,6 +1059,8 @@ mod tests {
                 controller: PlayerId(1),
                 owner: PlayerId(1),
                 from_zone: Some(Zone::Library),
+                cast_from_zone: None,
+                played_from_zone: None,
                 to_zone: Zone::Hand,
                 attachments: Vec::new(),
                 linked_exile_snapshot: Vec::new(),

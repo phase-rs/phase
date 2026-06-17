@@ -1,3 +1,4 @@
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
@@ -483,6 +484,27 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
     }
 }
 
+/// CR 707.2: Keyword abilities are copiable values. When a copy snapshot carries
+/// a keyword but its `trigger_definitions` omit the synthesized companion
+/// trigger (e.g. Persist without an explicit printed dies trigger), install the
+/// missing keyword trigger so copies function correctly.
+pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableValues) {
+    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+    for keyword in &values.keywords {
+        for trigger in KeywordTriggerInstaller::triggers_for(keyword) {
+            if triggers.iter().any(|existing| existing == &trigger) {
+                continue;
+            }
+            if triggers.iter().any(|existing| {
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(existing, keyword)
+            }) {
+                continue;
+            }
+            triggers.push(trigger);
+        }
+    }
+}
+
 pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
     obj.name = values.name.clone();
     obj.mana_cost = values.mana_cost.clone();
@@ -866,6 +888,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
         | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
         // CR 701.26a/b: all tap/untap scopes are leaf effects here.
         | Effect::SetTapState { .. }
         | Effect::RemoveCounter { .. }

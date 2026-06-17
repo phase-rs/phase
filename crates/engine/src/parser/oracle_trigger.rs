@@ -504,6 +504,22 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
+    // CR 603.1 + CR 603.2: Disjunctive zone-change triggers ("whenever [A], or [B],
+    // or [C]") must stay a single `TriggerDefinition` with `zone_change_clauses`.
+    // `split_cross_subject_event_compound` mis-splits Syr Konrad's "another creature
+    // dies, or a creature card is put into a graveyard..." at the first ", or "
+    // because the second clause begins with "a creature card". That produces two
+    // separate triggers that can both fire on the same zone-change event, doubling
+    // the damage (issue #3299).
+    if parse_disjunctive_zone_change_condition(&condition).is_some() {
+        return vec![parse_trigger_line_with_index_ir(
+            text,
+            card_name,
+            base_trigger_index,
+            ctx,
+        )];
+    }
+
     // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
     // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
     // is its own trigger condition, all sharing the one subject.
@@ -8684,11 +8700,25 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
             continue;
         }
 
+        let has_attachment_clause = attachment_prop.is_some();
         let filter = apply_attachment_prop(filter, attachment_prop);
 
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
+        // CR 508.3a: a lexical "attack a player" restriction narrows the attacked
+        // target through the purpose-built attack_target_filter channel, not the
+        // valid_target overload.
         if attacks_player {
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+        }
+        // CR 303.4e + CR 506.2: an attachment-relation subject ("enchanted by an
+        // Aura / equipped by an Equipment you control") binds "you control" to the
+        // attachment, not the attacker — the enchanted/equipped creature may be
+        // controlled by an opponent. Set the attacking-player gate to pass-through
+        // (any attacking player) WITHOUT an attack-target restriction, so the trigger
+        // fires regardless of whether the attack targets a player, planeswalker, or
+        // battle (Killian, Decisive Mentor; #3314).
+        if has_attachment_clause {
             def.valid_target = Some(TargetFilter::Player);
         }
         if min_count > 1 {
@@ -12671,6 +12701,32 @@ mod tests {
         assert!(def.execute.is_some());
     }
 
+    /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
+    /// Syr Konrad's disjunctive zone-change condition into separate triggers.
+    #[test]
+    fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
+        const ORACLE: &str = "Whenever another creature dies, or a creature card \
+            is put into a graveyard from anywhere other than the battlefield, or a \
+            creature card leaves your graveyard, Syr Konrad, the Grim deals 1 damage \
+            to each opponent.";
+        let defs = parse_trigger_lines(ORACLE, "Syr Konrad, the Grim");
+        assert_eq!(
+            defs.len(),
+            1,
+            "expected one disjunctive trigger, got {} triggers: {:?}",
+            defs.len(),
+            defs.iter()
+                .map(|d| d.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            defs[0].zone_change_clauses.len(),
+            3,
+            "expected 3 zone_change_clauses, got {:?}",
+            defs[0].zone_change_clauses
+        );
+    }
+
     // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
     // trigger. Asserts the parsed `TriggerDefinition` SHAPE; it does not drive
     // the runtime apply pipeline (see `triggers.rs` for the runtime test).
@@ -13737,7 +13793,8 @@ mod tests {
                 *sub.effect,
                 Effect::Manifest {
                     target: TargetFilter::TriggeringPlayer,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
@@ -16179,6 +16236,41 @@ mod tests {
     }
 
     #[test]
+    fn trigger_if_gained_or_lost_life_compound() {
+        // CR 119: "you gained or lost life this turn" (Star Charter, Starseer
+        // Mentor, Starlit Soothsayer) is the disjunctive sibling of the "and"
+        // compound — either life change satisfies it.
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained or lost life this turn, surveil 1.",
+            "Starlit Soothsayer",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) if conditions.len() == 2 => {
+                assert!(conditions.iter().any(|c| matches!(
+                    c,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeGainedThisTurn { .. }
+                        },
+                        ..
+                    }
+                )));
+                assert!(conditions.iter().any(|c| matches!(
+                    c,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. }
+                        },
+                        ..
+                    }
+                )));
+            }
+            other => panic!("Expected Or with LifeGained+LifeLost conditions, got {other:?}"),
+        }
+        assert!(def.execute.is_some(), "surveil effect must not be dropped");
+    }
+
+    #[test]
     fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
         let def = parse_trigger_line(
             "Whenever a creature you control attacks, it gets +1/+0 until end of turn for each other attacking creature that shares a creature type with it.",
@@ -18242,6 +18334,21 @@ mod tests {
             "Killian, Decisive Mentor",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
+        // CR 303.4e + CR 506.2: the attachment-relation clause ("enchanted by an
+        // Aura you control") makes the attacking-player gate pass-through
+        // (`valid_target == Player`) — the enchanted attacker may be
+        // opponent-controlled — WITHOUT any attacked-target narrowing
+        // (`attack_target_filter == None`), since this text has no "attack a
+        // player" restriction. (#3314)
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "attachment-relation subject ⇒ permissive attacking-player pass-through"
+        );
+        assert_eq!(
+            def.attack_target_filter, None,
+            "no \"attack a player\" clause ⇒ no attacked-target narrowing"
+        );
         let filter = def.valid_card.as_ref().expect("valid_card set");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -24545,7 +24652,20 @@ mod tests {
                 count: 2,
             })
         );
-        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        // CR 508.3a: the lexical "attack a player" restriction is an
+        // attacked-target narrowing carried by `attack_target_filter`, NOT the
+        // `valid_target` overload. With no attachment-relation clause, the
+        // attacking-player gate stays at the controller-scoped default
+        // (`valid_target == None`).
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::Player),
+            "\"attack a player\" sets the purpose-built attack_target_filter"
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "no attachment clause ⇒ controller-scoped default, not the Player overload"
+        );
         assert!(def.execute.is_some());
     }
 
@@ -25999,6 +26119,72 @@ mod tests {
                 "Breena must gate on defending player life exceeding another opponent, got {other:?}"
             ),
         }
+        let execute = def.execute.as_deref().expect("Breena must have execute");
+        let Effect::Draw { target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Breena draw clause must lower to Draw, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player draws must bind to TriggeringPlayer"
+        );
+    }
+
+    #[test]
+    fn ellie_brick_master_attack_token_trigger() {
+        // Issue #1325: attack trigger creates Cordyceps Infected for the attacking player.
+        let def = parse_trigger_line(
+            "Whenever a player attacks one of your opponents, that attacking player creates a tapped 1/1 black Fungus Zombie creature token named Cordyceps Infected that's attacking that opponent.",
+            "Ellie, Brick Master",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let execute = def.execute.as_deref().expect("Ellie must have execute");
+        let Effect::Token {
+            owner,
+            name,
+            tapped,
+            enters_attacking,
+            types,
+            colors,
+            power,
+            toughness,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("Ellie must lower to Token, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player creates must bind token owner to TriggeringPlayer"
+        );
+        assert_eq!(name, "Cordyceps Infected");
+        assert!(*tapped, "Cordyceps Infected must enter tapped");
+        assert!(
+            *enters_attacking,
+            "Cordyceps Infected must enter attacking that opponent"
+        );
+        assert!(
+            types.iter().any(|t| t.eq_ignore_ascii_case("Fungus"))
+                && types.iter().any(|t| t.eq_ignore_ascii_case("Zombie")),
+            "Cordyceps Infected must be Fungus Zombie, got {types:?}"
+        );
+        assert!(
+            colors.contains(&crate::types::mana::ManaColor::Black),
+            "Cordyceps Infected must be black"
+        );
+        assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+        assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
     }
 
     #[test]

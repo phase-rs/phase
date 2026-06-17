@@ -95,6 +95,8 @@ pub enum ReplacementEvent {
     LoseMana,
     PlanarDiceResult,
     Planeswalk,
+    /// CR 701.34a + CR 614.1a: Replaces a proliferate action (count-modifying
+    /// "proliferate twice instead" effects such as Tekuthal, Inquiry Dominus).
     Proliferate,
 
     /// Fallback for truly unknown event strings.

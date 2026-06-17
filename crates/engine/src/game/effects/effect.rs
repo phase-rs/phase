@@ -142,6 +142,26 @@ fn register_transient_effect(
         );
         return;
     }
+    // CR 603.7 + CR 611.2c: Token followup grants ("It has trample, haste, and …")
+    // target `LastCreated` — bind directly to the just-created token(s) instead
+    // of broadcasting across the battlefield (issue #3297: Rite of the Raging
+    // Storm was granting haste/trample/sacrifice to the enchantment source).
+    if matches!(
+        target_filter.or(static_def.affected.as_ref()),
+        Some(TargetFilter::LastCreated)
+    ) {
+        for obj_id in state.last_created_token_ids.clone() {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject { id: obj_id },
+                modifications.clone(),
+                static_def.condition.clone(),
+            );
+        }
+        return;
+    }
     // CR 603.2 + CR 608.2c: Judith modal sub-abilities set `target:
     // TriggeringSource` (the GenericEffect `target` parameter); a SequentialSibling
     // continuous grant on a non-targeted trigger ("put a +1/+1 counter on it. It

@@ -228,6 +228,39 @@ pub fn resolve(
         })
         .unwrap_or(ability.source_id);
 
+    // CR 701.37a + CR 614.1a: Consult explore replacements (Twists and Turns,
+    // Topography Tracker, …) before the reveal/counter/land logic runs.
+    let proposed = ProposedEvent::Explore {
+        object_id: explorer_id,
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(_) => {}
+        ReplacementResult::Prevented => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
+    }
+
+    resolve_explore_effect(state, ability, explorer_id, events)
+}
+
+/// CR 701.44a: Run the explore reveal/counter/land pipeline without consulting
+/// replacement effects. Used when a replacement effect's "instead" chain
+/// already resolved the replacement (nested explores must not re-enter).
+pub(crate) fn resolve_explore_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    explorer_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let controller = state
         .objects
         .get(&explorer_id)
@@ -362,14 +395,101 @@ pub fn handle_choice(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ReplacementDefinition,
+        TargetFilter, TargetRef, TypedFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_explore_ability(source_id: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(Effect::Explore, vec![], source_id, PlayerId(0))
+    }
+
+    #[test]
+    fn explore_scry_prelude_replacement_runs_before_explore() {
+        let mut state = GameState::new_two_player(42);
+
+        let twists = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twists and Turns".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&twists)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let replacement = ReplacementDefinition::new(ReplacementEvent::Explore)
+            .execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Scry {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::Explore)),
+            )
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ));
+        state
+            .objects
+            .get_mut(&twists)
+            .unwrap()
+            .replacement_definitions
+            .push(replacement);
+
+        let explorer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Explorer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&explorer)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let top_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&top_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let ability = make_explore_ability(explorer);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&explorer]
+                .counters
+                .iter()
+                .any(|(ct, _)| *ct == CounterType::Plus1Plus1),
+            "replacement scry prelude must still leave the creature exploring (+1/+1 counter)"
+        );
     }
 
     #[test]
