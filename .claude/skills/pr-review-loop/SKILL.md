@@ -98,6 +98,12 @@ gh api "repos/$REPO/pulls/$n/commits" --paginate \
 
 ### 3. Dispatch a reviewer
 
+**Cheap pre-gate first — value & direction, before any deep-review spend (large/speculative feature PRs only).** A wrong-*direction* PR should cost a paragraph, not an agent. Before classifying a tier or dispatching a reviewer on a PR that introduces a **new subsystem / high file count / a feature with no prior maintainer buy-in**, answer two questions from the PR description + file list + ~30 seconds of judgment — no diff trace, no agent:
+- **Direction fit:** is this a thing the project wants, or does it build a *parallel* path to infrastructure that already exists? Re-implementing an engine/subsystem the repo already owns (e.g. a second state-mutation layer beside `engine::apply`, a bespoke game-runner beside `phase-ai/duel_suite`) is wrong-by-construction regardless of code quality — a correctness review just confirms what the direction already disqualifies. If the direction is unwanted, **decline/close with a respectful redirect** to the wanted shape; do **not** spend a deep-review agent proving a bypass on a PR you'd decline anyway.
+- **Visual evidence (heavily-frontend PRs):** a large frontend PR with **no screenshot or screen recording** does not proceed to deep FE review — request visual evidence first. Its absence is itself a weak signal the author didn't validate their own running build (the recurring failure mode: broken image loading / unpolished UX that only surfaces on hands-on checkout, which a screenshot would have pre-empted). Frontend value is visual; it must be shown, not just diffed.
+
+Only PRs that clear this pre-gate (or aren't large speculative features) proceed to tier classification below. Record the pre-gate decline in the tracker/quality log like any other verdict.
+
 **The bar is invariant; only the investigation depth scales.** Every PR, at every tier, must be validated against the same non-negotiable three lenses (owned by `review-impl` / `pr-contribution-handler`):
 1. the change is at the **right architectural seam**;
 2. the code is **idiomatic and follows repo patterns/standards AT that seam**;
