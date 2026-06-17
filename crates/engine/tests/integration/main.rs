@@ -365,6 +365,7 @@ mod turn_control_priority_softlock;
 mod twice_instead_repeat_for;
 mod tyvar_activate_as_though_haste;
 mod unstoppable_slasher_half_life;
+mod unravel_counter_mana_value;
 mod ureni_attack_trigger;
 mod urge_to_feed_regression;
 mod urza_lord_high_artificer_shuffle_exile_free_cast;
