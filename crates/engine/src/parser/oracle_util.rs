@@ -1184,6 +1184,7 @@ const SUBTYPES: &[&str] = &[
     "Vampire",
     "Vedalken",
     "Viashino",
+    "Villain",
     "Volver",
     "Wall",
     "Walrus",

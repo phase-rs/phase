@@ -287,6 +287,14 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
                 ProposedEvent::Explore { .. } => {}
+                // CR 701.34a: Proliferate accepted after replacement choice.
+                proliferate @ ProposedEvent::Proliferate { .. } => {
+                    crate::game::effects::proliferate::apply_proliferate_after_replacement(
+                        state,
+                        proliferate,
+                        events,
+                    );
+                }
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.

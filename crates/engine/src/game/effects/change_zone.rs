@@ -58,7 +58,11 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
     (!zones.is_empty()).then_some(zones)
 }
 
-fn resolve_enters_under_player(
+/// CR 110.2a: Resolve the optional `enters_under` controller override to a
+/// concrete `PlayerId` for any battlefield-entry effect. Shared by `ChangeZone`,
+/// `ChangeZoneAll`, and `Manifest` so every entry path resolves the reference
+/// through the single canonical `ControllerRef` authority (`controller_ref_player`).
+pub(crate) fn resolve_enters_under_player(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_name: &str,

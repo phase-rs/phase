@@ -287,6 +287,28 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if let Some(def) = parse_proliferate_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
+    // --- "If [player] would proliferate, {effect}" ---
+    // CR 701.34a + CR 614.1a: Generic proliferate replacement (Tekuthal class).
+    if nom_primitives::scan_contains(&lower, "would proliferate") {
+        let effect_text = extract_replacement_effect(&normalized);
+        let mut def =
+            ReplacementDefinition::new(ReplacementEvent::Proliferate).description(text.to_string());
+        {
+            let e = effect_text?;
+            let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
+            if optional_modal_present {
+                def = def.mode(ReplacementMode::Optional { decline: None });
+            }
+            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+        }
+        apply_proliferate_player_scope(&lower, &mut def);
+        return Some(def);
+    }
+
     // --- Explore replacement: "If a creature you control would explore, instead …"
     // (Twists and Turns / Topography Tracker class).
     if nom_primitives::scan_contains(&lower, "would explore") {
@@ -4724,6 +4746,80 @@ fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
         ),
     ))
     .parse(input)
+}
+
+/// CR 614.1a: Apply `valid_player` scope to proliferate replacements from the
+/// antecedent subject ("an opponent", "a player", or default controller-only).
+fn apply_proliferate_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would proliferate")
+        || nom_primitives::scan_contains(lower, "opponent would proliferate")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "a player would proliferate") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    } else if nom_primitives::scan_contains(lower, "you would proliferate") {
+        def.valid_player = Some(ReplacementPlayerScope::You);
+    }
+}
+
+fn parse_proliferate_replacement_count(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice that many"),
+        ),
+        nom::combinator::map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+            value: value as i32,
+        }),
+        value(QuantityExpr::Fixed { value: 2 }, tag("twice")),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.34a + CR 614.1a: Parse count-modifying proliferate replacements such
+/// as Tekuthal, Inquiry Dominus ("proliferate twice instead").
+fn parse_proliferate_count_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (count, rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if you would proliferate, proliferate ").parse(input)?;
+        let (input, count) = parse_proliferate_replacement_count.parse(input)?;
+        let (input, _) = alt((tag(" instead"), tag(" times instead"))).parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, count))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let repeat_for = match count {
+        QuantityExpr::Fixed { value: 1 } => None,
+        other => Some(other),
+    };
+    let mut execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Proliferate);
+    if let Some(repeat) = repeat_for {
+        execute.repeat_for = Some(repeat);
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Proliferate)
+        .execute(execute)
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
 }
 
 fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
@@ -12172,6 +12268,29 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+
+    #[test]
+    fn tekuthal_proliferate_replacement_parses() {
+        let def = parse_replacement_line(
+            "If you would proliferate, proliferate twice instead.",
+            "Tekuthal, Inquiry Dominus",
+        )
+        .expect("Tekuthal proliferate replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Proliferate);
+        assert_eq!(
+            def.valid_player,
+            Some(ReplacementPlayerScope::You),
+            "controller-scoped proliferate replacement"
+        );
+        let execute = def.execute.expect("execute ability");
+        assert!(matches!(*execute.effect, Effect::Proliferate));
+        assert_eq!(
+            execute.repeat_for,
+            Some(QuantityExpr::Fixed { value: 2 }),
+            "proliferate twice instead → repeat_for Fixed(2)"
+        );
     }
 
     #[test]

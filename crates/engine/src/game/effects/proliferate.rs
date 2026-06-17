@@ -1,12 +1,15 @@
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::counter::{
     has_positive_counters, positive_counter_types, prune_zero_counters, CounterType,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+    GameState, PendingCounterAddition, PendingEffectResolved, PendingProliferateActions, WaitingFor,
 };
+use crate::types::identifiers::ObjectId;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::proposed_event::ProposedEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlayerCounterSource {
@@ -33,15 +36,18 @@ fn proliferatable_player_counters(player: &Player) -> Vec<PlayerCounterSource> {
     counters
 }
 
-/// CR 701.34a: Proliferate — controller chooses any number of permanents and/or
-/// players that already have counters, then gives each another counter of a kind
-/// already there. Sets `WaitingFor::ProliferateChoice` for the player to choose.
-pub fn resolve(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    // CR 701.34a: Collect eligible permanents (with counters on them).
+/// Outcome of routing proliferate through the CR 614 replacement pipeline.
+pub(crate) enum ProliferateThroughReplacementOutcome {
+    /// All proliferate actions completed synchronously (no target choice needed).
+    Completed,
+    /// A `ProliferateChoice` prompt is open; remaining actions may be queued in
+    /// `pending_proliferate_actions`.
+    PausedForChoice,
+    /// CR 614.6: the proliferate event was fully replaced away.
+    Prevented,
+}
+
+fn collect_proliferate_eligible(state: &GameState) -> Vec<TargetRef> {
     let mut eligible: Vec<TargetRef> = state
         .battlefield
         .iter()
@@ -55,33 +61,167 @@ pub fn resolve(
         .map(|id| TargetRef::Object(*id))
         .collect();
 
-    // CR 701.34a + CR 107.14: players with any counter, including energy, are eligible.
     for player in &state.players {
         if !proliferatable_player_counters(player).is_empty() {
             eligible.push(TargetRef::Player(player.id));
         }
     }
 
+    eligible
+}
+
+fn emit_empty_proliferate_action(actor: PlayerId, events: &mut Vec<GameEvent>) {
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: actor,
+        action: PlayerActionKind::Proliferate,
+    });
+}
+
+/// CR 701.34a: Drive one proliferate action for `actor`. Returns `true` when the
+/// action completed synchronously, `false` when a `ProliferateChoice` was opened.
+fn drive_single_proliferate_action(
+    state: &mut GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    remaining_after_this: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let eligible = collect_proliferate_eligible(state);
     if eligible.is_empty() {
-        // Nothing to proliferate — skip choice and resolve immediately.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        // CR 701.34a: Emit player-action event so proliferate triggers fire
-        // even when there are no eligible targets.
-        events.push(GameEvent::PlayerPerformedAction {
-            player_id: ability.controller,
-            action: PlayerActionKind::Proliferate,
-        });
-        return Ok(());
+        emit_empty_proliferate_action(actor, events);
+        return true;
     }
 
-    // Set WaitingFor so the player can choose which to proliferate.
+    if remaining_after_this > 0 {
+        state.pending_proliferate_actions = Some(PendingProliferateActions {
+            actor,
+            source_id,
+            remaining: remaining_after_this,
+        });
+    } else {
+        state.pending_proliferate_actions = Some(PendingProliferateActions {
+            actor,
+            source_id,
+            remaining: 0,
+        });
+    }
+
     state.waiting_for = WaitingFor::ProliferateChoice {
-        player: ability.controller,
+        player: actor,
         eligible,
     };
+    false
+}
+
+/// CR 701.34a + CR 614.1a: Perform `count` proliferate actions after replacement
+/// effects have modified the count. Returns `false` when paused on a choice.
+pub(crate) fn drive_proliferate_actions(
+    state: &mut GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if count == 0 {
+        return true;
+    }
+
+    for index in 0..count {
+        let remaining_after_this = count - index - 1;
+        if !drive_single_proliferate_action(state, actor, source_id, remaining_after_this, events) {
+            return false;
+        }
+    }
+    true
+}
+
+/// CR 614.6 + CR 614.11: Apply a post-replacement `ProposedEvent::Proliferate`.
+pub fn apply_proliferate_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) {
+    let ProposedEvent::Proliferate {
+        player_id, count, ..
+    } = event
+    else {
+        debug_assert!(
+            false,
+            "apply_proliferate_after_replacement called with non-Proliferate ProposedEvent"
+        );
+        return;
+    };
+
+    let _ = drive_proliferate_actions(state, player_id, ObjectId(0), count, events);
+}
+
+/// CR 701.34a + CR 614.1a: Resume proliferate actions stashed while waiting for
+/// a `ProliferateChoice`. Returns `true` when all remaining actions completed.
+pub fn resume_pending_proliferate_actions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(pending) = state.pending_proliferate_actions.take() else {
+        return true;
+    };
+    drive_proliferate_actions(
+        state,
+        pending.actor,
+        pending.source_id,
+        pending.remaining,
+        events,
+    )
+}
+
+/// CR 614.6 + CR 614.11: Single authority for propose → replace → apply.
+pub(crate) fn proliferate_through_replacement(
+    state: &mut GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> ProliferateThroughReplacementOutcome {
+    let proposed = ProposedEvent::proliferate(actor, 1);
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(ProposedEvent::Proliferate {
+            player_id, count, ..
+        }) => {
+            if count == 0 {
+                return ProliferateThroughReplacementOutcome::Prevented;
+            }
+            if drive_proliferate_actions(state, player_id, source_id, count, events) {
+                ProliferateThroughReplacementOutcome::Completed
+            } else {
+                ProliferateThroughReplacementOutcome::PausedForChoice
+            }
+        }
+        ReplacementResult::Execute(_) => ProliferateThroughReplacementOutcome::Completed,
+        ReplacementResult::Prevented => ProliferateThroughReplacementOutcome::Prevented,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            ProliferateThroughReplacementOutcome::PausedForChoice
+        }
+    }
+}
+
+/// CR 701.34a: Proliferate — controller chooses any number of permanents and/or
+/// players that already have counters, then gives each another counter of a kind
+/// already there. Sets `WaitingFor::ProliferateChoice` for the player to choose.
+pub fn resolve(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    match proliferate_through_replacement(state, ability.controller, ability.source_id, events) {
+        ProliferateThroughReplacementOutcome::Completed
+        | ProliferateThroughReplacementOutcome::Prevented => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+        }
+        ProliferateThroughReplacementOutcome::PausedForChoice => {}
+    }
 
     Ok(())
 }
@@ -258,6 +398,50 @@ mod tests {
 
     fn make_proliferate_ability() -> ResolvedAbility {
         ResolvedAbility::new(Effect::Proliferate, vec![], ObjectId(100), PlayerId(0))
+    }
+
+    /// CR 701.34a + CR 614.1a: Tekuthal-style proliferate replacement doubles
+    /// the action count via `repeat_for` on the execute ability.
+    #[test]
+    fn proliferate_replacement_doubles_action_count() {
+        use crate::game::replacement::{replace_event, ReplacementResult};
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition,
+            ReplacementPlayerScope,
+        };
+        use crate::types::proposed_event::ProposedEvent;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let tekuthal = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Tekuthal".to_string(),
+            Zone::Battlefield,
+        );
+        let mut execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Proliferate);
+        execute.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        let mut replacement =
+            ReplacementDefinition::new(ReplacementEvent::Proliferate).execute(execute);
+        replacement.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&tekuthal)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+
+        let mut events = Vec::new();
+        match replace_event(
+            &mut state,
+            ProposedEvent::proliferate(PlayerId(0), 1),
+            &mut events,
+        ) {
+            ReplacementResult::Execute(ProposedEvent::Proliferate { count, .. }) => {
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected doubled proliferate event, got {other:?}"),
+        }
     }
 
     #[test]

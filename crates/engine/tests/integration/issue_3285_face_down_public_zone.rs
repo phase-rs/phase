@@ -22,6 +22,7 @@ fn manifested_creature_turns_face_up_in_graveyard_when_it_dies() {
         card,
         card,
         FaceDownProfile::vanilla_2_2(),
+        None,
         &mut events,
     )
     .expect("manifest must succeed");

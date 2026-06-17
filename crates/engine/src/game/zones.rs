@@ -2211,6 +2211,7 @@ mod tests {
             id,
             id,
             FaceDownProfile::vanilla_2_2(),
+            None,
             &mut events,
         )
         .unwrap();

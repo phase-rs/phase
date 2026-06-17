@@ -13793,7 +13793,8 @@ mod tests {
                 *sub.effect,
                 Effect::Manifest {
                     target: TargetFilter::TriggeringPlayer,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",

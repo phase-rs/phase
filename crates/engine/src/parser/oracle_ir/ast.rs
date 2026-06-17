@@ -1132,6 +1132,22 @@ pub(crate) enum PutImperativeAst {
     /// CR 121.5: "put that many cards from the top of your library into your
     /// hand" moves library cards without drawing them (Scroll Rack).
     PutTopCardsIntoHandMatchingExileCount,
+    /// CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+    /// library onto the battlefield face down [under your control]." This is the
+    /// put-clause surface form of manifest (CR 701.40a): the cards are turned
+    /// face down before entry (CR 708.3) and become 2/2 creatures by default.
+    /// `target` selects whose library is the source. `count` is N. `profile`
+    /// seeds the effect-specified face-down characteristics (CR 708.2a) — set to
+    /// `Some(vanilla_2_2())` when "face down" is present so a trailing "They're
+    /// 2/2 Cyberman artifact creatures." continuation has a profile to refine.
+    /// `enters_under` carries the CR 110.2a controller override ("under your
+    /// control"). Lowered 1:1 onto `Effect::Manifest`.
+    Manifest {
+        target: TargetFilter,
+        count: QuantityExpr,
+        profile: Option<FaceDownProfile>,
+        enters_under: Option<ControllerRef>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
