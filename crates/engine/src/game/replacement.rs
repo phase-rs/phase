@@ -3387,6 +3387,14 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 502.3 + CR 502.4: untap-step gate. Permanents untap as a turn-based
+        // action during the untap step, and no player receives priority then, so
+        // any `ProposedEvent::Untap` raised while `phase == Untap` is the
+        // turn-based untap (effect-untaps like "untap target creature" occur in
+        // phases that grant priority). Restricts the replacement to the untap
+        // step exactly as the "during [its controller's / your] untap step"
+        // wording requires.
+        ReplacementCondition::DuringUntapStep => state.phase == crate::types::phase::Phase::Untap,
         // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
         // while the controller has at least `minimum` permanents matching `filter` on
         // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
