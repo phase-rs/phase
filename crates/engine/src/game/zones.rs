@@ -26,20 +26,39 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 ///
 /// CR 113.6b: the ability is read from the object's state in the zone it is
 /// moving FROM. This function must be called while the object's `zone` field
-/// still holds the from-zone (before `move_to_zone` updates it), so that the
-/// ability's `condition` gate and any layer-applied ability removal (such as
-/// Yixlid Jailer in graveyards) are evaluated from the correct zone — matching
+/// still holds the from-zone (before `move_to_zone` updates it), so the
+/// ability's `condition` gate is evaluated from the correct zone — matching
 /// Me's official ruling.
 ///
-/// Note: `active_static_definitions` only enforces the `active_zones`
-/// membership gate for the Command zone (functioning_abilities.rs); for other
-/// zones the full `active_zones` gate lives in the layers pipeline
-/// (layers.rs), which this helper bypasses. Persistence here is therefore
-/// gated by `excluded_zones`, not by `active_zones`. This is sound for the
-/// shipping cards because their `excluded_zones` (Hand, Library) coincide with
-/// the inactive zones where objects never carry counters. A future
-/// `CountersPersistAcrossZones` card with a different active/excluded split
-/// would need an explicit `active_zones` check added here.
+/// Two documented limitations, both arising because this helper reads
+/// `obj.static_definitions` directly (via `active_static_definitions`) rather
+/// than the layer-resolved view of the object:
+///
+/// 1. `active_zones`: `active_static_definitions` only enforces the
+///    `active_zones` membership gate for the Command zone
+///    (functioning_abilities.rs); for other zones the full `active_zones` gate
+///    lives in the layers pipeline (layers.rs), which this helper bypasses.
+///    Persistence here is therefore gated by `excluded_zones`, not by
+///    `active_zones`. This is sound for the shipping cards because their
+///    `excluded_zones` (Hand, Library) coincide with the inactive zones where
+///    objects never carry counters. A future `CountersPersistAcrossZones` card
+///    with a different active/excluded split would need an explicit
+///    `active_zones` check added here.
+///
+/// 2. Layer-6 ability removal (Humility / Yixlid Jailer's "Cards in graveyards
+///    lose all abilities"): `evaluate_layers` (layers.rs) only applies layers to
+///    battlefield + hand objects, so a graveyard/exile object's
+///    `static_definitions` never has its abilities stripped. With Yixlid Jailer
+///    in play and Me/Skullbriar in a graveyard bearing counters, this helper
+///    still observes the persistence static and would INCORRECTLY persist the
+///    counters on a graveyard→exile move — CR 113.6b reads the ability from the
+///    from-zone state, where it is rules-meant to be removed. This is not a
+///    regression (graveyard ability-removal is unmodeled engine-wide), but it is
+///    a known-wrong interaction on this new path, called out here explicitly
+///    rather than left implicit.
+///    TODO: once `evaluate_layers` applies Layer-6 ability removal to non-
+///    battlefield zones, re-check persistence against the layer-resolved view
+///    here so Humility/Yixlid correctly suppress it.
 fn counters_persist_on_move(state: &GameState, object_id: ObjectId, to: Zone) -> bool {
     let Some(obj) = state.objects.get(&object_id) else {
         return false;
