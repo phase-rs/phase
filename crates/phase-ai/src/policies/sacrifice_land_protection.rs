@@ -95,7 +95,7 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 }
 
-fn activation_ability(ctx: &PolicyContext<'_>) -> Option<&AbilityDefinition> {
+fn activation_ability<'a>(ctx: &'a PolicyContext<'a>) -> Option<&'a AbilityDefinition> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
