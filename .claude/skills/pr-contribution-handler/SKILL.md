@@ -271,6 +271,8 @@ git merge --no-edit origin/main
 
 Resolve conflicts in the same architectural style as the surrounding code. Do not discard contributor changes. If conflicts reveal that the PR's approach is obsolete, finish the merge only after deciding whether the right resolution is an inline fix or a full implementation cycle.
 
+**The `main.rs` mod-line tax (recurring, deterministic).** `crates/engine/tests/integration/main.rs` is rustfmt-sorted (`reorder_modules`), and every test-carrying PR appends a `mod issue_XXXX;` line. Two test PRs near each other in the queue therefore conflict **deterministically** on that file, and GitHub's auto-rebase bails (leaving the PR `DIRTY`). The resolution is always the same: keep **both** mod lines, in sorted order. This is a merge-queue serialization artifact, not a contributor defect — resolve it mechanically and move on. (Inline `#[cfg(test)]` tests avoid it entirely.)
+
 If `origin/main` is already an ancestor and there are no conflicts, skip the merge — repeatedly bringing-current adds noise to the PR history without changing mergeability under the queue.
 
 ## Review Comment Resolution
@@ -431,6 +433,17 @@ Suggested commit shapes:
 - `test(PR-<PR>): cover deferred follow-up`
 
 Do not push unless the user requested pushing or the invocation explicitly says to update the PR branch. If push access is unavailable, report the local commits and branch.
+
+**Pushing a maintainer fixup to a fork PR (`maintainerCanModify=true`).** A maintainer-edit token can push **only** to the PR's *existing* head branch name on the fork — a different branch name is rejected "permission denied". To avoid switching the main working dir's branch while other agents run, do the fixup in an **isolated worktree**, commit by pathspec, and push to the fork via a token URL:
+
+```bash
+git worktree add -q /tmp/pr<PR>-fix pr/<PR>      # pr/<PR> = the already-fetched head ref
+cd /tmp/pr<PR>-fix && cargo fmt --all            # or whatever the narrow fix is
+git commit <paths> -m "style: cargo fmt (maintainer fixup)"
+git push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/<forkOwner>/phase.git" HEAD:<exact-headRefName>
+```
+
+Then **verify the PR head actually moved** via `gh pr view <PR> --json headRefOid` — a push exit 0 can lie (a SIGPIPE after the pre-push hook passes can strand the ref). Remove the worktree afterward. `cargo fmt --all` is the one cargo command safe to run directly (Tilt doesn't auto-format); never run `cargo build`/`clippy`/`test` directly (Tilt holds the target lock).
 
 ## Labeling (required — every handled PR)
 
