@@ -42,7 +42,8 @@ jobs:
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p data/mtgjson
-          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run quick AI gate
@@ -73,7 +74,8 @@ jobs:
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p data/mtgjson
-          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run full AI gate

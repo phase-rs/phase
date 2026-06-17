@@ -27,11 +27,14 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     if matches!(filter, TargetFilter::LastCreated) {
         return state.last_created_token_ids.clone();
     }
-    // CR 722.3a: A self-referential "this creature becomes prepared" (e.g.
+    // CR 722.3a: a self-referential "this creature becomes prepared" (e.g.
     // Stensian Sanguinist's combat-damage delayed trigger) carries no explicit
-    // object target — the subject is the ability's own source. Resolve it to
-    // `source_id` so the prepare designation lands on the right permanent.
-    if matches!(filter, TargetFilter::SelfRef) {
+    // object target — the subject is the ability's own source.
+    // CR 608.2c: a triggered BecomePrepared bound to the source via ParentTarget
+    // with no explicit target (e.g. Tam landfall) likewise resolves to source_id.
+    if matches!(filter, TargetFilter::SelfRef)
+        || (ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget))
+    {
         return vec![ability.source_id];
     }
     ability
@@ -415,6 +418,42 @@ mod tests {
             matches!(effect, Effect::BecomeUnprepared { .. }),
             "expected BecomeUnprepared, got {effect:?}"
         );
+    }
+
+    #[test]
+    fn become_prepared_parent_target_with_empty_targets_prepares_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tam, Observant Sequencer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.back_face = Some(BackFaceForTest::prepare());
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomePrepared {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&source].prepared.is_some(),
+            "ParentTarget BecomePrepared with empty targets must prepare the source"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::BecamePrepared { object_id } if *object_id == source)
+        ));
     }
 
     fn setup_creature(state: &mut GameState) -> ObjectId {

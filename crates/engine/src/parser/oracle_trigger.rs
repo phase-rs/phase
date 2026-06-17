@@ -26164,6 +26164,21 @@ mod tests {
     }
 
     #[test]
+    fn trigger_intervening_if_source_is_exiled_sets_trigger_zone() {
+        let def = parse_trigger_line(
+            "Whenever a land you control enters, if ~ is exiled, you may put a voyage counter on it.",
+            "Cosima, God of the Voyage",
+        );
+
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::SourceInZone { zone: Zone::Exile }),
+        );
+    }
+
+    #[test]
     fn trigger_intervening_if_this_card_is_suspended() {
         let def = parse_trigger_line(
             "Whenever you cast a spell, if this card is suspended, remove a time counter from it.",

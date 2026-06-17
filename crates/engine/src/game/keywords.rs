@@ -499,13 +499,18 @@ pub fn activate_ninjutsu(
         }
     };
 
-    // Validate: creature controlled by player
+    // Validate: creature controlled by player and still on the battlefield.
+    // CR 506.4 + CR 702.49a: A creature that died or left combat before the
+    // declare blockers step cannot be returned by Ninjutsu.
     let creature_obj = state
         .objects
         .get(&creature_to_return)
         .ok_or("Creature not found")?;
     if creature_obj.controller != player {
         return Err("You don't control that creature".to_string());
+    }
+    if !super::combat::is_attacker_in_play(state, creature_to_return) {
+        return Err("Attacker is no longer on the battlefield".to_string());
     }
 
     // CR 601.2f: Apply ability cost reduction from statics like Silver-Fur Master

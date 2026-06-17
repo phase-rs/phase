@@ -6898,6 +6898,13 @@ pub fn handle_cast_spell_as_sneak_with_payment_mode(
             "You don't control that creature".to_string(),
         ));
     }
+    // CR 506.4 + CR 702.190a: Sneak may only return an unblocked attacker still
+    // on the battlefield.
+    if !super::combat::is_attacker_in_play(state, creature_to_return) {
+        return Err(EngineError::ActionNotAllowed(
+            "Attacker is no longer on the battlefield".to_string(),
+        ));
+    }
 
     let placement = if is_permanent_spell {
         Some(SneakPlacement {

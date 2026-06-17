@@ -116,12 +116,21 @@ jobs:
         run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
+        # Scoped to AtomicCards.json under its own `mtgjson-atomic-` namespace —
+        # this job needs nothing else from data/mtgjson. The per-content
+        # namespace stops draft-pools (which populates only SetList + sets/,
+        # never AtomicCards) from clobbering this job's key with a partial dir.
+        #
+        # Exact weekly key, NO restore-keys: a new week misses, so the download
+        # step re-fetches fresh MTGJSON data (the weekly refresh we want); a
+        # restore-keys fallback would pin us to last week's AtomicCards forever
+        # because the download is file-existence-gated. Same-week runs reuse the
+        # exact-key hit.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
-          path: data/mtgjson
-          key: mtgjson-${{ steps.cache-keys.outputs.week }}
-          restore-keys: mtgjson-
+          path: data/mtgjson/AtomicCards.json
+          key: mtgjson-atomic-${{ steps.cache-keys.outputs.week }}
 
       - name: Download MTGJSON data
         # Gate on file existence, not cache-hit: actions/cache restore-keys can
@@ -133,7 +142,8 @@ jobs:
         run: |
           if [ ! -f data/mtgjson/AtomicCards.json ]; then
             mkdir -p data/mtgjson
-            curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           fi
 
       - name: Cache generated card data
@@ -251,20 +261,25 @@ jobs:
         run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
-        # Shares the weekly mtgjson key with card-data-gate so per-set files
-        # fetched by fetch-draft-sets.sh persist across runs.
+        # Scoped to SetList.json + the per-set files this job populates, under
+        # its own `mtgjson-sets-` namespace so it can't collide with
+        # card-data-gate's `mtgjson-atomic-` key (this job never fetches
+        # AtomicCards). Exact weekly key, NO restore-keys: a new week misses and
+        # re-fetches fresh set data; same-week runs reuse the exact-key hit.
         uses: actions/cache@v4
         with:
-          path: data/mtgjson
-          key: mtgjson-${{ steps.cache-keys.outputs.week }}
-          restore-keys: mtgjson-
+          path: |
+            data/mtgjson/SetList.json
+            data/mtgjson/sets
+          key: mtgjson-sets-${{ steps.cache-keys.outputs.week }}
 
       - name: Download MTGJSON SetList data
         # fetch-draft-sets.sh enumerates draftable sets from SetList.json.
         run: |
           mkdir -p data/mtgjson
           if [ ! -f data/mtgjson/SetList.json ]; then
-            curl -fSL -o data/mtgjson/SetList.json "https://mtgjson.com/api/v5/SetList.json"
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download SetList.json data/mtgjson/SetList.json
           fi
 
       - name: Download draft set data
