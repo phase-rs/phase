@@ -7580,6 +7580,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         crate::game::engine::apply(
@@ -11721,6 +11722,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -11757,6 +11759,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                is_cost_payment: false,
             },
             GameAction::SelectCards {
                 cards: vec![second],

@@ -1186,12 +1186,6 @@
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
     },
-    "exile": {
-      "title_one": "Eine Karte ins Exil schicken",
-      "title_other": "{{count}} Karten ins Exil schicken",
-      "subtitle_one": "Wähle {{count}} Karte zum Exilieren",
-      "subtitle_other": "Wähle {{count}} Karten zum Exilieren"
-    },
     "discard": {
       "title": "Abwerfen",
       "titleAdditionalCost": "Als zusätzliche Kosten abwerfen",

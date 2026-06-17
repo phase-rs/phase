@@ -3050,18 +3050,6 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unless_filter: Option<crate::types::ability::TargetFilter>,
     },
-    /// CR 406.6: Player chooses card(s) to exile from a zone during effect resolution.
-    /// Used by The Mimeoplasm's "exile two creature cards from graveyards" cost.
-    ExileChoice {
-        player: PlayerId,
-        count: usize,
-        cards: Vec<ObjectId>,
-        source_id: ObjectId,
-        /// Filter for eligible cards (e.g., creature cards in graveyards).
-        filter: crate::types::ability::TargetFilter,
-        /// Zone to exile from (e.g., Graveyard).
-        zone: crate::types::Zone,
-    },
     /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
     /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
     EffectZoneChoice {
@@ -3114,6 +3102,11 @@ pub enum WaitingFor {
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
         count_param: u32,
+        /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
+        /// rather than effect resolution. Cost-payment choices require special
+        /// handling for exile-link tracking (push_exiled_with_source_this_turn).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_cost_payment: bool,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -4190,7 +4183,6 @@ impl WaitingFor {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
-            WaitingFor::ExileChoice { .. } => "ExileChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::LearnChoice { .. } => "LearnChoice",
@@ -4394,7 +4386,6 @@ impl WaitingFor {
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
-            | WaitingFor::ExileChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
@@ -8164,6 +8155,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -8411,6 +8403,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -8512,6 +8505,7 @@ mod tests {
                 ward: None,
             }),
             count_param: 0,
+            is_cost_payment: false,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

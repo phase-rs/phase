@@ -598,7 +598,7 @@ fn pay_ability_cost_inner(
         }
         // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
         // "exile two creature cards from graveyards"). The interactive choice is
-        // surfaced via WaitingFor::ExileChoice.
+        // surfaced via WaitingFor::EffectZoneChoice with is_cost_payment: true.
         AbilityCost::Exile {
             count,
             zone,
@@ -630,16 +630,31 @@ fn pay_ability_cost_inner(
             if eligible.len() == count {
                 for card_id in eligible {
                     super::zones::move_to_zone(state, card_id, Zone::Exile, events);
+                    super::exile_links::push_exiled_with_source_this_turn(
+                        state, card_id, source_id,
+                    );
                 }
                 state.last_effect_count = Some(count as i32);
             } else {
-                state.waiting_for = WaitingFor::ExileChoice {
+                state.waiting_for = WaitingFor::EffectZoneChoice {
                     player,
-                    count,
                     cards: eligible,
+                    count,
+                    min_count: 0,
+                    up_to: false,
                     source_id,
-                    filter: filter.clone().unwrap_or(TargetFilter::Any),
+                    effect_kind: crate::types::ability::EffectKind::PayCost,
                     zone: effective_zone,
+                    destination: Some(Zone::Exile),
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_transformed: false,
+                    enters_under_player: None,
+                    enters_attacking: false,
+                    owner_library: false,
+                    track_exiled_by_source: true,
+                    face_down_profile: None,
+                    count_param: 0,
+                    is_cost_payment: true,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,

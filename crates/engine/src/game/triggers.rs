@@ -19293,6 +19293,7 @@ pub mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         crate::game::engine::apply_as_current(

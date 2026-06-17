@@ -1186,12 +1186,6 @@
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
     },
-    "exile": {
-      "title_one": "Exiler une carte",
-      "title_other": "Exiler {{count}} cartes",
-      "subtitle_one": "Choisissez {{count}} carte à exiler",
-      "subtitle_other": "Choisissez {{count}} cartes à exiler"
-    },
     "discard": {
       "title": "Défausser",
       "titleAdditionalCost": "Défausser comme coût supplémentaire",

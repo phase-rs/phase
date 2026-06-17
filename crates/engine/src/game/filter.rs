@@ -1625,9 +1625,10 @@ fn filter_inner_for_object(
                 .iter()
                 .any(|entry| entry.exiled_id == object_id)
         }
-        // CR 406.6: References a specific card exiled by the source, indexed by order.
+        // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
-        // "the second card exiled this way".
+        // "the second card exiled this way". ENGINE INVARIANT: The ordering is
+        // guaranteed by Vec::push in push_exiled_with_source_this_turn.
         TargetFilter::ExiledCardByIndex { index } => {
             // Look up the source's exile list and check if object_id matches the indexed position
             let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);

@@ -1186,12 +1186,6 @@
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
     },
-    "exile": {
-      "title_one": "Exiliar una carta",
-      "title_other": "Exiliar {{count}} cartas",
-      "subtitle_one": "Elige {{count}} carta para exiliar",
-      "subtitle_other": "Elige {{count}} cartas para exiliar"
-    },
     "discard": {
       "title": "Descartar",
       "titleAdditionalCost": "Descartar como coste adicional",

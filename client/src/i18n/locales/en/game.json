@@ -1191,12 +1191,6 @@
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
     },
-    "exile": {
-      "title_one": "Exile a card",
-      "title_other": "Exile {{count}} cards",
-      "subtitle_one": "Choose {{count}} card to exile",
-      "subtitle_other": "Choose {{count}} cards to exile"
-    },
     "discard": {
       "title": "Discard",
       "titleAdditionalCost": "Discard as additional cost",

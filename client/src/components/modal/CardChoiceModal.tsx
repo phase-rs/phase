@@ -108,7 +108,6 @@ type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
-type ExileChoice = Extract<WaitingFor, { type: "ExileChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -328,9 +327,6 @@ export function CardChoiceModal() {
     case "LearnChoice":
       if (!canActForWaitingState) return null;
       return <LearnModal data={waitingFor.data} />;
-    case "ExileChoice":
-      if (!canActForWaitingState) return null;
-      return <ExileChoiceModal data={waitingFor.data} />;
     case "ChooseManaColor":
       if (!canActForWaitingState) return null;
       return <ManaColorChoiceModal data={waitingFor.data} />;
@@ -2946,96 +2942,6 @@ function CollectEvidenceModal({
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-amber-500/20">
                   <span className="rounded-full bg-amber-500/90 px-3 py-1 text-xs font-bold text-white">
                     {t("cardChoice.badges.evidence")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Exile Choice Modal ──────────────────────────────────────────────────────
-
-function ExileChoiceModal({ data }: { data: ExileChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.count],
-  );
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  const isReady = selected.size === data.count;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.exile.title", { count: data.count })}
-      subtitle={t("cardChoice.exile.subtitle", { count: data.count })}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={!isReady}
-          label={t("cardChoice.buttons.exileCount", {
-            selected: selected.size,
-            count: data.count,
-          })}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-violet-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20">
-                  <span className="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.exile")}
                   </span>
                 </div>
               )}

@@ -116,7 +116,6 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
-            | WaitingFor::ExileChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -2424,64 +2423,6 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
-            WaitingFor::ExileChoice {
-                player,
-                count,
-                cards,
-                source_id,
-                filter: _,
-                zone,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => {
-            if chosen.len() != count {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must select exactly {} card(s), got {}",
-                    count,
-                    chosen.len()
-                )));
-            }
-
-            for card_id in &chosen {
-                if !cards.contains(card_id) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected card not in eligible set".to_string(),
-                    ));
-                }
-                if state.objects.get(card_id).map(|obj| obj.zone) != Some(zone) {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Selected card is no longer in {:?}",
-                        zone
-                    )));
-                }
-            }
-
-            let events_before_effect = events.len();
-            for &card_id in &chosen {
-                zones::move_to_zone(state, card_id, Zone::Exile, events);
-            }
-            let events_after_move = events.len();
-
-            state.last_effect_count = Some(chosen.len() as i32);
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::ChangeZone,
-                source_id,
-            });
-
-            let waiting_for = finish_with_continuation(state, player, events);
-
-            // CR 603.2c: batch observer triggers across the ExileChoice pause
-            if let Some(outcome) = batch_or_drain_observer_triggers(
-                state,
-                events,
-                events_before_effect,
-                events_after_move,
-            ) {
-                return Ok(outcome);
-            }
-            ResolutionChoiceOutcome::WaitingFor(waiting_for)
-        }
-        (
             WaitingFor::EffectZoneChoice {
                 player,
                 cards,
@@ -2500,6 +2441,7 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_profile,
                 count_param,
+                is_cost_payment,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -2653,7 +2595,16 @@ pub(super) fn handle_resolution_choice(
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
                         ) {
-                            effects::change_zone::ZoneMoveResult::Done => {}
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                // CR 118.3: When this is a cost-payment exile (e.g., Mimeoplasm),
+                                // populate the exile-link index map so the continuation can
+                                // reference exiled cards by position (ExiledCardByIndex, ExiledCardPower).
+                                if is_cost_payment && dest_zone == Zone::Exile {
+                                    super::exile_links::push_exiled_with_source_this_turn(
+                                        state, *card_id, source_id,
+                                    );
+                                }
+                            }
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {

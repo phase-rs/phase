@@ -2025,7 +2025,7 @@ fn build_replacement_exec(
         // `Unless` and `MayActions` are handled by the early-return guards above.
         A::Unless(_, _) => unreachable!("Unless handled by early-return guard"),
         A::MayActions(_) => unreachable!("MayActions handled by early-return guard"),
-        // CR 706.9: Enter as a copy of a specific card exiled by the source.
+        // CR 707.2: Enter as a copy of a specific card exiled by the source.
         // Used by The Mimeoplasm to copy the first exiled card.
         A::EnterAsCopyOfExiled(card_in_exile, copy_effects) => {
             let target = convert_card_in_exile_to_target_filter(card_in_exile)?;

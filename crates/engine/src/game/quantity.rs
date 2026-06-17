@@ -1664,7 +1664,8 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => usize_to_i32_saturating(
             crate::game::players::linked_exile_cards_for_source(state, source_id).len(),
         ),
-        // CR 406.6: The power of a specific card exiled by the source, indexed by order.
+        // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
+        // ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
         QuantityRef::ExiledCardPower { index } => {
             let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
             match exiled_cards.and_then(|cards| cards.get(*index as usize)) {

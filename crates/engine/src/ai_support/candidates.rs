@@ -1443,12 +1443,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
-        WaitingFor::ExileChoice {
-            player,
-            count,
-            cards,
-            ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
                 GameAction::DecideOptionalCost { pay: true },
@@ -4943,6 +4937,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let actions = candidate_actions_broad(&state);

@@ -311,6 +311,7 @@ pub fn resolve(
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses

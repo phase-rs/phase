@@ -397,7 +397,6 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
-        | WaitingFor::ExileChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardToHandSize { .. }
         | WaitingFor::ManifestDreadChoice { .. }

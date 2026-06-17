@@ -3135,13 +3135,14 @@ pub enum TargetFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
-    /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
+    /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
-    /// CR 406.6: References a specific card exiled by the source, indexed by order.
+    /// CR 607.2a: References a specific card exiled by the source, indexed by order.
     /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
     /// "the second card exiled this way". The index is 0-based and corresponds to
     /// the order in `state.cards_exiled_with_source_this_turn[source_id]`.
+    /// ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
     ExiledCardByIndex {
         index: u32,
     },

@@ -690,7 +690,7 @@ fn pay_replacement_may_cost(
         // CR 406.6: Non-self exile cost paid as the replacement is applied
         // (The Mimeoplasm's "exile two creature cards from graveyards"). This
         // follows the same pattern as Discard: the resolution authority handles
-        // the interactive choice via `WaitingFor::ExileChoice`.
+        // the interactive choice via `WaitingFor::EffectZoneChoice` with is_cost_payment: true.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
             let ability = ResolvedAbility::new(
                 crate::types::ability::Effect::PayCost {
@@ -708,7 +708,13 @@ fn pay_replacement_may_cost(
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
                     if state.waiting_for != prior_waiting_for
-                        && matches!(state.waiting_for, WaitingFor::ExileChoice { .. })
+                        && matches!(
+                            state.waiting_for,
+                            WaitingFor::EffectZoneChoice {
+                                is_cost_payment: true,
+                                ..
+                            }
+                        )
                     {
                         return MayCostOutcome::PausedForChoice {
                             remaining_cost: None,

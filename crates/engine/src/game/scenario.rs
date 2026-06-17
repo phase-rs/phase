@@ -1466,7 +1466,6 @@ impl GameRunner {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
-            WaitingFor::ExileChoice { .. } => "ExileChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
