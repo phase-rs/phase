@@ -29185,6 +29185,102 @@ mod tests {
         ));
     }
 
+    /// CR 508.1d + CR 608.2c + CR 611.2c: standalone "Target creature attacks
+    /// this turn if able" (Boiling Blood, Heckling Fiends, Incite, …). The
+    /// subject-layer interceptor must bind the targeted creature: `target =
+    /// Some(Typed(Creature))` and the embedded MustAttack static's `affected =
+    /// Some(ParentTarget)`. On reverted main both are None (the requirement is
+    /// silently dropped) — this is the discriminating gate.
+    #[test]
+    fn target_creature_attacks_if_able_binds_to_parent_target() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Target creature attacks this turn if able.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert!(
+                    matches!(target, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)),
+                    "target must be the chosen creature, got {target:?}"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget),
+                    "MustAttack must bind to the chosen creature, not nothing"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1d: the combat-duration wording variant — "attacks this combat if
+    /// able" → UntilEndOfCombat, with the same ParentTarget binding.
+    #[test]
+    fn target_creature_attacks_this_combat_if_able_binds_with_combat_duration() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Target creature attacks this combat if able.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfCombat));
+                assert!(
+                    matches!(target, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)),
+                    "target must be the chosen creature, got {target:?}"
+                );
+                assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget)
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1d: activated representative through the full `parse_oracle_text`
+    /// path — Heckling Fiends ("{2}{R}: Target creature attacks this turn if
+    /// able."). The activated ability's effect must bind the target.
+    #[test]
+    fn activated_attacks_if_able_binds_target_via_full_parse() {
+        use crate::types::statics::StaticMode;
+        let r = crate::parser::parse_oracle_text(
+            "{2}{R}: Target creature attacks this turn if able.",
+            "Heckling Fiends",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+        );
+        assert!(!r.abilities.is_empty(), "expected an activated ability");
+        let effect = &r.abilities[0].effect;
+        assert!(
+            matches!(
+                &**effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    target: Some(TargetFilter::Typed(tf)),
+                    ..
+                } if tf.type_filters.contains(&TypeFilter::Creature)
+                    && static_abilities[0].mode == StaticMode::MustAttack
+                    && static_abilities[0].affected == Some(TargetFilter::ParentTarget)
+            ),
+            "activated ability must bind the targeted creature, got {effect:?}"
+        );
+    }
+
     #[test]
     fn effect_target_creature_cant_block_uses_rule_static() {
         let e = parse_effect("Target creature can't block this turn");

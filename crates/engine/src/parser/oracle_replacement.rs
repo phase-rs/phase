@@ -4778,7 +4778,21 @@ fn parse_proliferate_replacement_count(
         nom::combinator::map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
             value: value as i32,
         }),
-        value(QuantityExpr::Fixed { value: 2 }, tag("twice")),
+        // CR 616.1: "proliferate twice" is a *multiplicative* replacement, not a
+        // set-to-2. Modeling it as `Multiply` (double the in-flight count) instead
+        // of `Fixed { value: 2 }` lets two doublers compound through the
+        // replacement pipeline's re-evaluation: two Tekuthal, Inquiry Dominus
+        // proliferate 1 -> 2 -> 4 times (per the MOM ruling), not a flat 2. The
+        // single-doubler case is unchanged (1 * 2 == 2).
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice"),
+        ),
         value(
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
@@ -12288,8 +12302,13 @@ mod tests {
         assert!(matches!(*execute.effect, Effect::Proliferate));
         assert_eq!(
             execute.repeat_for,
-            Some(QuantityExpr::Fixed { value: 2 }),
-            "proliferate twice instead → repeat_for Fixed(2)"
+            Some(QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            }),
+            "proliferate twice instead → repeat_for Multiply(2 × event count) so stacked doublers compound"
         );
     }
 

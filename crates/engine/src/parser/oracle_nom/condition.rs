@@ -6678,6 +6678,35 @@ mod tests {
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
     }
 
+    /// Recent Universe Beyond / Standard creature subtypes (Hero, Spy,
+    /// Scientist, Cyborg, Sorcerer) must be recognized so their oracle-text
+    /// references ("you control a <type>", typed tokens, etc.) parse.
+    #[test]
+    fn test_you_control_recent_subtypes() {
+        for w in ["hero", "spy", "scientist", "cyborg", "sorcerer"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
+    /// Universe Beyond creature subtypes (Marvel: Gamma/Symbiote/Kree/Inhuman/
+    /// Skrull; Transformers: Autobot; DC: Brainiac) must be recognized.
+    #[test]
+    fn test_you_control_universe_beyond_subtypes() {
+        for w in [
+            "gamma", "symbiote", "kree", "inhuman", "skrull", "autobot", "brainiac",
+        ] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
     #[test]
     fn test_you_control_compound_presence() {
         let (rest, c) =

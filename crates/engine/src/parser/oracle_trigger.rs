@@ -22269,6 +22269,55 @@ mod tests {
         }
     }
 
+    /// Issue #1307: Moseo, Vein's New Dean's Infusion ability — an end-step
+    /// trigger gated by an intervening-if condition whose effect's
+    /// `ChangeZone` target filter bears a `Cmc` bound defined by a trailing
+    /// "where X is …" clause. `apply_where_x_effect_expression` previously had
+    /// no `Effect::ChangeZone` arm, so the filter's bound stayed an unresolved
+    /// bare `Variable("X")` (resolves to 0 at runtime via
+    /// `QuantityRef::Variable`), making the reanimation target only mana value
+    /// 0 or less and the ability appear to never fire for any real graveyard
+    /// card. The fix threads the where-X rewrite into `ChangeZone`'s target
+    /// filter the same way `SearchLibrary`/`Seek` already do.
+    #[test]
+    fn moseo_infusion_end_step_reanimate_binds_cmc_to_life_gained_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained life this turn, return up to one target creature card with mana value X or less from your graveyard to the battlefield, where X is the amount of life you gained this turn.",
+            "Moseo, Vein's New Dean",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target,
+                ..
+            } => match target {
+                TargetFilter::Typed(typed) => {
+                    assert!(
+                        typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Ref {
+                                    qty: QuantityRef::LifeGainedThisTurn {
+                                        player: PlayerScope::Controller
+                                    }
+                                },
+                            }
+                        )),
+                        "expected Cmc{{LE, LifeGainedThisTurn{{Controller}}}} bound, got {:?}",
+                        typed.properties
+                    );
+                }
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+    }
+
     #[test]
     fn phase_trigger_combat_on_your_turn() {
         let def = parse_trigger_line(
@@ -26119,6 +26168,72 @@ mod tests {
                 "Breena must gate on defending player life exceeding another opponent, got {other:?}"
             ),
         }
+        let execute = def.execute.as_deref().expect("Breena must have execute");
+        let Effect::Draw { target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Breena draw clause must lower to Draw, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player draws must bind to TriggeringPlayer"
+        );
+    }
+
+    #[test]
+    fn ellie_brick_master_attack_token_trigger() {
+        // Issue #1325: attack trigger creates Cordyceps Infected for the attacking player.
+        let def = parse_trigger_line(
+            "Whenever a player attacks one of your opponents, that attacking player creates a tapped 1/1 black Fungus Zombie creature token named Cordyceps Infected that's attacking that opponent.",
+            "Ellie, Brick Master",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let execute = def.execute.as_deref().expect("Ellie must have execute");
+        let Effect::Token {
+            owner,
+            name,
+            tapped,
+            enters_attacking,
+            types,
+            colors,
+            power,
+            toughness,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("Ellie must lower to Token, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player creates must bind token owner to TriggeringPlayer"
+        );
+        assert_eq!(name, "Cordyceps Infected");
+        assert!(*tapped, "Cordyceps Infected must enter tapped");
+        assert!(
+            *enters_attacking,
+            "Cordyceps Infected must enter attacking that opponent"
+        );
+        assert!(
+            types.iter().any(|t| t.eq_ignore_ascii_case("Fungus"))
+                && types.iter().any(|t| t.eq_ignore_ascii_case("Zombie")),
+            "Cordyceps Infected must be Fungus Zombie, got {types:?}"
+        );
+        assert!(
+            colors.contains(&crate::types::mana::ManaColor::Black),
+            "Cordyceps Infected must be black"
+        );
+        assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+        assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
     }
 
     #[test]

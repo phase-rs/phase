@@ -8618,7 +8618,7 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
 /// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
 /// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
 /// "you" to the resolving ability controller and grants `MustAttackPlayer`.
-fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
@@ -8708,7 +8708,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 /// must be carried by an explicit `AddStaticMode` modification to actually reach
 /// the layer system and `combat.rs` enforcement. Mirrors the block path's
 /// `ImperativeFamilyAst::MustBeBlocked` lowering.
-fn must_attack_static_definition() -> StaticDefinition {
+pub(super) fn must_attack_static_definition() -> StaticDefinition {
     use crate::types::statics::StaticMode;
     StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
         ContinuousModification::AddStaticMode {

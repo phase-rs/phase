@@ -5156,6 +5156,22 @@ fn candidate_materiality(
         }
         return CandidateMateriality::Disjoint;
     };
+    // CR 616.1: a proliferate count-doubler ("proliferate twice instead",
+    // Tekuthal) multiplies the proliferate action count via a `Multiply`
+    // `repeat_for`. Two such doublers commute (x2 then x2 == x2 then x2 == x4),
+    // so the ordering is immaterial and they must auto-apply — mirroring the
+    // `QuantityModification::Double` -> `Multiplicative` count-write path. Without
+    // this they fall to the conservative `Unconditional` default below and force
+    // a degenerate CR 616.1 ordering choice. (A non-`Multiply` `repeat_for` is not
+    // a doubler and correctly falls through to the conservative default.)
+    if matches!(&*execute.effect, Effect::Proliferate)
+        && matches!(execute.repeat_for, Some(QuantityExpr::Multiply { .. }))
+    {
+        return CandidateMateriality::Writes {
+            field: EventField::Count,
+            commute: CommuteClass::Multiplicative,
+        };
+    }
     let mut field: Option<EventField> = None;
     let mut current = Some(execute);
     while let Some(def) = current {

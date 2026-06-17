@@ -5254,6 +5254,17 @@ pub(super) fn apply_where_x_effect_expression(
             *filter = apply_where_x_to_filter(filter.clone(), where_x_expression);
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
+        // CR 107.3i + CR 400.7: "return/put up to one target creature card with
+        // mana value X or less ..., where X is <expression>" binds the
+        // `ChangeZone` target filter's `Cmc` bound (Moseo, Vein's New Dean's
+        // Infusion ability). Without this arm the filter's bound stayed an
+        // unresolved bare `Variable("X")`, which resolves to 0 at runtime and
+        // makes the reanimation target only mana value 0 or less — silently
+        // breaking the trigger's intended behavior. Mirrors the
+        // `SearchLibrary`/`Seek` filter rewrite above.
+        Effect::ChangeZone { target, .. } => {
+            *target = apply_where_x_to_filter(target.clone(), where_x_expression);
+        }
         Effect::Scry { count, .. } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }

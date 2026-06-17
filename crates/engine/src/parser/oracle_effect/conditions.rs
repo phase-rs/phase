@@ -1036,6 +1036,56 @@ fn parse_target_color_condition_text(text: &str) -> Option<AbilityCondition> {
     parsed
 }
 
+/// CR 508.1a + CR 603.4 + CR 603.7: target-anaphoric combat-history gate used
+/// as a trailing "if" condition — "it attacked this turn" / "it didn't attack
+/// this turn" (Aggression, Berserk, Norritt, Nettling Imp). Composes the shared
+/// target-anaphoric subject parser with a verb-tense polarity axis; emits
+/// `TargetMatchesFilter { creature + AttackedThisTurn }`, wrapped in `Not` for
+/// the negated form, resolved against the ability's first object target (or the
+/// triggering source) at runtime. `use_lki: false` — the creature is still on
+/// the battlefield when the destroy condition evaluates (CR 400.7), so current
+/// object state is authoritative, not an LKI snapshot.
+fn parse_target_attacked_this_turn_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, _) = parse_target_anaphoric_subject(input)?;
+    let (rest, negated) = parse_anaphoric_attacked_tense_polarity(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    Ok((
+        rest,
+        maybe_negate(
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+                ),
+                use_lki: false,
+            },
+            negated,
+        ),
+    ))
+}
+
+/// Verb tense+polarity after a target-anaphoric subject for the
+/// attacked-this-turn gate. Returns `negated`. Negated/longest forms listed
+/// first so "didn't attack" wins over the positive "attacked". The positive
+/// form is bare " attacked" — "did attack" is not real Oracle wording.
+fn parse_anaphoric_attacked_tense_polarity(input: &str) -> OracleResult<'_, bool> {
+    alt((
+        value(true, alt((tag(" didn't attack"), tag(" did not attack")))),
+        value(false, tag(" attacked")),
+    ))
+    .parse(input)
+}
+
+fn parse_target_attacked_this_turn_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let parsed = all_consuming(parse_target_attacked_this_turn_condition)
+        .parse(lower.as_str())
+        .ok()
+        .map(|(_, c)| c);
+    parsed
+}
+
 pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let lower = lower.trim_end_matches('.');
@@ -2899,6 +2949,14 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 508.1a + CR 603.4: target-anaphoric "it [didn't] attack this turn"
+    // combat-history gate (Aggression end-step trigger, Berserk delayed trigger).
+    // Tried after the controller-scoped "you attacked with" form above, whose
+    // subject parser cannot match the anaphoric "it"/"that creature".
+    if let Some(condition) = parse_target_attacked_this_turn_condition_text(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -4278,6 +4336,88 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Assert a condition is a (possibly `Not`-wrapped) `TargetMatchesFilter`
+    /// over a creature `TypedFilter` carrying `FilterProp::AttackedThisTurn`
+    /// with `use_lki: false`. Returns whether the condition was negated, so the
+    /// caller distinguishes the Aggression (negated) and Berserk (positive)
+    /// shapes. Mirrors the structural assertions in
+    /// `attacked_with_filter_condition_forms`.
+    fn assert_attacked_this_turn_target_match(cond: &AbilityCondition) -> bool {
+        let (inner, negated) = match cond {
+            AbilityCondition::Not { condition } => (condition.as_ref(), true),
+            other => (other, false),
+        };
+        match inner {
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(tf),
+                use_lki,
+            } => {
+                assert!(
+                    !use_lki,
+                    "attacked-this-turn gate must use current state, not LKI (CR 400.7)"
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "filter must be a creature TypedFilter, got {tf:?}"
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::AttackedThisTurn),
+                    "filter must carry AttackedThisTurn, got {tf:?}"
+                );
+            }
+            other => panic!("expected TargetMatchesFilter, got {other:?}"),
+        }
+        negated
+    }
+
+    /// CR 508.1a + CR 603.4: Aggression's end-step trigger — "destroy that
+    /// creature if it didn't attack this turn" — peels the trailing-if into a
+    /// `Not(TargetMatchesFilter{ creature + AttackedThisTurn })` gate, leaving
+    /// the bare "destroy that creature" effect. Reverting the dispatch arm makes
+    /// this `cond` `None`, failing the `expect`.
+    #[test]
+    fn target_attacked_this_turn_condition_aggression_negated() {
+        let (cond, text) = strip_suffix_conditional(
+            "destroy that creature if it didn't attack this turn",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "destroy that creature");
+        let cond = cond.expect("Aggression trailing-if must extract a combat-history gate");
+        assert!(
+            assert_attacked_this_turn_target_match(&cond),
+            "Aggression's 'didn't attack' form must be Not-wrapped"
+        );
+    }
+
+    /// CR 508.1a + CR 603.7: Berserk's delayed end-step trigger — "destroy that
+    /// creature if it attacked this turn" — must produce the positive (NOT
+    /// `Not`-wrapped) `TargetMatchesFilter{ creature + AttackedThisTurn }` so the
+    /// drawback only fires when the creature actually attacked.
+    #[test]
+    fn target_attacked_this_turn_condition_berserk_positive() {
+        let (cond, text) = strip_suffix_conditional(
+            "destroy that creature if it attacked this turn",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "destroy that creature");
+        let cond = cond.expect("Berserk trailing-if must extract a combat-history gate");
+        assert!(
+            !assert_attacked_this_turn_target_match(&cond),
+            "Berserk's 'attacked' form must NOT be Not-wrapped"
+        );
+    }
+
+    /// No-regression: the controller-scoped "you attacked this turn" form must
+    /// stay on the controller path and never reach the anaphoric arm — the
+    /// anaphoric subject parser cannot match "you".
+    #[test]
+    fn target_attacked_this_turn_does_not_swallow_controller_form() {
+        assert!(
+            parse_target_attacked_this_turn_condition_text("you attacked this turn").is_none(),
+            "controller-scoped 'you attacked this turn' must not match the anaphoric gate"
+        );
     }
 
     /// CR 608.2c + CR 201.2: Amareth pattern is now a typed
