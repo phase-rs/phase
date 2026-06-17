@@ -27,6 +27,13 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     if matches!(filter, TargetFilter::LastCreated) {
         return state.last_created_token_ids.clone();
     }
+    // CR 722.3a: A self-referential "this creature becomes prepared" (e.g.
+    // Stensian Sanguinist's combat-damage delayed trigger) carries no explicit
+    // object target — the subject is the ability's own source. Resolve it to
+    // `source_id` so the prepare designation lands on the right permanent.
+    if matches!(filter, TargetFilter::SelfRef) {
+        return vec![ability.source_id];
+    }
     ability
         .targets
         .iter()

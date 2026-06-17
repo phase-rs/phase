@@ -2197,6 +2197,7 @@ fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> 
         },
     )
     .condition(AbilityCondition::AdditionalCostPaid {
+        subject: ObjectScope::Source,
         source: AdditionalCostPaymentSource::NonKicker,
         origin: Some(AdditionalCostOrigin::Casualty),
         origin_ordinal,
@@ -2305,6 +2306,7 @@ pub(crate) fn replicate_copy_ability_definition_for_ordinal(
     // no-op (no SpellCopied events) when replicate was declined, matching the
     // intervening-if phrasing exactly.
     .condition(AbilityCondition::AdditionalCostPaid {
+        subject: ObjectScope::Source,
         source: AdditionalCostPaymentSource::NonKicker,
         origin: Some(AdditionalCostOrigin::Replicate),
         origin_ordinal,

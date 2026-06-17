@@ -2298,10 +2298,19 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        let target = application
-            .target
-            .clone()
-            .unwrap_or(crate::types::ability::TargetFilter::ParentTarget);
+        // CR 722.3a: Resolve the prepare/unprepare target from the subject.
+        // A targeted subject ("target creature becomes prepared", Biblioplex)
+        // binds to the chosen object via `ParentTarget` at resolution; a
+        // self-referential or anaphoric subject ("this creature becomes
+        // prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`) uses
+        // the subject's own `affected` filter. Mirrors
+        // `static_affected_for_application`'s targeted-vs-subject split so the
+        // self-reference is preserved instead of collapsing to `ParentTarget`.
+        let target = if application.target.is_some() || application.inherits_parent {
+            crate::types::ability::TargetFilter::ParentTarget
+        } else {
+            application.affected.clone()
+        };
         let effect = match kind {
             PreparedKind::Prepared => Effect::BecomePrepared { target },
             PreparedKind::Unprepared => Effect::BecomeUnprepared { target },

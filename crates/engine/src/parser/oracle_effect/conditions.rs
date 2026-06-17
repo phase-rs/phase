@@ -1787,6 +1787,10 @@ pub(super) fn strip_suffix_conditional(
         return (Some(cond), effect_text);
     }
 
+    if let Some(cond) = parse_was_kicked_condition_text(condition_core) {
+        return (Some(cond), effect_text);
+    }
+
     if let Some(cond) = parse_mana_spent_vs_mana_value_target_condition_text(condition_core) {
         return (Some(cond), effect_text);
     }
@@ -1854,6 +1858,24 @@ fn parse_no_mana_spent_to_cast_target_condition(input: &str) -> OracleResult<'_,
     ))
 }
 
+/// CR 702.33d + CR 608.2c: "if it/that spell was kicked" suffix on a targeted
+/// spell effect (Ertai's Trickery).
+fn parse_was_kicked_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_was_kicked_condition).parse(input)
+    })
+}
+
+fn parse_was_kicked_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = (
+        alt((tag("it"), tag("that spell"), tag("this spell"))),
+        tag(" was kicked"),
+    )
+        .parse(input)?;
+    Ok((rest, AbilityCondition::additional_cost_paid_any()))
+}
+
 /// CR 601.2h + CR 608.2c: "if the amount of mana spent to cast it/that spell
 /// was less than its mana value" on a targeted spell effect — the spell
 /// anaphors to the ability's object target (Unravel-class riders).
@@ -1901,6 +1923,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
     if let Some(condition) = parse_no_mana_spent_to_cast_target_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_was_kicked_condition_text(text) {
         return Some(condition);
     }
 
@@ -2241,6 +2267,16 @@ fn build_instead_def(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
+    // CR 608.2e: An additional-cost-paid "instead" fold ("if it/this spell was
+    // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
+    // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
+    // the generic `parse_condition_text` recognizer (which now classifies "was
+    // kicked" as the bare `AdditionalCostPaid`) does not pre-empt that fold by
+    // producing a `ConditionInstead { inner: AdditionalCostPaid }` wrapper.
+    if parse_additional_cost_instead_condition_fragment(&cond_text).is_some() {
+        return None;
+    }
+
     let condition = try_nom_condition_as_ability_condition(&cond_text, ctx)
         .or_else(|| parse_condition_text(&cond_text))
         .or_else(|| parse_control_count_as_ability_condition(&cond_text))?;
@@ -4339,6 +4375,16 @@ mod tests {
         );
         assert_eq!(text, "Counter target spell");
         assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
+    }
+
+    #[test]
+    fn parse_was_kicked_suffix_condition_on_counter() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target spell if it was kicked",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target spell");
+        assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
     }
 
     #[test]

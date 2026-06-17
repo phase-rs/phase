@@ -6035,32 +6035,93 @@ pub(crate) fn evaluate_condition(
         // GameObject at cast resolution, and propagated back into the trigger's
         // resolved-ability context for ETB triggers).
         AbilityCondition::AdditionalCostPaid {
+            subject,
             source,
             origin,
             origin_ordinal,
             variant,
             kicker_cost,
             min_count,
-        } => {
-            if let Some(origin) = origin {
-                let count = origin_ordinal.map_or_else(
-                    || ability.context.instance_payment_count(*origin),
-                    |ordinal| {
-                        ability
-                            .context
-                            .instance_payment_count_for_ordinal(*origin, ordinal)
-                    },
-                );
-                count >= (*min_count).max(1)
-            } else {
-                ability.context.additional_cost_paid_matches(
-                    *source,
-                    *variant,
-                    kicker_cost.as_ref(),
-                    *min_count,
-                )
+        } => match subject {
+            // CR 113.7: Source-relative payments live in the resolving ability's
+            // own SpellContext. `Anaphoric`/`Demonstrative` "it"/"that spell"
+            // back-references resolve to the source's context here, mirroring the
+            // trigger path (the legacy kicker/Gift/Buyback/Casualty/Replicate class).
+            crate::types::ability::ObjectScope::Source
+            | crate::types::ability::ObjectScope::Anaphoric
+            | crate::types::ability::ObjectScope::Demonstrative => {
+                if let Some(origin) = origin {
+                    let count = origin_ordinal.map_or_else(
+                        || ability.context.instance_payment_count(*origin),
+                        |ordinal| {
+                            ability
+                                .context
+                                .instance_payment_count_for_ordinal(*origin, ordinal)
+                        },
+                    );
+                    count >= (*min_count).max(1)
+                } else {
+                    ability.context.additional_cost_paid_matches(
+                        *source,
+                        *variant,
+                        kicker_cost.as_ref(),
+                        *min_count,
+                    )
+                }
             }
-        }
+            // CR 115.1 + CR 608.2c + CR 702.33d: Target-relative payments — "counter
+            // target spell if it was kicked" (Ertai's Trickery): "it" anaphors to the
+            // first object target (the countered spell), so we read that object's
+            // cast-time payments stamped on its GameObject, not the source context.
+            // Mirrors the trigger evaluation in `triggers.rs` precisely.
+            crate::types::ability::ObjectScope::Target => {
+                if kicker_cost.is_some() && variant.is_none() {
+                    return false;
+                }
+                let Some(id) = ability.targets.iter().find_map(|t| match t {
+                    crate::types::ability::TargetRef::Object(id) => Some(*id),
+                    crate::types::ability::TargetRef::Player(_) => None,
+                }) else {
+                    return false;
+                };
+                let Some(obj) = state.objects.get(&id) else {
+                    return false;
+                };
+                match variant {
+                    Some(kicker) => obj.kickers_paid.contains(kicker),
+                    None => {
+                        let non_kicker_count = if let Some(origin) = origin {
+                            origin_ordinal.map_or_else(
+                                || obj.instance_payment_count(*origin),
+                                |ordinal| obj.instance_payment_count_for_ordinal(*origin, ordinal),
+                            )
+                        } else if obj.additional_cost_payments.is_empty() {
+                            obj.additional_cost_payment_count
+                        } else {
+                            obj.additional_cost_payments
+                                .iter()
+                                .map(|payment| payment.count)
+                                .sum()
+                        };
+                        crate::types::ability::additional_cost_payment_count_matches(
+                            *source,
+                            non_kicker_count > 0 || !obj.kickers_paid.is_empty(),
+                            obj.kickers_paid.len(),
+                            non_kicker_count,
+                            *min_count,
+                        )
+                    }
+                }
+            }
+            // No additional-cost-read semantics exist for these scopes: a
+            // recipient/event/cost-paid referent never carries the "if it was
+            // kicked" casting-payment question, which is only ever asked of the
+            // resolving spell/ability (Source) or the targeted spell (Target).
+            crate::types::ability::ObjectScope::Recipient
+            | crate::types::ability::ObjectScope::EventSource
+            | crate::types::ability::ObjectScope::CostPaidObject
+            | crate::types::ability::ObjectScope::EventTarget => false,
+        },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::OptionalEffectPerformed,
@@ -14905,6 +14966,87 @@ mod tests {
             &state,
             &opponent_ability,
         ));
+    }
+
+    /// CR 115.1 + CR 608.2c + CR 702.33d: `AdditionalCostPaid { subject }` reads
+    /// the *target spell's* `kickers_paid` under `ObjectScope::Target`, and the
+    /// resolving ability's own (empty) context under `ObjectScope::Source`. This
+    /// is the building-block guard behind Ertai's Trickery: the Target path must
+    /// see the target's kicker state while the Source path stays blind to it,
+    /// proving the two scopes evaluate independently.
+    #[test]
+    fn evaluate_condition_additional_cost_paid_target_reads_target_object() {
+        let mut state = GameState::new_two_player(42);
+
+        // Target spell object whose kicker WAS paid at cast time.
+        let mut kicked = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Kickable Brute".to_string(),
+            Zone::Stack,
+        );
+        kicked
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::First);
+        state.objects.insert(ObjectId(7), kicked);
+
+        // Target spell object whose kicker was NOT paid.
+        let unkicked = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(700),
+            PlayerId(0),
+            "Kickable Brute".to_string(),
+            Zone::Stack,
+        );
+        state.objects.insert(ObjectId(8), unkicked);
+
+        let target_condition = AbilityCondition::additional_cost_paid_target();
+
+        // ObjectScope::Target reads the FIRST object target's kicker state.
+        let counter_kicked = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(ObjectId(7))],
+            ObjectId(99),
+            PlayerId(1),
+        );
+        assert!(
+            evaluate_condition(&target_condition, &state, &counter_kicked),
+            "Target subject must see the kicked target's kickers_paid"
+        );
+
+        let counter_unkicked = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(ObjectId(8))],
+            ObjectId(99),
+            PlayerId(1),
+        );
+        assert!(
+            !evaluate_condition(&target_condition, &state, &counter_unkicked),
+            "Target subject must report false when the target was not kicked"
+        );
+
+        // The same ability under ObjectScope::Source reads its OWN empty context,
+        // not the target object — proving the two paths are independent.
+        let source_condition = AbilityCondition::AdditionalCostPaid {
+            subject: crate::types::ability::ObjectScope::Source,
+            source: crate::types::ability::AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        };
+        assert!(
+            !evaluate_condition(&source_condition, &state, &counter_kicked),
+            "Source subject must ignore the target's kicker and read the (empty) own context"
+        );
     }
 
     /// CR 608.2c + CR 700.1: Currency Converter — "Put a card exiled with this

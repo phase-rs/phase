@@ -488,7 +488,12 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
 }
 
+/// Windows that terminate the condition of an inline delayed trigger and
+/// introduce its effect clause.
+const DELAYED_TRIGGER_WINDOWS: [&str; 2] = [" this turn, ", " this combat, "];
+
 /// CR 603.7c: Parse "whenever [trigger condition] this turn, [effect]" delayed triggers.
+/// (Also "whenever [trigger condition] this combat, [effect]".)
 /// These create multi-fire delayed triggers that persist until end of turn.
 /// Example: "whenever a creature you control deals combat damage to a player this turn, draw a card"
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -498,10 +503,27 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     {
         return None;
     }
-    // Must contain "this turn" to distinguish from regular triggers.
-    // Use rsplit_around: "this turn" terminates the condition — the last occurrence
-    // is the correct split point if the condition itself contains "this turn".
-    let (before, after) = tp.rsplit_around(" this turn, ")?;
+    // Must contain a delayed-trigger window ("this turn" / "this combat") to
+    // distinguish from regular triggers. Use rsplit_around per window: the window
+    // terminates the condition, and the rightmost split point is correct if the
+    // condition itself contains an earlier occurrence of the window phrase.
+    //
+    // CR 603.7b/603.7c + CR 510: An inline delayed trigger scoped to "this turn"
+    // (most cards) or "this combat" (prepare-mechanic combat-damage triggers, e.g.
+    // Stensian Sanguinist) lowers to a multi-fire WheneverEvent delayed trigger
+    // purged at end-of-turn cleanup (CR 603.7b). "this combat" is modeled as the
+    // "this turn" multi-fire window: the only observable divergence is re-preparing
+    // in a later same-turn extra combat (CR 500.8) after the prepared copy was cast
+    // and the creature unprepared (CR 722.3c) — rare, and not separately gated
+    // because the engine has no per-combat delayed-trigger purge primitive.
+    let (before, after) = DELAYED_TRIGGER_WINDOWS.iter().fold(
+        None::<(TextPair, TextPair)>,
+        |best, window| match (best, tp.rsplit_around(window)) {
+            (Some((b, _)), Some((nb, na))) if nb.lower.len() > b.lower.len() => Some((nb, na)),
+            (None, Some((nb, na))) => Some((nb, na)),
+            (best, _) => best,
+        },
+    )?;
 
     // Condition is between "whenever " and " this turn"
     let condition_text = &before.lower[9..];
@@ -15854,6 +15876,28 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 115.1 + CR 608.2c: "Counter target spell if it was kicked" — the lowered
+/// AdditionalCostPaid condition's "it" = the target spell, not the counter. The
+/// lowering can't see the effect, so retarget subject Source->Target post-assembly
+/// where Effect::Counter and the condition coexist. Self-kicked counters don't
+/// exist (Fires of Victory's rider is on its own resolution), so gating on
+/// Effect::Counter is correct and leaves all other AdditionalCostPaid cards Source.
+fn retarget_counter_additional_cost_to_target(def: &mut AbilityDefinition) {
+    if matches!(&*def.effect, Effect::Counter { .. }) {
+        if let Some(AbilityCondition::AdditionalCostPaid { subject, .. }) = def.condition.as_mut() {
+            if matches!(subject, ObjectScope::Source) {
+                *subject = ObjectScope::Target;
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(sub);
+    }
+    if let Some(e) = def.else_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(e);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RepeatStopPredicate {
     PutToHand,
@@ -20427,6 +20471,111 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    /// Stensian Sanguinist (SOC, prepare mechanic): the second sentence is an
+    /// inline delayed trigger scoped to "this combat" (not "this turn"). It must
+    /// lower to a multi-fire `WheneverEvent` delayed trigger — same path as
+    /// Hunter's Insight's "this turn" window — rather than falling through to
+    /// `Effect::Unimplemented`. Mirrors
+    /// `hunters_insight_class_builds_whenever_event_delayed_trigger` for the
+    /// "this combat" window + prepare effect. CR 603.7b/603.7c + CR 722.
+    #[test]
+    fn stensian_class_builds_whenever_event_this_combat_delayed_trigger() {
+        use crate::types::ability::{DamageKindFilter, TargetFilter};
+        use crate::types::triggers::TriggerMode;
+
+        let parsed = parse_oracle_text(
+            "Whenever you attack, target creature gains deathtouch until end of turn. Whenever that creature deals combat damage to a player this combat, this creature becomes prepared.",
+            "Stensian Sanguinist",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+
+        // The "Whenever you attack" ability is a triggered ability.
+        assert_eq!(parsed.triggers.len(), 1, "expected one triggered ability");
+        let trig = &parsed.triggers[0];
+        assert_eq!(trig.mode, TriggerMode::YouAttack);
+        let exec = trig
+            .execute
+            .as_deref()
+            .expect("YouAttack trigger should carry an execute body");
+
+        // First effect: grant deathtouch until end of turn to the chosen creature.
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = exec.effect.as_ref()
+        else {
+            panic!(
+                "expected deathtouch GenericEffect head, got {:?}",
+                exec.effect
+            );
+        };
+        assert!(
+            static_abilities.iter().any(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Deathtouch,
+                        }
+                    )
+                })
+            }),
+            "expected an AddKeyword(Deathtouch) modification, got {static_abilities:?}"
+        );
+
+        // SequentialSibling sub-ability: the "this combat" delayed trigger.
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("deathtouch grant should chain into the delayed trigger");
+        let Effect::CreateDelayedTrigger {
+            condition,
+            effect,
+            uses_tracked_set,
+        } = sub.effect.as_ref()
+        else {
+            panic!(
+                "expected CreateDelayedTrigger sub-ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(!uses_tracked_set);
+        let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::ParentTarget));
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+
+        // Inner effect: "this creature becomes prepared". "this creature" is the
+        // ability's source (Stensian), distinct from "that creature" (the
+        // targeted attacker), so it must lower to a self-reference — NOT
+        // ParentTarget, which would (wrongly) bind the prepare to the targeted
+        // creature. CR 722.3a.
+        assert!(
+            matches!(
+                effect.effect.as_ref(),
+                Effect::BecomePrepared {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "expected BecomePrepared{{SelfRef}}, got {:?}",
+            effect.effect
+        );
+
+        // Discriminating regression assertion: NO Unimplemented anywhere. Before
+        // the "this combat" window was added, the second sentence fell through to
+        // Effect::Unimplemented.
+        let json = serde_json::to_string(&parsed).expect("serialize parsed abilities");
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"Unimplemented\""),
+            "parsed tree must contain no Effect::Unimplemented"
+        );
+    }
 
     /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
     /// filter must not put the clause splitter into quote mode and thereby

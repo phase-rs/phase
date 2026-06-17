@@ -49,9 +49,10 @@ use super::{
     mark_uses_tracked_set, parse_effect_clause, parse_event_context_ref_with_ctx,
     parse_for_each_object_copy_parts, publishes_tracked_set_from_resolution,
     refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
+    rewrite_rounding_mode, rewrite_that_type_mana_instead, scan_contains_phrase,
+    stamp_delayed_returns, target_filter_controller_ref, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -849,6 +850,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
+    retarget_counter_additional_cost_to_target(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
