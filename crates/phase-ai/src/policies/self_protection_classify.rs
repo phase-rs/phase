@@ -16,10 +16,17 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 
+use engine::game::keywords::source_matches_protection_target;
+use engine::types::ability::TargetRef;
+use engine::types::card_type::CoreType;
+use engine::types::keywords::{HexproofFilter, ProtectionTarget};
+
 use crate::ability_chain::collect_chain_effects;
 use crate::eval::threat_level;
 use crate::features::landfall::ability_searches_library_for_land;
 use crate::features::mana_ramp::target_filter_references_land;
+use crate::policies::context::collect_ability_effects;
+use crate::policies::effect_classify::{effect_polarity, extract_target_filter, EffectPolarity};
 
 /// Threat-level threshold above which protection casts/activations are unblocked.
 pub(crate) const THREAT_FLOOR: f64 = 0.45;
@@ -220,17 +227,99 @@ fn any_stack_targets_ai_or_ai_permanent(state: &GameState, ai_player: PlayerId) 
     })
 }
 
-/// CR 702.18a / CR 702.11a: Shroud and hexproof on a creature answer only
-/// incoming **targeted** spells or abilities on that permanent — not life loss,
-/// board pressure, combat damage, or untargeted mass removal. Returns true when
-/// an opponent-controlled stack entry targets an AI-controlled object (the
-/// permanent a Safekeeper-style grant would be placed on).
-pub(crate) fn any_stack_targets_ai_creature_for_shroud_grant(
+/// Defensive quality an activation would grant — used to match stack threats the
+/// grant can actually answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefensiveGrant {
+    /// CR 702.18a / CR 702.11a: shroud or unqualified hexproof.
+    CantBeTargeted,
+    /// CR 702.11d: hexproof from a specific quality.
+    HexproofFrom(HexproofFilter),
+    /// CR 702.16: protection from a specific quality.
+    Protection(ProtectionTarget),
+    /// CR 702.12a: indestructible.
+    Indestructible,
+    /// CR 704.15: damage prevention.
+    PreventDamage,
+}
+
+fn extract_defensive_grants(ability: &AbilityDefinition) -> Vec<DefensiveGrant> {
+    let mut grants = Vec::new();
+    for effect in collect_chain_effects(ability) {
+        match effect {
+            Effect::PreventDamage { .. } => grants.push(DefensiveGrant::PreventDamage),
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                for sd in static_abilities {
+                    if !static_definition_affects_self_grant(sd, target.as_ref()) {
+                        continue;
+                    }
+                    grants.extend(grant_from_static_mode(&sd.mode));
+                    for m in &sd.modifications {
+                        grants.extend(grants_from_modification(m));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    grants
+}
+
+fn static_definition_affects_self_grant(
+    sd: &StaticDefinition,
+    parent_target: Option<&TargetFilter>,
+) -> bool {
+    match sd.affected.as_ref() {
+        Some(TargetFilter::ParentTarget) => parent_target.is_some_and(target_filter_self_scoped),
+        Some(f) => target_filter_self_scoped(f),
+        None => false,
+    }
+}
+
+fn grant_from_static_mode(mode: &StaticMode) -> Vec<DefensiveGrant> {
+    match mode {
+        StaticMode::CantBeTargeted | StaticMode::Shroud | StaticMode::Hexproof => {
+            vec![DefensiveGrant::CantBeTargeted]
+        }
+        StaticMode::Protection => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+fn grants_from_modification(m: &ContinuousModification) -> Vec<DefensiveGrant> {
+    match m {
+        ContinuousModification::AddKeyword { keyword } => grant_from_keyword(keyword),
+        ContinuousModification::AddStaticMode { mode } => grant_from_static_mode(mode),
+        ContinuousModification::GrantAbility { definition } => extract_defensive_grants(definition),
+        _ => Vec::new(),
+    }
+}
+
+fn grant_from_keyword(keyword: &Keyword) -> Vec<DefensiveGrant> {
+    match keyword {
+        Keyword::Shroud | Keyword::Hexproof => vec![DefensiveGrant::CantBeTargeted],
+        Keyword::HexproofFrom(filter) => vec![DefensiveGrant::HexproofFrom(filter.clone())],
+        Keyword::Protection(pt) => vec![DefensiveGrant::Protection(pt.clone())],
+        Keyword::Indestructible => vec![DefensiveGrant::Indestructible],
+        _ => Vec::new(),
+    }
+}
+
+/// CR 702.18a / CR 702.11a: targeting immunity answers only harmful effects
+/// that select the protected permanent as a target — not player burn, beneficial
+/// buffs, or untargeted mass removal.
+fn any_stack_harmful_answerable_by_grants(
     state: &GameState,
     ai_player: PlayerId,
+    grants: &[DefensiveGrant],
 ) -> bool {
-    use engine::types::ability::TargetRef;
-    use engine::types::card_type::CoreType;
+    if grants.is_empty() {
+        return false;
+    }
     state.stack.iter().any(|entry| {
         if entry.controller == ai_player {
             return false;
@@ -238,28 +327,101 @@ pub(crate) fn any_stack_targets_ai_creature_for_shroud_grant(
         let Some(ability) = entry.ability() else {
             return false;
         };
-        ability.targets.iter().any(|t| match t {
-            TargetRef::Player(_) => false,
-            TargetRef::Object(obj_id) => state.objects.get(obj_id).is_some_and(|obj| {
-                obj.controller == ai_player
-                    && obj.card_types.core_types.contains(&CoreType::Creature)
-            }),
+        ability.targets.iter().any(|t| {
+            let TargetRef::Object(obj_id) = t else {
+                return false;
+            };
+            let Some(obj) = state.objects.get(obj_id) else {
+                return false;
+            };
+            if obj.controller != ai_player
+                || !obj.card_types.core_types.contains(&CoreType::Creature)
+            {
+                return false;
+            }
+            collect_ability_effects(ability).iter().any(|effect| {
+                harmful_effect_answerable_by_grants(
+                    effect,
+                    grants,
+                    obj,
+                    state.objects.get(&entry.source_id),
+                )
+            })
         })
     })
 }
 
+fn harmful_effect_answerable_by_grants(
+    effect: &Effect,
+    grants: &[DefensiveGrant],
+    protected: &engine::game::game_object::GameObject,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> bool {
+    if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
+        return false;
+    }
+    grants
+        .iter()
+        .any(|grant| grant_answers_harmful_effect(grant, effect, protected, source))
+}
+
+fn grant_answers_harmful_effect(
+    grant: &DefensiveGrant,
+    effect: &Effect,
+    protected: &engine::game::game_object::GameObject,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> bool {
+    match grant {
+        DefensiveGrant::CantBeTargeted => harmful_effect_uses_object_targeting(effect),
+        DefensiveGrant::HexproofFrom(filter) => {
+            harmful_effect_uses_object_targeting(effect)
+                && source.is_some_and(|src| hexproof_from_blocks_source(filter, protected, src))
+        }
+        DefensiveGrant::Protection(pt) => {
+            harmful_effect_uses_object_targeting(effect)
+                && source.is_some_and(|src| source_matches_protection_target(pt, protected, src))
+        }
+        DefensiveGrant::Indestructible => matches!(effect, Effect::Destroy { .. }),
+        DefensiveGrant::PreventDamage => matches!(effect, Effect::DealDamage { .. }),
+    }
+}
+
+/// Harmful single-target effects that select a permanent (answered by shroud /
+/// hexproof / protection when the source is not exempt).
+fn harmful_effect_uses_object_targeting(effect: &Effect) -> bool {
+    !matches!(extract_target_filter(effect), Some(TargetFilter::Player))
+        && extract_target_filter(effect).is_some()
+}
+
+fn hexproof_from_blocks_source(
+    filter: &HexproofFilter,
+    protected: &engine::game::game_object::GameObject,
+    source: &engine::game::game_object::GameObject,
+) -> bool {
+    use engine::game::keywords::{source_matches_card_type, source_matches_quality};
+
+    match filter {
+        HexproofFilter::Color(color) => source.color.contains(color),
+        HexproofFilter::CardType(type_name) => source_matches_card_type(source, type_name),
+        HexproofFilter::Quality(quality) => source_matches_quality(source, quality),
+        HexproofFilter::ChosenColor => protected
+            .chosen_color()
+            .is_some_and(|color| source.color.contains(&color)),
+    }
+}
+
 /// Whether a land-sacrifice self-protection activation has a concrete payoff
-/// right now. Targeting grants (shroud, hexproof, protection) answer stack
-/// removal on an AI creature; protection also has combat-step payoff (CR
-/// 509.1b color dodge). Deliberately excludes low life, board pressure, and
-/// untargeted mass effects — sacrificing a land to shroud one creature does not
-/// answer those threats.
+/// right now. Requires a harmful stack effect answerable by the actual grant;
+/// protection also has combat-step payoff (CR 509.1b color dodge). Deliberately
+/// excludes low life, board pressure, and untargeted mass effects — sacrificing
+/// a land to shroud one creature does not answer those threats.
 pub(crate) fn any_land_sacrifice_protection_payoff(
     state: &GameState,
     ai_player: PlayerId,
     ability: &AbilityDefinition,
 ) -> bool {
-    if any_stack_targets_ai_creature_for_shroud_grant(state, ai_player) {
+    let grants = extract_defensive_grants(ability);
+    if any_stack_harmful_answerable_by_grants(state, ai_player, &grants) {
         return true;
     }
     if ability_grants_combat_step_protection(ability) && combat_step_allows_protection(state) {
@@ -447,15 +609,33 @@ mod tests {
     }
 
     #[test]
-    fn shroud_payoff_requires_creature_stack_target_not_player_burn() {
-        use engine::types::ability::{ResolvedAbility, TargetRef};
+    fn shroud_payoff_requires_harmful_creature_target_not_player_burn() {
+        use engine::types::ability::{
+            ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetRef, TypeFilter,
+        };
         use engine::types::game_state::{StackEntry, StackEntryKind};
-        use engine::types::identifiers::ObjectId;
+        use engine::types::identifiers::{CardId, ObjectId};
 
         let mut state = GameState::new_two_player(42);
         let ai = PlayerId(0);
         let opp = PlayerId(1);
         state.players[ai.0 as usize].life = 5;
+
+        let safekeeper = AbilityDefinition::new(
+            AbilityKind::Activated,
+            grant_effect(
+                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                Keyword::Shroud,
+            ),
+        );
+        let mut safekeeper = safekeeper;
+        safekeeper.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            requirement: SacrificeRequirement::count(1),
+        }));
 
         let spell_id = ObjectId(99);
         let ability = ResolvedAbility::new(
@@ -473,13 +653,159 @@ mod tests {
             source_id: spell_id,
             controller: opp,
             kind: StackEntryKind::Spell {
-                card_id: engine::types::identifiers::CardId(99),
+                card_id: CardId(99),
                 ability: Some(ability),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
         });
 
-        assert!(!any_stack_targets_ai_creature_for_shroud_grant(&state, ai));
+        assert!(!any_land_sacrifice_protection_payoff(
+            &state,
+            ai,
+            &safekeeper
+        ));
+    }
+
+    #[test]
+    fn shroud_payoff_rejects_beneficial_pump_on_ai_creature() {
+        use engine::types::ability::{
+            PtValue, ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetRef, TypeFilter,
+        };
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+
+        let safekeeper = {
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                grant_effect(
+                    Some(TargetFilter::ParentTarget),
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    )),
+                    Keyword::Shroud,
+                ),
+            );
+            ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                requirement: SacrificeRequirement::count(1),
+            }));
+            ability
+        };
+
+        let creature = create_test_creature(&mut state, ai);
+        let spell_id = ObjectId(99);
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert!(!any_land_sacrifice_protection_payoff(
+            &state,
+            ai,
+            &safekeeper
+        ));
+    }
+
+    #[test]
+    fn shroud_payoff_allows_harmful_removal_on_ai_creature() {
+        use engine::types::ability::{
+            ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetRef, TypeFilter,
+        };
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+
+        let safekeeper = {
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                grant_effect(
+                    Some(TargetFilter::ParentTarget),
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    )),
+                    Keyword::Shroud,
+                ),
+            );
+            ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                requirement: SacrificeRequirement::count(1),
+            }));
+            ability
+        };
+
+        let creature = create_test_creature(&mut state, ai);
+        let spell_id = ObjectId(99);
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(creature)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert!(any_land_sacrifice_protection_payoff(
+            &state,
+            ai,
+            &safekeeper
+        ));
+    }
+
+    fn create_test_creature(state: &mut GameState, controller: PlayerId) -> engine::types::identifiers::ObjectId {
+        use engine::game::zones::create_object;
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+        let id = create_object(
+            state,
+            CardId(2),
+            controller,
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
     }
 }
