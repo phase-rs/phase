@@ -29279,6 +29279,16 @@
           "cr_refs": []
         },
         {
+          "name": "DamageNotRemovedDuringCleanup",
+          "line": 620,
+          "kind": "unit",
+          "field_names": [],
+          "doc": "CR 514.2: Normally all damage marked on permanents is removed as a turn-based action during the cleanup step. This static suppresses that removal for the permanents matched by the definition's `affected` filter (\"Damage isn't removed from [filter] during cleanup steps\" — Ancient Adamantoise, Patient Zero, Uthgardt Fury, …), so their marked damage persists across turns.",
+          "cr_refs": [
+            "CR 514.2"
+          ]
+        },
+        {
           "name": "CantAttack",
           "line": 614,
           "kind": "unit",
