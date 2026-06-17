@@ -5357,6 +5357,21 @@ fn resolve_chain_body(
         return Ok(());
     }
 
+    // CR 701.44d: `ExploreAll` is the single authority for its own sub_ability
+    // chain. `explore::resolve_single_explorer` carries `ability.sub_ability`
+    // onto the terminal explorer (and synthesizes the per-explorer `TrackedSet`
+    // continuation between explorers). If the generic chain walker ALSO
+    // processed the sub here, a paused explore (the nonland `DigChoice`) would
+    // re-prepend the sub onto `pending_continuation` a SECOND time. For a
+    // synthesized `ExploreAll { TrackedSet }` continuation that second prepend
+    // chains it to itself, producing a self-renewing loop that re-explores the
+    // same permanent every time the choice resolves — Hakbal of the Surging
+    // Soul accrued unbounded +1/+1 counters this way. Mirror the
+    // `ExileFromTopUntil` guard above and skip the outer chain.
+    if matches!(ability.effect, Effect::ExploreAll { .. }) {
+        return Ok(());
+    }
+
     // CR 615.5: `PreventDamage` with a chained `ContinuationStep` sub-ability
     // installs the sub as the shield's `runtime_execute` continuation — it runs
     // once per fired damage prevention event (Gatta and Luzzu's "prevent that
