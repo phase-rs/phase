@@ -283,6 +283,7 @@ mod memory_plunder_free_cast_2884;
 mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
+mod mimeoplasm_interactive_exile;
 mod mindblade_render_warrior_intervening_if_2867;
 mod mogg_war_marshal_echo_dies_trigger;
 mod morophon_chosen_type_1653;

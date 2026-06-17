@@ -1173,7 +1173,7 @@ fn can_pay_resolution(
         }
         // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
         // "exile two creature cards from graveyards"). The interactive choice is
-        // surfaced via WaitingFor::ExileChoice.
+        // surfaced via WaitingFor::EffectZoneChoice.
         AbilityCost::Exile {
             count,
             zone,
