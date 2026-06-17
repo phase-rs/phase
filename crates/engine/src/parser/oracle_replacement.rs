@@ -297,14 +297,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::Proliferate).description(text.to_string());
-        if let Some(e) = effect_text {
+        {
+            let e = effect_text?;
             let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
             def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
-        } else {
-            return None;
         }
         apply_proliferate_player_scope(&lower, &mut def);
         return Some(def);
