@@ -6,6 +6,10 @@ if [ -f ".env" ]; then
   set -a; source .env; set +a
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/mtgjson-fetch.sh
+source "$SCRIPT_DIR/lib/mtgjson-fetch.sh"
+
 DATA_DIR="data"
 OUTPUT_DIR="client/public"
 OUTPUT="${OUTPUT_DIR}/card-data.json"
@@ -19,12 +23,14 @@ DECKS_OUTPUT="${OUTPUT_DIR}/decks.json"
 
 echo "=== Card Data Generation ==="
 
-# Download MTGJSON AtomicCards if not present
+# Download MTGJSON AtomicCards if not present. mtgjson_download prefers the
+# gzipped artifact (~50 MB vs ~156 MB uncompressed) and retries the
+# mid-transfer connection resets mtgjson hands out on large anonymous reads.
 MTGJSON_FILE="$DATA_DIR/mtgjson/AtomicCards.json"
 if [ ! -f "$MTGJSON_FILE" ]; then
   echo "Downloading MTGJSON AtomicCards..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_FILE" "https://mtgjson.com/api/v5/AtomicCards.json"
+  mtgjson_download "AtomicCards.json" "$MTGJSON_FILE"
   echo "Downloaded MTGJSON data."
 fi
 
@@ -33,14 +39,14 @@ MTGJSON_META_FILE="$DATA_DIR/mtgjson/Meta.json"
 if [ ! -f "$MTGJSON_META_FILE" ]; then
   echo "Downloading MTGJSON Meta..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_META_FILE" "https://mtgjson.com/api/v5/Meta.json"
+  mtgjson_download "Meta.json" "$MTGJSON_META_FILE"
 fi
 
 MTGJSON_SET_LIST_FILE="$DATA_DIR/mtgjson/SetList.json"
 if [ ! -f "$MTGJSON_SET_LIST_FILE" ]; then
   echo "Downloading MTGJSON SetList..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_SET_LIST_FILE" "https://mtgjson.com/api/v5/SetList.json"
+  mtgjson_download "SetList.json" "$MTGJSON_SET_LIST_FILE"
 fi
 
 echo "Ensuring MTGJSON token set files..."
@@ -53,7 +59,7 @@ if [ ! -d "$MTGJSON_DECKS_DIR" ]; then
   echo "Downloading MTGJSON AllDeckFiles..."
   mkdir -p "$MTGJSON_DECKS_DIR"
   MTGJSON_DECKS_ARCHIVE="$DATA_DIR/mtgjson/AllDeckFiles.tar.gz"
-  curl -L -o "$MTGJSON_DECKS_ARCHIVE" "https://mtgjson.com/api/v5/AllDeckFiles.tar.gz"
+  "${MTGJSON_CURL[@]}" -o "$MTGJSON_DECKS_ARCHIVE" "$MTGJSON_BASE/AllDeckFiles.tar.gz"
   tar -xzf "$MTGJSON_DECKS_ARCHIVE" -C "$MTGJSON_DECKS_DIR" --strip-components=1
   rm -f "$MTGJSON_DECKS_ARCHIVE"
 fi

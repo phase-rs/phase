@@ -11156,6 +11156,28 @@ fn damage_clause_has_fresh_opponent_recipient(effect: &Effect) -> bool {
     }
 }
 
+/// CR 201.5 + CR 608.2c: a damage clause whose recipient is the source object's
+/// self-reference ("this creature" / "~", `TargetFilter::SelfRef`) declares its
+/// own recipient — the fight-back recipient class (Karplusan Yeti and siblings:
+/// "... That creature deals damage equal to its power to this creature."). Per
+/// CR 201.5 the self-reference names just the source object, so the blanket
+/// anaphoric parent-rewrite must not collapse it to `ParentTarget` (which would
+/// re-aim the fight-back at clause 1's chosen target). The `Anaphoric` amount is
+/// resolved by the resolver's CR 608.2c `effect_context_object` referent, so no
+/// source/amount rebind is needed here.
+fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::DamageAll {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
 /// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
 /// `ObjectScope::Target`. The mirror of `rebind_anaphoric_ref` for the one-sided
 /// fight class: a "Then it deals damage equal to its power" sub-clause whose
@@ -11222,7 +11244,20 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
 /// deals..." subject was classified `SelfRef` (Wolf Strike/Burrog Barrage),
 /// which would otherwise read the ability source (the spell, power 0). Returns
 /// true (= decline the blanket `replace_target_with_parent`) when handled.
+///
+/// Covers two recipient shapes: (1) the fresh-opponent recipient — rebind the
+/// damage source/amount to the parent target while preserving the recipient;
+/// (2) the self-reference recipient ("to this creature"/"to ~",
+/// `TargetFilter::SelfRef`, the Karplusan Yeti fight-back class) — preserve the
+/// recipient verbatim with NO source/amount rebind.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
+    // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
+    // is the source itself and must be preserved verbatim (fight-back class). No
+    // source/amount rebind: the resolver seeds the `Anaphoric` amount from the
+    // prior clause's damaged-object event (effect_context_object).
+    if damage_clause_has_self_ref_recipient(effect) {
+        return true;
+    }
     if !damage_clause_has_fresh_opponent_recipient(effect) {
         return false;
     }

@@ -2419,6 +2419,10 @@ fn max_blockers_each_combat(state: &GameState) -> Option<u32> {
 /// Per CR 509.1h, a creature remains blocked for the rest of combat even if all
 /// blockers are removed. This function checks the `blocked` flag set at blocker
 /// declaration, not the current blocker list.
+///
+/// CR 506.4 + CR 702.49a + CR 702.190a: Attackers that left the battlefield
+/// (destroyed, exiled, bounced, etc.) are excluded — Ninjutsu/Sneak may only
+/// return unblocked attackers still on the battlefield.
 pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
     let Some(combat) = &state.combat else {
         return Vec::new();
@@ -2427,6 +2431,7 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .attackers
         .iter()
         .filter(|a| !a.blocked)
+        .filter(|a| is_attacker_in_play(state, a.object_id))
         .map(|a| a.object_id)
         .collect()
 }
@@ -4424,6 +4429,23 @@ mod tests {
 
         prune_attackers_not_in_play(&mut state);
         assert!(state.combat.as_ref().unwrap().attackers.is_empty());
+    }
+
+    #[test]
+    fn unblocked_attackers_excludes_attackers_not_in_play() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert_eq!(unblocked_attackers(&state), vec![attacker]);
+
+        state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
+        assert!(
+            unblocked_attackers(&state).is_empty(),
+            "dead attackers must not be returnable for Ninjutsu/Sneak (#1319)"
+        );
     }
 
     #[test]

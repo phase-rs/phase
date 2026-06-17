@@ -203,12 +203,19 @@ jobs:
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
+        # Full data/mtgjson dir under the `mtgjson-full-` namespace (shared with
+        # deploy.yml — both run gen-card-data.sh and populate every file). Kept
+        # distinct from ci.yml's partial `mtgjson-atomic-`/`mtgjson-sets-`
+        # caches; all stay under the `mtgjson-` prefix clear-caches.yml deletes.
+        #
+        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
+        # re-fetches fresh MTGJSON data; a restore-keys fallback would pin the
+        # file-existence-gated fetches to last week's data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-${{ steps.cache-keys.outputs.week }}
-          restore-keys: mtgjson-
+          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
@@ -222,10 +229,17 @@ jobs:
           key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Download MTGJSON data
-        if: steps.mtgjson-cache.outputs.cache-hit != 'true'
+        # Gate on file existence, not cache-hit: a restore-keys (non-exact) hit
+        # leaves cache-hit=false even though AtomicCards.json is already present,
+        # so the old `if: cache-hit != true` re-downloaded it every new week.
+        # File-existence gating fetches only when genuinely missing and lets a
+        # poisoned cache self-heal (matches ci.yml / deploy.yml).
         run: |
-          mkdir -p data/mtgjson
-          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          if [ ! -f data/mtgjson/AtomicCards.json ]; then
+            mkdir -p data/mtgjson
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          fi
 
       - name: Generate card data and coverage report
         # Single source of truth: gen-card-data.sh produces all 7 public JSON

@@ -395,6 +395,54 @@ mod tests {
     }
 
     #[test]
+    fn summon_yojimbo_chapter_combat_tax_parses() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::{ContinuousModification, StaticCondition};
+        use crate::types::statics::StaticMode;
+
+        let lines = vec!["II, III — Until your next turn, creatures can't attack you unless their controller pays {2} for each of those creatures."];
+        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Yojimbo");
+        assert_eq!(triggers.len(), 2);
+
+        for trigger in &triggers {
+            let exec = trigger.execute.as_ref().expect("chapter execute");
+            assert!(
+                matches!(exec.duration, Some(Duration::UntilNextTurnOf { .. })),
+                "expected UntilNextTurnOf, got {:?}",
+                exec.duration
+            );
+            match &*exec.effect {
+                Effect::GenericEffect {
+                    static_abilities,
+                    target,
+                    ..
+                } => {
+                    assert_eq!(target, &Some(TargetFilter::SelfRef));
+                    let ContinuousModification::GrantStaticAbility { definition } =
+                        &static_abilities[0].modifications[0]
+                    else {
+                        panic!("expected GrantStaticAbility combat tax");
+                    };
+                    assert!(matches!(definition.mode, StaticMode::CantAttack));
+                    assert!(matches!(
+                        definition.condition,
+                        Some(StaticCondition::UnlessPay { .. })
+                    ));
+                }
+                other => panic!("expected GenericEffect combat tax, got {other:?}"),
+            }
+        }
+
+        let effect = parse_effect(
+            "Until your next turn, creatures can't attack you unless their controller pays {2} for each of those creatures.",
+        );
+        assert!(
+            matches!(effect, Effect::GenericEffect { .. }),
+            "peeled duration combat tax must not be Unimplemented"
+        );
+    }
+
+    #[test]
     fn is_saga_chapter_extended() {
         assert!(is_saga_chapter("VI — Something"));
         assert!(is_saga_chapter("VII — Something"));
