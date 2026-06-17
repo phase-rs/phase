@@ -3794,6 +3794,25 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             }
         }
     }
+
+    // CR 503.1a + CR 608.2d (issue #1535): per-player upkeep optional effects
+    // ("that player may put a card from their hand ...") route the prompt to
+    // the scoped player, not the ability's controller (Braids, Conjurer Adept).
+    if let Some(scoped) = ability.scoped_player {
+        if let Effect::ChangeZone { target, .. } = &ability.effect {
+            if filter_uses_relative_controller_scoped(target) {
+                return scoped;
+            }
+        }
+        if ability
+            .effect
+            .target_filter()
+            .is_some_and(filter_uses_relative_controller_scoped)
+        {
+            return scoped;
+        }
+    }
+
     ability.controller
 }
 

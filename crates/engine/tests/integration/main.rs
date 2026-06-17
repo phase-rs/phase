@@ -142,6 +142,7 @@ mod issue_1499_arabella;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1524_serpents_soul_jar;
 mod issue_1526_harvest_season;
+mod issue_1535_braids;
 mod issue_1539_queen_marchesa;
 mod issue_1544_zinnia_offspring;
 mod issue_1549_legend_of_roku_impulse;
