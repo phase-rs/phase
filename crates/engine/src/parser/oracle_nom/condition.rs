@@ -6668,6 +6668,16 @@ mod tests {
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
     }
 
+    /// The "Villain" creature subtype (Marvel set) must be recognized so that
+    /// "you control a Villain" conditions parse — e.g. the conditional self
+    /// cost-reduction on Visions of Villainy / Venom's Hunger.
+    #[test]
+    fn test_you_control_a_villain_subtype() {
+        let (rest, c) = parse_inner_condition("you control a villain").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
     #[test]
     fn test_you_control_compound_presence() {
         let (rest, c) =
