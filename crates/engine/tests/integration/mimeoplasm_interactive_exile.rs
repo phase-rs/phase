@@ -295,6 +295,143 @@ fn mimeoplasm_full_end_to_end_copy_and_counters() {
 }
 
 #[test]
+fn mimeoplasm_exiles_from_opponent_graveyard() {
+    // Discriminating test that verifies Mimeoplasm can exile from any player's graveyard,
+    // not just the controller's. This is critical for Commander where Mimeoplasm's
+    // primary use case is exiling opponents' creatures.
+
+    let p1 = engine::game::scenario::P1;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Add a creature to P1's graveyard (opponent's graveyard)
+    let opponent_bears_id = scenario
+        .add_creature_to_graveyard(p1, "Grizzly Bears", 2, 2)
+        .id();
+
+    // Add a creature to P0's graveyard (controller's graveyard)
+    let controller_giant_id = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .id();
+
+    // Add a third creature to P0's graveyard to prevent forced-choice fast path
+    let _controller_angel_id = scenario
+        .add_creature_to_graveyard(P0, "Serra Angel", 4, 4)
+        .id();
+
+    // Add Mimeoplasm to P0's hand
+    let mimeoplasm_id = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Test",
+            5, 5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+
+    // Add mana to cast it
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+
+    let mut runner = scenario.build();
+
+    // Verify graveyards have the expected cards
+    assert_eq!(runner.state().players[0].graveyard.len(), 2);
+    assert_eq!(runner.state().players[1].graveyard.len(), 1);
+
+    // Cast Mimeoplasm
+    let _outcome = runner.cast(mimeoplasm_id).resolve();
+
+    // Accept the replacement choice (index 0 = pay cost)
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("Accept replacement should succeed");
+
+    // Verify that both cards (from both graveyards) are eligible for exile
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => {
+            // Should have 3 cards available: 2 from P0's graveyard, 1 from P1's graveyard
+            assert_eq!(
+                cards.len(),
+                3,
+                "Should have 3 eligible cards from both graveyards"
+            );
+            assert!(
+                cards.contains(&opponent_bears_id),
+                "Opponent's creature should be eligible for exile"
+            );
+            assert!(
+                cards.contains(&controller_giant_id),
+                "Controller's creature should be eligible for exile"
+            );
+
+            // Select the opponent's creature and the controller's creature
+            let selected = vec![opponent_bears_id, controller_giant_id];
+            runner
+                .act(GameAction::SelectCards { cards: selected })
+                .expect("SelectCards should succeed");
+        }
+        other => {
+            panic!("Expected EffectZoneChoice, got {:?}", other);
+        }
+    }
+
+    // Verify the outcome
+    let state = runner.state();
+
+    // Verify cards were exiled from both graveyards
+    assert_eq!(
+        state.players[0].graveyard.len(),
+        1,
+        "Controller's graveyard should have 1 card remaining (Angel) after exile"
+    );
+    assert_eq!(
+        state.players[1].graveyard.len(),
+        0,
+        "Opponent's graveyard should be empty after exile"
+    );
+    assert!(
+        state.exile.len() >= 2,
+        "At least 2 cards should be in exile"
+    );
+
+    // Verify Mimeoplasm is on the battlefield
+    let mimeoplasm_obj = state.objects.get(&mimeoplasm_id);
+    assert!(
+        mimeoplasm_obj.is_some_and(|obj| obj.zone == Zone::Battlefield),
+        "Mimeoplasm should be on the battlefield"
+    );
+
+    let mimeoplasm_obj = mimeoplasm_obj.expect("Mimeoplasm object should exist");
+
+    // The permanent should have copied the opponent's Grizzly Bears (index 0)
+    assert_eq!(
+        mimeoplasm_obj.name, "Grizzly Bears",
+        "Mimeoplasm should have copied the opponent's Grizzly Bears"
+    );
+
+    // Verify the permanent has +1/+1 counters equal to the controller's Hill Giant's power (3)
+    let plus_one_counters = mimeoplasm_obj
+        .counters
+        .iter()
+        .filter(|(counter_type, _count)| {
+            **counter_type == engine::types::counter::CounterType::Plus1Plus1
+        })
+        .map(|(_counter_type, count)| *count)
+        .sum::<u32>();
+    assert_eq!(
+        plus_one_counters, 3,
+        "Mimeoplasm should have 3 +1/+1 counters (equal to Hill Giant's power)"
+    );
+
+    println!("SUCCESS: Opponent graveyard exile test passed");
+}
+
+#[test]
 fn paycost_arm_exiles_cards_via_apply_as_current() {
     // This test directly exercises the PayCost arm by:
     // 1. Setting up a GameState with 3 cards in graveyard

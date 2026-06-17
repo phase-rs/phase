@@ -410,9 +410,35 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
             }
         },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
-        AbilityCost::Exile { count, zone, .. } => {
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+            ..
+        } => {
             let zone_str = match zone {
-                Some(Zone::Graveyard) => "from your graveyard",
+                Some(Zone::Graveyard) => {
+                    // CR 406.6: Check if the filter is controller-scoped. When the filter
+                    // has controller: None (unrestricted "graveyards"), use "from graveyards".
+                    // When controller: Some(ControllerRef::You) ("your graveyard"), use
+                    // "from your graveyard".
+                    let is_unrestricted = filter.as_ref().is_none_or(|f| {
+                        matches!(
+                            f,
+                            crate::types::ability::TargetFilter::Typed(
+                                crate::types::ability::TypedFilter {
+                                    controller: None,
+                                    ..
+                                }
+                            )
+                        )
+                    });
+                    if is_unrestricted {
+                        "from graveyards"
+                    } else {
+                        "from your graveyard"
+                    }
+                }
                 Some(Zone::Hand) => "from your hand",
                 Some(Zone::Battlefield) => "from the battlefield",
                 _ => "",

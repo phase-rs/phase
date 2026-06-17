@@ -42,7 +42,9 @@
 
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, EffectKind, TargetFilter, REMOVE_COUNTER_COST_ALL};
+use crate::types::ability::{
+    AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -75,11 +77,27 @@ fn find_eligible_exile_targets(
     let player_state = state.players.get(player.0 as usize);
 
     match zone {
-        Zone::Graveyard => player_state
-            .map(|p| {
-                p.graveyard
+        Zone::Graveyard => {
+            // CR 406.6: Check if the filter is controller-scoped. When the filter
+            // has controller: None (unrestricted "graveyards"), scan all players'
+            // graveyards. When controller: Some(ControllerRef::You) ("your graveyard"),
+            // scan only the payer's graveyard.
+            let is_unrestricted = filter.is_none_or(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter {
+                        controller: None,
+                        ..
+                    })
+                )
+            });
+
+            if is_unrestricted {
+                // Scan all players' graveyards
+                state
+                    .players
                     .iter()
-                    .copied()
+                    .flat_map(|p| p.graveyard.iter().copied())
                     .filter(|&id| {
                         id != source_id
                             && filter.is_none_or(|f| {
@@ -87,8 +105,24 @@ fn find_eligible_exile_targets(
                             })
                     })
                     .collect()
-            })
-            .unwrap_or_default(),
+            } else {
+                // Scan only the payer's graveyard (controller-scoped)
+                player_state
+                    .map(|p| {
+                        p.graveyard
+                            .iter()
+                            .copied()
+                            .filter(|&id| {
+                                id != source_id
+                                    && filter.is_none_or(|f| {
+                                        super::filter::matches_target_filter(state, id, f, &ctx)
+                                    })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        }
         Zone::Hand => player_state
             .map(|p| {
                 p.hand

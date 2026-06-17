@@ -3138,7 +3138,7 @@ pub enum TargetFilter {
     /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
-    /// CR 607.2a: References a specific card exiled by the source, indexed by order.
+    /// CR 607.2b: References a specific card exiled by the source, indexed by order.
     /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
     /// "the second card exiled this way". The index is 0-based and corresponds to
     /// the order in `state.cards_exiled_with_source_this_turn[source_id]`.
@@ -3684,7 +3684,7 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
-    /// CR 406.6: The power of a specific card exiled by the source, indexed by order.
+    /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
     ExiledCardPower { index: u32 },
     /// CR 604.3: Count cards in a zone matching optional type filters.
