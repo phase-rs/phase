@@ -1186,6 +1186,12 @@
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
     },
+    "exile": {
+      "title_one": "Wygnaj kartę",
+      "title_other": "Wygnaj {{count}} karty",
+      "subtitle_one": "Wybierz {{count}} kartę do wygnania",
+      "subtitle_other": "Wybierz {{count}} karty do wygnania"
+    },
     "discard": {
       "title": "Odrzuć",
       "titleAdditionalCost": "Odrzuć jako koszt dodatkowy",

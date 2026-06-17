@@ -1186,6 +1186,12 @@
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
     },
+    "exile": {
+      "title_one": "Exilar uma carta",
+      "title_other": "Exilar {{count}} cartas",
+      "subtitle_one": "Escolha {{count}} carta para exilar",
+      "subtitle_other": "Escolha {{count}} cartas para exilar"
+    },
     "discard": {
       "title": "Descartar",
       "titleAdditionalCost": "Descartar como custo adicional",

@@ -1186,6 +1186,12 @@
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"
     },
+    "exile": {
+      "title_one": "Esilia una carta",
+      "title_other": "Esilia {{count}} carte",
+      "subtitle_one": "Scegli {{count}} carta da esiliare",
+      "subtitle_other": "Scegli {{count}} carte da esiliare"
+    },
     "discard": {
       "title": "Scarta",
       "titleAdditionalCost": "Scarta come costo aggiuntivo",
