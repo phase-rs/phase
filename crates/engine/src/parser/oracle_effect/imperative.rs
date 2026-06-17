@@ -2780,6 +2780,16 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
         crate::types::ability::CardSelectionMode::Chosen
     };
 
+    // The "at random" qualifier is now captured in `selection`; strip it so it
+    // does not leak into the downstream zone/filter parse. Otherwise a pre-zone
+    // qualifier ("a creature card at random from target opponent's graveyard")
+    // lands in the search-filter prefix, which `parse_search_filter` can't
+    // classify, emitting a spurious "search-filter-suffix unmatched"
+    // TargetFallback (Tariel, Reckoner of Souls; Deadbridge Chant; Higure).
+    // allow-noncombinator: strip a captured free-floating qualifier before sub-parse
+    let choice_text_owned = choice_text.replace(" at random", "");
+    let choice_text = choice_text_owned.as_str();
+
     let (filter_prefix, (zone_owner, zones), zone_suffix) =
         nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)?;
     if filter_prefix.trim().is_empty() {
