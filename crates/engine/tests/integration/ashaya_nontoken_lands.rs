@@ -15,12 +15,14 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
 /// Ashaya's "Nontoken creatures you control are Forest lands" line.
 const ASHAYA: &str = "Ashaya, Soul of the Wild's power and toughness are each \
 equal to the number of lands you control.\nNontoken creatures you control are \
 Forest lands in addition to their other types.";
+const LANDFALL_DRAW: &str = "Whenever a land you control enters, draw a card.";
 
 /// CR 205.1b / CR 707.9d: Ashaya adds the Land type and Forest subtype "in
 /// addition to" the creature's existing types — the `AddType`/`AddSubtype`
@@ -142,60 +144,21 @@ fn ashaya_does_not_affect_opponent_creatures() {
 /// creature enters the battlefield with Ashaya in play, it should trigger
 /// landfall abilities because Ashaya's layer effect adds the Land type.
 ///
-/// This test verifies that the creature enters with the Land type after
-/// Ashaya's effect is applied, which is the prerequisite for landfall triggers.
-/// The fix in trigger_index.rs::keys_from_event ensures that ETB event keys
-/// use the live object's post-layer types (including Land from Ashaya) instead
-/// of the ZoneChangeRecord's pre-layer types.
 #[test]
 fn ashaya_creature_etb_triggers_landfall() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Ashaya on the battlefield
-    scenario
-        .add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA)
-        .id();
-
-    // Add a nontoken creature to hand
-    let creature_id = scenario
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_creature_from_oracle(P0, "Landfall Observer", 1, 1, LANDFALL_DRAW);
+    let entering_creature = scenario
         .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
         .id();
+    scenario.add_card_to_library_top(P0, "Drawn Card");
 
     let mut runner = scenario.build();
-    // Add mana to pay for the creature (Grizzly Bears has {1}{G} cost)
-    runner.state_mut().players[0]
-        .mana_pool
-        .add(engine::types::mana::ManaUnit::new(
-            engine::types::mana::ManaType::Green,
-            engine::types::identifiers::ObjectId(0),
-            false,
-            vec![],
-        ));
-    runner.state_mut().players[0]
-        .mana_pool
-        .add(engine::types::mana::ManaUnit::new(
-            engine::types::mana::ManaType::Colorless,
-            engine::types::identifiers::ObjectId(0),
-            false,
-            vec![],
-        ));
+    let outcome = runner.cast(entering_creature).resolve();
 
-    // Cast the creature
-    runner.cast(creature_id).resolve();
-
-    let state = runner.state();
-
-    // Verify the creature entered with the Land type from Ashaya's effect
-    let creature = &state.objects[&creature_id];
-    assert!(
-        creature.card_types.core_types.contains(&CoreType::Land),
-        "Creature should have Land type from Ashaya's effect, got {:?}",
-        creature.card_types.core_types
-    );
-    assert!(
-        creature.card_types.core_types.contains(&CoreType::Creature),
-        "Creature should retain Creature type (additive), got {:?}",
-        creature.card_types.core_types
-    );
+    outcome.assert_hand_drawn(P0, 1);
 }
