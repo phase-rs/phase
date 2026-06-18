@@ -142,23 +142,60 @@ fn ashaya_does_not_affect_opponent_creatures() {
 /// creature enters the battlefield with Ashaya in play, it should trigger
 /// landfall abilities because Ashaya's layer effect adds the Land type.
 ///
-/// The fix is in trigger_index.rs::keys_from_event, which now uses the live
-/// object's post-layer core_types for ETB events instead of the ZoneChangeRecord's
-/// pre-layer types. This ensures that Ashaya's Land type addition is reflected
-/// in the event keys, allowing landfall triggers to match.
-///
-/// A full end-to-end test would require casting a creature and verifying the
-/// landfall trigger fires, but that requires complex test infrastructure.
-/// The existing tests verify that Ashaya's layer effect works correctly,
-/// and the fix in keys_from_event ensures the event keys reflect that effect.
+/// This test verifies that the creature enters with the Land type after
+/// Ashaya's effect is applied, which is the prerequisite for landfall triggers.
+/// The fix in trigger_index.rs::keys_from_event ensures that ETB event keys
+/// use the live object's post-layer types (including Land from Ashaya) instead
+/// of the ZoneChangeRecord's pre-layer types.
 #[test]
 fn ashaya_creature_etb_triggers_landfall() {
-    // This test is a placeholder to document the fix.
-    // The actual fix is in trigger_index.rs::keys_from_event.
-    // The existing tests (ashaya_grants_land_forest_to_other_nontoken_creatures,
-    // ashaya_does_not_affect_tokens, ashaya_does_not_affect_opponent_creatures)
-    // verify that Ashaya's layer effect works correctly.
-    // The fix ensures that when keys_from_event is called for an ETB event,
-    // it uses the live object's post-layer types (including Land from Ashaya)
-    // instead of the ZoneChangeRecord's pre-layer types.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Ashaya on the battlefield
+    scenario
+        .add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA)
+        .id();
+
+    // Add a nontoken creature to hand
+    let creature_id = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .id();
+
+    let mut runner = scenario.build();
+    // Add mana to pay for the creature (Grizzly Bears has {1}{G} cost)
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Green,
+            engine::types::identifiers::ObjectId(0),
+            false,
+            vec![],
+        ));
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Colorless,
+            engine::types::identifiers::ObjectId(0),
+            false,
+            vec![],
+        ));
+
+    // Cast the creature
+    runner.cast(creature_id).resolve();
+
+    let state = runner.state();
+
+    // Verify the creature entered with the Land type from Ashaya's effect
+    let creature = &state.objects[&creature_id];
+    assert!(
+        creature.card_types.core_types.contains(&CoreType::Land),
+        "Creature should have Land type from Ashaya's effect, got {:?}",
+        creature.card_types.core_types
+    );
+    assert!(
+        creature.card_types.core_types.contains(&CoreType::Creature),
+        "Creature should retain Creature type (additive), got {:?}",
+        creature.card_types.core_types
+    );
 }
