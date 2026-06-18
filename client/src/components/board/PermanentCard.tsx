@@ -26,7 +26,6 @@ import { KeywordStrip } from "./KeywordStrip.tsx";
 import {
   boardChoiceMaxSelection,
   buildBoardChoiceAction,
-  getBattlefieldSacrificeChoice,
   getBoardChoiceView,
   isBoardChoiceImmediate,
   type BoardChoiceIntent,
@@ -222,7 +221,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     committedAttackerIds,
     incomingAttackerCounts,
     manaTappableObjectIds,
-    selectableSacrificeObjectIds,
     selectableManaCostCreatureIds,
     undoableTapObjectIds,
     validAttackerIds,
@@ -282,26 +280,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   );
   const isSelectableForManaCost = selectableManaCostCreatureIds.has(objectId);
   const isSelectedForManaCost = isSelectableForManaCost && selectedCardIds.includes(objectId);
-  const sacrificeChoice = useMemo(() => {
-    const choice = getBattlefieldSacrificeChoice(waitingFor);
-    if (!choice) return null;
-    switch (waitingFor?.type) {
-      case "EffectZoneChoice":
-      case "WardSacrificeChoice":
-        return waitingFor.data.player === playerId ? choice : null;
-      default:
-        return null;
-    }
-  }, [playerId, waitingFor]);
-  const isSelectableForSacrifice = selectableSacrificeObjectIds.has(objectId);
-  const isSelectedForSacrifice = isSelectableForSacrifice && selectedCardIds.includes(objectId);
   const isSelectableForBoardChoice = boardChoiceObjectIds.has(objectId) && boardChoice != null;
   const isSelectedForBoardChoice = isSelectableForBoardChoice && selectedCardIds.includes(objectId);
   const selectedBoardChoiceIds = boardChoice
     ? selectedCardIds.filter((id) => boardChoice.objectIds.includes(id))
-    : [];
-  const selectedSacrificeIds = sacrificeChoice
-    ? selectedCardIds.filter((id) => sacrificeChoice.objectIds.includes(id))
     : [];
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
@@ -397,12 +379,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     glowClass = selectedBoardChoiceGlowClass(boardChoice.intent);
   } else if (isSelectableForBoardChoice && boardChoice) {
     glowClass = availableBoardChoiceGlowClass(boardChoice.intent);
-  } else if (isSelectedForSacrifice) {
-    glowClass =
-      "ring-2 ring-red-400 shadow-[0_0_14px_4px_rgba(248,113,113,0.55)]";
-  } else if (isSelectableForSacrifice) {
-    glowClass =
-      "ring-2 ring-red-300/80 shadow-[0_0_10px_3px_rgba(248,113,113,0.35)]";
   } else if (isSelectedForManaCost) {
     glowClass =
       "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55)]";
@@ -491,18 +467,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         ) {
           toggleSelectedCard(objectId);
         }
-      }
-    } else if (isSelectableForSacrifice && sacrificeChoice) {
-      if (!sacrificeChoice.upTo && sacrificeChoice.count === 1) {
-        dispatchAction({
-          type: "SelectCards",
-          data: { cards: [objectId] },
-        });
-      } else if (
-        isSelectedForSacrifice
-        || selectedSacrificeIds.length < sacrificeChoice.count
-      ) {
-        toggleSelectedCard(objectId);
       }
     } else if (isSelectableForManaCost && tapCreatureCostChoice) {
       if (
@@ -804,14 +768,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "left-1 top-7" : "left-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
         >
           {t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
-        </div>
-      )}
-
-      {!isSelectableForBoardChoice && isSelectableForSacrifice && (
-        <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-red-500 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-white ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
-        >
-          {t("permanent.sacrifice")}
         </div>
       )}
 

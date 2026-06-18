@@ -473,7 +473,15 @@ export function boardChoiceMaxSelection(choice: BoardChoiceView): number | null 
 }
 
 export function isBoardChoiceImmediate(choice: BoardChoiceView): boolean {
-  return choice.selection.type === "single" || choice.selection.immediate === true;
+  switch (choice.selection.type) {
+    case "single":
+      return true;
+    case "exactCount":
+      return choice.selection.immediate === true;
+    case "rangeCount":
+    case "totalPowerAtLeast":
+      return false;
+  }
 }
 
 export function getBattlefieldSacrificeChoice(

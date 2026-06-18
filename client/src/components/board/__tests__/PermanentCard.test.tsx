@@ -263,7 +263,7 @@ describe("PermanentCard attachments", () => {
       gameState,
       waitingFor: gameState.waiting_for,
     });
-    const { container } = renderPermanent(new Set(), new Set([1]));
+    const { container } = renderPermanent(new Set(), new Set(), new Set([1]));
     const permanent = container.querySelector('[data-object-id="1"]') as HTMLElement;
 
     fireEvent.click(permanent);

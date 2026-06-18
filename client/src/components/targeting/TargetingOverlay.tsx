@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -51,9 +51,12 @@ export function TargetingOverlay() {
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
   const boardChoice = getBoardChoiceView(waitingFor);
   const isBoardChoice = boardChoice != null;
-  const selectedBoardChoiceIds = boardChoice
-    ? selectedCardIds.filter((id) => boardChoice.objectIds.includes(id))
-    : [];
+  const selectedBoardChoiceIds = useMemo(
+    () => boardChoice
+      ? selectedCardIds.filter((id) => boardChoice.objectIds.includes(id))
+      : [],
+    [boardChoice, selectedCardIds],
+  );
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
   const currentTargetSlot = isCopyRetarget

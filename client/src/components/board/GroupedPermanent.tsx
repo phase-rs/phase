@@ -531,8 +531,10 @@ function BoardChoiceGroupControls({
   }
 
   const canConfirm = canConfirmBoardChoice(choice, selectedForChoice, objects);
+  const requiredPower =
+    choice.selection.type === "totalPowerAtLeast" ? choice.selection.power : null;
   const power =
-    choice.selection.type === "totalPowerAtLeast"
+    requiredPower != null
       ? boardChoiceSelectedPower(choice, selectedForChoice, objects)
       : null;
 
@@ -553,7 +555,7 @@ function BoardChoiceGroupControls({
             })
           : t("boardChoice.groupPower", {
               selected: power,
-              required: choice.selection.power,
+              required: requiredPower,
             })}
       </div>
       <button
