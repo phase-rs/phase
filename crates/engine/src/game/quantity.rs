@@ -3291,17 +3291,15 @@ where
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),
-        // CR 608.2c: An anaphoric pronoun ("its power") in a triggered ability
+        // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
         // binds to the object introduced by the most recent earlier *effect
         // instruction* in the same ability (slot 1: `effect_context_object`).
         // CR 608.2k: if no such instruction exists, fall back to the
         // trigger-condition referent (slot 2: trigger-event source) then the
-        // cost referent (slot 3: `cost_paid_object`). The arm differs from
+        // cost referent (slot 3: `cost_paid_object`). This arm differs from
         // `CostPaidObject` only in slot priority — instruction-order (608.2c)
-        // first, vs. cost referent (608.2k) first. `Demonstrative` ("that
-        // creature's toughness") shares this resolution — same earlier-
-        // instruction referent, named by a full noun phrase rather than "its".
-        ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
+        // first, vs. cost referent (608.2k) first.
+        ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
@@ -3317,6 +3315,60 @@ where
                 ability
                     .and_then(|a| a.cost_paid_object.as_ref())
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
+            })
+            .unwrap_or(0),
+        // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
+        // `Demonstrative` referent chain (earlier instruction → trigger-event
+        // source → cost referent), plus one extra final fallback for the
+        // one-sided-fight damage class (see below).
+        ObjectScope::Anaphoric => ability
+            .and_then(|a| a.effect_context_object.as_ref())
+            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .or_else(|| {
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .and_then(&obj_extract)
+                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.cost_paid_object.as_ref())
+                    .and_then(|snapshot| lki_extract(&snapshot.lki))
+            })
+            .or_else(|| {
+                // CR 608.2c + CR 115.10a: for a one-sided-fight damage clause
+                // (damage_source = Target), the anaphoric "It"/"its" is the
+                // object dealing the damage = targets[0] (the same object
+                // deal_damage.rs selects as source). Last fallback so
+                // reveal/sacrifice/tap referents above still win.
+                let is_one_sided_fight = ability
+                    .map(|a| {
+                        matches!(
+                            a.effect,
+                            crate::types::ability::Effect::DealDamage {
+                                damage_source: Some(crate::types::ability::DamageSource::Target),
+                                ..
+                            } | crate::types::ability::Effect::DamageAll {
+                                damage_source: Some(crate::types::ability::DamageSource::Target),
+                                ..
+                            }
+                        )
+                    })
+                    .unwrap_or(false);
+                if !is_one_sided_fight {
+                    return None;
+                }
+                targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(id)
+                        .and_then(&obj_extract)
+                        .or_else(|| state.lki_cache.get(id).and_then(&lki_extract)),
+                    _ => None,
+                })
             })
             .unwrap_or(0),
     }

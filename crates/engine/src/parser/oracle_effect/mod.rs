@@ -11213,14 +11213,16 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
 }
 
 /// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
-/// `ObjectScope::Target`. The mirror of `rebind_anaphoric_ref` for the one-sided
-/// fight class: a "Then it deals damage equal to its power" sub-clause whose
-/// subject was classified as `SelfRef` gets its "its power" anaphor prematurely
-/// rebound to `Source` (the ability source) by the subject-stamping pass
-/// (~mod.rs:12278). For this class the "it" is the parent TARGET (the boosted
-/// creature, `targets[0]` once `damage_source = Target`), never the spell
-/// source — so the amount must read `Target`, not `Source`.
-fn rebind_source_ref_to_target(qty: &mut QuantityRef) {
+/// `target`. The mirror of `rebind_anaphoric_ref` for the one-sided fight class:
+/// a "Then it deals damage equal to its power" sub-clause whose subject was
+/// classified as `SelfRef` gets its "its power" anaphor prematurely rebound to
+/// `Source` (the ability source) by the subject-stamping pass (~mod.rs:12278).
+/// For this class the "it" is the boosted creature (the parent TARGET,
+/// `targets[0]` once `damage_source = Target`), never the spell source — so the
+/// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
+/// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
+/// in sync with the Oracle "its".
+fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope) {
     let scope = match qty {
         QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
@@ -11233,15 +11235,15 @@ fn rebind_source_ref_to_target(qty: &mut QuantityRef) {
         _ => return,
     };
     if *scope == ObjectScope::Source {
-        *scope = ObjectScope::Target;
+        *scope = target;
     }
 }
 
-/// `QuantityExpr` walker for `rebind_source_ref_to_target` (mirrors
+/// `QuantityExpr` walker for `rebind_source_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
+fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref_to_target(qty),
+        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -11249,15 +11251,15 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount_to_target(inner),
+        } => rebind_source_amount(inner, target),
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
-                rebind_source_amount_to_target(inner);
+                rebind_source_amount(inner, target);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount_to_target(left);
-            rebind_source_amount_to_target(right);
+            rebind_source_amount(left, target);
+            rebind_source_amount(right, target);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -11265,25 +11267,33 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
 
 /// CR 120.1 + CR 608.2c: For a "one-sided fight" anaphoric damage clause
 /// ("It deals damage equal to its power to target creature an opponent
-/// controls") whose recipient is a FRESH opponent target, bind the damage
-/// SOURCE/amount to the parent-chosen boosted creature WITHOUT clobbering the
+/// controls") whose recipient is a FRESH opponent target, attribute the damage
+/// SOURCE to the parent-chosen boosted creature WITHOUT clobbering the
 /// recipient. CR 120.1: the object that deals damage is the source of that
 /// damage — here the boosted creature, which is the parent target, so
-/// `damage_source = Some(Target)` and the amount reads the parent target's
-/// power. CR 608.2c: read the whole text / apply English anaphora — "It" and
-/// "its power" refer to the boosted creature, but "target creature an opponent
-/// controls" is a distinct target. `bind_damage_clause_source` rebinds an
-/// `Anaphoric` amount (Ambuscade/Clear Shot/Rabid Gnaw) → `Target`; the
-/// follow-up coercion fixes the `Source` amount produced when the "Then it
-/// deals..." subject was classified `SelfRef` (Wolf Strike/Burrog Barrage),
-/// which would otherwise read the ability source (the spell, power 0). Returns
-/// true (= decline the blanket `replace_target_with_parent`) when handled.
+/// `damage_source = Some(Target)` (consumed by `game/effects/deal_damage.rs`,
+/// which selects `targets[0]` as the source and `targets[1..]` as recipients).
+/// CR 608.2c: read the whole text / apply English anaphora — "It" and "its
+/// power" refer to the boosted creature, but "target creature an opponent
+/// controls" is a distinct target.
 ///
-/// Covers two recipient shapes: (1) the fresh-opponent recipient — rebind the
-/// damage source/amount to the parent target while preserving the recipient;
-/// (2) the self-reference recipient ("to this creature"/"to ~",
-/// `TargetFilter::SelfRef`, the Karplusan Yeti fight-back class) — preserve the
-/// recipient verbatim with NO source/amount rebind.
+/// The "its power" amount is left as `Power{Anaphoric}` (NOT rebound to
+/// `Target`): the runtime one-sided-fight fallback in `game/quantity.rs`
+/// resolves `Anaphoric` to that same `targets[0]` source object. Keeping the
+/// AST `Anaphoric` keeps the serialized export in sync with the Oracle "its"
+/// and avoids reintroducing #699 (where rebinding the source amount to `Target`
+/// alongside a clobbered recipient made the boosted creature damage itself).
+/// The only rebind here is `Source → Anaphoric`: the "Then it deals..." subject
+/// is classified `SelfRef`, so the subject-stamping pass (~mod.rs:12278)
+/// prematurely binds "its power" to `Source` (the spell, power 0); coercing it
+/// to `Anaphoric` routes it back through the same runtime fallback. Returns true
+/// (= decline the blanket `replace_target_with_parent`) when handled.
+///
+/// Covers two recipient shapes: (1) the fresh-opponent recipient — attribute
+/// the damage source to the parent target while preserving the recipient and
+/// the anaphoric amount; (2) the self-reference recipient ("to this
+/// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
+/// class) — preserve the recipient verbatim with NO source/amount rebind.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source itself and must be preserved verbatim (fight-back class). No
@@ -11295,9 +11305,17 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     if !damage_clause_has_fresh_opponent_recipient(effect) {
         return false;
     }
-    bind_damage_clause_source(effect, DamageSource::Target, ObjectScope::Target);
+    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the fresh-opponent
+    // recipient and attribute damage source to targets[0] (the boosted "It");
+    // leave "its power" as Power{Anaphoric} — the runtime resolves it to that
+    // same source object. Do NOT rebind to Target (that desyncs the export from
+    // the Oracle "its" and reintroduces #699).
+    set_damage_clause_source_only(effect, DamageSource::Target);
+    // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
+    // gated inside this fresh-opponent branch so it can't touch unrelated
+    // Source-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount_to_target(amount);
+        rebind_source_amount(amount, ObjectScope::Anaphoric);
     }
     true
 }
@@ -12239,6 +12257,22 @@ fn bind_damage_clause_source(
             ..
         } => {
             rebind_anaphoric_object_scope(amount, power_scope);
+            *damage_source = Some(damage_source_ref);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// CR 120.1: Set a damage clause's `damage_source` WITHOUT rebinding the
+/// anaphoric amount scope. The one-sided-fight fresh-opponent path keeps "its
+/// power" as `Power{Anaphoric}` (resolved to `targets[0]` by the runtime
+/// fallback) instead of collapsing it to `Target`, so it cannot reuse
+/// `bind_damage_clause_source` (which always rebinds the amount). Returns true
+/// iff the effect is a `DealDamage`/`DamageAll`.
+fn set_damage_clause_source_only(effect: &mut Effect, damage_source_ref: DamageSource) -> bool {
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
             *damage_source = Some(damage_source_ref);
             true
         }
@@ -43922,17 +43956,19 @@ mod tests {
                     ),
                     "expected Typed opponent recipient, got {target:?}"
                 );
-                // Source bound to the boosted parent target; Anaphoric amount
-                // rebound to Power{Target}.
+                // Source attributed to the boosted parent target (targets[0]);
+                // "its power" stays Power{Anaphoric} (runtime resolves it to that
+                // same targets[0]). NOT rebound to Target (that desyncs the
+                // export from the Oracle "its" and reintroduces #699).
                 assert_eq!(damage_source, &Some(DamageSource::Target));
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
-                            scope: ObjectScope::Target
+                            scope: ObjectScope::Anaphoric
                         }
                     },
-                    "expected Power{{Target}} (rebound from Anaphoric)"
+                    "expected Power{{Anaphoric}} (preserved, not rebound to Target)"
                 );
             }
             other => panic!("expected DealDamage, got {other:?}"),
@@ -43944,9 +43980,11 @@ mod tests {
     /// clause (conditional-prior slot). Because the sub-clause subject is
     /// classified `SelfRef`, the upstream subject-stamping pass rebinds
     /// "its power" Anaphoric → Source prematurely; for this class the "it" is the
-    /// parent TARGET (the boosted creature), so the amount must read Power{Target},
-    /// NOT Power{Source} (which at runtime would read the spell source, power 0).
-    /// The recipient ("you don't control" == Opponent) is preserved.
+    /// boosted creature (targets[0] at runtime), so the amount is coerced
+    /// Source → Power{Anaphoric} (resolved to targets[0] by the runtime
+    /// one-sided-fight fallback), NOT Power{Source} (which would read the spell
+    /// source, power 0). The recipient ("you don't control" == Opponent) is
+    /// preserved.
     #[test]
     fn one_sided_fight_power_source_variant() {
         let def = parse_effect_chain(
@@ -43971,16 +44009,17 @@ mod tests {
                     "expected Typed opponent recipient, got {target:?}"
                 );
                 assert_eq!(damage_source, &Some(DamageSource::Target));
-                // SelfRef-subject Source amount coerced to Target (boosted
-                // creature == parent target == targets[0] at runtime).
+                // SelfRef-subject Source amount coerced to Anaphoric (boosted
+                // creature == targets[0] at runtime via the one-sided-fight
+                // fallback), not Source (the spell, power 0).
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
-                            scope: ObjectScope::Target
+                            scope: ObjectScope::Anaphoric
                         }
                     },
-                    "Power amount must be Target (parent boosted creature), not Source (spell)"
+                    "Power amount must be Anaphoric (boosted creature, targets[0]), not Source (spell)"
                 );
             }
             other => panic!("expected DealDamage, got {other:?}"),

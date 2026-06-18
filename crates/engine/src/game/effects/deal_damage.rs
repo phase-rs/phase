@@ -1809,6 +1809,72 @@ mod tests {
         assert_eq!(state.objects[&recipient].damage_marked, 5);
     }
 
+    /// #699 (one-sided fight — `Power{Anaphoric}` amount). Same shape as the
+    /// `Power{Target}` test above, but the amount is `Power{Anaphoric}` with
+    /// `effect_context_object = None` (the real Ambuscade-class AST after the
+    /// Option-b fix: the parser leaves "its power" as Anaphoric). With no
+    /// effect-context / event-source / cost referent to seed it, the anaphor
+    /// MUST resolve through the runtime one-sided-fight fallback to `targets[0]`
+    /// (the boosted creature, power 5) — NOT to 0. Asserts the boosted creature
+    /// (targets[0]) takes 0 and the opponent (targets[1]) takes 5. This is the
+    /// assertion that flips (5 → 0 on the recipient) if the new
+    /// `resolve_object_pt` Anaphoric fallback is reverted.
+    /// CR 608.2c + CR 120.1: the boosted creature is the anaphoric "It" and the
+    /// damage source.
+    #[test]
+    fn one_sided_fight_anaphoric_amount_reads_boosted_creature() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Boosted Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source).unwrap();
+            s.card_types.core_types.push(CoreType::Creature);
+            s.power = Some(5);
+            s.base_power = Some(5);
+        }
+        {
+            let r = state.objects.get_mut(&recipient).unwrap();
+            r.card_types.core_types.push(CoreType::Creature);
+            r.power = Some(2);
+            r.base_power = Some(2);
+        }
+        // ResolvedAbility::new leaves effect_context_object = None and
+        // cost_paid_object = None, so only the new targets[0] fallback can seed
+        // the anaphoric power.
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source), TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&source].damage_marked, 0);
+        assert_eq!(state.objects[&recipient].damage_marked, 5);
+    }
+
     #[test]
     fn deal_damage_to_player() {
         let mut state = GameState::new_two_player(42);

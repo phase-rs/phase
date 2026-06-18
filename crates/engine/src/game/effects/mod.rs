@@ -1394,6 +1394,41 @@ fn try_begin_reflexive_target_selection(
     Ok(true)
 }
 
+/// CR 120.1 + CR 608.2c + CR 115.10a: the "one-sided fight" chain shape — a
+/// boost head ("Target creature you control gets +N/+M …") followed by a
+/// `DealDamage`/`DamageAll` sub whose `damage_source = Target` ("It deals damage
+/// equal to its power to target creature an opponent controls"). The anaphoric
+/// "It"/"its power" names the creature the boost head chose, NOT the sub's own
+/// fresh recipient (CR 608.2c — read the whole text). The sub carries only its
+/// recipient in `targets` (it was assigned its own target slot in declaration
+/// order), so the damage source (and the `Power{Anaphoric}` amount the runtime
+/// resolves to `targets[0]`) would otherwise read the recipient. This predicate
+/// recognizes that sub so the chain descent can prepend the parent's chosen
+/// object target, restoring the `targets = [source, recipient]` contract the
+/// `deal_damage` resolver (CR 120.1: the object that deals damage is the source)
+/// and the `quantity::resolve_object_pt` one-sided-fight fallback both expect.
+fn is_one_sided_fight_damage_sub(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: Some(crate::types::ability::DamageSource::Target),
+            ..
+        } | Effect::DamageAll {
+            damage_source: Some(crate::types::ability::DamageSource::Target),
+            ..
+        }
+    )
+}
+
+/// The first `TargetRef::Object` in a target list (the chain head's chosen
+/// creature for the one-sided-fight prepend).
+fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
+    targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    })
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -5838,6 +5873,36 @@ fn resolve_chain_body(
             apply_parent_chain_context(&mut sub_clone, ability, effect_context_object.as_ref());
             prepend_to_pending_continuation(state, sub_clone);
             return Ok(());
+        }
+
+        // CR 120.1 + CR 608.2c + CR 115.10a: one-sided-fight chain — the boost
+        // head ("Target creature you control gets +N/+M …") chose the creature
+        // that the trailing `DealDamage { damage_source = Target }` sub's "It"
+        // anaphor names. The sub was assigned its OWN recipient slot in
+        // declaration order, so its `targets` hold only the fresh opponent
+        // recipient. Per CR 120.1 the object that deals the damage is the boosted
+        // creature (the parent's chosen object target), and per CR 608.2c "It"/
+        // "its power" refer to that same creature — not the recipient. Prepend
+        // the parent's chosen object so the sub resolves with the contract the
+        // `deal_damage` resolver and `quantity::resolve_object_pt`'s
+        // one-sided-fight fallback expect: `targets = [source, recipient]`
+        // (source = `targets[0]`, recipients = `targets[1..]`). Guarded on the
+        // parent already carrying an object target and the source not already
+        // being `targets[0]`, so it is a no-op for every other chain shape.
+        if is_one_sided_fight_damage_sub(&sub.effect) && !sub.targets.is_empty() {
+            if let Some(source) = first_object_target(&ability.targets) {
+                if first_object_target(&sub.targets) != Some(source) {
+                    let mut sub_with_source = sub.as_ref().clone();
+                    sub_with_source.targets.insert(0, TargetRef::Object(source));
+                    apply_parent_chain_context(
+                        &mut sub_with_source,
+                        ability,
+                        effect_context_object.as_ref(),
+                    );
+                    resolve_ability_chain(state, &sub_with_source, events, depth + 1)?;
+                    return Ok(());
+                }
+            }
         }
 
         // Apply forward_result: moved object becomes sub's source.

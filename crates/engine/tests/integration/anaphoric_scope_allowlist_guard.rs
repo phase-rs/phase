@@ -177,6 +177,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "boulderbranch golem",
     "brainstealer dragon",
     "brokers charm",
+    "burrog barrage",
     "captain marvel, shooting star",
     "champion of the path",
     "champion of wits",
@@ -262,7 +263,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "noxious gearhulk",
     "origin of thor",
     "orzhov charm",
-    "osseous sticktwister",
     "packsong pup",
     "pain for all",
     "paladin of atonement",
@@ -321,6 +321,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vivien's invocation",
     "vraska's stoneglare",
     "willow geist",
+    "wolf strike",
     "wolverine riders",
     "yavimaya steelcrusher",
 ];
@@ -534,17 +535,24 @@ fn anaphoric_scope_set_is_frozen() {
     // target/event pronoun ("it deals damage equal to its power") now parses on
     // five more cards — Bionic Blow, Captain Marvel (Shooting Star), Colossal
     // Collision, Nova Flame, and Origin of Thor — taking the count to 171.
+    // The one-sided-fight runtime-fallback fix (#512/#511 direction) restored
+    // the "boost target creature, then it deals damage equal to its power"
+    // class to ObjectScope::Anaphoric (the parser keeps Power{Anaphoric}; the
+    // runtime resolves it to the boosted creature, targets[0]) — adding Burrog
+    // Barrage and Wolf Strike (+2), while Osseous Sticktwister's "this creature
+    // deals damage equal to its power" self-source clause correctly resolves to
+    // Source, not Anaphoric (-1) — taking the count to 172.
     assert_eq!(
         observed.len(),
-        171,
-        "Expected exactly 171 cards retaining ObjectScope::Anaphoric (pronoun \
+        172,
+        "Expected exactly 172 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        171,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 171 cards."
+        172,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 172 cards."
     );
 }
 
