@@ -290,10 +290,17 @@ fn resolve_mass_put_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine_resolution_choices::{
+        handle_resolution_choice, ResolutionChoiceOutcome,
+    };
     use crate::game::zones::create_object;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::SpellContext;
     use crate::types::ability::{
         AbilityCondition, AbilityKind, FilterProp, QuantityExpr, TypedFilter,
     };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -1761,9 +1768,6 @@ mod tests {
         source: ObjectId,
         kicked: bool,
     ) -> ResolvedAbility {
-        use crate::parser::oracle_effect::parse_effect_chain;
-        use crate::types::ability::{AbilityKind, SpellContext};
-
         let def = parse_effect_chain(
             "Look at the top X cards of your library, where X is the number of lands you \
              control. Put one of those cards into your hand. If this spell was kicked, put \
@@ -1820,12 +1824,6 @@ mod tests {
     }
 
     fn run_consult_the_star_charts(kicked: bool) -> (GameState, usize) {
-        use crate::game::engine_resolution_choices::{
-            handle_resolution_choice, ResolutionChoiceOutcome,
-        };
-        use crate::types::actions::GameAction;
-        use crate::types::card_type::CoreType;
-
         let mut state = GameState::new_two_player(42);
         let source = ObjectId(100);
         let controller = PlayerId(0);

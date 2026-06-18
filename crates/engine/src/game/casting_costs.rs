@@ -7720,6 +7720,8 @@ mod tests {
 
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::engine_resolution_choices::handle_resolution_choice;
+    use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
@@ -13474,8 +13476,6 @@ library in a random order.";
     fn consult_the_star_charts_scenario(
         num_lands: usize,
     ) -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
-        use crate::game::scenario::GameScenario;
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(crate::types::Phase::PreCombatMain);
 
@@ -13504,7 +13504,6 @@ library in a random order.";
     }
 
     fn fund_blue(runner: &mut crate::game::scenario::GameRunner, count: usize) {
-        use crate::types::mana::ManaUnit;
         let p0 = runner
             .state_mut()
             .players
@@ -13525,9 +13524,6 @@ library in a random order.";
     }
 
     fn cast_consult_the_star_charts(kick: bool) -> usize {
-        use crate::game::engine_resolution_choices::handle_resolution_choice;
-        use crate::types::GameAction;
-
         let (mut runner, spell_id, card_id) = consult_the_star_charts_scenario(3);
         fund_blue(&mut runner, 3); // {1}{U} base + {1}{U} kicker, generic from blue too
 
