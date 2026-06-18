@@ -2515,6 +2515,7 @@ async fn draft_pack_generator_for_start(
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
 async fn broadcast_takeback_approved(
     connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
     game_code: &str,
     player_count: u8,
     snapshot: server_core::BroadcastSnapshot,
@@ -2570,6 +2571,22 @@ async fn broadcast_takeback_approved(
         };
         for sender in players.values() {
             let _ = sender.send(resolved_msg.clone());
+        }
+    }
+    drop(conns);
+
+    // Spectators are read-only viewers of `StateUpdate` only (mirroring the
+    // normal action-broadcast path) — they never receive player-facing
+    // notifications like `TakebackResolved`, just like they never receive
+    // `Conceded`/`GameOver`. Without this, a spectator would stay frozen on
+    // the pre-rollback state until some later action produced a new update.
+    if let Ok(spectator_msg) = build_spectator_state_update_message(&raw_state, &[], &[]) {
+        let mut specs = game_spectators.lock().await;
+        if let Some(spectators) = specs.get_mut(game_code) {
+            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+            if spectators.is_empty() {
+                specs.remove(game_code);
+            }
         }
     }
 }
@@ -4541,6 +4558,14 @@ async fn handle_client_message(
             let player_count = session.player_count;
             let approved_snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
                 .then(|| session.current_broadcast_snapshot());
+            // GH #1507: persist the rolled-back state immediately, in the
+            // same lock as the rollback itself — otherwise SQLite still
+            // holds the pre-rollback `GameState` until some later action
+            // happens to persist, and a crash/restart in that window
+            // resurrects the branch the table just agreed to undo.
+            if approved_snapshot.is_some() {
+                persist_session_async(game_db, &game_code, session);
+            }
             drop(mgr);
 
             match outcome {
@@ -4565,6 +4590,7 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
                     broadcast_takeback_approved(
                         connections,
+                        game_spectators,
                         &game_code,
                         player_count,
                         approved_snapshot.expect("Approved outcome always computes a snapshot"),
@@ -4601,6 +4627,11 @@ async fn handle_client_message(
             let player_count = session.player_count;
             let approved_snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
                 .then(|| session.current_broadcast_snapshot());
+            // GH #1507: persist the rolled-back state immediately — see the
+            // matching comment in the `RequestTakeback` arm above.
+            if approved_snapshot.is_some() {
+                persist_session_async(game_db, &game_code, session);
+            }
             drop(mgr);
 
             match outcome {
@@ -4617,6 +4648,7 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
                     broadcast_takeback_approved(
                         connections,
+                        game_spectators,
                         &game_code,
                         player_count,
                         approved_snapshot.expect("Approved outcome always computes a snapshot"),

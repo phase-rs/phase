@@ -508,8 +508,16 @@ impl GameSession {
     /// Each entry contains: raw state snapshot, events, legal actions, and log entries.
     /// The caller is responsible for filtering the state per-player before sending.
     /// Returns an empty vec if the session has no AI seats.
+    ///
+    /// GH #1507: also a no-op while a takeback request is pending. AI moves
+    /// mutate `self.state` directly (not through `handle_action`'s pending-
+    /// takeback guard), so without this check an AI seat could advance the
+    /// authoritative state — e.g. via a reconnecting human's follow-up AI
+    /// turn — out from under the snapshot the table is voting to roll back
+    /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
+    /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> Vec<ActionResult> {
-        if self.ai_seats.is_empty() {
+        if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
             return vec![];
         }
 
@@ -2053,6 +2061,63 @@ mod tests {
             "the pending takeback must still be there for the reconnecting socket to be told about"
         );
         assert!(session.pending_takeback_message().is_some());
+    }
+
+    /// GH #1507 follow-up: `run_ai` must not advance the authoritative state
+    /// while a takeback vote is pending — AI moves bypass `handle_action`'s
+    /// pending-takeback guard entirely (they mutate `self.state` directly),
+    /// so without an explicit check here a reconnecting human's follow-up AI
+    /// turn (or any other `run_ai` call site) could move the state out from
+    /// under the snapshot the table is voting to roll back to.
+    #[test]
+    fn run_ai_is_noop_while_takeback_is_pending() {
+        let mut mgr = SessionManager::new();
+        let (code, _token0) = mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            3,
+            MatchConfig::default(),
+            None,
+        );
+        let (_token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (_token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        // Retroactively mark seat 2 as AI-controlled (server-side bookkeeping
+        // only — the engine state itself has no notion of AI seats), and
+        // hand it a known legal action: an undecided mulligan. This is
+        // exactly the kind of action `run_ai` would otherwise resolve.
+        let ai_pid = PlayerId(2);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.ai_seats.insert(ai_pid);
+        session.ai_configs.insert(
+            ai_pid,
+            phase_ai::config::create_config_for_players(AiDifficulty::Easy, Platform::Native, 3),
+        );
+        session.state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                player: ai_pid,
+                mulligan_count: 0,
+            }],
+            free_first_mulligan: true,
+        };
+
+        // Player 0 requests a takeback; with two human seats (0 and 1) it
+        // stays Pending until player 1 also approves.
+        session.push_takeback_snapshot(PlayerId(0));
+        let outcome = session.request_takeback(PlayerId(0)).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Pending);
+
+        let state_before = session.state.clone();
+        let ai_results = session.run_ai();
+        assert!(
+            ai_results.is_empty(),
+            "run_ai must no-op while a takeback vote is pending, even though the AI seat has a legal action"
+        );
+        assert_eq!(
+            session.state.waiting_for, state_before.waiting_for,
+            "authoritative state must not move while a takeback vote is pending"
+        );
     }
 
     // ── Sandbox capability tests ─────────────────────────────────────────
