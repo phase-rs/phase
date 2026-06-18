@@ -78,13 +78,9 @@ pub fn resolve(
     {
         values.mana_cost = crate::types::mana::ManaCost::NoCost;
     }
-    if let Some(loyalty) = additional_modifications.iter().rev().find_map(|m| {
-        if let ContinuousModification::SetStartingLoyalty { value } = m {
-            Some(*value)
-        } else {
-            None
-        }
-    }) {
+    if let Some(loyalty) =
+        super::token_copy::copy_starting_loyalty_override(&additional_modifications)
+    {
         values.loyalty = Some(loyalty);
     }
 

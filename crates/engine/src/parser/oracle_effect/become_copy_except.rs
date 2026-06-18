@@ -73,6 +73,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::char;
 use nom::combinator::{opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -968,14 +969,17 @@ fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
 /// is shared with BecomeCopy exceptions so future planeswalker-copy effects use
 /// the same resolution-time override.
 fn parse_starting_loyalty_override(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("its starting loyalty is "),
-        tag("his starting loyalty is "),
-        tag("her starting loyalty is "),
-        tag("their starting loyalty is "),
-        tag("it's starting loyalty is "),
-        tag("it\u{2019}s starting loyalty is "),
-    ))
+    let (rest, _) = preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("its"),
+            tag("his"),
+            tag("her"),
+            tag("their"),
+            tag("it's"),
+            tag("it\u{2019}s"),
+        )),
+        tag(" starting loyalty is "),
+    )
     .parse(input)
     .ok()?;
     let (rest, value) = nom_primitives::parse_number(rest).ok()?;

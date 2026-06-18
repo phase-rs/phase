@@ -1084,7 +1084,9 @@ fn apply_token_modifications(
     true
 }
 
-fn copy_starting_loyalty_override(modifications: &[ContinuousModification]) -> Option<u32> {
+pub(crate) fn copy_starting_loyalty_override(
+    modifications: &[ContinuousModification],
+) -> Option<u32> {
     modifications.iter().rev().find_map(|modification| {
         if let ContinuousModification::SetStartingLoyalty { value } = modification {
             Some(*value)
