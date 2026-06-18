@@ -4,6 +4,16 @@
     "message": "Votre adversaire sera déclaré vainqueur.",
     "concede": "Concéder"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} demande une reprise",
+    "requestedMessage": "Revenir au moment juste avant sa dernière action ?",
+    "ownTitle": "Reprise demandée",
+    "ownMessage": "En attente de l'approbation des autres joueurs pour revenir avant votre dernière action.",
+    "approve": "Approuver",
+    "decline": "Refuser",
+    "cancel": "Annuler la demande",
+    "declinedToast": "Demande de reprise refusée"
+  },
   "connectionDot": {
     "connected": "Connecté",
     "connecting": "Connexion...",

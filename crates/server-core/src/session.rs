@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,7 @@ use crate::filter::filter_state_for_player;
 use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::PlayerSlotInfo;
 use crate::reconnect::ReconnectManager;
+use crate::takeback::PendingTakeback;
 
 /// Result of handling a game action: raw state snapshot, events, legal actions, log entries,
 /// auto-pass flag, spell costs, and per-object action grouping.
@@ -42,6 +43,17 @@ pub type ActionResult = (
     // Per-object grouping of legal actions, keyed by `GameAction::source_object()`.
     // Required by the frontend's `collectObjectActions(...)` lookup for card clicks;
     // dropping this field leaves guests unable to play lands or cast spells.
+    HashMap<ObjectId, Vec<GameAction>>,
+);
+
+/// Broadcast-ready fields for a state snapshot taken outside the normal
+/// `handle_action` flow (e.g. an approved takeback rollback): the raw state,
+/// legal actions, auto-pass flag, spell costs, and per-object action grouping.
+pub type BroadcastSnapshot = (
+    GameState,
+    Vec<GameAction>,
+    bool,
+    HashMap<ObjectId, ManaCost>,
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
@@ -126,6 +138,12 @@ pub struct GameSession {
     /// late joiners and reconnects do not re-receive the contest. Empty when the
     /// game has not started or the events have already been broadcast.
     pub start_events: Vec<GameEvent>,
+    /// A "request takeback" awaiting unanimous human approval, if any. See
+    /// `crate::takeback` for the GH #1507 multiplayer-safe undo flow.
+    pub pending_takeback: Option<PendingTakeback>,
+    /// Rolling buffer of authoritative states immediately preceding each
+    /// state-mutating action, used to restore on an approved takeback.
+    pub takeback_history: VecDeque<GameState>,
 }
 
 impl GameSession {
@@ -526,6 +544,23 @@ impl GameSession {
             .collect()
     }
 
+    /// Recomputes the broadcast-ready fields (legal actions, auto-pass,
+    /// spell costs, per-object grouping) for the session's *current* state.
+    /// Used after any out-of-band mutation that doesn't go through
+    /// `handle_action` — e.g. an approved takeback rollback — so the
+    /// resulting `StateUpdate` carries data consistent with a normal action.
+    pub fn current_broadcast_snapshot(&self) -> BroadcastSnapshot {
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
+        (
+            self.state.clone(),
+            legal_actions,
+            auto_pass,
+            spell_costs,
+            by_object,
+        )
+    }
+
     /// Create a serializable snapshot of this session for disk persistence.
     pub fn to_persisted(&self) -> PersistedSession {
         let ai_difficulties = self
@@ -613,6 +648,8 @@ impl GameSession {
             start_when_full: ps.start_when_full,
             ranked: ps.ranked,
             start_events: Vec::new(),
+            pending_takeback: None,
+            takeback_history: VecDeque::new(),
         }
     }
 }
@@ -722,6 +759,8 @@ impl SessionManager {
             start_when_full: true,
             ranked: false,
             start_events: Vec::new(),
+            pending_takeback: None,
+            takeback_history: VecDeque::new(),
         };
 
         self.token_to_game
@@ -933,6 +972,18 @@ impl SessionManager {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
+        // GH #1507: while a takeback request is awaiting approval, the
+        // authoritative state must not move out from under it — a new
+        // action here would either invalidate the snapshot the table is
+        // voting on or silently discard the action once the rollback lands.
+        // Require the table to resolve (approve/decline/cancel) first.
+        if session.pending_takeback.is_some() {
+            return Err(
+                "A takeback request is pending — resolve it before taking further actions"
+                    .to_string(),
+            );
+        }
+
         // Sandbox capability gate. A `Debug(_)` is accepted only when the
         // session was created in sandbox mode AND the submitting player is in
         // the `debug_permitted` set. The set is host-managed via
@@ -1024,6 +1075,7 @@ impl SessionManager {
         // the rules; players may arrange them as they choose. Hand reordering
         // has no game-rules consequence.
         if matches!(action, GameAction::ReorderHand { .. }) {
+            session.push_takeback_snapshot();
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1053,6 +1105,7 @@ impl SessionManager {
                 | GameAction::GrantDebugPermission { .. }
                 | GameAction::RevokeDebugPermission { .. }
         ) {
+            session.push_takeback_snapshot();
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1137,6 +1190,7 @@ impl SessionManager {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
+        session.push_takeback_snapshot();
         let result = apply(&mut session.state, player, action).map_err(|e| {
             warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
             format!("Engine error: {}", e)
@@ -1699,6 +1753,170 @@ mod tests {
         );
     }
 
+    // ── Takeback tests (GH #1507) ────────────────────────────────────────
+
+    use crate::takeback::TakebackOutcome;
+
+    /// Two human players: a request stays `Pending` until the other player
+    /// approves, then the rolled-back state matches the pre-action snapshot.
+    #[test]
+    fn takeback_requires_unanimous_human_approval() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (acting_token, other_player) = if priority_player == PlayerId(0) {
+            (token0.clone(), PlayerId(1))
+        } else {
+            (token1.clone(), PlayerId(0))
+        };
+
+        let state_before = mgr.sessions.get(&code).unwrap().state.clone();
+        let result = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        assert!(
+            result.is_ok(),
+            "PassPriority should succeed: {:?}",
+            result.err()
+        );
+        assert_ne!(
+            mgr.sessions.get(&code).unwrap().state.waiting_for,
+            state_before.waiting_for,
+            "sanity: the action should have actually changed turn state"
+        );
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let outcome = session.request_takeback(priority_player).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Pending);
+
+        // A second concurrent request is rejected — only one in flight at a time.
+        assert!(session.request_takeback(other_player).is_err());
+
+        let outcome = session.respond_takeback(other_player, true).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Approved);
+        assert_eq!(
+            session.state.waiting_for, state_before.waiting_for,
+            "approved takeback should restore the pre-action waiting_for"
+        );
+        assert!(session.pending_takeback.is_none());
+    }
+
+    /// A single decline withdraws the request and leaves state untouched.
+    #[test]
+    fn takeback_decline_leaves_state_untouched() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (acting_token, other_player) = if priority_player == PlayerId(0) {
+            (token0.clone(), PlayerId(1))
+        } else {
+            (token1.clone(), PlayerId(0))
+        };
+
+        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        let state_after_pass = mgr.sessions.get(&code).unwrap().state.clone();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.request_takeback(priority_player).unwrap();
+        let outcome = session.respond_takeback(other_player, false).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Rejected);
+        assert!(session.pending_takeback.is_none());
+        assert_eq!(session.state.waiting_for, state_after_pass.waiting_for);
+    }
+
+    /// The requester can withdraw their own request before anyone responds;
+    /// nobody else may cancel it.
+    #[test]
+    fn takeback_cancel_is_requester_only() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (acting_token, other_player) = if priority_player == PlayerId(0) {
+            (token0.clone(), PlayerId(1))
+        } else {
+            (token1.clone(), PlayerId(0))
+        };
+
+        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.request_takeback(priority_player).unwrap();
+
+        assert!(session.cancel_takeback(other_player).is_err());
+        assert!(session.pending_takeback.is_some());
+
+        assert!(session.cancel_takeback(priority_player).is_ok());
+        assert!(session.pending_takeback.is_none());
+    }
+
+    /// With no prior action, there is nothing to take back.
+    #[test]
+    fn takeback_with_no_history_is_rejected() {
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+        let _ = token0;
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let player = match &session.state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        assert!(session.request_takeback(player).is_err());
+    }
+
+    /// While a takeback request is pending, new actions are rejected so the
+    /// table can't race the vote.
+    #[test]
+    fn action_rejected_while_takeback_pending() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (acting_token, other_token) = if priority_player == PlayerId(0) {
+            (token0.clone(), token1.clone())
+        } else {
+            (token1.clone(), token0.clone())
+        };
+
+        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.request_takeback(priority_player).unwrap();
+
+        let result = mgr.handle_action(&code, &other_token, GameAction::PassPriority);
+        assert!(
+            result.is_err(),
+            "action should be rejected while a takeback is pending"
+        );
+    }
+
+    /// A solo human vs. AI seats auto-resolves their own takeback request —
+    /// there's nobody else at the table to ask.
+    #[test]
+    fn takeback_auto_approves_for_sole_human_seat() {
+        let mut mgr = SessionManager::new();
+        let db = engine::database::CardDatabase::default();
+        let (code, _token) = mgr.create_game_with_ai(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            MatchConfig::default(),
+            vec![(1, AiDifficulty::Easy, make_deck())],
+            Vec::new(),
+            None,
+            &db,
+        );
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // Force a known checkpoint to take back to, since the AI may have
+        // already acted past mulligans by the time the game starts.
+        session.push_takeback_snapshot();
+        let outcome = session.request_takeback(PlayerId(0)).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Approved);
+    }
+
     // ── Sandbox capability tests ─────────────────────────────────────────
 
     fn create_sandbox_game(mgr: &mut SessionManager) -> (String, String) {
@@ -1993,6 +2211,8 @@ mod tests {
             start_when_full: true,
             ranked: false,
             start_events: Vec::new(),
+            pending_takeback: None,
+            takeback_history: VecDeque::new(),
         };
 
         let game_started_before = session.game_started;

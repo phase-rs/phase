@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Minimum protocol version the server will accept at the hello handshake.
 /// Clients on `MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION` are admitted to the
@@ -243,6 +243,18 @@ pub enum ClientMessage {
     SpectateDraft {
         draft_code: String,
     },
+    /// GH #1507: ask every other human player at the table to approve
+    /// rolling the game back to the state immediately before the requester's
+    /// most recent action. Auto-approves when the requester is the only
+    /// human seat (e.g. solo vs. AI).
+    RequestTakeback,
+    /// Approve or decline the table's pending takeback request. Any single
+    /// decline withdraws the request — rollback requires unanimous approval.
+    RespondTakeback {
+        approve: bool,
+    },
+    /// Withdraw a takeback request the caller themselves made.
+    CancelTakeback,
 }
 
 fn default_player_count() -> u8 {
@@ -466,6 +478,26 @@ pub enum ServerMessage {
     },
     DraftSpectatorView {
         view: draft_core::view::SpectatorDraftView,
+    },
+    /// GH #1507: a human player has requested a takeback. Sent to every
+    /// connected seat (including the requester) so the UI can prompt the
+    /// other human players for approval.
+    TakebackRequested {
+        requester: PlayerId,
+        requester_name: String,
+    },
+    /// The pending takeback request has been resolved, either by unanimous
+    /// approval, a decline, or the requester cancelling it. When
+    /// `approved` is true, a `StateUpdate` carrying the rolled-back state
+    /// is sent to every seat immediately before this message.
+    TakebackResolved {
+        approved: bool,
+        /// The player whose response concluded the request: the decliner,
+        /// or the requester on self-cancel. `None` when every human seat
+        /// approved without a final distinguished responder (e.g. the
+        /// requester was the sole human seat).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_by: Option<PlayerId>,
     },
 }
 
@@ -1788,7 +1820,87 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_7() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+    fn protocol_version_is_8() {
+        assert_eq!(PROTOCOL_VERSION, 8);
+    }
+
+    #[test]
+    fn client_message_request_takeback_roundtrips() {
+        let msg = ClientMessage::RequestTakeback;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::RequestTakeback));
+    }
+
+    #[test]
+    fn client_message_respond_takeback_roundtrips() {
+        let msg = ClientMessage::RespondTakeback { approve: false };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::RespondTakeback { approve } => assert!(!approve),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_cancel_takeback_roundtrips() {
+        let msg = ClientMessage::CancelTakeback;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::CancelTakeback));
+    }
+
+    #[test]
+    fn server_message_takeback_requested_roundtrips() {
+        let msg = ServerMessage::TakebackRequested {
+            requester: PlayerId(1),
+            requester_name: "Alice".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::TakebackRequested {
+                requester,
+                requester_name,
+            } => {
+                assert_eq!(requester, PlayerId(1));
+                assert_eq!(requester_name, "Alice");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_takeback_resolved_roundtrips() {
+        let msg = ServerMessage::TakebackResolved {
+            approved: true,
+            resolved_by: Some(PlayerId(0)),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::TakebackResolved {
+                approved,
+                resolved_by,
+            } => {
+                assert!(approved);
+                assert_eq!(resolved_by, Some(PlayerId(0)));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_takeback_resolved_omits_resolved_by_when_none() {
+        let msg = ServerMessage::TakebackResolved {
+            approved: false,
+            resolved_by: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("resolved_by"),
+            "None must be omitted: {json}"
+        );
     }
 }

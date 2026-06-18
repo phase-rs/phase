@@ -19,6 +19,9 @@ interface GameMenuProps {
   onSettingsClick: () => void;
   onHelpClick: () => void;
   onConcede?: () => void;
+  /** GH #1507: ask every other human player to approve rolling the game
+   * back to the state before this player's last action. Online-only. */
+  onRequestTakeback?: () => void;
   /** Show the always-visible Sandbox Tools button. Gated by the caller to
    *  game modes where debug actions actually work (vs-AI, local, or a
    *  multiplayer sandbox). */
@@ -35,6 +38,7 @@ export function GameMenu({
   onSettingsClick,
   onHelpClick,
   onConcede,
+  onRequestTakeback,
   showSandboxTools,
   onSandboxToolsClick,
 }: GameMenuProps) {
@@ -145,6 +149,15 @@ export function GameMenu({
               onClick={() => {
                 onToggleAiHand();
                 setOpen(false);
+              }}
+            />
+          )}
+          {isOnlineMode && onRequestTakeback && (
+            <MenuButton
+              label={t("gameMenu.requestTakeback")}
+              onClick={() => {
+                setOpen(false);
+                onRequestTakeback();
               }}
             />
           )}
