@@ -1645,7 +1645,7 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .iter()
             .flat_map(|p| p.library.iter().copied())
             .collect(),
-        Zone::Command => vec![],
+        Zone::Command => state.command_zone.iter().copied().collect(),
     }
 }
 

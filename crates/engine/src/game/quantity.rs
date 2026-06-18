@@ -1939,26 +1939,15 @@ fn resolve_ref(
                     .controller(owner.clone())
                     .properties(vec![FilterProp::IsCommander]),
             );
-
-            // Check battlefield first
-            let battlefield_ids: Vec<ObjectId> = crate::game::targeting::zone_object_ids(
-                state,
+            let zones = [
                 crate::types::zones::Zone::Battlefield,
-            )
-            .into_iter()
-            .filter(|&id| matches_target_filter(state, id, &filter, &filter_ctx))
-            .collect();
-
-            // Check command zone (zone_object_ids returns empty for Command, so use state.command_zone directly)
-            let command_zone_ids: Vec<ObjectId> = state
-                .command_zone
-                .iter()
-                .filter(|&id| matches_target_filter(state, *id, &filter, &filter_ctx))
-                .copied()
+                crate::types::zones::Zone::Command,
+            ];
+            let ids: Vec<ObjectId> = zones
+                .into_iter()
+                .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+                .filter(|&id| matches_target_filter(state, id, &filter, &filter_ctx))
                 .collect();
-
-            let mut ids = battlefield_ids;
-            ids.extend(command_zone_ids);
 
             // Return mana value of first matching commander (any one if multiple exist)
             ids.first()
@@ -4881,6 +4870,65 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
             3,
             "Commander on battlefield should resolve to its mana value (3)"
+        );
+    }
+
+    /// CR 903.3d: Greatest commander mana value with partners in command zone.
+    /// Verifies that the Aggregate resolver correctly enumerates command-zone
+    /// commanders after zone_object_ids(Zone::Command) was fixed.
+    #[test]
+    fn resolve_quantity_greatest_commander_mana_value_command_zone() {
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+                filter: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::IsCommander,
+                            FilterProp::InAnyZone {
+                                zones: vec![Zone::Battlefield, Zone::Command],
+                            },
+                        ]),
+                ),
+            },
+        };
+
+        // Add two partners in command zone: 3-mana and 5-mana
+        let cmd1_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Partner1".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd1_id).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::generic(3);
+        }
+        let cmd2_id = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Partner2".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd2_id).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::generic(5);
+        }
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "Greatest of partners in command zone should be 5"
         );
     }
 
