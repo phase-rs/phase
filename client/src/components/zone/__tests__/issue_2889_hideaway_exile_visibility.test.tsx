@@ -1,10 +1,26 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { GameCardPreview } from "../../card/GameCardPreview.tsx";
 import { ZoneViewer } from "../ZoneViewer.tsx";
+
+// The hover/long-press preview (GameCardPreview -> CardPreview) reads the raw
+// object from the store independently of ZoneViewer's redacted strip — it has
+// its own `useCardImage`/engine-data fetches, mocked here the same way
+// GameCardPreview.test.tsx does, so the integration test below can render it
+// alongside ZoneViewer and simulate a real hover.
+vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardImage: () => ({ src: "card.png", isLoading: false, isRotated: false, isFlip: false }),
+}));
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useEngineCardData: () => null,
+  useCardParseDetails: () => null,
+  useCardRulings: () => [],
+}));
 
 // Issue #2889: a Hideaway permanent exiles a card face down (CR 702.75a). The
 // engine's per-viewer `filter_state_for_viewer` already redacts this card on
@@ -130,6 +146,19 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
       pendingAbilityChoice: null,
       debugInteractionMode: false,
     });
+    // Desktop hover path: `useInspectHoverProps` gates onMouseEnter on
+    // `useCanHover` (any-hover media query) and `useIsMobile` (jsdom's default
+    // 1024px innerWidth already reads as non-mobile).
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(any-hover: hover)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
   });
 
   afterEach(() => {
@@ -289,5 +318,69 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
 
     expect(screen.getByTestId("card-image").getAttribute("data-face-down")).toBe("false");
     expect(screen.getByLabelText("Alrund's Epiphany")).toBeInTheDocument();
+  });
+
+  it("does not leak the real card via hover/long-press preview either", () => {
+    // The strip thumbnail is only half the surface: ZoneCard still wires
+    // `hoverProps(obj.id)` (mouseenter on desktop, long-press on touch) to
+    // `inspectObject`, and GameCardPreview resolves that id straight from the
+    // RAW, unredacted `gameState.objects` — independent of the redacted strip
+    // image above. It stays safe because `GameCardPreview` nulls the derived
+    // `cardName` whenever `obj.face_down` is true (regardless of viewer, the
+    // same fail-closed rule CR 708.5 already applies to a face-down battlefield
+    // permanent — see GameCardPreview.test.tsx's "never previews a face-down
+    // permanent" case), and `CardPreview` renders nothing at all when
+    // `cardName` is null. This test exercises that path end-to-end through a
+    // real hover instead of relying on the unit test alone.
+    const source = makeObject({
+      id: 1,
+      owner: 1,
+      controller: 1,
+      zone: "Battlefield",
+      name: "Windbrisk Heights",
+    });
+    const hidden = makeObject({
+      id: 2,
+      owner: 1,
+      controller: 1,
+      zone: "Exile",
+      name: "Ghalta, Primal Hunter",
+      face_down: true,
+      printed_ref: { oracle_id: "ghalta-oracle", face_name: "Ghalta, Primal Hunter" },
+    });
+    const gameState = makeState(
+      [source, hidden],
+      [{ exiled_id: 2, source_id: 1, kind: "HideawayLookable" }],
+    );
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+    usePreferencesStore.setState({ cardPreviewMode: "follow" });
+
+    render(
+      <>
+        <ZoneViewer zone="exile" playerId={1} onClose={vi.fn()} />
+        <GameCardPreview />
+      </>,
+    );
+
+    const cardImage = screen.getByTestId("card-image");
+    const hoverTarget = cardImage.parentElement as HTMLElement;
+    fireEvent.mouseEnter(hoverTarget);
+
+    // The hover did wire up — `inspectObject` ran — but the preview must
+    // render nothing for a face-down card with no look-permission.
+    expect(useUiStore.getState().inspectedObjectId).toBe(hidden.id);
+    expect(screen.queryByAltText("Ghalta, Primal Hunter")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-card-preview]")).toBeNull();
+
+    fireEvent.mouseLeave(hoverTarget);
   });
 });
