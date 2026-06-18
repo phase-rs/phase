@@ -387,6 +387,7 @@
     "payMana": "Pagar Custo de Mana",
     "convokeHint": "Vire criaturas para ajudar a pagar.",
     "improviseHint": "Vire artefatos para ajudar a pagar.",
+    "delveHint": "Exile cartas do seu cemitério para ajudar a pagar.",
     "convokeOrImproviseHint": "Vire criaturas ou artefatos para ajudar a pagar.",
     "convokeStaged": "Viradas:",
     "lifeAmount": "2 de vida",

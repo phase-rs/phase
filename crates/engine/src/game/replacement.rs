@@ -5133,8 +5133,14 @@ enum CommuteClass {
     Multiplicative,
     Additive,
     Subtractive,
-    /// Two `SetTapState::Untap` replacements commute (same outcome).
-    EnterUntap,
+    /// Two replacements that set the same enter tap-state commute: the
+    /// permanent enters with that state regardless of which is applied
+    /// first, so the CR 616.1e/f ordering choice is immaterial. Keyed by
+    /// the value written (not the direction) so that same-direction writes
+    /// commute while opposite-direction writes (tap vs untap, where
+    /// last-applied wins) stay `NonCommuting`.
+    EnterTapped,
+    EnterUntapped,
 }
 
 impl CommuteClass {
@@ -5319,20 +5325,25 @@ fn candidate_materiality(
             }
             // CR 616.1c: copy-as-it-enters strips another replacement's source.
             Effect::BecomeCopy { .. } => return CandidateMateriality::Unconditional,
-            // CR 614.1c: single-target `Tap`/`Untap` (legacy `Tap`/`Untap`) both
-            // overwrite the `enter_tapped` field — two such candidates conflict
-            // (tapland + Spelunking / Archelos), last-applied wins. The mass
-            // scope is not an ETB modifier and is not matched here.
+            // CR 614.1c: single-target `Tap`/`Untap` both overwrite the
+            // `enter_tapped` field. CR 616.1e/f: ordering only matters when the
+            // candidates would leave the permanent in *different* states.
+            // Same-direction writes (two "enters tapped", or two "enters
+            // untapped") are idempotent — the permanent enters with that state
+            // regardless of order, so the choice is immaterial and no prompt is
+            // shown. Opposite-direction writes (tapland + Spelunking / Archelos)
+            // are last-applied-wins and stay `NonCommuting`. The mass scope is
+            // not an ETB modifier and is not matched here.
             Effect::SetTapState {
                 scope: EffectScope::Single,
                 state,
                 ..
             } => {
                 field = Some(EventField::EnterTapped);
-                // CR 616.1f: Duplicate untap state replacements commute (#1340).
+                // Keyed by the value written so opposite directions don't commute.
                 enter_tapped_commute = Some(match state {
-                    TapStateChange::Tap => CommuteClass::NonCommuting,
-                    TapStateChange::Untap => CommuteClass::EnterUntap,
+                    TapStateChange::Tap => CommuteClass::EnterTapped,
+                    TapStateChange::Untap => CommuteClass::EnterUntapped,
                 });
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
@@ -6360,6 +6371,99 @@ mod tests {
         assert!(
             matches!(result, ReplacementResult::Execute(_)),
             "identical untap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn two_identical_tap_replacements_auto_apply_without_choice() {
+        // CR 616.1e/f: Two "enters tapped" replacements (Kismet + Frozen Aether)
+        // are idempotent — the permanent enters tapped regardless of order, so
+        // the ordering choice is immaterial and no prompt is shown. This is the
+        // symmetric counterpart of the untap case (#1340): materiality keys on
+        // the value written, not the tap-direction.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state = test_state_with_object(
+            ObjectId(1),
+            Zone::Battlefield,
+            vec![tap_repl.clone(), tap_repl],
+        );
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "identical tap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn opposite_tap_state_replacements_prompt_for_order() {
+        // CR 616.1e/f: One "enters tapped" + one "enters untapped" replacement
+        // leave the permanent in *different* states depending on which is applied
+        // last, so the ordering is material and the controller must choose
+        // (tapland + Spelunking / Archelos). Guards against over-commuting the
+        // value-keyed classes.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state =
+            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![tap_repl, untap_repl]);
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "opposite tap-state replacements must prompt for order, got {result:?}"
         );
     }
 

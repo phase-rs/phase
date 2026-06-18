@@ -8538,41 +8538,54 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    // CR 603.8: "when ~ has no [type] counters on it" — state trigger that fires
-    // when the source permanent has zero counters of the specified type.
-    // Handles: Dark Depths ("has no ice counters"), Afiya Grove ("has no +1/+1
-    // counters"), and bare "has no counters on it" (any type).
-    if let Some(result) = try_parse_has_no_counters_state_trigger(lower) {
+    // CR 603.8: "when ~ has no [type] counters on it" / "when ~ has N or more
+    // [type] counters on it" — state trigger on the source permanent's counter
+    // state. Two accepted forms:
+    //   - Depletion (minimum: 0, maximum: Some(0)): Dark Depths, Afiya Grove —
+    //     self-limiting because the effect removes the source or its counters.
+    //   - Threshold (minimum > 0, maximum: None): Darksteel Reactor — self-limiting
+    //     because the effect ends the game (WinTheGame) before re-firing.
+    if let Some(result) = try_parse_source_counter_state_trigger(lower) {
         return Some(result);
     }
 
     None
 }
 
-/// CR 603.8: Parse "when ~ has no [type] counters on it" as a state trigger.
+/// CR 603.8: Parse "when ~ has [no / N or more] [type] counters on it" as a
+/// state trigger.
 ///
-/// Delegates the subject × quantity × counter-type × "on it" grammar to the
-/// shared `parse_source_has_counters` combinator and bridges its
+/// Delegates subject × quantity × counter-type × "on it" grammar to
+/// `parse_source_has_counters` and bridges the resulting
 /// `StaticCondition::HasCounters` to a `TriggerCondition` via
 /// `static_condition_to_trigger_condition` — the same path intervening-if
-/// counter conditions already use. Only the zero/depletion form (Dark Depths,
-/// Afiya Grove, vanishing-style "has no … counters") is accepted: a state
-/// trigger re-checks every SBA cycle and re-fires once off the stack, so a
-/// non-zero threshold would loop for any effect that doesn't itself remove the
-/// counters.
-fn try_parse_has_no_counters_state_trigger(
-    lower: &str,
-) -> Option<(TriggerMode, TriggerDefinition)> {
+/// counter conditions use.
+///
+/// Two accepted forms:
+/// - **Depletion** (`minimum: 0, maximum: Some(0)`): Dark Depths, Afiya Grove,
+///   vanishing-style "has no … counters". Self-limiting: the effect removes the
+///   source from the battlefield or depletes its counters.
+/// - **Threshold** (`minimum > 0, maximum: None`): Darksteel Reactor ("has
+///   twenty or more charge counters"). For all currently printed threshold state
+///   triggers, the effect is self-limiting (the game ends, the source leaves
+///   the battlefield, or counters fall below the threshold before re-checking);
+///   the parser does not enforce this constraint structurally.
+fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
     let (_, static_cond) = parse_source_has_counters(rest).ok()?;
-    // CR 603.8: restrict to the self-limiting "has no … counters" depletion form.
+    // CR 603.8: accept depletion form (minimum: 0, maximum: Some(0)) and
+    // threshold form (minimum > 0, maximum: None). Reject mixed/range forms.
     if !matches!(
         static_cond,
         StaticCondition::HasCounters {
             minimum: 0,
             maximum: Some(0),
+            ..
+        } | StaticCondition::HasCounters {
+            minimum: 1..,
+            maximum: None,
             ..
         }
     ) {
@@ -27258,6 +27271,154 @@ mod tests {
         } else {
             panic!("expected HasCounters condition, got {:?}", def.condition);
         }
+    }
+
+    #[test]
+    fn state_trigger_has_twenty_or_more_charge_counters() {
+        // Darksteel Reactor: "When Darksteel Reactor has twenty or more charge counters on it,
+        // you win the game."
+        let def = parse_trigger_line(
+            "When Darksteel Reactor has twenty or more charge counters on it, you win the game.",
+            "Darksteel Reactor",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &def.condition
+        {
+            assert_eq!(
+                *counters,
+                CounterMatch::OfType(CounterType::Generic("charge".to_string()))
+            );
+            assert_eq!(*minimum, 20);
+            assert_eq!(*maximum, None);
+        } else {
+            panic!("expected HasCounters condition, got {:?}", def.condition);
+        }
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::WinTheGame { .. }),
+            "expected WinTheGame, got {:?}",
+            execute.effect,
+        );
+    }
+
+    #[test]
+    fn upkeep_trigger_may_put_charge_counter() {
+        // Darksteel Reactor: "At the beginning of your upkeep, you may put a charge counter
+        // on Darksteel Reactor."
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, you may put a charge counter on Darksteel Reactor.",
+            "Darksteel Reactor",
+        );
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert!(def.optional, "upkeep trigger should be optional (you may)");
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Generic(ref s),
+                    target: TargetFilter::SelfRef,
+                    ..
+                } if s == "charge"
+            ),
+            "expected PutCounter(charge) on SelfRef, got {:?}",
+            execute.effect,
+        );
+    }
+
+    /// CR 603.8: Darksteel Reactor's state trigger fires when the reactor reaches
+    /// 20 charge counters and resolves the WinTheGame effect, ending the game.
+    /// Discriminates against guard-reversion regressions: reverting the
+    /// `minimum: 1..` arm causes the pre-assertion (StateCondition trigger exists)
+    /// to fail because the oracle text no longer produces a StateCondition trigger.
+    #[test]
+    fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
+        use crate::game::scenario::GameRunner;
+        use crate::game::triggers::check_state_triggers;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::CardId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        use crate::types::PlayerId;
+        use std::sync::Arc;
+
+        const ORACLE: &str = "Indestructible\n\
+            At the beginning of your upkeep, you may put a charge counter on Darksteel Reactor.\n\
+            When Darksteel Reactor has twenty or more charge counters on it, you win the game.";
+
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Darksteel Reactor",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+
+        // Confirm the state trigger was parsed — shape check before the runtime test.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::StateCondition),
+            "Darksteel Reactor must parse a StateCondition trigger; got {:?}",
+            parsed.triggers,
+        );
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Place Darksteel Reactor on the battlefield for player 0.
+        let reactor_id = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Darksteel Reactor".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Install the parsed trigger definitions and add 20 charge counters.
+        {
+            let obj = state.objects.get_mut(&reactor_id).unwrap();
+            obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
+            obj.trigger_definitions = parsed.triggers.clone().into();
+            obj.controller = PlayerId(0);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 20);
+        }
+
+        // CR 603.8: call check_state_triggers, which sees the reactor has 20 charge
+        // counters and enqueues the WinTheGame trigger.
+        check_state_triggers(&mut state);
+
+        assert!(
+            state.pending_trigger.is_some() || !state.stack.is_empty(),
+            "state trigger must be pending or on the stack after check_state_triggers",
+        );
+
+        // Drain the stack: the WinTheGame effect resolves, eliminating all opponents.
+        let mut runner = GameRunner::from_state(state);
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "game must end with player 0 as winner after Darksteel Reactor fires; got {:?}",
+            state.waiting_for,
+        );
     }
 
     // --- Compound trigger tests ---

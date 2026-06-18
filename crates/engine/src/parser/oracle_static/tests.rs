@@ -17602,3 +17602,217 @@ fn aura_static_does_not_bind_it_pronoun_to_source() {
         );
     }
 }
+
+/// CR 702.16p: Benevolent Blessing — "Enchanted creature has protection from the
+/// chosen color. This effect doesn't remove Auras and Equipment you control that
+/// are already attached to it." The trailing inert SBA-exemption sentence must be
+/// dropped so the keyword token reaches `parse_protection_target` clean and yields
+/// `Protection(ChosenColor)` — NOT a bogus `Protection(CardType(_))` swallowing
+/// the trailing prose. (fail-if-reverted)
+#[test]
+fn protection_chosen_color_drops_trailing_sba_exemption_benevolent_blessing() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(_)),
+            }
+        )),
+        "trailing prose must not be swallowed into Protection(CardType(_)), got {mods:?}"
+    );
+}
+
+/// CR 702.16n: Pentarch Ward variant — the trailing sentence references "this
+/// Aura" (no internal " and "), exercising the single-leg split path. Must still
+/// yield `Protection(ChosenColor)`. (fail-if-reverted)
+#[test]
+fn protection_chosen_color_drops_trailing_this_aura_exemption() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove this Aura.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(_)),
+            }
+        )),
+        "trailing prose must not be swallowed into Protection(CardType(_)), got {mods:?}"
+    );
+}
+
+/// Building-block: `push_grant_clause_modifications` must drop the trailing prose
+/// sentence directly on the bare keyword leg and emit one
+/// `Protection(ChosenColor)`. (fail-if-reverted)
+#[test]
+fn push_grant_clause_drops_trailing_sentence_chosen_color() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mut mods = Vec::new();
+    push_grant_clause_modifications(
+        &mut mods,
+        "protection from the chosen color. this effect doesn't remove auras",
+        None,
+    );
+    assert_eq!(
+        mods,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }],
+        "expected exactly one Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: a plain chosen-color grant with NO trailing ". " sentence is
+/// unchanged (split returns None).
+#[test]
+fn protection_chosen_color_plain_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has protection from the chosen color.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: Glory's duration form "protection from the chosen color until
+/// end of turn" — the duration is stripped, no truncation, still ChosenColor.
+#[test]
+fn protection_chosen_color_duration_form_glory() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Creatures you control gain protection from the chosen color until end of turn",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: single-color protection still parses to Color(Red).
+#[test]
+fn protection_single_color_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications("Enchanted creature has protection from red.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "expected Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// Broader Ward-cycle class: a single-color Ward with a trailing sentence (Red
+/// Ward form) recovers the keyword via the same ". " split → Color(Red).
+#[test]
+fn protection_single_color_with_trailing_sentence_red_ward() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from red. This effect doesn't remove this Aura.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "expected Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// No-regression: Spectra Ward's "protection from each color" still fans out to
+/// the five WUBRG protection entries (via expand_protection_parts) through the
+/// new split (the leg has no ". ").
+#[test]
+fn protection_each_color_fanout_unchanged_spectra_ward() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications("Enchanted creature has protection from each color.");
+    let prot: Vec<_> = mods
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(pt),
+            } => Some(pt.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prot,
+        vec![
+            ProtectionTarget::Color(ManaColor::White),
+            ProtectionTarget::Color(ManaColor::Blue),
+            ProtectionTarget::Color(ManaColor::Black),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        ],
+        "expected five WUBRG protection entries, got {mods:?}"
+    );
+}
+
+/// No-regression: a multi-keyword grant where one leg is protection still emits
+/// BOTH keywords (the " and " pre-split happens before the per-leg ". " split).
+#[test]
+fn multi_keyword_flying_and_protection_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has flying and protection from red.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }),
+        "missing Flying, got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "missing Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// CR 604.1 / 613.1f: a granted QUOTED activated ability whose body contains an
+/// internal ". " must reach the quoted-ability path (GrantAbility) and NOT be
+/// truncated by the new bare-keyword ". " split — proving quoted text bypasses it.
+#[test]
+fn granted_quoted_ability_with_internal_period_bypasses_split() {
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has \"{T}: Add one mana of any color. Activate this ability only as a sorcery.\"",
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "expected a GrantAbility from the quoted ability, got {mods:?}"
+    );
+}

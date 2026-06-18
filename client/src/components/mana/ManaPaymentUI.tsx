@@ -296,7 +296,9 @@ export function ManaPaymentUI() {
                     ? t("mana.convokeHint")
                     : convokeMode === "Improvise"
                       ? t("mana.improviseHint")
-                      : t("mana.convokeOrImproviseHint")}
+                      : convokeMode === "Delve"
+                        ? t("mana.delveHint")
+                        : t("mana.convokeOrImproviseHint")}
                 </p>
               )}
 

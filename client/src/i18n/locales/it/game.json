@@ -387,6 +387,7 @@
     "payMana": "Paga il costo di mana",
     "convokeHint": "TAPpa le creature per aiutare a pagare.",
     "improviseHint": "TAPpa gli artefatti per aiutare a pagare.",
+    "delveHint": "Esilia carte dal tuo cimitero per aiutare a pagare.",
     "convokeOrImproviseHint": "TAPpa creature o artefatti per aiutare a pagare.",
     "convokeStaged": "TAPpate:",
     "lifeAmount": "2 punti vita",

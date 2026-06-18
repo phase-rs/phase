@@ -579,9 +579,11 @@ pub fn activate_ninjutsu(
     // source; the cast-variant tag below records the ninjutsu provenance).
     //
     // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
-    // external enter-tapped `Moved` effects (Authority of the Consuls +
-    // Imposing Sovereign class) both write the entry event's tap field, a
-    // material same-field collision that surfaces an ordering prompt (see
+    // external enter tap-state `Moved` effects writing in *opposite* directions
+    // (one enters tapped, one enters untapped — the Frozen Aether + Spelunking
+    // class) are last-applied-wins, a material CR 616.1e/f collision that
+    // surfaces an ordering prompt (same-direction writes commute, no prompt —
+    // see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`) (see
     // `paused_ninjutsu_entry_resumes_with_combat_placement_and_tag`). On the
     // pause, the post-entry ninjutsu work (cast-variant tag + CR 702.49c combat
     // placement + CR 702.49a trigger event) is deferred onto a
@@ -1493,9 +1495,10 @@ mod tests {
     }
 
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose
-    /// battlefield entry parks on a replacement-ordering prompt (two co-played
-    /// external enter-tapped `Moved` effects — Authority of the Consuls +
-    /// Imposing Sovereign class collide on the entry's tap field) must, after
+    /// battlefield entry parks on a replacement-ordering prompt (two opposite-
+    /// direction enter tap-state `Moved` effects — one enters tapped, one enters
+    /// untapped: the Frozen Aether + Spelunking class, last-applied-wins and so a
+    /// material CR 616.1e/f collision) must, after
     /// the prompt is answered, still receive the FULL post-entry ninjutsu work:
     /// the CR 702.49c tapped-and-attacking combat placement and the CR 702.49
     /// cast-variant provenance tag. The old bail skipped both — the resumed
@@ -1508,10 +1511,23 @@ mod tests {
 
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
 
-        // Two external enter-tapped Moved replacements on the opponent's board.
-        for (offset, name) in [
-            (0u64, "Authority of the Consuls"),
-            (1, "Imposing Sovereign"),
+        // A genuinely *material* enter tap-state collision: one replacement makes
+        // the entering ninja enter tapped (Frozen Aether class), the other makes
+        // it enter untapped (Spelunking / Archelos class). Opposite directions
+        // are last-applied-wins, so CR 616.1e/f requires the controller to order
+        // them and the entry parks on a ReplacementChoice. (Two same-direction
+        // writes commute — see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        for (offset, name, state_change) in [
+            (
+                0u64,
+                "Frozen Aether",
+                crate::types::ability::TapStateChange::Tap,
+            ),
+            (
+                1,
+                "Spelunking",
+                crate::types::ability::TapStateChange::Untap,
+            ),
         ] {
             let oid = ObjectId(9000 + offset);
             let mut src = GameObject::new(
@@ -1527,7 +1543,7 @@ mod tests {
                     Effect::SetTapState {
                         target: TargetFilter::SelfRef,
                         scope: crate::types::ability::EffectScope::Single,
-                        state: crate::types::ability::TapStateChange::Tap,
+                        state: state_change,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -1541,13 +1557,14 @@ mod tests {
         activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
             .expect("activation should succeed");
 
-        // CR 616.1: the colliding enter-tapped writes parked the ninja's entry.
+        // CR 616.1: the colliding tap/untap (opposite-direction) writes parked
+        // the ninja's entry.
         let WaitingFor::ReplacementChoice {
             player: chooser, ..
         } = state.waiting_for.clone()
         else {
             panic!(
-                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                "expected parked ReplacementChoice for the tap/untap collision, got {:?}",
                 state.waiting_for
             );
         };

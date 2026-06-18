@@ -887,6 +887,19 @@ pub(crate) fn push_grant_clause_modifications(
     part: &str,
     where_x_expression: Option<&str>,
 ) {
+    // CR 702.16n / 702.16p: a keyword-grant clause reaching this fn is a single
+    // BARE (unquoted) keyword token — granted activated/triggered abilities are
+    // quoted and stripped to a separate path (strip_quoted_segments at :645 +
+    // parse_quoted_ability_modifications at :798) before extract_keyword_clause
+    // runs, so any ". " here can only introduce a trailing inert prose sentence
+    // (e.g. Benevolent Blessing's SBA-exemption "This effect doesn't remove ...").
+    // Drop it so the keyword sentence reaches map_keyword clean.
+    let part =
+        match super::oracle_nom::bridge::split_once_on_lower(part, &part.to_lowercase(), ". ") {
+            Some((first, _)) => first,
+            None => part,
+        };
+
     let part_trimmed = part.trim().trim_end_matches('.');
     let (part_without_duration, _) = strip_trailing_duration(part_trimmed);
     let part_trimmed = part_without_duration.trim().trim_end_matches('.');

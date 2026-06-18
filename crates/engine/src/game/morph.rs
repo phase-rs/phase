@@ -155,10 +155,13 @@ pub fn play_face_down(
     // change_zone's face-down path).
     //
     // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
-    // external enter-tapped `Moved` effects (Authority of the Consuls +
-    // Imposing Sovereign class) both write the entry event's tap field, a
-    // material same-field collision that surfaces an ordering prompt (see
-    // `paused_face_down_morph_entry_resumes_face_down`). The bail is correct
+    // external enter tap-state `Moved` effects writing in *opposite* directions
+    // (one enters tapped, one enters untapped — the Frozen Aether + Spelunking
+    // class) are last-applied-wins, a material CR 616.1e/f collision that
+    // surfaces an ordering prompt (see
+    // `paused_face_down_morph_entry_resumes_face_down`). (Two same-direction
+    // writes are idempotent and commute without a prompt — see replacement.rs
+    // `CommuteClass::EnterTapped`/`EnterUntapped`.) The bail is correct
     // and complete: the face-down profile rides the parked event, and the
     // resume path (`engine_replacement::handle_replacement_choice`'s ZoneChange
     // arm) applies it through the shared CR 708.3 helper
@@ -284,9 +287,12 @@ pub fn manifest_card(
     // post-move override is dropped (the tail is the single authority).
     //
     // CR 616.1: a battlefield-entry pause IS reachable — two co-played external
-    // enter-tapped `Moved` effects (Authority of the Consuls + Imposing
-    // Sovereign class) collide on the entry's tap field and surface an ordering
-    // prompt. The bail is correct and complete: the face-down profile rides the
+    // enter tap-state `Moved` effects writing in *opposite* directions (one
+    // enters tapped, one enters untapped — the Frozen Aether + Spelunking class)
+    // are last-applied-wins, a material CR 616.1e/f collision that surfaces an
+    // ordering prompt (same-direction writes commute, no prompt — see
+    // replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`). The bail is
+    // correct and complete: the face-down profile rides the
     // parked event and the resume path applies it through the shared CR 708.3
     // helper (`zone_pipeline::apply_face_down_entry_profile`), so the manifest
     // resumes face down with nothing left for this helper to do.
@@ -452,11 +458,13 @@ mod tests {
     /// CR 616.1 + CR 708.3 discriminating test (fail-first): a face-down morph
     /// entry parked on a replacement-ordering prompt must resume FACE DOWN.
     ///
-    /// Reachability: two co-played external enter-tapped `Moved` defs (Authority
-    /// of the Consuls + Imposing Sovereign class — both parse as ChangeZone
-    /// Moved defs) both write the entry event's tap field; same-field writes are
-    /// non-commuting and the engine has no same-value dedupe, so the set is
-    /// material and CR 616.1 prompts — `move_object` parks the morph entry.
+    /// Reachability: two co-played external enter tap-state `Moved` defs writing
+    /// in *opposite* directions (one enters tapped, one enters untapped — the
+    /// Frozen Aether + Spelunking class, both parse as ChangeZone Moved defs)
+    /// are last-applied-wins, a material CR 616.1e/f collision that prompts —
+    /// `move_object` parks the morph entry. (Same-direction writes are
+    /// idempotent and commute without a prompt — see replacement.rs
+    /// `CommuteClass::EnterTapped`/`EnterUntapped`.)
     ///
     /// The resume path (`handle_replacement_choice`'s ZoneChange arm) previously
     /// destructured the approved event with `..`, DISCARDING
@@ -474,10 +482,23 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let player = PlayerId(0);
 
-        // Two external enter-tapped Moved replacements on the opponent's board.
-        for (offset, name) in [
-            (0u64, "Authority of the Consuls"),
-            (1, "Imposing Sovereign"),
+        // A genuinely *material* enter tap-state collision: one replacement makes
+        // the entrant enter tapped (Frozen Aether class), the other makes it
+        // enter untapped (Spelunking / Archelos class). Opposite directions are
+        // last-applied-wins, so CR 616.1e/f requires the controller to order them
+        // and the entry parks on a ReplacementChoice. (Two same-direction writes
+        // commute — see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        for (offset, name, state_change) in [
+            (
+                0u64,
+                "Frozen Aether",
+                crate::types::ability::TapStateChange::Tap,
+            ),
+            (
+                1,
+                "Spelunking",
+                crate::types::ability::TapStateChange::Untap,
+            ),
         ] {
             let oid = ObjectId(9000 + offset);
             let mut src = GameObject::new(
@@ -493,7 +514,7 @@ mod tests {
                     crate::types::ability::Effect::SetTapState {
                         target: TargetFilter::SelfRef,
                         scope: crate::types::ability::EffectScope::Single,
-                        state: crate::types::ability::TapStateChange::Tap,
+                        state: state_change,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -507,14 +528,14 @@ mod tests {
         let mut events = Vec::new();
         play_face_down(&mut state, player, id, &mut events).unwrap();
 
-        // CR 616.1: the colliding enter-tapped writes parked the entry — the
-        // card has NOT moved yet and the prompt is live.
+        // CR 616.1: the colliding tap/untap (opposite-direction) writes parked
+        // the entry — the card has NOT moved yet and the prompt is live.
         let WaitingFor::ReplacementChoice {
             player: chooser, ..
         } = state.waiting_for.clone()
         else {
             panic!(
-                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                "expected parked ReplacementChoice for the tap/untap collision, got {:?}",
                 state.waiting_for
             );
         };
@@ -530,9 +551,13 @@ mod tests {
 
         let obj = &state.objects[&id];
         assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
+        // CR 616.1e/f: opposite-direction tap-state writes are last-applied-wins.
+        // The chosen order (`index: 0`) lands the untapped write last, so the
+        // resumed entry is untapped — confirming both colliding replacements ran
+        // through the resume path and the chosen ordering was honored.
         assert!(
-            obj.tapped,
-            "both enter-tapped replacements applied to the resumed entry"
+            !obj.tapped,
+            "the chosen ordering's last-applied untap write must win on the resumed entry"
         );
         assert!(
             obj.face_down,

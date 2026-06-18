@@ -193,6 +193,18 @@ fn mother_of_runes() {
 }
 
 #[test]
+fn sylvan_safekeeper() {
+    let (ir, lowered) = parse_two_layer(
+        "Sacrifice a land: Target creature you control gains shroud until end of turn.",
+        "Sylvan Safekeeper",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    insta::assert_json_snapshot!("sylvan_safekeeper_ir", &ir);
+    insta::assert_json_snapshot!("sylvan_safekeeper_lowered", &lowered);
+}
+
+#[test]
 fn jade_mage() {
     let (ir, lowered) = parse_two_layer(
         "{2}{G}: Create a 1/1 green Saproling creature token.",
