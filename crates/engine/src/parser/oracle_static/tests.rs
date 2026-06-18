@@ -7837,6 +7837,82 @@ fn persistent_exile_play_permission_matrix_form() {
     );
 }
 
+/// Issue #717 — Evendo Brushrazer's condition-gated persistent exile-play
+/// permission uses the compact "you may play cards exiled with ~" wording,
+/// rather than the Matrix-style "play lands and cast spells from among ..."
+/// wording. It must still lower to the same persistent Play permission, with
+/// the sacrificed-permanent condition attached to the static.
+#[test]
+fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
+    let text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with ~.";
+    let def = parse_static_line(text).expect("Evendo static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+
+    let condition = def
+        .condition
+        .as_ref()
+        .expect("Evendo permission must keep its sacrificed-permanent gate");
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SacrificedThisTurn {
+                            player: PlayerScope::Controller,
+                            filter:
+                                TargetFilter::Typed(TypedFilter {
+                                    type_filters,
+                                    properties,
+                                    ..
+                                }),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } => {
+            assert_eq!(type_filters, &vec![TypeFilter::Permanent]);
+            assert!(
+                properties.contains(&FilterProp::NonToken),
+                "condition filter must preserve nontoken permanent qualifier: {properties:?}"
+            );
+        }
+        other => panic!("expected SacrificedThisTurn permanent gate, got {other:?}"),
+    }
+
+    let card_text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with Evendo Brushrazer.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Evendo Brushrazer",
+        &[],
+        &["Creature".to_string()],
+        &["Brushwagg".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode && parsed_def.condition == def.condition),
+        "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
+        parsed.statics
+    );
+}
+
 /// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may
 /// play lands and cast spells from among those cards." variant lowers to the
 /// same persistent Play permission, but without the your-turn timing gate.

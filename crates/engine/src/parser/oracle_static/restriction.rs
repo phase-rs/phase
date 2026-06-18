@@ -1701,11 +1701,12 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
 }
 
 /// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Parse the persistent,
-/// name-anchored exile-play permission — "[During your turn, ]you may play
-/// lands and cast spells from among cards exiled with ~[.]" (The Matrix of
-/// Time) and the "you may look at cards exiled with ~, and you may play lands
-/// and cast spells from among those cards." variant (the Prosper/Tibalt
-/// impulse-commander class).
+/// name-anchored exile-play permission — "[During your turn, ][as long as
+/// <condition>, ]you may play lands and cast spells from among cards exiled
+/// with ~[.]" (The Matrix of Time), the compact "you may play cards exiled
+/// with ~" wording (Evendo Brushrazer), and the "you may look at cards exiled
+/// with ~, and you may play lands and cast spells from among those cards."
+/// variant (the Prosper/Tibalt impulse-commander class).
 ///
 /// Distinguished from `try_parse_exile_cast_permission` (Maralen) by:
 /// - **No "this turn" pool bound** → `pool: ExileCardPool::Persistent` reads the
@@ -1731,6 +1732,11 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         None => (lower, ExileCastTiming::AnyTime),
     };
 
+    let (rest, condition) = match strip_leading_permission_condition(rest) {
+        Some((rest, condition)) => (rest, Some(condition)),
+        None => (rest, None),
+    };
+
     // Optional "you may look at cards exiled with <self>, and " preamble
     // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
     // rather than re-naming the source; when absent, the play clause names the
@@ -1739,16 +1745,25 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     let uses_anaphor = after_look.is_some();
     let rest = after_look.unwrap_or(rest);
 
-    // Core permission phrase. CR 305.1: "play lands and cast spells" → Play mode.
-    let rest = nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")?;
-
-    // The play clause either names the source ("cards exiled with <self>") or
-    // refers back to the look-at preamble's set ("those cards").
-    let after_clause = if uses_anaphor {
-        nom_tag_lower(rest, rest, "those cards")?
+    // Core permission phrase. CR 305.1: both "play lands and cast spells" and
+    // "play cards" lower to Play mode.
+    let after_clause = if let Some(rest) =
+        nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")
+    {
+        // The play clause either names the source ("cards exiled with <self>") or
+        // refers back to the look-at preamble's set ("those cards").
+        if uses_anaphor {
+            nom_tag_lower(rest, rest, "those cards")?
+        } else {
+            strip_exile_play_source_reference(rest)?
+        }
     } else {
-        let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")?;
-        strip_self_reference(after_anchor)?
+        let rest = nom_tag_lower(rest, rest, "you may play ")?;
+        if uses_anaphor {
+            nom_tag_lower(rest, rest, "those cards")?
+        } else {
+            strip_exile_play_source_reference(rest)?
+        }
     };
 
     // CR 113.6b: A trailing period is the only permitted remainder; any other
@@ -1761,23 +1776,38 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         return None;
     }
 
-    Some(
-        StaticDefinition::new(StaticMode::ExileCastPermission {
-            // CR 601.2a: No once-per-turn cap on this class.
-            frequency: CastFrequency::Unlimited,
-            // CR 305.1: Play covers lands (played) and non-land cards (cast).
-            play_mode: CardPlayMode::Play,
-            // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
-            cost: ExileCastCost::PayNormalCost,
-            // CR 406.6: Lifetime per-source exile-link pool.
-            pool: ExileCardPool::Persistent,
-            timing,
-        })
-        // CR 305.1: The permission applies to every card in the source's exile
-        // pool; the pool itself is the scope, so no type/MV constraint.
-        .affected(TargetFilter::Any)
-        .description(text.to_string()),
-    )
+    let mut definition = StaticDefinition::new(StaticMode::ExileCastPermission {
+        // CR 601.2a: No once-per-turn cap on this class.
+        frequency: CastFrequency::Unlimited,
+        // CR 305.1: Play covers lands (played) and non-land cards (cast).
+        play_mode: CardPlayMode::Play,
+        // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
+        cost: ExileCastCost::PayNormalCost,
+        // CR 406.6: Lifetime per-source exile-link pool.
+        pool: ExileCardPool::Persistent,
+        timing,
+    })
+    // CR 305.1: The permission applies to every card in the source's exile
+    // pool; the pool itself is the scope, so no type/MV constraint.
+    .affected(TargetFilter::Any)
+    .description(text.to_string());
+    if let Some(condition) = condition {
+        definition = definition.condition(condition);
+    }
+
+    Some(definition)
+}
+
+fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondition)> {
+    let (rest, condition) = nom_condition::parse_condition(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(rest).ok()?;
+    Some((rest, condition))
+}
+
+fn strip_exile_play_source_reference(rest: &str) -> Option<&str> {
+    let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")
+        .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?;
+    strip_self_reference(after_anchor)
 }
 
 /// CR 601.3f + CR 113.6b: Strip the "you may look at cards exiled with
