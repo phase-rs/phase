@@ -160,6 +160,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
             // safety net. Parameterized — no registry entry; coverage support here.
             | StaticMode::MaxUntapPerType { .. }
+            // CR 702.122a / 702.171a / 702.184a: CrewContribution carries the
+            // modifier kind + action list (Giant Ox, Hotshot Mechanic). Runtime
+            // enforcement is in static_abilities.rs::object_crew_power_contribution.
+            | StaticMode::CrewContribution { .. }
     )
 }
 

@@ -86,6 +86,7 @@ mod fuse_runtime;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
 mod giada_angel_counters;
+mod giant_ox_crew_toughness;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
 mod gluntch_choose_player_chain;
