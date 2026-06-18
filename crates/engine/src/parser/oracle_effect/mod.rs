@@ -5917,8 +5917,17 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let rest = rest_lower.trim().trim_end_matches('.');
-    // CR 603.7c: Prefer event context quantity for triggered effects.
-    let qty = super::oracle_quantity::parse_event_context_quantity(rest)?;
+    // CR 603.7c: Prefer event context quantity for triggered effects — keeps
+    // "that much"/"this way"/"that many" bound to the triggering-event amount.
+    // CR 121.1 + CR 107.1b: When the count is a static/dynamic CDA expression
+    // rather than an event-context reference (e.g. Narset's "spells you've cast
+    // this turn", Mr. Foxglove's "cards in defending player's hand minus the
+    // number of cards in your hand"), fall back to the arithmetic-aware
+    // `parse_cda_quantity` so binary minus / offset / fraction draw counts
+    // resolve instead of dropping the whole clause. Event-context FIRST is what
+    // preserves the trigger semantics for the cards that need them.
+    let qty = super::oracle_quantity::parse_event_context_quantity(rest)
+        .or_else(|| super::oracle_quantity::parse_cda_quantity(rest))?;
     match verb {
         EqualToQtyVerb::Mill => Some(parsed_clause(Effect::Mill {
             count: qty,
@@ -7362,6 +7371,79 @@ pub(crate) fn try_parse_balance_equalization(
     Some(chain)
 }
 
+/// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
+/// the player with the most cards in hand" equalize-upward draw (Tales of the
+/// Ancestors). Structured like [`try_parse_balance_equalization`]: the
+/// cross-player extremum operand is PRODUCED by the typed
+/// [`nom_quantity::parse_player_with_extremum_cards_in_hand`] combinator (not a
+/// literal tag), and a `Verify`-style structural guard (mirroring
+/// `parse_balance_arm_b`) rejects superficially similar text. Mirror of Balance
+/// with verb = draw, aggregate = Max, operand order swapped.
+///
+/// Operand order is load-bearing: `left` = the cross-player MAX
+/// (`HandSize { AllPlayers { Max } }`, frozen by the §8 clause-minimum snapshot
+/// per CR 608.2e so an earlier-APNAP draw can't raise it), `right` = the
+/// iterating player's own live `HandSize { ScopedPlayer }`. `left >= right`
+/// always holds because Max includes the iterating player; `Difference` takes
+/// `.abs()` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
+/// the "with fewer cards in hand" subject restriction needs no separate
+/// `PlayerFilter`.
+pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+
+    let (extremum, _) = nom_on_lower(text, &lower, |input| {
+        // Subject restriction: fixed grammatical lead-in (the iterated subject).
+        let (input, _) = tag("each player with fewer cards in hand than ").parse(input)?;
+        // Extremum operand — PRODUCED by the typed combinator (not a literal tag).
+        let saved = input;
+        let (input, extremum) = nom_quantity::parse_player_with_extremum_cards_in_hand(input)?;
+        // CR 107.1b: Verify guard (mirror `parse_balance_arm_b`). The operand MUST
+        // be the cross-player hand-size MAX. Anything else (e.g. a Min/"fewest"
+        // look-alike) fails so the line falls through to the generic parser path.
+        if !matches!(
+            extremum,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    ..
+                }
+            }
+        ) {
+            return Err(nom::Err::Error(OracleError::new(
+                saved,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        // Verb clause + terminator.
+        let (input, _) = tag(" draws cards equal to the difference").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, extremum))
+    })?;
+
+    // CR 121.1: each player draws `max - own` (clamped). Assemble the Difference
+    // from the parsed extremum (left = frozen Max) and the live per-player hand
+    // size (right = ScopedPlayer) — operand order load-bearing (see doc above).
+    let count = QuantityExpr::Difference {
+        left: Box::new(QuantityExpr::Ref { qty: extremum }),
+        right: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+        }),
+    };
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
+    );
+    // CR 101.4: APNAP fan-out over every player.
+    def.player_scope = Some(PlayerFilter::All);
+    Some(def)
+}
+
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
 ///
 /// Handles patterns like:
@@ -7906,6 +7988,8 @@ fn for_each_subject_application(
         " mill ",
         " discards ",
         " discard ",
+        " sacrifices ",
+        " sacrifice ",
         " scries ",
         " scry ",
         " surveils ",
@@ -8056,6 +8140,38 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             amount,
             player: target,
         },
+        // CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent/player sacrifices
+        // a [typed] permanent ... for each X" (Urborg Justice, Din of the Fireherd,
+        // Rakdos Riteknife). The for-each interception strips the dynamic count
+        // early, so the fixed-count `inject_subject_target` Sacrifice arm never ran
+        // and the controller stayed null (→ the source's controller sacrifices).
+        // Mirror that arm here: stamp the subject player's controller onto the
+        // object filter (TargetPlayer for targeted subjects → surfaces a player
+        // target slot, read by `resolve_sacrifice_scope` at resolution) and rewrite
+        // any "they control" refs inside the count to the same player.
+        Effect::Sacrifice {
+            target: mut sac_target,
+            count: mut sac_count,
+            min_count,
+        } if player_filter_as_controller_ref(&target).is_some() => {
+            let ctrl = player_filter_as_controller_ref(&target).expect("guarded is_some");
+            let effective_ctrl = if is_targeted {
+                ControllerRef::TargetPlayer
+            } else {
+                ctrl
+            };
+            force_controller(&mut sac_target, effective_ctrl.clone());
+            rewrite_quantity_controller(
+                &mut sac_count,
+                ControllerRef::ScopedPlayer,
+                effective_ctrl,
+            );
+            Effect::Sacrifice {
+                target: sac_target,
+                count: sac_count,
+                min_count,
+            }
+        }
         other => other,
     }
 }
@@ -11179,14 +11295,16 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
 }
 
 /// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
-/// `ObjectScope::Target`. The mirror of `rebind_anaphoric_ref` for the one-sided
-/// fight class: a "Then it deals damage equal to its power" sub-clause whose
-/// subject was classified as `SelfRef` gets its "its power" anaphor prematurely
-/// rebound to `Source` (the ability source) by the subject-stamping pass
-/// (~mod.rs:12278). For this class the "it" is the parent TARGET (the boosted
-/// creature, `targets[0]` once `damage_source = Target`), never the spell
-/// source — so the amount must read `Target`, not `Source`.
-fn rebind_source_ref_to_target(qty: &mut QuantityRef) {
+/// `target`. The mirror of `rebind_anaphoric_ref` for the one-sided fight class:
+/// a "Then it deals damage equal to its power" sub-clause whose subject was
+/// classified as `SelfRef` gets its "its power" anaphor prematurely rebound to
+/// `Source` (the ability source) by the subject-stamping pass (~mod.rs:12278).
+/// For this class the "it" is the boosted creature (the parent TARGET,
+/// `targets[0]` once `damage_source = Target`), never the spell source — so the
+/// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
+/// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
+/// in sync with the Oracle "its".
+fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope) {
     let scope = match qty {
         QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
@@ -11199,15 +11317,15 @@ fn rebind_source_ref_to_target(qty: &mut QuantityRef) {
         _ => return,
     };
     if *scope == ObjectScope::Source {
-        *scope = ObjectScope::Target;
+        *scope = target;
     }
 }
 
-/// `QuantityExpr` walker for `rebind_source_ref_to_target` (mirrors
+/// `QuantityExpr` walker for `rebind_source_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
+fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref_to_target(qty),
+        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -11215,15 +11333,15 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount_to_target(inner),
+        } => rebind_source_amount(inner, target),
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
-                rebind_source_amount_to_target(inner);
+                rebind_source_amount(inner, target);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount_to_target(left);
-            rebind_source_amount_to_target(right);
+            rebind_source_amount(left, target);
+            rebind_source_amount(right, target);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -11231,25 +11349,33 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
 
 /// CR 120.1 + CR 608.2c: For a "one-sided fight" anaphoric damage clause
 /// ("It deals damage equal to its power to target creature an opponent
-/// controls") whose recipient is a FRESH opponent target, bind the damage
-/// SOURCE/amount to the parent-chosen boosted creature WITHOUT clobbering the
+/// controls") whose recipient is a FRESH opponent target, attribute the damage
+/// SOURCE to the parent-chosen boosted creature WITHOUT clobbering the
 /// recipient. CR 120.1: the object that deals damage is the source of that
 /// damage — here the boosted creature, which is the parent target, so
-/// `damage_source = Some(Target)` and the amount reads the parent target's
-/// power. CR 608.2c: read the whole text / apply English anaphora — "It" and
-/// "its power" refer to the boosted creature, but "target creature an opponent
-/// controls" is a distinct target. `bind_damage_clause_source` rebinds an
-/// `Anaphoric` amount (Ambuscade/Clear Shot/Rabid Gnaw) → `Target`; the
-/// follow-up coercion fixes the `Source` amount produced when the "Then it
-/// deals..." subject was classified `SelfRef` (Wolf Strike/Burrog Barrage),
-/// which would otherwise read the ability source (the spell, power 0). Returns
-/// true (= decline the blanket `replace_target_with_parent`) when handled.
+/// `damage_source = Some(Target)` (consumed by `game/effects/deal_damage.rs`,
+/// which selects `targets[0]` as the source and `targets[1..]` as recipients).
+/// CR 608.2c: read the whole text / apply English anaphora — "It" and "its
+/// power" refer to the boosted creature, but "target creature an opponent
+/// controls" is a distinct target.
 ///
-/// Covers two recipient shapes: (1) the fresh-opponent recipient — rebind the
-/// damage source/amount to the parent target while preserving the recipient;
-/// (2) the self-reference recipient ("to this creature"/"to ~",
-/// `TargetFilter::SelfRef`, the Karplusan Yeti fight-back class) — preserve the
-/// recipient verbatim with NO source/amount rebind.
+/// The "its power" amount is left as `Power{Anaphoric}` (NOT rebound to
+/// `Target`): the runtime one-sided-fight fallback in `game/quantity.rs`
+/// resolves `Anaphoric` to that same `targets[0]` source object. Keeping the
+/// AST `Anaphoric` keeps the serialized export in sync with the Oracle "its"
+/// and avoids reintroducing #699 (where rebinding the source amount to `Target`
+/// alongside a clobbered recipient made the boosted creature damage itself).
+/// The only rebind here is `Source → Anaphoric`: the "Then it deals..." subject
+/// is classified `SelfRef`, so the subject-stamping pass (~mod.rs:12278)
+/// prematurely binds "its power" to `Source` (the spell, power 0); coercing it
+/// to `Anaphoric` routes it back through the same runtime fallback. Returns true
+/// (= decline the blanket `replace_target_with_parent`) when handled.
+///
+/// Covers two recipient shapes: (1) the fresh-opponent recipient — attribute
+/// the damage source to the parent target while preserving the recipient and
+/// the anaphoric amount; (2) the self-reference recipient ("to this
+/// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
+/// class) — preserve the recipient verbatim with NO source/amount rebind.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source itself and must be preserved verbatim (fight-back class). No
@@ -11261,9 +11387,17 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     if !damage_clause_has_fresh_opponent_recipient(effect) {
         return false;
     }
-    bind_damage_clause_source(effect, DamageSource::Target, ObjectScope::Target);
+    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the fresh-opponent
+    // recipient and attribute damage source to targets[0] (the boosted "It");
+    // leave "its power" as Power{Anaphoric} — the runtime resolves it to that
+    // same source object. Do NOT rebind to Target (that desyncs the export from
+    // the Oracle "its" and reintroduces #699).
+    set_damage_clause_source_only(effect, DamageSource::Target);
+    // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
+    // gated inside this fresh-opponent branch so it can't touch unrelated
+    // Source-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount_to_target(amount);
+        rebind_source_amount(amount, ObjectScope::Anaphoric);
     }
     true
 }
@@ -12205,6 +12339,22 @@ fn bind_damage_clause_source(
             ..
         } => {
             rebind_anaphoric_object_scope(amount, power_scope);
+            *damage_source = Some(damage_source_ref);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// CR 120.1: Set a damage clause's `damage_source` WITHOUT rebinding the
+/// anaphoric amount scope. The one-sided-fight fresh-opponent path keeps "its
+/// power" as `Power{Anaphoric}` (resolved to `targets[0]` by the runtime
+/// fallback) instead of collapsing it to `Target`, so it cannot reuse
+/// `bind_damage_clause_source` (which always rebinds the amount). Returns true
+/// iff the effect is a `DealDamage`/`DamageAll`.
+fn set_damage_clause_source_only(effect: &mut Effect, damage_source_ref: DamageSource) -> bool {
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
             *damage_source = Some(damage_source_ref);
             true
         }
@@ -16012,6 +16162,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_catch_up_draw(text, kind) {
+        return def;
+    }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
@@ -16036,6 +16189,9 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_catch_up_draw(text, kind) {
         return def;
     }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
@@ -25447,6 +25603,134 @@ mod tests {
             ),
             "self-ref subject should produce SelfRef target"
         );
+    }
+
+    /// CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent sacrifices a
+    /// creature ... for each <dynamic>" (Urborg Justice). The "for each" path
+    /// intercepts before the fixed-count `inject_subject_target` Sacrifice arm,
+    /// so without `thread_for_each_subject` rebinding the controller, YOU
+    /// sacrificed instead of the targeted opponent. Both the `TargetPlayer`
+    /// scope AND the dynamic `ZoneChangeCountThisTurn` count must survive.
+    /// Regression guard: revert either edit and the controller is `None`.
+    #[test]
+    fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
+        let e = parse_effect(
+            "Target opponent sacrifices a creature of their choice for each creature put \
+             into your graveyard from the battlefield this turn.",
+        );
+        match e {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "sacrificed-creature filter must be scoped to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeCountThisTurn { .. }
+                        }
+                    ),
+                    "dynamic for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1a/c + CR 701.21a: Rakdos Riteknife activated ability — "Target
+    /// player sacrifices a permanent of their choice for each blood counter on
+    /// this Equipment." Bare "target player" lowers to `TargetFilter::Player`;
+    /// the for-each path must still bind `TargetPlayer` while keeping the
+    /// `CountersOn { Source, blood }` count.
+    #[test]
+    fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
+        let e = parse_effect(
+            "Target player sacrifices a permanent of their choice for each blood counter \
+             on this Equipment.",
+        );
+        match e {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "sacrificed-permanent filter must be scoped to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn { .. }
+                        }
+                    ),
+                    "blood-counter for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1a/c + CR 701.21a: Din of the Fireherd leading leg — "Target
+    /// opponent sacrifices a creature for each black creature you control, then
+    /// ...". The first sacrifice leg must bind `TargetPlayer` with its dynamic
+    /// `ObjectCount` count. (The "then sacrifices a land" continuation is an
+    /// implicit-subject continuation handled by a separate compound path; see
+    /// the deviations note — its land filter is a pre-existing controller gap
+    /// out of scope of this AST-only for-each fix.)
+    #[test]
+    fn for_each_sacrifice_din_first_leg_binds_target_player() {
+        let sorcery = vec!["Sorcery".to_string()];
+        let pa = crate::parser::parse_oracle_text(
+            "Target opponent sacrifices a creature for each black creature you control, \
+             then sacrifices a land for each red creature you control.",
+            "Din of the Fireherd",
+            &[],
+            &sorcery,
+            &[],
+        );
+        let def = pa
+            .abilities
+            .first()
+            .expect("Din should produce a spell ability");
+        match &*def.effect {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::TargetPlayer),
+                    "Din first leg must scope to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "Din first leg for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice in Din first leg, got {other:?}"),
+        }
+    }
+
+    /// No-regression: bare self "Sacrifice a creature for each X" (no targeted
+    /// subject) must NOT be rebound to a player target — the verb sits at offset
+    /// 0 so `for_each_subject_application` returns None and the controller stays
+    /// caster-relative (`None`/`You`).
+    #[test]
+    fn for_each_sacrifice_self_subject_unaffected() {
+        let e = parse_effect("sacrifice a creature for each creature you control");
+        match e {
+            Effect::Sacrifice { target, .. } => {
+                assert_ne!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "self sacrifice must not be rebound to TargetPlayer, got {target:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -43760,17 +44044,19 @@ mod tests {
                     ),
                     "expected Typed opponent recipient, got {target:?}"
                 );
-                // Source bound to the boosted parent target; Anaphoric amount
-                // rebound to Power{Target}.
+                // Source attributed to the boosted parent target (targets[0]);
+                // "its power" stays Power{Anaphoric} (runtime resolves it to that
+                // same targets[0]). NOT rebound to Target (that desyncs the
+                // export from the Oracle "its" and reintroduces #699).
                 assert_eq!(damage_source, &Some(DamageSource::Target));
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
-                            scope: ObjectScope::Target
+                            scope: ObjectScope::Anaphoric
                         }
                     },
-                    "expected Power{{Target}} (rebound from Anaphoric)"
+                    "expected Power{{Anaphoric}} (preserved, not rebound to Target)"
                 );
             }
             other => panic!("expected DealDamage, got {other:?}"),
@@ -43782,9 +44068,11 @@ mod tests {
     /// clause (conditional-prior slot). Because the sub-clause subject is
     /// classified `SelfRef`, the upstream subject-stamping pass rebinds
     /// "its power" Anaphoric → Source prematurely; for this class the "it" is the
-    /// parent TARGET (the boosted creature), so the amount must read Power{Target},
-    /// NOT Power{Source} (which at runtime would read the spell source, power 0).
-    /// The recipient ("you don't control" == Opponent) is preserved.
+    /// boosted creature (targets[0] at runtime), so the amount is coerced
+    /// Source → Power{Anaphoric} (resolved to targets[0] by the runtime
+    /// one-sided-fight fallback), NOT Power{Source} (which would read the spell
+    /// source, power 0). The recipient ("you don't control" == Opponent) is
+    /// preserved.
     #[test]
     fn one_sided_fight_power_source_variant() {
         let def = parse_effect_chain(
@@ -43809,16 +44097,17 @@ mod tests {
                     "expected Typed opponent recipient, got {target:?}"
                 );
                 assert_eq!(damage_source, &Some(DamageSource::Target));
-                // SelfRef-subject Source amount coerced to Target (boosted
-                // creature == parent target == targets[0] at runtime).
+                // SelfRef-subject Source amount coerced to Anaphoric (boosted
+                // creature == targets[0] at runtime via the one-sided-fight
+                // fallback), not Source (the spell, power 0).
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
-                            scope: ObjectScope::Target
+                            scope: ObjectScope::Anaphoric
                         }
                     },
-                    "Power amount must be Target (parent boosted creature), not Source (spell)"
+                    "Power amount must be Anaphoric (boosted creature, targets[0]), not Source (spell)"
                 );
             }
             other => panic!("expected DealDamage, got {other:?}"),

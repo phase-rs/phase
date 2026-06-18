@@ -9572,6 +9572,74 @@ fn static_enchanted_creature_cant_be_blocked() {
     );
 }
 
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked() {
+    // CR 509.1b: Tetsuko Umezawa, Fugitive — evasion applies to the typed
+    // subject, not SelfRef (~).
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can't be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
+        ))
+    );
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked_typographic_apostrophe() {
+    // CR 509.1b: reprints may use U+2019 RIGHT SINGLE QUOTATION MARK.
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can\u{2019}t be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked with typographic apostrophe");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
+        ))
+    );
+}
+
 // --- MustAttack / MustBlock combat requirement pattern tests ---
 
 #[test]

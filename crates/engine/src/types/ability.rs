@@ -3625,6 +3625,12 @@ pub enum QuantityRef {
     /// "with the same mana value as that spell". `CostPaidObject` subsumes the
     /// former `EventContextSourceManaValue` (CR 608.2k).
     ObjectManaValue { scope: ObjectScope },
+    /// CR 202.3 + CR 115.1: Mana value of the object chosen for a count-derived
+    /// target slot whose legal candidates are `filter` (e.g. "target artifact or
+    /// creature you control"). Distinct from `ObjectManaValue { scope: Target }`
+    /// (a possessive "that creature's mana value", filterless); this variant owns
+    /// its own target slot, surfaced via `quantity_ref_target_slot_spec`.
+    TargetObjectManaValue { filter: Box<TargetFilter> },
     /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
     /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
     /// objects return 0. `Recipient` preserves "for each of its colors" on
@@ -4055,6 +4061,11 @@ pub enum QuantityRef {
     /// as "copy it for each time you've cast your commander from the command
     /// zone this game."
     CommanderCastFromCommandZoneCount,
+    /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
+    /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
+    /// or in the command zone" pattern. The resolver selects the first matching commander
+    /// (any one if multiple exist) and returns its mana value.
+    CommanderManaValue { owner: ControllerRef },
     /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
     /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
     /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's
@@ -7533,6 +7544,14 @@ pub enum Effect {
         /// sibling copy effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copier: Option<ControllerRef>,
+        /// CR 707.9 + CR 707.2: Non-keyword copy exceptions stamped onto spell
+        /// copies at creation (Ob Nixilis: "except the copy isn't legendary").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
+        /// Ob Nixilis, the Adversary: "has starting loyalty X" where X is the
+        /// sacrificed creature's power when Casualty was paid.
+        #[serde(default)]
+        starting_loyalty_from_casualty_sacrifice: bool,
     },
     /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
     /// of the Epic spell's resolved ability captured when the Epic spell
@@ -9785,6 +9804,9 @@ impl TargetFilter {
                 }
             }
             TargetFilter::Not { filter } => filter.collect_zones(out),
+            TargetFilter::ExiledBySource if !out.contains(&crate::types::zones::Zone::Exile) => {
+                out.push(crate::types::zones::Zone::Exile);
+            }
             _ => {}
         }
     }
@@ -11262,6 +11284,12 @@ pub struct ModalChoice {
     /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_costs: Vec<ManaCost>,
+    /// CR 700.2i: Per-mode pawprint weight for points-budget modals ("up to N {P}
+    /// worth of modes"). Empty for all non-pawprint modals. When non-empty, the
+    /// modal is a pawprint budget modal and `max_choices` is reinterpreted as the
+    /// point budget (Σ of chosen `mode_pawprints` ≤ `max_choices`), NOT a mode count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_pawprints: Vec<u8>,
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entwine_cost: Option<ManaCost>,

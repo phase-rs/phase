@@ -1527,6 +1527,7 @@
     "chooseExact": "Scegli {{count}}",
     "chooseRange": "Scegli da {{min}} a {{max}}",
     "confirm": "Conferma ({{selected}}/{{count}})",
+    "confirmBudget": "Conferma ({{spent}}/{{budget}} {P})",
     "clear": "Cancella",
     "alreadyChosen": "(già scelta)"
   },

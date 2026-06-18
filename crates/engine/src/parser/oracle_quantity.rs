@@ -4287,6 +4287,42 @@ mod tests {
         );
     }
 
+    /// CR 107.x + CR 506.2: Mr. Foxglove's binary-minus draw count composes
+    /// `Sum[left, Multiply{-1, right}]` over two dynamic hand-size quantities,
+    /// the right one negated. This is the arithmetic-aware shape the draw
+    /// effect-construction fallback (`try_parse_equal_to_quantity_effect`)
+    /// reaches via `parse_cda_quantity`.
+    #[test]
+    fn parse_cda_quantity_defending_minus_your_hand() {
+        let result = parse_cda_quantity(
+            "the number of cards in defending player's hand minus the number of cards in your hand",
+        );
+        assert_eq!(
+            result,
+            Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::DefendingPlayer,
+                        },
+                    },
+                    // CR 402: "the number of cards in your hand" inside
+                    // `parse_cda_quantity` routes through the "the number of"
+                    // arm to the typed `HandSize { Controller }` ref (not the
+                    // bare-suffix `ZoneCardCount` form).
+                    QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
+                        }),
+                    },
+                ],
+            })
+        );
+    }
+
     #[test]
     fn parse_event_context_quantity_its_power() {
         assert_eq!(

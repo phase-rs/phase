@@ -1131,7 +1131,7 @@ fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
     if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
         clause = head;
     }
-    for marker in [" where ", " equal to ", " attached "] {
+    for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
     clause
@@ -1668,6 +1668,44 @@ mod tests {
         let kws = parse_token_keyword_clause(
             "with flying equal to the number of card types among cards in your graveyard",
         );
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// "with <keyword> named <X>" (Crow Storm, The Hive, etc.): the trailing
+    /// "named …" token-name clause must be truncated before keyword parsing so
+    /// the keyword survives. Without the " named " marker this yields [].
+    #[test]
+    fn keyword_clause_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying named storm crow");
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// Hornet Cannon: "with flying and haste named hornet" must keep BOTH.
+    #[test]
+    fn keyword_clause_multiple_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying and haste named hornet");
+        assert!(kws.contains(&Keyword::Flying), "got {kws:?}");
+        assert!(kws.contains(&Keyword::Haste), "got {kws:?}");
+    }
+
+    /// Jungle Patrol / Wall of Kelp: "with defender named wall".
+    #[test]
+    fn keyword_clause_defender_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with defender named wall");
+        assert_eq!(kws, vec![Keyword::Defender]);
+    }
+
+    /// Then Dreadmaws Ate Everyone: "with trample named dreadmaw".
+    #[test]
+    fn keyword_clause_trample_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with trample named dreadmaw");
+        assert_eq!(kws, vec![Keyword::Trample]);
+    }
+
+    /// No-regression: the " attached " marker must still truncate.
+    #[test]
+    fn keyword_clause_with_attached_suffix() {
+        let kws = parse_token_keyword_clause("with flying attached to it");
         assert_eq!(kws, vec![Keyword::Flying]);
     }
 

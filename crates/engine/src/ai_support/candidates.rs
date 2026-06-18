@@ -1320,11 +1320,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     modal.max_choices,
                 )
             };
-            // CR 702.172b: For Spree spells, filter out mode combinations the player
-            // cannot afford. Each mode has an additional cost that sums with the base cost.
-            if modal.mode_costs.is_empty() {
+            // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
+            // mode sequences (Σ weight ≤ budget). Index the UNFILTERED `modal`
+            // (real indices 0..mode_count). Mutually exclusive with Spree.
+            if !modal.mode_pawprints.is_empty() {
+                actions
+                    .into_iter()
+                    .filter(|ca| match &ca.action {
+                        GameAction::SelectModes { indices } => {
+                            crate::game::ability_utils::pawprint_budget_satisfied(modal, indices)
+                        }
+                        _ => true,
+                    })
+                    .collect()
+            } else if modal.mode_costs.is_empty() {
                 actions
             } else {
+                // CR 702.172b: For Spree spells, filter out mode combinations the player
+                // cannot afford. Each mode has an additional cost that sums with the base cost.
                 actions
                     .into_iter()
                     .filter(|ca| {
@@ -1364,7 +1377,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             let available: Vec<usize> = (0..modal.mode_count)
                 .filter(|i| !unavailable_modes.contains(i))
                 .collect();
-            if modal.allow_repeat_modes {
+            let actions = if modal.allow_repeat_modes {
                 // Build a filtered ModalChoice for sequence generation with repeats.
                 let filtered = crate::types::ability::ModalChoice {
                     mode_count: available.len(),
@@ -1392,6 +1405,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     modal.min_choices,
                     modal.max_choices,
                 )
+            };
+            // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
+            // mode sequences. Index the UNFILTERED `modal` (real indices
+            // 0..mode_count). No-op for non-pawprint modals.
+            if modal.mode_pawprints.is_empty() {
+                actions
+            } else {
+                actions
+                    .into_iter()
+                    .filter(|ca| match &ca.action {
+                        GameAction::SelectModes { indices } => {
+                            crate::game::ability_utils::pawprint_budget_satisfied(modal, indices)
+                        }
+                        _ => true,
+                    })
+                    .collect()
             }
         }
         WaitingFor::ConniveDiscard {

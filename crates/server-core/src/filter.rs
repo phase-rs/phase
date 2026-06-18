@@ -437,6 +437,7 @@ mod tests {
             allow_repeat_modes: false,
             constraints: Vec::new(),
             mode_costs: Vec::new(),
+            mode_pawprints: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             selection: engine::types::ability::TargetSelectionMode::Chosen,

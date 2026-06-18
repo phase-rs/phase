@@ -2581,6 +2581,10 @@ pub(crate) fn strip_rule_static_subject<'a>(
         // CR 509.1b: Evasion — "<subject> can't be blocked except by <filter>".
         " can't be blocked except by ",
         " can\u{2019}t be blocked except by ",
+        // CR 509.1b: Evasion — "<subject> can't be blocked" (Tetsuko Umezawa).
+        // Must follow the "except by" needles so the longer form wins.
+        " can't be blocked",
+        " can\u{2019}t be blocked",
         " has shroud",
         " have shroud",
         " has hexproof",
