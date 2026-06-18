@@ -370,6 +370,7 @@ mod support;
 mod suppressor_skyguard_prevent_2924;
 mod surveil_rest_pile_redirect_continuation;
 mod swans_prevention_followup;
+mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
 mod teferi_time_raveler_sorcery_speed_lock;
 mod tempt_with_discovery;

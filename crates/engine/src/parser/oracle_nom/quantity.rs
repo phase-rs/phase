@@ -595,6 +595,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_basic_land_types_among_lands_controlled_by_ref,
         parse_devotion_ref,
         parse_counters_among_ref,
+        // CR 402.1: "the player with the {most|fewest} cards in hand" — the
+        // cross-player hand-size extremum, the hand-zone peer of the life
+        // extremum. Distinctive "the player with the " prefix; no ordering
+        // hazard with sibling arms.
+        parse_player_with_extremum_cards_in_hand,
     )))
     .parse(input)
 }
@@ -1052,7 +1057,8 @@ fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Used by Balance / Restore Balance / Balancing Act for the equalization
 /// minimum ("a number of lands they control equal to the number of lands
 /// controlled by the player who controls the fewest"). Battlefield-scoped: the
-/// hand-zone analogue is `HandSize { AllPlayers { Min } }`, parsed elsewhere.
+/// hand-zone analogue is `HandSize { AllPlayers { aggregate } }`, parsed by
+/// [`parse_player_with_extremum_cards_in_hand`].
 fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, filter) = super::target::parse_type_phrase(input)?;
     if !quantity_filter_has_meaningful_content(&filter) {
@@ -1072,6 +1078,35 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
     Ok((
         rest,
         QuantityRef::ControlledByEachPlayer { filter, aggregate },
+    ))
+}
+
+/// CR 402.1: Parse "the player with the {most|fewest} cards in hand" →
+/// `QuantityRef::HandSize { player: AllPlayers { aggregate } }`. The hand-zone
+/// peer of `parse_cross_player_life_extremum` (the life axis, CR 119): two
+/// independent nom axes — the aggregate direction (most↔fewest) and the fixed
+/// "cards in hand" zone (CR 402, the hand). Used by the catch-up-draw
+/// interceptor (Tales of the Ancestors) and any future card that names the
+/// cross-player hand-size extremum. Hand is CR 402, so this routes to
+/// `HandSize`/`PlayerScope`, never the CR 208/202 object-property `Aggregate`.
+pub(crate) fn parse_player_with_extremum_cards_in_hand(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the player with the ").parse(input)?;
+    let (rest, aggregate) = alt((
+        value(AggregateFunction::Max, tag("most")),
+        value(AggregateFunction::Min, tag("fewest")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" cards in hand").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::HandSize {
+            player: PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        },
     ))
 }
 
@@ -4975,6 +5010,60 @@ mod tests {
             QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
                 aggregate: AggregateFunction::Min,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_player_with_most_cards_in_hand() {
+        // CR 402.1: the cross-player hand-size MAX extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the player with the most cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_player_with_fewest_cards_in_hand() {
+        // CR 402.1: the MIN direction — proves the aggregate parameterization,
+        // not just Tales' Max direction.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the player with the fewest cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn player_with_extremum_cards_in_hand_reachable_via_quantity_ref() {
+        // Confirms the new combinator is registered in the shared
+        // `parse_quantity_ref` `alt`, so any quantity context gains the phrase.
+        let (rest, q) = parse_quantity_ref("the player with the most cards in hand").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
             }
         );
         assert_eq!(rest, "");
