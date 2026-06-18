@@ -7,6 +7,7 @@ import type { WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
@@ -61,7 +62,7 @@ export function isClickThroughWaitingFor(
 ): boolean {
   if (!waitingFor) return false;
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
-  return waitingFor.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
+  return getBoardChoiceView(waitingFor) != null;
 }
 
 function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean {

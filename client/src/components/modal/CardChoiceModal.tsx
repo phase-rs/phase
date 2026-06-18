@@ -32,6 +32,7 @@ import {
 } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
+import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
@@ -155,6 +156,7 @@ export function CardChoiceModal() {
       return <ChooseFromZoneModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <EffectZoneModal data={waitingFor.data} />;
     case "DrawnThisTurnTopdeckChoice":
       if (!canActForWaitingState) return null;
@@ -182,6 +184,7 @@ export function CardChoiceModal() {
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
     case "PayCost":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <PayCostDispatch data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
@@ -200,21 +203,26 @@ export function CardChoiceModal() {
       return null;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <BlightModal data={waitingFor.data} />;
     case "CrewVehicle":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <CrewModal data={waitingFor.data} />;
     case "StationTarget":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <StationTargetModal data={waitingFor.data} />;
     case "SaddleMount":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <SaddleModal data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
     case "HarmonizeTapChoice":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <HarmonizeTapModal data={waitingFor.data} />;
     case "PairChoice":
       if (!canActForWaitingState) return null;
@@ -267,9 +275,10 @@ export function CardChoiceModal() {
       );
     case "WardSacrificeChoice":
       if (!canActForWaitingState) return null;
-      return <WardSacrificeModal data={waitingFor.data} />;
+      return null;
     case "UnlessBounceChoice":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <UnlessBounceModal data={waitingFor.data} />;
     case "AssignCombatDamage":
       if (!canActForWaitingState) return null;
@@ -323,6 +332,7 @@ export function CardChoiceModal() {
       return <RoomChoiceModal data={waitingFor.data} />;
     case "ChooseRingBearer":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor)) return null;
       return <RingBearerModal data={waitingFor.data} />;
     case "LearnChoice":
       if (!canActForWaitingState) return null;
@@ -2383,79 +2393,6 @@ function SaddleModal({ data }: { data: SaddleMount["data"] }) {
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
                   <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
                     {t("cardChoice.badges.saddle", { power: obj.power ?? 0 })}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Ward Sacrifice Modal ─────────────────────────────────────────────────────
-
-type WardSacrificeChoice = Extract<WaitingFor, { type: "WardSacrificeChoice" }>;
-
-function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected == null) return;
-    dispatch({
-      type: "SelectCards",
-      data: { cards: [selected] },
-    });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.wardSacrifice.title", { count: data.remaining })}
-      subtitle={t("cardChoice.wardSacrifice.subtitle")}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={selected == null}
-          label={t("cardChoice.badges.sacrifice")}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.permanents.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(isSelected ? null : id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.sacrifice")}
                   </span>
                 </div>
               )}

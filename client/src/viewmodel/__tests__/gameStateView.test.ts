@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { GameAction, GameObject, GameState, PlayerId } from "../../adapter/types";
 import {
+  boardChoiceSelectedPower,
+  buildBoardChoiceAction,
+  canConfirmBoardChoice,
+  getBattlefieldSacrificeChoice,
+  getBoardChoiceView,
   getCastableZoneViewerTarget,
   getOpponentIds,
   getSeatCount,
@@ -115,6 +120,177 @@ describe("getWaitingForObjectChoiceIds", () => {
         data: { player: 0, source_id: 1, choices: [20, 21, 22] },
       }),
     ).toEqual([]);
+  });
+});
+
+describe("getBattlefieldSacrificeChoice", () => {
+  it("returns engine-provided battlefield sacrifice candidates", () => {
+    expect(
+      getBattlefieldSacrificeChoice({
+        type: "EffectZoneChoice",
+        data: {
+          player: 0,
+          cards: [10, 11],
+          count: 2,
+          min_count: 1,
+          up_to: true,
+          source_id: 99,
+          effect_kind: "Sacrifice",
+          zone: "Battlefield",
+          destination: null,
+        },
+      }),
+    ).toEqual({
+      objectIds: [10, 11],
+      count: 2,
+      minCount: 1,
+      upTo: true,
+    });
+  });
+
+  it("returns ward sacrifice candidates", () => {
+    expect(
+      getBattlefieldSacrificeChoice({
+        type: "WardSacrificeChoice",
+        data: {
+          player: 0,
+          permanents: [20, 21],
+          pending_effect: {},
+          remaining: 1,
+        },
+      }),
+    ).toEqual({
+      objectIds: [20, 21],
+      count: 1,
+      minCount: 1,
+      upTo: false,
+    });
+  });
+
+  it("does not treat non-sacrifice zone choices as board sacrifice choices", () => {
+    expect(
+      getBattlefieldSacrificeChoice({
+        type: "EffectZoneChoice",
+        data: {
+          player: 0,
+          cards: [30],
+          count: 1,
+          source_id: 99,
+          effect_kind: "ReturnToHand",
+          zone: "Battlefield",
+          destination: "Hand",
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("getBoardChoiceView", () => {
+  it("maps PayCost ReturnToHand to a confirmed board choice", () => {
+    const choice = getBoardChoiceView({
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "ReturnToHand" },
+        choices: [4, 5],
+        count: 1,
+        min_count: 1,
+        resume: {
+          type: "Spell",
+          Spell: {
+            object_id: 99,
+            card_id: 990,
+            ability: { targets: [] },
+            cost: { type: "NoCost" },
+          },
+        },
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      sourceId: 99,
+      cancelAction: { type: "CancelCast" },
+    });
+  });
+
+  it("builds CrewVehicle actions and gates by selected total power", () => {
+    const choice = getBoardChoiceView({
+      type: "CrewVehicle",
+      data: {
+        player: 0,
+        vehicle_id: 30,
+        crew_power: 4,
+        eligible_creatures: [10, 11],
+      },
+    });
+    const objects = {
+      10: { id: 10, power: 2 },
+      11: { id: 11, power: 3 },
+    } as unknown as Record<number, GameObject>;
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(2);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
+    expect(canConfirmBoardChoice(choice, [10, 11], objects)).toBe(true);
+    expect(buildBoardChoiceAction(choice, [10, 11])).toEqual({
+      type: "CrewVehicle",
+      data: { vehicle_id: 30, creature_ids: [10, 11] },
+    });
+  });
+
+  it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
+    const station = getBoardChoiceView({
+      type: "StationTarget",
+      data: {
+        player: 0,
+        spacecraft_id: 20,
+        eligible_creatures: [7],
+      },
+    });
+    const ringBearer = getBoardChoiceView({
+      type: "ChooseRingBearer",
+      data: {
+        player: 0,
+        candidates: [12],
+      },
+    });
+
+    expect(station?.selection).toEqual({ type: "single", immediate: true });
+    expect(station && buildBoardChoiceAction(station, [7])).toEqual({
+      type: "ActivateStation",
+      data: { spacecraft_id: 20, creature_id: 7 },
+    });
+    expect(ringBearer && buildBoardChoiceAction(ringBearer, [12])).toEqual({
+      type: "ChooseRingBearer",
+      data: { target: 12 },
+    });
+  });
+
+  it("keeps RemoveCounter costs modal-only", () => {
+    expect(
+      getBoardChoiceView({
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: {
+            type: "RemoveCounter",
+            counter_type: { type: "Any" },
+            count: 1,
+            selection: "SingleObject",
+          },
+          choices: [4],
+          count: 1,
+          min_count: 1,
+          resume: { type: "ManaAbility", ManaAbility: {} },
+        },
+      }),
+    ).toBeNull();
   });
 });
 

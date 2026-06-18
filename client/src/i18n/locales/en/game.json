@@ -136,6 +136,8 @@
       "attacking": "atk",
       "incoming": "in",
       "mana": "mana",
+      "choice": "pick",
+      "sacrifice": "sac",
       "selected": "sel",
       "target": "target"
     },
@@ -145,6 +147,8 @@
       "attacking": "Hidden creatures currently attacking.",
       "incoming": "Attacks currently aimed at hidden objects in this drawer.",
       "mana": "Hidden objects that can be tapped for mana.",
+      "choice": "Hidden objects eligible for the active board choice.",
+      "sacrifice": "Hidden objects that can be sacrificed.",
       "selected": "Hidden objects currently selected for the active choice.",
       "target": "Hidden objects that are legal targets."
     }
@@ -163,10 +167,51 @@
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
+    "sacrifice": "Sacrifice",
     "copy": "Copy",
     "copyTooltip": "Token copy of a real card",
     "ringBearer": "Ring",
-    "ringBearerTooltip": "Ring-bearer"
+    "ringBearerTooltip": "Ring-bearer",
+    "boardChoiceBadges": {
+      "sacrifice": "Sac",
+      "return": "Return",
+      "exile": "Exile",
+      "tap": "Tap",
+      "crew": "Crew",
+      "saddle": "Saddle",
+      "station": "Station",
+      "blight": "-1/-1",
+      "ringBearer": "Ring"
+    }
+  },
+  "boardChoice": {
+    "actions": {
+      "sacrifice": "Sacrifice",
+      "return": "Return",
+      "exile": "Exile",
+      "tap": "Tap",
+      "crew": "Crew",
+      "saddle": "Saddle",
+      "station": "Station",
+      "blight": "Blight",
+      "ringBearer": "Choose"
+    },
+    "prompt": {
+      "single": "{{action}} a permanent",
+      "exactCount_one": "{{action}} {{count}} permanent",
+      "exactCount_other": "{{action}} {{count}} permanents",
+      "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
+      "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
+      "upToCount_one": "{{action}} up to {{count}} permanent",
+      "upToCount_other": "{{action}} up to {{count}} permanents",
+      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+    },
+    "confirm": "Confirm",
+    "confirmCount": "Confirm ({{selected}}/{{count}})",
+    "confirmPower": "Confirm ({{selected}}/{{required}} power)",
+    "skip": "Skip",
+    "groupCount": "{{selected}} / {{count}} selected",
+    "groupPower": "Power {{selected}} / {{required}}"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -500,6 +545,12 @@
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
+    "sacrificeExact_one": "Sacrifice {{count}} permanent",
+    "sacrificeExact_other": "Sacrifice {{count}} permanents",
+    "sacrificeUpTo_one": "Sacrifice up to {{count}} permanent",
+    "sacrificeUpTo_other": "Sacrifice up to {{count}} permanents",
+    "sacrificeRange_one": "Sacrifice {{min}}-{{count}} permanent",
+    "sacrificeRange_other": "Sacrifice {{min}}-{{count}} permanents",
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
     "chooseTarget": "Choose a target",
     "noLegalTargets": "No legal targets available",
@@ -514,6 +565,8 @@
     "nounTargetPermanent": "target permanent",
     "nounTarget": "target",
     "confirmTap": "Confirm Tap ({{selected}}/{{count}})",
+    "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
+    "skipSacrifice": "Skip Sacrifice",
     "keepCurrentTargets": "Keep Current Targets",
     "skip": "Skip"
   },
