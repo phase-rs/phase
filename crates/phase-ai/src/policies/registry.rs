@@ -25,6 +25,7 @@ use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
 use super::lifegain_payoff::LifegainPayoffPolicy;
+use super::mill_payoff::MillPayoffPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
@@ -118,6 +119,7 @@ pub enum PolicyId {
     XValue,
     LandAnimation,
     MillTargeting,
+    MillPayoff,
     ChaliceAvoidance,
     PaymentSelection,
     SeparatePilesTiming,
@@ -330,6 +332,7 @@ impl Default for PolicyRegistry {
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
+            Box::new(MillPayoffPolicy),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
             Box::new(SeparatePilesTimingPolicy),

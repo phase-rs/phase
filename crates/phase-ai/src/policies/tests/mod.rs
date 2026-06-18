@@ -6,6 +6,7 @@ pub mod blink_payoff;
 pub mod enchantments_payoff;
 pub mod equipment_payoff;
 pub mod lifegain_payoff;
+pub mod mill_payoff;
 pub mod mulligan_input_lint;
 pub mod reanimator_payoff;
 pub mod score_contract_lint;

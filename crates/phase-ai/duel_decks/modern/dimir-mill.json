@@ -1,0 +1,20 @@
+{
+  "name": "Dimir Mill",
+  "format": "modern",
+  "frozen_date": "2026-06-17",
+  "source": "https://www.mtggoldfish.com/metagame/modern",
+  "main": [
+    { "name": "Glimpse the Unthinkable", "count": 4 },
+    { "name": "Archive Trap", "count": 4 },
+    { "name": "Tome Scour", "count": 4 },
+    { "name": "Breaking", "count": 4 },
+    { "name": "Mind Sculpt", "count": 4 },
+    { "name": "Hedron Crab", "count": 4 },
+    { "name": "Thought Scour", "count": 4 },
+    { "name": "Traumatize", "count": 2 },
+    { "name": "Island", "count": 16 },
+    { "name": "Swamp", "count": 10 },
+    { "name": "Watery Grave", "count": 2 },
+    { "name": "Drowned Catacomb", "count": 2 }
+  ]
+}

@@ -4765,9 +4765,17 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
         let effect = TextPair::new(effect, &lower)
             .trim_end()
             .trim_end_matches('.');
+        // Strip trailing "... instead" marker (e.g., "draw two cards instead.").
         let effect = effect
             .strip_suffix(" instead")
             .map_or(effect, |trimmed| trimmed.trim_end());
+        // CR 614.1a: Strip leading "instead ..." marker (e.g., "instead you
+        // draw two cards"). This form appears when the subject follows the
+        // replacement word, as in Blood Scrivener: "..., instead you draw two
+        // cards and you lose 1 life."
+        let effect = effect
+            .strip_prefix("instead ") // allow-noncombinator: TextPair structural cleanup on an already-extracted replacement effect fragment, mirroring the trailing "instead" strip above.
+            .map_or(effect, |stripped| stripped.trim_start());
         if !effect.original.is_empty() {
             return Some(effect.original.to_string());
         }
@@ -11913,6 +11921,56 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 }
             ) && *offset == 1
+        ));
+    }
+
+    #[test]
+    fn draw_replacement_leading_instead_prefix_blood_scrivener() {
+        // CR 614.1a: "instead you draw two cards" — leading "instead" form with
+        // subject prefix. The replacement must wire up Draw {count:2} as the
+        // execute effect and LoseLife as a sub_ability, gated on HandSize == 0.
+        // Regression test for issue #3305: "instead" was not stripped from the
+        // effect text, leaving the draw as Unimplemented and only the life loss
+        // fired.
+        let def = parse_replacement_line(
+            "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+            "Blood Scrivener",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        // Gate: HandSize EQ 0
+        assert!(matches!(
+            &def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: None,
+            })
+        ));
+        // Execute: Draw { count: 2 }
+        assert!(matches!(
+            def.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            })
+        ));
+        // Sub-ability: LoseLife { amount: 1 }
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .and_then(|a| a.sub_ability.as_deref())
+                .map(|a| &*a.effect),
+            Some(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            })
         ));
     }
 

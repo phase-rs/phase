@@ -35,6 +35,7 @@ mod lethality_awareness;
 mod life_total_resource;
 mod lifegain_payoff;
 mod mana_efficiency;
+mod mill_payoff;
 mod mill_targeting;
 pub mod mulligan;
 mod payment_selection;
