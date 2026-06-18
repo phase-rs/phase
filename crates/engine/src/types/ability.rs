@@ -15001,6 +15001,14 @@ pub enum ContinuousModification {
         /// characteristics").
         if_type: Option<CoreType>,
     },
+    /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
+    /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,
+    /// this is consumed at copy resolution: token-copy uses the value before
+    /// seeding intrinsic loyalty counters, and BecomeCopy folds it into the
+    /// copied values before installing the layer-1 copy effect.
+    SetStartingLoyalty {
+        value: u32,
+    },
     /// CR 707.9 + CR 202.1b: Strip a copy's mana cost — the "has no mana cost"
     /// copy exception used by Embalm (CR 702.128a) and Eternalize
     /// (CR 702.129a). Like `AddCounterOnEnter`, this is consumed at copy
@@ -16665,6 +16673,7 @@ mod tests {
             ContinuousModification::AddColor {
                 color: ManaColor::Red,
             },
+            ContinuousModification::SetStartingLoyalty { value: 1 },
         ];
         let json = serde_json::to_string(&mods).unwrap();
         let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();

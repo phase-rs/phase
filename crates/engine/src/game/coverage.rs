@@ -3011,6 +3011,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
                 None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
         }
+        ContinuousModification::SetStartingLoyalty { value } => {
+            format!("starting loyalty {value}")
+        }
         ContinuousModification::RemoveManaCost => "no mana cost".to_string(),
     }
 }

@@ -46,6 +46,9 @@
 //!   pronoun accepts `he`/`she`/`it` so cards from any gender print route
 //!   through the same arm. When neither index is set, the arm declines (no
 //!   modification produced) so the rest of the except clause still parses.
+//! - `<possessive> starting loyalty is N`
+//!   → [`ContinuousModification::SetStartingLoyalty`] so planeswalker-copy
+//!   exceptions seed loyalty counters from the overridden value.
 //!
 //! # Fail-soft semantics
 //!
@@ -161,6 +164,7 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
 ///   - `is a(n) {core_type|subtype} in addition to its other types`
 ///     (elided-subject form for non-leading bodies)            → AddType/AddSubtype
+///   - `<possessive> starting loyalty is N`                    → SetStartingLoyalty
 ///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
 pub(crate) fn parse_except_body<'a>(
@@ -190,6 +194,9 @@ pub(crate) fn parse_except_body<'a>(
         return Some((rest, vec![modification]));
     }
     if let Some((rest, modification)) = parse_enters_with_additional_counter(input) {
+        return Some((rest, vec![modification]));
+    }
+    if let Some((rest, modification)) = parse_starting_loyalty_override(input) {
         return Some((rest, vec![modification]));
     }
     // CR 707.9d: the replacement form ("… and loses all other card types")
@@ -954,6 +961,25 @@ fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
         return Some((rest, count));
     }
     Some((rest, 1))
+}
+
+/// CR 707.9b + CR 306.5b/c: Match "`its/their starting loyalty is N`" copy
+/// exceptions. Jace, Mirror Mage is the canonical token-copy form; the grammar
+/// is shared with BecomeCopy exceptions so future planeswalker-copy effects use
+/// the same resolution-time override.
+fn parse_starting_loyalty_override(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("its starting loyalty is "),
+        tag("his starting loyalty is "),
+        tag("her starting loyalty is "),
+        tag("their starting loyalty is "),
+        tag("it's starting loyalty is "),
+        tag("it\u{2019}s starting loyalty is "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (rest, value) = nom_primitives::parse_number(rest).ok()?;
+    Some((rest, ContinuousModification::SetStartingLoyalty { value }))
 }
 
 /// Parse the optional `" if it's a <core_type>"` tail trailing a counter
@@ -1976,6 +2002,27 @@ mod tests {
             }
             other => panic!("expected AddCounterOnEnter, got {other:?}"),
         }
+    }
+
+    /// CR 707.9b + CR 306.5b/c: Jace, Mirror Mage's token-copy exception
+    /// changes the copy's starting loyalty instead of merely adding counters.
+    #[test]
+    fn starting_loyalty_exception_emits_override() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and its starting loyalty is 1",
+            "Jace, Mirror Mage",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetStartingLoyalty { value: 1 })));
     }
 
     /// CR 122.1 + CR 614.1c: Spark Double's three-clause body — bare comma

@@ -3394,7 +3394,8 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AddDynamicToughness { value }
         | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
         // Resolution-time-consumed; never an active continuous effect.
-        ContinuousModification::AddCounterOnEnter { .. } => None,
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => None,
         // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
         // magnitude. Enumerated explicitly (no wildcard) so a future
         // QuantityExpr-carrying variant forces a decision here.
@@ -3969,6 +3970,17 @@ fn apply_continuous_effect_filtered(
                      not via apply_continuous_effect"
                 );
             }
+            // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are folded
+            // into copied values at copy resolution, before loyalty counters
+            // are seeded. Reaching the layer system means a resolver forgot to
+            // consume this one-shot copy exception.
+            ContinuousModification::SetStartingLoyalty { .. } => {
+                debug_assert!(
+                    false,
+                    "SetStartingLoyalty must be consumed at copy resolution time, \
+                     not via apply_continuous_effect"
+                );
+            }
             // CR 707.9 + CR 202.1b: the "has no mana cost" copy exception is
             // consumed at copy resolution (token_copy.rs bakes it into the token;
             // become_copy.rs strips it from the copied values), never via a
@@ -4346,6 +4358,12 @@ pub(crate) fn compute_current_copiable_values(
             // source's name.
             ContinuousModification::SetName { name } => {
                 values.name = name.clone();
+            }
+            // CR 707.9b + CR 306.5b: Starting loyalty is a copy-effect
+            // characteristic exception. A later copy of this copy must see
+            // the overridden loyalty value.
+            ContinuousModification::SetStartingLoyalty { value } => {
+                values.loyalty = Some(*value);
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
