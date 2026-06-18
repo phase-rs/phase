@@ -64,22 +64,39 @@ pub fn eliminate_players_simultaneously(
     // resolves to a draw (`winner: None`) rather than a spurious winner.
     check_game_over(state, events);
 
-    // CR 800.4a: If the active `WaitingFor` was waiting on any newly-eliminated
-    // player (the conceder, or — for team formats — a teammate eliminated alongside
-    // them), advance to `Priority` for the next living player so the game does not
-    // deadlock waiting on a player who has left. Skip when the game just ended
-    // (`GameOver` is terminal) or the waiting player is still alive.
-    if !matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+    let game_over_winner = match &state.waiting_for {
+        WaitingFor::GameOver { winner } => Some(*winner),
+        _ => None,
+    };
+
+    // CR 603.3b + CR 800.4a: Always resolve in-flight trigger-ordering work
+    // when players leave — including lethal combat damage that ends the game
+    // (issue #1350). Previously this ran only when the game continued, leaving
+    // `pending_trigger_order` / `deferred_triggers` orphaned on `GameOver`.
+    prune_pending_trigger_order(state);
+    prune_deferred_triggers_for_eliminated_players(state);
+
+    if let Some(winner) = game_over_winner {
+        // Terminal: drop trigger scaffolding the client would otherwise show as
+        // a stuck stack / ordering prompt.
+        state.pending_trigger_order = None;
+        state.deferred_triggers.clear();
+        state.pending_trigger = None;
+        state.pending_trigger_entry = None;
+        state.waiting_for = WaitingFor::GameOver { winner };
+    } else {
+        // CR 603.3b: If prune collapsed an ordering pass into
+        // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
+        // combat auto-advance does not skip them (issue #1350).
+        drain_or_clear_deferred_triggers_after_elimination(state, events);
+
+        // CR 800.4a: If the active `WaitingFor` was waiting on any
+        // newly-eliminated player, advance to `Priority` for the next living
+        // player so the game does not deadlock waiting on a player who has left.
         // CR 103.5: For simultaneous mulligan states, prune eliminated players
         // from the pending list. If the list becomes empty, advance the flow
         // by emitting MulliganStarted-equivalent transition state.
         prune_mulligan_pending(state, events);
-
-        // CR 603.3b + CR 800.4a: Resolve any in-flight trigger-ordering pass
-        // around the elimination — drop triggers controlled by eliminated
-        // players, auto-resolve their ordering groups with identity order,
-        // and re-emit / advance the prompt as needed.
-        prune_pending_trigger_order(state);
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
@@ -221,6 +238,37 @@ fn prune_pending_trigger_order(state: &mut GameState) {
     // if its controller is alive).
     if let Some(wf) = super::triggers::build_next_order_triggers_prompt_public(state) {
         state.waiting_for = wf;
+    }
+}
+
+/// CR 800.4a: Remove deferred triggers controlled by eliminated players.
+fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
+    state.deferred_triggers.retain(|ctx| {
+        state
+            .players
+            .iter()
+            .find(|player| player.id == ctx.pending.controller)
+            .is_some_and(|player| !player.is_eliminated)
+    });
+}
+
+/// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
+/// while `waiting_for` is Priority, dispatch now so phase auto-advance does
+/// not skip them (issue #1350).
+fn drain_or_clear_deferred_triggers_after_elimination(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if state.deferred_triggers.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_order.is_some()
+    {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+            state.waiting_for = wf;
+        }
     }
 }
 

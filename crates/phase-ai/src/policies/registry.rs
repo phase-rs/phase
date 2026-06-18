@@ -4,6 +4,7 @@ use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
 use super::blight_value::BlightValuePolicy;
+use super::blink_payoff::BlinkPayoffPolicy;
 use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
@@ -31,6 +32,7 @@ use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::reanimator_payoff::ReanimatorPayoffPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
@@ -58,6 +60,7 @@ pub enum PolicyId {
     EtbValue,
     EnchantmentsPayoff,
     EquipmentPayoff,
+    BlinkPayoff,
     CopyValue,
     Tutor,
     HandDisruption,
@@ -102,6 +105,7 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    SacrificeLandProtection,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
@@ -315,6 +319,7 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeLandProtectionPolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
@@ -329,6 +334,7 @@ impl Default for PolicyRegistry {
             Box::new(PaymentSelectionPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(ReanimatorPayoffPolicy),
+            Box::new(BlinkPayoffPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

@@ -8,7 +8,7 @@ use nom::Parser;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ChoiceType,
     Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter,
-    ReplacementDefinition, StaticCondition, TargetFilter, TriggerCondition,
+    ReplacementDefinition, StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -133,6 +133,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             allow_repeat_modes: false,
             constraints: vec![],
             chooser: PlayerFilter::Controller,
+            selection: TargetSelectionMode::Chosen,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -148,6 +149,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             allow_repeat_modes: false,
             constraints: vec![],
             chooser: PlayerFilter::Controller,
+            selection: TargetSelectionMode::Chosen,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -414,6 +416,15 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         }
     }
 
+    // CR 700.2b (override) + CR 701.9b (analogous): "choose one at random" — the
+    // game, not the chooser, selects the mode(s). The "at random" qualifier is a
+    // word-boundary phrase flag on the header sentence, not parsing dispatch.
+    let selection = if nom_primitives::scan_contains(&header_lower, "at random") {
+        TargetSelectionMode::Random
+    } else {
+        TargetSelectionMode::Chosen
+    };
+
     Some(ModalHeaderAst {
         raw: text.to_string(),
         min_choices,
@@ -421,6 +432,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         allow_repeat_modes,
         constraints,
         chooser,
+        selection,
     })
 }
 
@@ -764,6 +776,7 @@ fn lower_as_enters_anchor_word_modal(
                     options: labels.clone(),
                 },
                 persist: true,
+                selection: TargetSelectionMode::Chosen,
             },
         ))
         .valid_card(TargetFilter::SelfRef)
@@ -993,6 +1006,8 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
         chooser: header.chooser.clone(),
+        // CR 700.2b (override): random mode selection ("choose one at random").
+        selection: header.selection,
     }
 }
 
@@ -1464,6 +1479,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_modal_header_choose_one_at_random_sets_random_selection() {
+        // CR 700.2b (override): "choose one at random" (Cult of Skaro) — the
+        // game selects the mode, so the header records TargetSelectionMode::Random
+        // while still parsing the count as one.
+        let header =
+            parse_modal_header_ast("choose one at random —").expect("modal header recognized");
+        assert_eq!(header.min_choices, 1);
+        assert_eq!(header.max_choices, 1);
+        assert_eq!(header.selection, TargetSelectionMode::Random);
+    }
+
+    #[test]
+    fn parse_modal_header_plain_choose_one_stays_chosen() {
+        // Building-block regression: ordinary modal headers default to Chosen.
+        let header = parse_modal_header_ast("choose one —").expect("modal header recognized");
+        assert_eq!(header.selection, TargetSelectionMode::Chosen);
+    }
+
     // B3: "choose up to N —" must parse as (0, N), not fall through to the
     // default (1, 1). Without this, players are forced to pick exactly one
     // mode when the CR allows zero. Affects Biblioplex Tomekeeper and ~96
@@ -1638,6 +1672,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Labeled { options },
                 persist,
+                ..
             } => {
                 assert!(*persist);
                 assert_eq!(options, &vec!["Jeskai".to_string(), "Temur".to_string()]);

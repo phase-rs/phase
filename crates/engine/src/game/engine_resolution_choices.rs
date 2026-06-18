@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, LibraryPosition,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, LibraryPosition, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -3073,38 +3073,12 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            if let Some(obj_id) = source_id {
-                if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
-                    if let Some(obj) = state.objects.get_mut(&obj_id) {
-                        obj.chosen_attributes.push(attr);
-                        // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card
-                        // name, creature type, card type, color, etc.) can gate
-                        // source-dependent continuous or rule effects. Layer
-                        // evaluation may have run before the choice was made
-                        // (Morophon buffs, Pithing Needle prohibitions, Serra's
-                        // Emissary protection, …) — re-run.
-                        if matches!(
-                            choice_type,
-                            ChoiceType::CardName
-                                | ChoiceType::CreatureType
-                                | ChoiceType::CardType
-                                | ChoiceType::BasicLandType
-                                | ChoiceType::Color { .. }
-                                | ChoiceType::Keyword { .. }
-                                // CR 613.1: a persisted "choose a player" gates
-                                // CDA P/T that count the chosen player's objects
-                                // or zones (Sewer Nemesis, Skyshroud War Beast) —
-                                // recompute layers immediately.
-                                | ChoiceType::Player
-                                | ChoiceType::Opponent { .. }
-                        ) {
-                            crate::game::layers::mark_layers_full(state);
-                        }
-                    }
-                }
-            }
-
-            state.last_named_choice = ChoiceValue::from_choice(&choice_type, &choice);
+            // CR 607.2d + CR 613.1: Persist the chosen attribute on the source
+            // (Morophon buffs, Pithing Needle prohibitions, Serra's Emissary
+            // protection, Sewer Nemesis CDA, …), recompute layers for the
+            // layer-affecting choice kinds, and record `last_named_choice`.
+            // Single authority shared with the random `Effect::Choose` resolver.
+            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the

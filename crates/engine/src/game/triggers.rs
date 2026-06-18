@@ -3552,6 +3552,9 @@ fn dispatch_pending_trigger_context(
                 // CR 603.3c: No legal mode; drop the trigger entirely.
                 return false;
             }
+            let mode_abilities = trigger.mode_abilities.clone();
+            let controller = trigger.controller;
+            let source_id = trigger.source_id;
             let pending_for_state = trigger.clone();
             let entry_id = push_pending_trigger_to_stack_with_event_batch(
                 state,
@@ -3562,6 +3565,44 @@ fn dispatch_pending_trigger_context(
             state.pending_trigger_event_batch = trigger_events;
             state.pending_trigger = Some(pending_for_state);
             state.pending_trigger_entry = Some(entry_id);
+
+            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at random"
+            // (Cult of Skaro). The game — not `chooser` — picks the mode(s), so
+            // resolve them immediately via `state.rng` instead of pausing on
+            // `AbilityModeChoice`. Mirrors the `TargetSelectionMode::Random`
+            // short-circuit used for targets below.
+            if modal_for_player.selection.is_random() {
+                match super::engine_modes::resolve_random_modal_trigger(
+                    state,
+                    controller,
+                    source_id,
+                    modal_for_player,
+                    mode_abilities,
+                    &unavailable_modes,
+                    events_out,
+                ) {
+                    Ok(Some(waiting_for)) => {
+                        // A pause (target selection) was raised by the chosen
+                        // mode; surface it through `state.waiting_for` the same
+                        // way the DistributeAmong branch does. A `Priority`
+                        // result means the trigger reached the stack with no
+                        // further input — report "not paused".
+                        if matches!(
+                            waiting_for,
+                            crate::types::game_state::WaitingFor::Priority { .. }
+                        ) {
+                            return false;
+                        }
+                        state.waiting_for = waiting_for;
+                        return true;
+                    }
+                    // CR 603.3c: No mode could be chosen — trigger already
+                    // dropped and stack entry removed inside the resolver.
+                    Ok(None) => return false,
+                    Err(_) => return false,
+                }
+            }
+
             return true;
         }
     }
@@ -23387,6 +23428,7 @@ mod push_first_contract_tests {
             mode_costs: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         };
         let modal_ability = AbilityDefinition::new(
             AbilityKind::Database,
@@ -23455,6 +23497,112 @@ mod push_first_contract_tests {
         assert!(
             state.pending_trigger.is_none(),
             "no-legal-mode modal trigger must not leave a stashed pending_trigger",
+        );
+    }
+
+    /// CR 700.2b (override) + CR 701.9b (analogous): a modal triggered ability
+    /// declared "choose one at random" (Cult of Skaro) must NOT prompt the
+    /// controller with `AbilityModeChoice` — the game picks the mode via
+    /// `state.rng` and the ability reaches the stack with a resolved,
+    /// non-modal mode. Regression test for the unconsumed-random-axis defect.
+    #[test]
+    fn random_modal_trigger_resolves_without_prompting() {
+        use crate::types::ability::{ModalChoice, PlayerFilter, QuantityExpr, TargetSelectionMode};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source_id = ObjectId(state.next_object_id);
+        // Two non-targeting modes so the ONLY possible prompt is mode choice.
+        let mode_a = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mode_b = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            mode_descriptions: vec!["A".to_string(), "B".to_string()],
+            allow_repeat_modes: false,
+            constraints: vec![],
+            mode_costs: vec![],
+            entwine_cost: None,
+            chooser: PlayerFilter::Controller,
+            // The axis under test: the game selects the mode at random.
+            selection: TargetSelectionMode::Random,
+        };
+        let modal_ability = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .with_modal(modal, vec![mode_a, mode_b]);
+
+        let trigger = super::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: super::super::ability_utils::build_resolved_from_def(
+                &modal_ability,
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: state.turn_number,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: modal_ability.modal.clone(),
+            mode_abilities: modal_ability.mode_abilities.clone(),
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+
+        let stack_before = state.stack.len();
+        let mut events = Vec::new();
+        let paused = super::dispatch_pending_trigger_context(
+            &mut state,
+            super::PendingTriggerContext::single(trigger),
+            &mut events,
+        );
+
+        // The game chose the mode — neither modes need targets, so dispatch
+        // reports "not paused" and never raises an interactive prompt.
+        assert!(
+            !paused,
+            "random modal trigger with non-targeting modes must not pause on input",
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. }),
+            "random modal trigger must NOT prompt the controller for the mode",
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_before + 1,
+            "random modal trigger must be pushed to the stack with a chosen mode",
+        );
+        // Construction is complete — the resolved mode replaced the modal data.
+        assert!(
+            state.pending_trigger.is_none(),
+            "random modal trigger must finish construction (no stashed pending_trigger)",
+        );
+        assert!(
+            state.pending_trigger_entry.is_none(),
+            "random modal trigger entry must be resolver-eligible (cursor cleared)",
         );
     }
 }

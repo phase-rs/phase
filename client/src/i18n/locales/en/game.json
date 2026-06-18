@@ -387,6 +387,7 @@
     "payMana": "Pay Mana Cost",
     "convokeHint": "Tap creatures to help pay.",
     "improviseHint": "Tap artifacts to help pay.",
+    "delveHint": "Exile cards from your graveyard to help pay.",
     "convokeOrImproviseHint": "Tap creatures or artifacts to help pay.",
     "convokeStaged": "Tapped:",
     "lifeAmount": "2 life",

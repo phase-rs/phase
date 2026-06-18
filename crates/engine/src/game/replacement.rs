@@ -2579,13 +2579,52 @@ fn untap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
     matches!(event, ProposedEvent::Untap { .. })
 }
 
+// CR 614.1a + CR 614.6: An untap-step replacement ("If [perm] would untap
+// during [...] untap step, [effect] instead") replaces the untap with its
+// alternative effect, bound to the permanent that would have untapped ("it").
+// With no alternative effect it is a pure prevention ("doesn't untap"). Either
+// way the original untap does not happen, so the applier returns `Prevented`.
 fn untap_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let ProposedEvent::Untap { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Untap { object_id, applied });
+    };
+    let controller = source.controller;
+    let execute = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone());
+
+    // Run the alternative effect chain (if any) against the would-be-untapped
+    // permanent, then prevent the untap. A replacement with no execute is a
+    // bare "doesn't untap" prevention.
+    if let Some(execute) = execute {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::TargetRef;
+
+        // CR 614.6: the alternative effect ("put two +1/+1 counters on it",
+        // "remove all wind counters from it") refers to the permanent that would
+        // have untapped — NOT the replacement source. Resolve the chain with the
+        // would-be-untapped object as the source so its `it`/SelfRef anaphor
+        // binds to that permanent, and seed `targets` for the `None`-anaphor form.
+        let mut current = Some(execute.as_ref());
+        while let Some(def) = current {
+            let mut ability = build_resolved_from_def(def, object_id, controller);
+            ability.targets = vec![TargetRef::Object(object_id)];
+            let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            current = def.sub_ability.as_deref();
+        }
+    }
+
+    ApplyResult::Prevented
 }
 
 // --- 14. Counter (spell countering) ---
@@ -3552,6 +3591,14 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 502.3 + CR 502.4: untap-step gate. Permanents untap as a turn-based
+        // action during the untap step, and no player receives priority then, so
+        // any `ProposedEvent::Untap` raised while `phase == Untap` is the
+        // turn-based untap (effect-untaps like "untap target creature" occur in
+        // phases that grant priority). Restricts the replacement to the untap
+        // step exactly as the "during [its controller's / your] untap step"
+        // wording requires.
+        ReplacementCondition::DuringUntapStep => state.phase == crate::types::phase::Phase::Untap,
         // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
         // while the controller has at least `minimum` permanents matching `filter` on
         // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
@@ -5086,6 +5133,14 @@ enum CommuteClass {
     Multiplicative,
     Additive,
     Subtractive,
+    /// Two replacements that set the same enter tap-state commute: the
+    /// permanent enters with that state regardless of which is applied
+    /// first, so the CR 616.1e/f ordering choice is immaterial. Keyed by
+    /// the value written (not the direction) so that same-direction writes
+    /// commute while opposite-direction writes (tap vs untap, where
+    /// last-applied wins) stay `NonCommuting`.
+    EnterTapped,
+    EnterUntapped,
 }
 
 impl CommuteClass {
@@ -5252,6 +5307,7 @@ fn candidate_materiality(
         };
     }
     let mut field: Option<EventField> = None;
+    let mut enter_tapped_commute: Option<CommuteClass> = None;
     let mut current = Some(execute);
     while let Some(def) = current {
         match &*def.effect {
@@ -5269,15 +5325,26 @@ fn candidate_materiality(
             }
             // CR 616.1c: copy-as-it-enters strips another replacement's source.
             Effect::BecomeCopy { .. } => return CandidateMateriality::Unconditional,
-            // CR 614.1c: single-target `Tap`/`Untap` (legacy `Tap`/`Untap`) both
-            // overwrite the `enter_tapped` field — two such candidates conflict
-            // (tapland + Spelunking / Archelos), last-applied wins. The mass
-            // scope is not an ETB modifier and is not matched here.
+            // CR 614.1c: single-target `Tap`/`Untap` both overwrite the
+            // `enter_tapped` field. CR 616.1e/f: ordering only matters when the
+            // candidates would leave the permanent in *different* states.
+            // Same-direction writes (two "enters tapped", or two "enters
+            // untapped") are idempotent — the permanent enters with that state
+            // regardless of order, so the choice is immaterial and no prompt is
+            // shown. Opposite-direction writes (tapland + Spelunking / Archelos)
+            // are last-applied-wins and stay `NonCommuting`. The mass scope is
+            // not an ETB modifier and is not matched here.
             Effect::SetTapState {
                 scope: EffectScope::Single,
+                state,
                 ..
             } => {
                 field = Some(EventField::EnterTapped);
+                // Keyed by the value written so opposite directions don't commute.
+                enter_tapped_commute = Some(match state {
+                    TapStateChange::Tap => CommuteClass::EnterTapped,
+                    TapStateChange::Untap => CommuteClass::EnterUntapped,
+                });
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
             // `enter_with_counters`, so they never conflict. `Effect::Choose`
@@ -5295,7 +5362,7 @@ fn candidate_materiality(
     match field {
         Some(field) => CandidateMateriality::Writes {
             field,
-            commute: CommuteClass::NonCommuting,
+            commute: enter_tapped_commute.unwrap_or(CommuteClass::NonCommuting),
         },
         None => CandidateMateriality::Disjoint,
     }
@@ -5785,6 +5852,7 @@ mod tests {
             Effect::Choose {
                 choice_type: crate::types::ability::ChoiceType::CreatureType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         );
         let mut execute = choose;
@@ -6265,6 +6333,141 @@ mod tests {
     }
 
     #[test]
+    fn two_identical_untap_replacements_auto_apply_without_choice() {
+        // CR 616.1f: Duplicate "lands enter untapped" replacements commute (#1340).
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state = test_state_with_object(
+            ObjectId(1),
+            Zone::Battlefield,
+            vec![untap_repl.clone(), untap_repl],
+        );
+        let land_id = ObjectId(10);
+        state.objects.insert(
+            land_id,
+            GameObject::new(
+                land_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(land_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "identical untap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn two_identical_tap_replacements_auto_apply_without_choice() {
+        // CR 616.1e/f: Two "enters tapped" replacements (Kismet + Frozen Aether)
+        // are idempotent — the permanent enters tapped regardless of order, so
+        // the ordering choice is immaterial and no prompt is shown. This is the
+        // symmetric counterpart of the untap case (#1340): materiality keys on
+        // the value written, not the tap-direction.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state = test_state_with_object(
+            ObjectId(1),
+            Zone::Battlefield,
+            vec![tap_repl.clone(), tap_repl],
+        );
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "identical tap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn opposite_tap_state_replacements_prompt_for_order() {
+        // CR 616.1e/f: One "enters tapped" + one "enters untapped" replacement
+        // leave the permanent in *different* states depending on which is applied
+        // last, so the ordering is material and the controller must choose
+        // (tapland + Spelunking / Archelos). Guards against over-commuting the
+        // value-keyed classes.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state =
+            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![tap_repl, untap_repl]);
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "opposite tap-state replacements must prompt for order, got {result:?}"
+        );
+    }
+
+    #[test]
     fn quantity_modification_field_collision_prompts_for_order() {
         // CR 616.1: Doubling Season (`Double`) and Hardened Scales (`Plus{1}`)
         // both modify the count of a single `AddCounter` event via the
@@ -6658,6 +6861,7 @@ mod tests {
                         crate::types::mana::ManaColor::Green,
                     ]),
                     persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

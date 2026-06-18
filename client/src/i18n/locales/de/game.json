@@ -387,6 +387,7 @@
     "payMana": "Manakosten bezahlen",
     "convokeHint": "Tappe Kreaturen, um die Bezahlung zu unterstützen.",
     "improviseHint": "Tappe Artefakte, um die Bezahlung zu unterstützen.",
+    "delveHint": "Exiliere Karten aus deinem Friedhof, um die Bezahlung zu unterstützen.",
     "convokeOrImproviseHint": "Tappe Kreaturen oder Artefakte, um die Bezahlung zu unterstützen.",
     "convokeStaged": "Getappt:",
     "lifeAmount": "2 Leben",

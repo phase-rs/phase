@@ -19,7 +19,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
 };
@@ -74,7 +74,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
-            parse_target(target_text)
+            parse_target_with_ctx(target_text, ctx)
         };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {

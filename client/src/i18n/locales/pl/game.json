@@ -387,6 +387,7 @@
     "payMana": "Zapłać koszt many",
     "convokeHint": "Obróć stwory, aby pomóc zapłacić.",
     "improviseHint": "Obróć artefakty, aby pomóc zapłacić.",
+    "delveHint": "Wygnaj karty ze swojego cmentarza, aby pomóc zapłacić.",
     "convokeOrImproviseHint": "Obróć stwory lub artefakty, aby pomóc zapłacić.",
     "convokeStaged": "Obrócone:",
     "lifeAmount": "2 życia",

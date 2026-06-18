@@ -488,7 +488,12 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
 }
 
+/// Windows that terminate the condition of an inline delayed trigger and
+/// introduce its effect clause.
+const DELAYED_TRIGGER_WINDOWS: [&str; 2] = [" this turn, ", " this combat, "];
+
 /// CR 603.7c: Parse "whenever [trigger condition] this turn, [effect]" delayed triggers.
+/// (Also "whenever [trigger condition] this combat, [effect]".)
 /// These create multi-fire delayed triggers that persist until end of turn.
 /// Example: "whenever a creature you control deals combat damage to a player this turn, draw a card"
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -498,10 +503,27 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     {
         return None;
     }
-    // Must contain "this turn" to distinguish from regular triggers.
-    // Use rsplit_around: "this turn" terminates the condition — the last occurrence
-    // is the correct split point if the condition itself contains "this turn".
-    let (before, after) = tp.rsplit_around(" this turn, ")?;
+    // Must contain a delayed-trigger window ("this turn" / "this combat") to
+    // distinguish from regular triggers. Use rsplit_around per window: the window
+    // terminates the condition, and the rightmost split point is correct if the
+    // condition itself contains an earlier occurrence of the window phrase.
+    //
+    // CR 603.7b/603.7c + CR 510: An inline delayed trigger scoped to "this turn"
+    // (most cards) or "this combat" (prepare-mechanic combat-damage triggers, e.g.
+    // Stensian Sanguinist) lowers to a multi-fire WheneverEvent delayed trigger
+    // purged at end-of-turn cleanup (CR 603.7b). "this combat" is modeled as the
+    // "this turn" multi-fire window: the only observable divergence is re-preparing
+    // in a later same-turn extra combat (CR 500.8) after the prepared copy was cast
+    // and the creature unprepared (CR 722.3c) — rare, and not separately gated
+    // because the engine has no per-combat delayed-trigger purge primitive.
+    let (before, after) = DELAYED_TRIGGER_WINDOWS.iter().fold(
+        None::<(TextPair, TextPair)>,
+        |best, window| match (best, tp.rsplit_around(window)) {
+            (Some((b, _)), Some((nb, na))) if nb.lower.len() > b.lower.len() => Some((nb, na)),
+            (None, Some((nb, na))) => Some((nb, na)),
+            (best, _) => best,
+        },
+    )?;
 
     // Condition is between "whenever " and " this turn"
     let condition_text = &before.lower[9..];
@@ -3593,6 +3615,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
             filter: None,
             chooser: crate::types::ability::Chooser::Controller,
             up_to: true,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
         },
         duration: None,
@@ -3996,6 +4019,17 @@ fn try_parse_choose_player_to_verb(
         after_player
     };
 
+    // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at random"
+    // (Strax, Sontaran Nurse) — the game selects the player, not the controller.
+    // The "at random" qualifier is the tail after the head noun (e.g. before a
+    // following ". When you do" sentence has already been split off), recorded as
+    // a typed `TargetSelectionMode`.
+    let selection = if nom_primitives::scan_contains(after_player, "at random") {
+        TargetSelectionMode::Random
+    } else {
+        TargetSelectionMode::Chosen
+    };
+
     // The chain index is the count of `Choose(Player)` clauses already
     // finalized in this chain. The chunk loop owns the increment (once per
     // finalized clause) — this function only READS the count and is
@@ -4020,6 +4054,7 @@ fn try_parse_choose_player_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: choice_type.clone(),
         persist: false,
+        selection,
     });
 
     if let Some(verb_lower) = verb_lower {
@@ -4090,6 +4125,7 @@ fn try_parse_an_opponent_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: ChoiceType::Opponent { restriction: None },
         persist: false,
+        selection: TargetSelectionMode::Chosen,
     });
     let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
     sub.sub_ability = verb_clause.sub_ability;
@@ -8586,6 +8622,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
         filter: Some(filter),
         chooser: Chooser::Opponent,
         up_to: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
     });
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -11119,6 +11156,28 @@ fn damage_clause_has_fresh_opponent_recipient(effect: &Effect) -> bool {
     }
 }
 
+/// CR 201.5 + CR 608.2c: a damage clause whose recipient is the source object's
+/// self-reference ("this creature" / "~", `TargetFilter::SelfRef`) declares its
+/// own recipient — the fight-back recipient class (Karplusan Yeti and siblings:
+/// "... That creature deals damage equal to its power to this creature."). Per
+/// CR 201.5 the self-reference names just the source object, so the blanket
+/// anaphoric parent-rewrite must not collapse it to `ParentTarget` (which would
+/// re-aim the fight-back at clause 1's chosen target). The `Anaphoric` amount is
+/// resolved by the resolver's CR 608.2c `effect_context_object` referent, so no
+/// source/amount rebind is needed here.
+fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::DamageAll {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
 /// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
 /// `ObjectScope::Target`. The mirror of `rebind_anaphoric_ref` for the one-sided
 /// fight class: a "Then it deals damage equal to its power" sub-clause whose
@@ -11185,7 +11244,20 @@ fn rebind_source_amount_to_target(expr: &mut QuantityExpr) {
 /// deals..." subject was classified `SelfRef` (Wolf Strike/Burrog Barrage),
 /// which would otherwise read the ability source (the spell, power 0). Returns
 /// true (= decline the blanket `replace_target_with_parent`) when handled.
+///
+/// Covers two recipient shapes: (1) the fresh-opponent recipient — rebind the
+/// damage source/amount to the parent target while preserving the recipient;
+/// (2) the self-reference recipient ("to this creature"/"to ~",
+/// `TargetFilter::SelfRef`, the Karplusan Yeti fight-back class) — preserve the
+/// recipient verbatim with NO source/amount rebind.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
+    // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
+    // is the source itself and must be preserved verbatim (fight-back class). No
+    // source/amount rebind: the resolver seeds the `Anaphoric` amount from the
+    // prior clause's damaged-object event (effect_context_object).
+    if damage_clause_has_self_ref_recipient(effect) {
+        return true;
+    }
     if !damage_clause_has_fresh_opponent_recipient(effect) {
         return false;
     }
@@ -15674,6 +15746,7 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
         Effect::Choose {
             choice_type: ChoiceType::Color { excluded },
             persist: false,
+            ..
         } if excluded.is_empty()
     ) {
         let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
@@ -15835,6 +15908,28 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
     if let Some(else_ability) = def.else_ability.as_mut() {
         wire_optional_cast_decline_fallback(else_ability);
+    }
+}
+
+/// CR 115.1 + CR 608.2c: "Counter target spell if it was kicked" — the lowered
+/// AdditionalCostPaid condition's "it" = the target spell, not the counter. The
+/// lowering can't see the effect, so retarget subject Source->Target post-assembly
+/// where Effect::Counter and the condition coexist. Self-kicked counters don't
+/// exist (Fires of Victory's rider is on its own resolution), so gating on
+/// Effect::Counter is correct and leaves all other AdditionalCostPaid cards Source.
+fn retarget_counter_additional_cost_to_target(def: &mut AbilityDefinition) {
+    if matches!(&*def.effect, Effect::Counter { .. }) {
+        if let Some(AbilityCondition::AdditionalCostPaid { subject, .. }) = def.condition.as_mut() {
+            if matches!(subject, ObjectScope::Source) {
+                *subject = ObjectScope::Target;
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(sub);
+    }
+    if let Some(e) = def.else_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(e);
     }
 }
 
@@ -18597,6 +18692,7 @@ pub(crate) fn parse_effect_chain_ir(
                             filter: None,
                             chooser: *chooser,
                             up_to: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
                         })
                     }
@@ -18630,6 +18726,7 @@ pub(crate) fn parse_effect_chain_ir(
                             filter: None,
                             chooser: *chooser,
                             up_to: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
                         }
                     }
@@ -20409,6 +20506,111 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    /// Stensian Sanguinist (SOC, prepare mechanic): the second sentence is an
+    /// inline delayed trigger scoped to "this combat" (not "this turn"). It must
+    /// lower to a multi-fire `WheneverEvent` delayed trigger — same path as
+    /// Hunter's Insight's "this turn" window — rather than falling through to
+    /// `Effect::Unimplemented`. Mirrors
+    /// `hunters_insight_class_builds_whenever_event_delayed_trigger` for the
+    /// "this combat" window + prepare effect. CR 603.7b/603.7c + CR 722.
+    #[test]
+    fn stensian_class_builds_whenever_event_this_combat_delayed_trigger() {
+        use crate::types::ability::{DamageKindFilter, TargetFilter};
+        use crate::types::triggers::TriggerMode;
+
+        let parsed = parse_oracle_text(
+            "Whenever you attack, target creature gains deathtouch until end of turn. Whenever that creature deals combat damage to a player this combat, this creature becomes prepared.",
+            "Stensian Sanguinist",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+
+        // The "Whenever you attack" ability is a triggered ability.
+        assert_eq!(parsed.triggers.len(), 1, "expected one triggered ability");
+        let trig = &parsed.triggers[0];
+        assert_eq!(trig.mode, TriggerMode::YouAttack);
+        let exec = trig
+            .execute
+            .as_deref()
+            .expect("YouAttack trigger should carry an execute body");
+
+        // First effect: grant deathtouch until end of turn to the chosen creature.
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = exec.effect.as_ref()
+        else {
+            panic!(
+                "expected deathtouch GenericEffect head, got {:?}",
+                exec.effect
+            );
+        };
+        assert!(
+            static_abilities.iter().any(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Deathtouch,
+                        }
+                    )
+                })
+            }),
+            "expected an AddKeyword(Deathtouch) modification, got {static_abilities:?}"
+        );
+
+        // SequentialSibling sub-ability: the "this combat" delayed trigger.
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("deathtouch grant should chain into the delayed trigger");
+        let Effect::CreateDelayedTrigger {
+            condition,
+            effect,
+            uses_tracked_set,
+        } = sub.effect.as_ref()
+        else {
+            panic!(
+                "expected CreateDelayedTrigger sub-ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(!uses_tracked_set);
+        let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::ParentTarget));
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+
+        // Inner effect: "this creature becomes prepared". "this creature" is the
+        // ability's source (Stensian), distinct from "that creature" (the
+        // targeted attacker), so it must lower to a self-reference — NOT
+        // ParentTarget, which would (wrongly) bind the prepare to the targeted
+        // creature. CR 722.3a.
+        assert!(
+            matches!(
+                effect.effect.as_ref(),
+                Effect::BecomePrepared {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "expected BecomePrepared{{SelfRef}}, got {:?}",
+            effect.effect
+        );
+
+        // Discriminating regression assertion: NO Unimplemented anywhere. Before
+        // the "this combat" window was added, the second sentence fell through to
+        // Effect::Unimplemented.
+        let json = serde_json::to_string(&parsed).expect("serialize parsed abilities");
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"Unimplemented\""),
+            "parsed tree must contain no Effect::Unimplemented"
+        );
+    }
 
     /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
     /// filter must not put the clause splitter into quote mode and thereby
@@ -29549,7 +29751,8 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
-                persist: true
+                persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
     }
@@ -30359,7 +30562,8 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::color(),
-                persist: false
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
     }
@@ -37613,6 +37817,7 @@ mod tests {
         let Effect::Choose {
             choice_type: ChoiceType::Labeled { options },
             persist: true,
+            ..
         } = *def.effect
         else {
             panic!("Expected Choose land/nonland, got {:?}", def.effect);
@@ -40451,13 +40656,17 @@ mod tests {
         let static_def = static_abilities
             .first()
             .expect("lifelink grant must carry a static definition");
-        assert!(
-            matches!(
-                static_def.affected.as_ref(),
-                Some(TargetFilter::Typed(tf))
-                    if tf.type_filters == [TypeFilter::Creature]
-            ),
-            "chain parser binds 'that creature' to a creature filter, got {:?}",
+        // CR 608.2c: "that creature" is an anaphor to the single chosen object,
+        // so `static_affected_for_application` binds the grant's `affected` to
+        // `ParentTarget` (via `inherits_parent`) — matching the outer
+        // GenericEffect `target` slot above. The runtime resolver
+        // (`generic_effect_application_filter`) treats both the inherited-ref
+        // `affected` and the `target` slot identically, so this is the
+        // self-consistent shape for an anaphoric grant.
+        assert_eq!(
+            static_def.affected.as_ref(),
+            Some(&TargetFilter::ParentTarget),
+            "chain parser binds 'that creature' to the parent target, got {:?}",
             static_def.affected
         );
         assert!(
@@ -46271,6 +46480,7 @@ mod tests {
         let Effect::Choose {
             choice_type,
             persist,
+            ..
         } = &*def.effect
         else {
             panic!("expected Choose, got {:?}", def.effect);
@@ -46824,6 +47034,7 @@ mod tests {
                         restriction: Some(restriction),
                     },
                 persist,
+                ..
             } => {
                 assert!(!persist, "The Master does not need persist");
                 match restriction.as_ref() {
@@ -50834,17 +51045,17 @@ mod tests {
         }
     }
 
-    /// CR 120.1 + CR 202.3 (cluster 32, Class C — Ensnared by the Mara): the
-    /// branch-1 damage amount "the total mana value of those exiled cards" is an
-    /// exiled-this-resolution aggregate the typed quantity parsers don't yet
-    /// model. It must NOT degrade to a verbatim `QuantityRef::Variable` carrying
-    /// raw Oracle text — that would silently resolve to 0 damage at runtime
-    /// (only `Variable{name:"X"}` / named choices resolve). Instead the
-    /// `DealDamage` step must strict-fail to `Effect::Unimplemented` so coverage
-    /// honestly flags the gap. The `ExileTop` branch head still parses, keeping
-    /// the two-branch `ChooseOneOf` intact.
+    /// CR 120.1 + CR 202.3 + CR 609.3 (cluster 32, Class C — Ensnared by the
+    /// Mara): the branch-1 damage amount "the total mana value of those exiled
+    /// cards" is an aggregate over the most recent chain tracked set — the cards
+    /// the branch-head `ExileTop` published. It parses to
+    /// `QuantityRef::TrackedSetAggregate { Sum, ManaValue }` (NOT a verbatim
+    /// `QuantityRef::Variable`, which would silently resolve to 0 damage). Because
+    /// the `DealDamage` is `ExileTop`'s sub-ability, the chain processor publishes
+    /// ExileTop's affected set before the damage step reads it (see
+    /// `exile_top_then_deal_damage_sums_mana_value_of_those_exiled_cards`).
     #[test]
-    fn ensnared_by_the_mara_unresolvable_damage_amount_strict_fails_not_verbatim_variable() {
+    fn ensnared_by_the_mara_damage_amount_is_tracked_set_aggregate() {
         let ability = parse_effect_chain(
             "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and ~ deals damage equal to the total mana value of those exiled cards to that player.",
             AbilityKind::Spell,
@@ -50856,8 +51067,8 @@ mod tests {
         assert_eq!(*chooser, PlayerFilter::Opponent);
         assert_eq!(branches.len(), 2);
 
-        // Branch 1 head exiles four cards (still parses); the chained damage
-        // step strict-fails rather than emitting a verbatim Variable.
+        // Branch 1 head exiles four cards; its chained sub-ability deals damage
+        // equal to the total mana value of that exiled (tracked) set.
         let branch1 = &branches[1];
         assert!(
             matches!(&*branch1.effect, Effect::ExileTop { .. }),
@@ -50868,17 +51079,28 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("branch 1 must retain its chained damage step");
+        let Effect::DealDamage { amount, .. } = &*damage.effect else {
+            panic!(
+                "branch 1 damage step must be DealDamage, got {:?}",
+                damage.effect
+            );
+        };
         assert!(
-            matches!(&*damage.effect, Effect::Unimplemented { .. }),
-            "branch 1 damage step must strict-fail to Unimplemented (unresolvable exiled-cards aggregate), got {:?}",
-            damage.effect
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::ManaValue,
+                    }
+                }
+            ),
+            "branch 1 damage amount must be TrackedSetAggregate(Sum, ManaValue), got {amount:?}"
         );
 
-        // Belt-and-braces: no node anywhere in the parsed ability stores the raw
-        // Oracle aggregate phrase as a `QuantityRef::Variable` name (the
-        // prohibited verbatim-text-in-parser smell). The phrase legitimately
-        // survives in human-readable `description`/Unimplemented-trace fields —
-        // only its appearance as a resolvable `Variable` payload is the defect.
+        // The verbatim Oracle aggregate phrase must never be stored as a
+        // resolvable `QuantityRef::Variable` name (the prohibited
+        // verbatim-text-in-parser smell).
         let json = serde_json::to_string(&ability).expect("serialize ability");
         assert!(
             !json.contains(r#""Variable","name":"the total mana value"#),
@@ -51942,6 +52164,27 @@ mod snapshot_tests {
     /// to …" chain decomposes into three `Choose(Player)` nodes. The dependent
     /// effects bind to the chosen player via `ControllerRef::ChosenPlayer`, and
     /// the 2nd/3rd choose clauses no longer fall back to `Unimplemented`.
+    #[test]
+    fn strax_choose_a_player_at_random_records_random_selection() {
+        // CR 608.2d (override): Strax, Sontaran Nurse — "Choose a player at
+        // random. When you do, ~ fights another target creature that player
+        // controls." The Choose(Player) must record TargetSelectionMode::Random
+        // and keep the dependent reflexive Fight as a WhenYouDo sub.
+        let def = parse_effect_chain(
+            "Choose a player at random. When you do, Strax fights another target \
+             creature that player controls.",
+            AbilityKind::Spell,
+        );
+        match def.effect.as_ref() {
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                selection,
+                ..
+            } => assert_eq!(*selection, TargetSelectionMode::Random),
+            other => panic!("expected random Choose(Player), got {other:?}"),
+        }
+    }
+
     #[test]
     fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         let def = parse_effect_chain(

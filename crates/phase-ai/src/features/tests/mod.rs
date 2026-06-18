@@ -2,6 +2,7 @@
 //! Shared lint scaffolding for feature module invariants.
 
 pub mod artifacts;
+pub mod blink;
 pub mod enchantments;
 pub mod equipment;
 pub mod lifegain;

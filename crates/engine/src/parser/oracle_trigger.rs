@@ -2672,6 +2672,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
             }),
+            // CR 725.1: "if you're not the monarch" / "if an opponent is the monarch".
+            StaticCondition::IsMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::IsMonarch),
+            }),
+            // CR 725.1: "if there is a monarch" (negated no-monarch check).
+            StaticCondition::NoMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::NoMonarch),
+            }),
             // CR 103.1: "you weren't the starting player" → Not(WasStartingPlayer).
             StaticCondition::WasStartingPlayer { controller } => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::WasStartingPlayer {
@@ -6080,15 +6088,21 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
 /// the discard-remainder convenience wrapper for call sites that don't read the
 /// tail.
 ///
-/// Recognizes only the *player* recipient axis — "a player", "an opponent",
-/// "you", "a player or planeswalker". The object-recipient axis (a
-/// creature/permanent/planeswalker that took the damage) is deliberately NOT
-/// matched here: it is reachable only through
-/// [`parse_object_recipient_pt_gate`], which requires the trailing "equal to
-/// that <recipient>'s toughness/power" qualifier. Folding the object axis in
-/// unconditionally would silently change the `valid_target` of every existing
-/// DamageDone trigger that names an object recipient (e.g. Questing Beast's
-/// "deals combat damage to a planeswalker"), so the object axis stays gated.
+/// Recognizes the *player* recipient axis only ("a player", "an opponent",
+/// "you", "a player or planeswalker"). The object recipient axis ("a creature",
+/// "a permanent", typed object) is handled separately by the guarded
+/// [`parse_object_recipient_filter`], which the call sites try BEFORE this
+/// player-axis parser. Keeping the object arm out of this parser is what lets a
+/// mixed "to a creature or player" / "to a creature or opponent" recipient
+/// (Crovax, Flesh Reaver) decline both parsers and leave `valid_target = None`
+/// (any recipient fires) rather than being mis-scoped to `Typed([Creature])`
+/// with its player leg dropped.
+///
+/// The Taii-Wakeen equal-to-P/T shape is the sole province of
+/// [`parse_object_recipient_pt_gate`] (which additionally yields the
+/// recipient-relative `QuantityRef`); a bare object recipient ("to a creature"
+/// with no P/T tail, Strax's class) is the sole province of
+/// [`parse_object_recipient_filter`].
 fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
@@ -8524,41 +8538,54 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    // CR 603.8: "when ~ has no [type] counters on it" — state trigger that fires
-    // when the source permanent has zero counters of the specified type.
-    // Handles: Dark Depths ("has no ice counters"), Afiya Grove ("has no +1/+1
-    // counters"), and bare "has no counters on it" (any type).
-    if let Some(result) = try_parse_has_no_counters_state_trigger(lower) {
+    // CR 603.8: "when ~ has no [type] counters on it" / "when ~ has N or more
+    // [type] counters on it" — state trigger on the source permanent's counter
+    // state. Two accepted forms:
+    //   - Depletion (minimum: 0, maximum: Some(0)): Dark Depths, Afiya Grove —
+    //     self-limiting because the effect removes the source or its counters.
+    //   - Threshold (minimum > 0, maximum: None): Darksteel Reactor — self-limiting
+    //     because the effect ends the game (WinTheGame) before re-firing.
+    if let Some(result) = try_parse_source_counter_state_trigger(lower) {
         return Some(result);
     }
 
     None
 }
 
-/// CR 603.8: Parse "when ~ has no [type] counters on it" as a state trigger.
+/// CR 603.8: Parse "when ~ has [no / N or more] [type] counters on it" as a
+/// state trigger.
 ///
-/// Delegates the subject × quantity × counter-type × "on it" grammar to the
-/// shared `parse_source_has_counters` combinator and bridges its
+/// Delegates subject × quantity × counter-type × "on it" grammar to
+/// `parse_source_has_counters` and bridges the resulting
 /// `StaticCondition::HasCounters` to a `TriggerCondition` via
 /// `static_condition_to_trigger_condition` — the same path intervening-if
-/// counter conditions already use. Only the zero/depletion form (Dark Depths,
-/// Afiya Grove, vanishing-style "has no … counters") is accepted: a state
-/// trigger re-checks every SBA cycle and re-fires once off the stack, so a
-/// non-zero threshold would loop for any effect that doesn't itself remove the
-/// counters.
-fn try_parse_has_no_counters_state_trigger(
-    lower: &str,
-) -> Option<(TriggerMode, TriggerDefinition)> {
+/// counter conditions use.
+///
+/// Two accepted forms:
+/// - **Depletion** (`minimum: 0, maximum: Some(0)`): Dark Depths, Afiya Grove,
+///   vanishing-style "has no … counters". Self-limiting: the effect removes the
+///   source from the battlefield or depletes its counters.
+/// - **Threshold** (`minimum > 0, maximum: None`): Darksteel Reactor ("has
+///   twenty or more charge counters"). For all currently printed threshold state
+///   triggers, the effect is self-limiting (the game ends, the source leaves
+///   the battlefield, or counters fall below the threshold before re-checking);
+///   the parser does not enforce this constraint structurally.
+fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
     let (_, static_cond) = parse_source_has_counters(rest).ok()?;
-    // CR 603.8: restrict to the self-limiting "has no … counters" depletion form.
+    // CR 603.8: accept depletion form (minimum: 0, maximum: Some(0)) and
+    // threshold form (minimum > 0, maximum: None). Reject mixed/range forms.
     if !matches!(
         static_cond,
         StaticCondition::HasCounters {
             minimum: 0,
             maximum: Some(0),
+            ..
+        } | StaticCondition::HasCounters {
+            minimum: 1..,
+            maximum: None,
             ..
         }
     ) {
@@ -12463,6 +12490,66 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{CastFrequency, StaticMode};
 
+    // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
+
+    #[test]
+    fn parse_damage_to_qualifier_preserves_player_recipients() {
+        // CR 120.3 + CR 102.2: player-recipient phrasings must keep their
+        // existing player-scope filters after the object arm was added.
+        assert_eq!(
+            parse_damage_to_qualifier("to a player"),
+            Some(TargetFilter::Player)
+        );
+        assert_eq!(
+            parse_damage_to_qualifier("to you"),
+            Some(TargetFilter::Controller)
+        );
+        // "to an opponent" → controller-only Typed (the player-scope convention).
+        match parse_damage_to_qualifier("to an opponent") {
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            })) => {
+                assert!(type_filters.is_empty(), "opponent filter is player-scope");
+                assert!(properties.is_empty());
+            }
+            other => panic!("expected opponent player-scope filter, got {other:?}"),
+        }
+        // "to a player or planeswalker" stays an Or naming a player slot.
+        match parse_damage_to_qualifier("to a player or planeswalker") {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+            }
+            other => panic!("expected Or {{ Player, Planeswalker }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn glory_of_battle_trigger_gates_on_creature_recipient() {
+        // CR 120.3: "Whenever ~ deals damage to a creature, put a +1/+1 counter
+        // on ~" (Strax, Sontaran Nurse — Glory of Battle) must set a typed
+        // creature `valid_target` so the trigger fires only on creature damage.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Strax deals damage to a creature, put a +1/+1 counter on Strax.",
+            "Strax, Sontaran Nurse",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger");
+        match &trigger.valid_target {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature-scoped valid_target, got {other:?}"),
+        }
+    }
+
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
         let count_minus_one = QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
@@ -13506,6 +13593,32 @@ mod tests {
             def.valid_source,
             Some(TargetFilter::Typed(TypedFilter::creature()))
         );
+    }
+
+    #[test]
+    fn impostor_syndrome_copy_it_binds_to_damage_source() {
+        let def = parse_trigger_line(
+            "Whenever a nontoken creature you control deals combat damage to a player, \
+             create a token that's a copy of it, except it isn't legendary.",
+            "Impostor Syndrome",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        match def.execute.as_ref().unwrap().effect.as_ref() {
+            Effect::CopyTokenOf {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::RemoveSupertype {
+                        supertype: crate::types::card_type::Supertype::Legendary
+                    }
+                )));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
     }
 
     #[test]
@@ -25949,6 +26062,60 @@ mod tests {
     }
 
     #[test]
+    fn bridge_opponent_is_monarch_intervening_if() {
+        let sc = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsMonarch),
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::NoMonarch),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_trigger_condition(&sc),
+            Some(TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::IsMonarch),
+                    },
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::NoMonarch),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn queen_marchesa_upkeep_attaches_opponent_monarch_intervening_if() {
+        let oracle = "At the beginning of your upkeep, if an opponent is the monarch, create a 1/1 black Assassin creature token with haste.";
+        let def = parse_trigger_line(oracle, "Queen Marchesa");
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        let condition = def.condition.as_ref().expect("intervening-if must parse");
+        assert!(matches!(
+            condition,
+            TriggerCondition::And {
+                conditions,
+            } if conditions.len() == 2
+                && matches!(
+                    conditions[0],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::IsMonarch)
+                )
+                && matches!(
+                    conditions[1],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::NoMonarch)
+                )
+        ));
+    }
+
+    #[test]
     fn bridge_initiative() {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::IsInitiative),
@@ -26006,6 +26173,21 @@ mod tests {
                 minimum: 1,
                 maximum: None,
             }),
+        );
+    }
+
+    #[test]
+    fn trigger_intervening_if_source_is_exiled_sets_trigger_zone() {
+        let def = parse_trigger_line(
+            "Whenever a land you control enters, if ~ is exiled, you may put a voyage counter on it.",
+            "Cosima, God of the Voyage",
+        );
+
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::SourceInZone { zone: Zone::Exile }),
         );
     }
 
@@ -27089,6 +27271,154 @@ mod tests {
         } else {
             panic!("expected HasCounters condition, got {:?}", def.condition);
         }
+    }
+
+    #[test]
+    fn state_trigger_has_twenty_or_more_charge_counters() {
+        // Darksteel Reactor: "When Darksteel Reactor has twenty or more charge counters on it,
+        // you win the game."
+        let def = parse_trigger_line(
+            "When Darksteel Reactor has twenty or more charge counters on it, you win the game.",
+            "Darksteel Reactor",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &def.condition
+        {
+            assert_eq!(
+                *counters,
+                CounterMatch::OfType(CounterType::Generic("charge".to_string()))
+            );
+            assert_eq!(*minimum, 20);
+            assert_eq!(*maximum, None);
+        } else {
+            panic!("expected HasCounters condition, got {:?}", def.condition);
+        }
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::WinTheGame { .. }),
+            "expected WinTheGame, got {:?}",
+            execute.effect,
+        );
+    }
+
+    #[test]
+    fn upkeep_trigger_may_put_charge_counter() {
+        // Darksteel Reactor: "At the beginning of your upkeep, you may put a charge counter
+        // on Darksteel Reactor."
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, you may put a charge counter on Darksteel Reactor.",
+            "Darksteel Reactor",
+        );
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert!(def.optional, "upkeep trigger should be optional (you may)");
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Generic(ref s),
+                    target: TargetFilter::SelfRef,
+                    ..
+                } if s == "charge"
+            ),
+            "expected PutCounter(charge) on SelfRef, got {:?}",
+            execute.effect,
+        );
+    }
+
+    /// CR 603.8: Darksteel Reactor's state trigger fires when the reactor reaches
+    /// 20 charge counters and resolves the WinTheGame effect, ending the game.
+    /// Discriminates against guard-reversion regressions: reverting the
+    /// `minimum: 1..` arm causes the pre-assertion (StateCondition trigger exists)
+    /// to fail because the oracle text no longer produces a StateCondition trigger.
+    #[test]
+    fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
+        use crate::game::scenario::GameRunner;
+        use crate::game::triggers::check_state_triggers;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::CardId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        use crate::types::PlayerId;
+        use std::sync::Arc;
+
+        const ORACLE: &str = "Indestructible\n\
+            At the beginning of your upkeep, you may put a charge counter on Darksteel Reactor.\n\
+            When Darksteel Reactor has twenty or more charge counters on it, you win the game.";
+
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Darksteel Reactor",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+
+        // Confirm the state trigger was parsed — shape check before the runtime test.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::StateCondition),
+            "Darksteel Reactor must parse a StateCondition trigger; got {:?}",
+            parsed.triggers,
+        );
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Place Darksteel Reactor on the battlefield for player 0.
+        let reactor_id = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Darksteel Reactor".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Install the parsed trigger definitions and add 20 charge counters.
+        {
+            let obj = state.objects.get_mut(&reactor_id).unwrap();
+            obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
+            obj.trigger_definitions = parsed.triggers.clone().into();
+            obj.controller = PlayerId(0);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 20);
+        }
+
+        // CR 603.8: call check_state_triggers, which sees the reactor has 20 charge
+        // counters and enqueues the WinTheGame trigger.
+        check_state_triggers(&mut state);
+
+        assert!(
+            state.pending_trigger.is_some() || !state.stack.is_empty(),
+            "state trigger must be pending or on the stack after check_state_triggers",
+        );
+
+        // Drain the stack: the WinTheGame effect resolves, eliminating all opponents.
+        let mut runner = GameRunner::from_state(state);
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "game must end with player 0 as winner after Darksteel Reactor fires; got {:?}",
+            state.waiting_for,
+        );
     }
 
     // --- Compound trigger tests ---
@@ -29408,6 +29738,7 @@ mod tests {
                 Effect::Choose {
                     choice_type,
                     persist,
+                    ..
                 } => Some((choice_type.clone(), *persist)),
                 _ => None,
             })

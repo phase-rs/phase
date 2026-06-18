@@ -12,9 +12,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, FilterProp,
-    ManaProduction, ModalChoice, ParsedCondition, QuantityExpr, QuantityRef, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypedFilter,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -956,10 +956,12 @@ fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSub
         Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::CreatureType),
         Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::BasicLandType),
         _ => def
             .sub_ability
@@ -2974,6 +2976,7 @@ pub(crate) fn parse_oracle_ir(
                 Effect::Choose {
                     choice_type: ChoiceType::color(),
                     persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -3751,6 +3754,11 @@ fn parse_activated_ability_definition(
     if !constraints.restrictions.is_empty() {
         def.activation_restrictions = constraints.restrictions;
     }
+    def.activator_filter = constraints.activator_filter.or_else(|| {
+        constraints
+            .any_player_may_activate
+            .then_some(PlayerFilter::All)
+    });
     extract_cost_reduction_from_chain(&mut def);
     extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
@@ -4392,6 +4400,39 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 }
                 continue;
             }
+        }
+
+        // CR 602.2a + CR 602.5: "Only your opponents may activate this ability and only
+        // <restriction>" — mirror the any-player composition: record the opponent
+        // permission and delegate the timing axis to `parse_activation_timing_restriction`.
+        if let Some((before, restriction)) =
+            tp.rsplit_around("only your opponents may activate this ability and only ")
+        {
+            if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
+                constraints.activator_filter = Some(PlayerFilter::Opponent);
+                constraints.restrictions.extend(parsed);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if remaining.trim().is_empty() {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        const OPPONENTS_ACTIVATE_SUFFIX: &str = "only your opponents may activate this ability";
+        if lower.ends_with(OPPONENTS_ACTIVATE_SUFFIX) {
+            let end = remaining.len() - OPPONENTS_ACTIVATE_SUFFIX.len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.activator_filter = Some(PlayerFilter::Opponent);
+            if remaining.is_empty() {
+                break 'parse_constraints;
+            }
+            continue 'parse_constraints;
         }
 
         // CR 602.2: "Any player may activate this ability." — strip as a recognized
@@ -5254,6 +5295,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::Keyword { options },
                     persist: true,
+                    ..
                 } if options.as_slice()
                     == [Keyword::Hexproof, Keyword::Indestructible]
             )),
@@ -9492,6 +9534,46 @@ mod tests {
             )),
             "expected source-on-stack condition, got {:?}",
             restrictions
+        );
+    }
+
+    /// CR 602.2a + CR 602.5: opponent permission must compose with the same timing
+    /// combinator as the any-player path — not a single hardcoded suffix.
+    #[test]
+    fn opponents_may_activate_but_only_records_timing_restriction() {
+        let activation_for = |text: &str, name: &str| {
+            let parsed = parse(text, name, &[], &["Creature"], &[]);
+            parsed
+                .abilities
+                .into_iter()
+                .find(|ability| ability.activator_filter.is_some())
+                .expect("expected an activated ability with activator_filter")
+        };
+
+        let sorcery = activation_for(
+            "{1}: Draw a card. Only your opponents may activate this ability and only as a sorcery.",
+            "Test Opponent Sorcery",
+        );
+        assert_eq!(sorcery.activator_filter, Some(PlayerFilter::Opponent));
+        assert!(
+            sorcery
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "expected AsSorcery, got {:?}",
+            sorcery.activation_restrictions
+        );
+
+        let during_turn = activation_for(
+            "{1}: Draw a card. Only your opponents may activate this ability and only during your turn.",
+            "Test Opponent Turn",
+        );
+        assert_eq!(during_turn.activator_filter, Some(PlayerFilter::Opponent));
+        assert!(
+            during_turn
+                .activation_restrictions
+                .contains(&ActivationRestriction::DuringYourTurn),
+            "expected DuringYourTurn, got {:?}",
+            during_turn.activation_restrictions
         );
     }
 
@@ -15485,6 +15567,74 @@ mod tests {
         );
     }
 
+    /// Walk every parsed ability (and its `sub_ability` chain) looking for the
+    /// first `Effect::GenericEffect` whose `static_abilities` contains a
+    /// `CantUntap` static, and return that static's `affected` filter. Used to
+    /// assert the spell-form "that [type] doesn't untap" anaphor binds to the
+    /// single tapped object (`ParentTarget`) rather than broadcasting `Typed`.
+    fn first_cant_untap_affected(r: &ParsedAbilities) -> Option<TargetFilter> {
+        for ability in &r.abilities {
+            let mut cursor = Some(ability);
+            while let Some(def) = cursor {
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = def.effect.as_ref()
+                {
+                    if let Some(static_def) = static_abilities
+                        .iter()
+                        .find(|s| s.mode == crate::types::statics::StaticMode::CantUntap)
+                    {
+                        return static_def.affected.clone();
+                    }
+                }
+                cursor = def.sub_ability.as_deref();
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn spell_form_that_type_doesnt_untap_binds_parent_target() {
+        // CR 608.2c: spell-form "Tap target X. That X doesn't untap" is an
+        // anaphor to the single tapped object — the CantUntap static's
+        // `affected` must be `ParentTarget`, NOT a broadcast `Typed(...)` that
+        // would lock every matching permanent. Revert-discriminating: without
+        // `|| inherits_parent` in `static_affected_for_application`, `affected`
+        // is `Typed(Land)` / `Typed(Creature)` and these asserts fail.
+
+        // Chandra's Revolution: damage clause has its own target; the tap+lock
+        // clause binds the tapped LAND, not the damaged creature.
+        let chandra = parse(
+            "Chandra's Revolution deals 4 damage to target creature. Tap target land. That land doesn't untap during its controller's next untap step.",
+            "Chandra's Revolution",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            first_cant_untap_affected(&chandra),
+            Some(TargetFilter::ParentTarget),
+            "Chandra's Revolution CantUntap static must bind ParentTarget, got {:?}",
+            first_cant_untap_affected(&chandra)
+        );
+
+        // Glacial Grasp: "Tap target creature. Its controller mills two cards.
+        // That creature doesn't untap…" → ParentTarget, not Typed(Creature).
+        let glacial = parse(
+            "Tap target creature. Its controller mills two cards. That creature doesn't untap during its controller's next untap step. Draw a card.",
+            "Glacial Grasp",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(
+            first_cant_untap_affected(&glacial),
+            Some(TargetFilter::ParentTarget),
+            "Glacial Grasp CantUntap static must bind ParentTarget, got {:?}",
+            first_cant_untap_affected(&glacial)
+        );
+    }
+
     #[test]
     fn spell_counter_tap_plus_doesnt_untap() {
         let r = parse(
@@ -16942,6 +17092,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::CardName,
                     persist: true,
+                    ..
                 }
             ),
             "expected Choose{{CardName, persist:true}}, got {:?}",
@@ -18636,6 +18787,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
                 persist: true,
+                ..
             }
         ));
         let counter = execute

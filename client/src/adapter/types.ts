@@ -1121,7 +1121,13 @@ export type WaitingFor =
   | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
   | {
       type: "ChooseXValue";
-      data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
+      data: {
+        player: PlayerId;
+        min?: number;
+        max: number;
+        pending_cast: PendingCast;
+        x_cost_previews?: [number, ManaCost][];
+      };
     }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }

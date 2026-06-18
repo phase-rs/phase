@@ -368,6 +368,24 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         },
     },
     MatchupSpec {
+        id: "blink-mirror",
+        p0_label: "Azorius Blink (P0)",
+        p1_label: "Azorius Blink (P1)",
+        p0: snap("modern", "azorius-blink.json"),
+        p1: snap("modern", "azorius-blink.json"),
+        // Azorius Blink is the canonical flicker-value list: a dense flicker
+        // package (Ephemerate, Cloudshift, Ghostly Flicker, Restoration Angel,
+        // Soulherder) plus value-ETB creatures worth re-triggering (Mulldrifter,
+        // Wall of Omens, Reflector Mage, Man-o'-War, Solemn Simulacrum, Cloudgoat
+        // Ranger). It clears `blink::COMMITMENT_FLOOR`, so this matchup is the
+        // gate's exercise of `BlinkPayoffPolicy` (verified by
+        // `blink_mirror_deck_activates_blink_payoff` below).
+        exercises: &[FeatureKind::Blink],
+        expected: Expected::Mirror {
+            tolerance: MIRROR_TOLERANCE,
+        },
+    },
+    MatchupSpec {
         id: "landfall-vs-niv",
         p0_label: "Mono-Green Landfall",
         p1_label: "Niv to Light",

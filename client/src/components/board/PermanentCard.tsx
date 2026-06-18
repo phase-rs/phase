@@ -2,7 +2,6 @@ import { motion } from "framer-motion";
 import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { useShallow } from "zustand/react/shallow";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
@@ -163,25 +162,18 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     validTargetObjectIds,
   } = useBoardInteractionState();
 
-  const {
-    selectedObjectId, selectObject, hoverObject, inspectObject,
-    debugHighlightedObjectId,
-    combatMode, selectedAttackers, toggleAttacker,
-    blockerAssignments, combatClickHandler, selectedCardIds, toggleSelectedCard,
-  } = useUiStore(useShallow((s) => ({
-    selectedObjectId: s.selectedObjectId,
-    selectObject: s.selectObject,
-    hoverObject: s.hoverObject,
-    inspectObject: s.inspectObject,
-    debugHighlightedObjectId: s.debugHighlightedObjectId,
-    combatMode: s.combatMode,
-    selectedAttackers: s.selectedAttackers,
-    toggleAttacker: s.toggleAttacker,
-    blockerAssignments: s.blockerAssignments,
-    combatClickHandler: s.combatClickHandler,
-    selectedCardIds: s.selectedCardIds,
-    toggleSelectedCard: s.toggleSelectedCard,
-  })));
+  const selectedObjectId = useUiStore((s) => s.selectedObjectId);
+  const selectObject = useUiStore((s) => s.selectObject);
+  const hoverObject = useUiStore((s) => s.hoverObject);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const debugHighlightedObjectId = useUiStore((s) => s.debugHighlightedObjectId);
+  const combatMode = useUiStore((s) => s.combatMode);
+  const selectedAttackers = useUiStore((s) => s.selectedAttackers);
+  const toggleAttacker = useUiStore((s) => s.toggleAttacker);
+  const blockerAssignments = useUiStore((s) => s.blockerAssignments);
+  const combatClickHandler = useUiStore((s) => s.combatClickHandler);
+  const selectedCardIds = useUiStore((s) => s.selectedCardIds);
+  const toggleSelectedCard = useUiStore((s) => s.toggleSelectedCard);
   // Hover is read as derived booleans, NOT the raw hoveredObjectId, so hovering
   // any permanent re-renders only the card whose hovered/lifted state actually
   // flips — not every PermanentCard on the board. O(1) per hover, not O(N).

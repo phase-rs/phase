@@ -1022,6 +1022,78 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
+/// CR 700.2b (override) + CR 701.9b (analogous): Resolve a modal ability whose
+/// `selection` is `Random` (Cult of Skaro "choose one at random") by uniformly
+/// drawing mode index/indices from the legal set using the engine's seeded RNG
+/// (`state.rng`). The game — not `modal.chooser` — makes the selection, so no
+/// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
+/// `random_select_targets_for_ability` for the mode-selection axis.
+///
+/// The legal set is `0..mode_count` minus `unavailable_modes` (modes ruled out
+/// by prior selection or unsatisfiable target legality, per CR 700.2b). A count
+/// is first drawn uniformly from `min_choices..=max_choices` (capped to the
+/// legal-set size), then that many distinct indices are drawn without
+/// replacement unless `allow_repeat_modes` permits repeats (CR 700.2d).
+///
+/// Determinism: uses `state.rng` (`ChaCha20Rng`, seeded per game), preserving
+/// replay/test reproducibility.
+///
+/// Returns `None` when no mode can legally be chosen (CR 603.3c: the ability is
+/// removed from the stack); callers handle that the same way the all-modes-
+/// unavailable branch does.
+pub fn random_select_modal_indices(
+    state: &mut GameState,
+    modal: &ModalChoice,
+    unavailable_modes: &[usize],
+) -> Option<Vec<usize>> {
+    use rand::seq::{IndexedRandom, SliceRandom}; // rand 0.9
+
+    let legal: Vec<usize> = (0..modal.mode_count)
+        .filter(|idx| !unavailable_modes.contains(idx))
+        .collect();
+    if legal.is_empty() {
+        // CR 603.3c: No legal mode — the ability is removed from the stack.
+        return None;
+    }
+
+    // CR 700.2d: Without repeats the chosen count cannot exceed the legal-set
+    // size; with repeats the same mode may be drawn up to `max_choices` times.
+    let max = if modal.allow_repeat_modes {
+        modal.max_choices
+    } else {
+        modal.max_choices.min(legal.len())
+    };
+    let min = modal.min_choices.min(max);
+    if max == 0 {
+        // "Choose up to one ... at random" with no legal mode to pick resolves
+        // with no instructions (CR 700.2a) — represented by an empty index set.
+        return Some(Vec::new());
+    }
+
+    let count = if min == max {
+        min
+    } else {
+        // Uniform over the inclusive count range.
+        (min..=max)
+            .collect::<Vec<_>>()
+            .choose(&mut state.rng)
+            .copied()
+            .unwrap_or(min)
+    };
+
+    let mut indices = Vec::with_capacity(count);
+    if modal.allow_repeat_modes {
+        for _ in 0..count {
+            indices.push(*legal.choose(&mut state.rng)?);
+        }
+    } else {
+        let mut pool = legal;
+        pool.shuffle(&mut state.rng);
+        indices.extend(pool.into_iter().take(count));
+    }
+    Some(indices)
+}
+
 /// CR 608.2b: When resolving, check that targets are still legal. If all targets are illegal,
 /// the spell or ability doesn't resolve.
 pub fn validate_selected_targets(

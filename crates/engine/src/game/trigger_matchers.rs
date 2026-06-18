@@ -1191,7 +1191,8 @@ pub(super) fn match_damage_done(
                     // their player-scope leg. This per-event arm is reached by SelfRef
                     // damage triggers (non-aggregate listeners); non-SelfRef listeners
                     // reach players only via the aggregate path guarded in
-                    // `matching_combat_damage_to_player_sources`.
+                    // `matching_combat_damage_to_player_sources`. (Strax's "deals
+                    // damage to a creature", Typed([Creature]), is rejected here.)
                     if !damage_recipient_filter_can_match_player(vt) {
                         return false;
                     }
@@ -11384,6 +11385,84 @@ mod tests {
             source_id,
             &state
         ));
+    }
+
+    /// Fix B regression: a `DamageDone` trigger whose `valid_target` is a typed
+    /// creature filter (Strax's "deals damage to a creature") fires ONLY on a
+    /// creature object recipient — never on a player and never on a
+    /// non-creature object. This is the now-populated `valid_target` that
+    /// previously fell through to `None` and fired on every recipient.
+    #[test]
+    fn damage_done_creature_valid_target_gates_recipient_type() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strax".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "A Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let planeswalker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "A Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        if let Some(obj) = state.objects.get_mut(&planeswalker) {
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        // "Whenever Strax deals damage to a creature" — SelfRef source + typed
+        // creature recipient.
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        let to_creature = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(creature),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let to_planeswalker = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(planeswalker),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let to_player = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(
+            match_damage_done(&to_creature, &trigger, source_id, &state),
+            "creature recipient must fire the trigger"
+        );
+        assert!(
+            !match_damage_done(&to_planeswalker, &trigger, source_id, &state),
+            "non-creature object recipient must not fire"
+        );
+        assert!(
+            !match_damage_done(&to_player, &trigger, source_id, &state),
+            "player recipient must not fire a creature-scoped valid_target"
+        );
     }
 
     // ---------------------------------------------------------------------------

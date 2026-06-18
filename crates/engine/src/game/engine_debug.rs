@@ -271,15 +271,29 @@ pub fn apply_debug_action(
             transformed,
             flipped,
         } => {
-            let obj = validate_object_mut(state, object_id)?;
+            validate_object(state, object_id)?;
             if let Some(fd) = face_down {
-                obj.face_down = fd;
-            }
-            if let Some(t) = transformed {
-                obj.transformed = t;
+                validate_object_mut(state, object_id)?.face_down = fd;
             }
             if let Some(f) = flipped {
-                obj.flipped = f;
+                validate_object_mut(state, object_id)?.flipped = f;
+            }
+            if let Some(want_transformed) = transformed {
+                let (zone, has_back_face, currently_transformed) = {
+                    let obj = state.objects.get(&object_id).unwrap();
+                    (obj.zone, obj.back_face.is_some(), obj.transformed)
+                };
+                if want_transformed != currently_transformed {
+                    // CR 701.27a: toggling `transformed` on a DFC must swap
+                    // printed faces, not just flip the flag — a flag-only write
+                    // leaves zone-exit revert applying the wrong characteristics
+                    // (issue #3290 / debug transform tool, issue #3284).
+                    if zone == Zone::Battlefield && has_back_face {
+                        crate::game::transform::transform_permanent(state, object_id, events)?;
+                    } else {
+                        validate_object_mut(state, object_id)?.transformed = want_transformed;
+                    }
+                }
             }
             crate::game::layers::mark_layers_full(state);
         }

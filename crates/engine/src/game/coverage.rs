@@ -1214,6 +1214,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
+        QuantityRef::TrackedSetAggregate { function, property } => {
+            let func = match function {
+                AggregateFunction::Max => "max",
+                AggregateFunction::Min => "min",
+                AggregateFunction::Sum => "total",
+            };
+            let prop = match property {
+                ObjectProperty::Power => "power",
+                ObjectProperty::Toughness => "toughness",
+                ObjectProperty::ManaValue => "mana value",
+            };
+            format!("{func} {prop} of those cards")
+        }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
         QuantityRef::LifeLostThisTurn { player } => {
             format!("life lost this turn ({})", fmt_player_scope(player))
@@ -2202,6 +2215,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            ..
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {
@@ -5710,6 +5724,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
+        QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),

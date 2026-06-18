@@ -439,6 +439,7 @@ mod tests {
             mode_costs: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         };
         let pending = PendingTrigger {
             source_id,

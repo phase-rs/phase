@@ -9,6 +9,7 @@
 pub mod aggro_pressure;
 pub mod aristocrats;
 pub mod artifacts;
+pub mod blink;
 pub mod commitment;
 pub mod control;
 pub mod enchantments;
@@ -28,6 +29,7 @@ pub mod tests;
 pub use aggro_pressure::AggroPressureFeature;
 pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
+pub use blink::BlinkFeature;
 pub use control::ControlFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use equipment::EquipmentFeature;
@@ -62,6 +64,7 @@ pub struct DeckFeatures {
     pub control: ControlFeature,
     pub enchantments: EnchantmentsFeature,
     pub equipment: EquipmentFeature,
+    pub blink: BlinkFeature,
     pub aristocrats: AristocratsFeature,
     pub artifacts: ArtifactsFeature,
     pub aggro_pressure: AggroPressureFeature,
@@ -103,6 +106,7 @@ impl DeckFeatures {
             control: control::detect(deck),
             enchantments: enchantments::detect(deck),
             equipment: equipment::detect(deck),
+            blink: blink::detect(deck),
             aristocrats: aristocrats::detect(deck),
             artifacts: artifacts::detect(deck),
             aggro_pressure: aggro_pressure::detect(deck),

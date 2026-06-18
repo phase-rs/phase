@@ -352,6 +352,66 @@ struct TriggeredModeChoice {
     indices: Vec<usize>,
 }
 
+/// CR 700.2b (override) + CR 701.9b (analogous): Complete a modal *triggered*
+/// ability whose `selection` is `Random` (Cult of Skaro "choose one at random")
+/// without prompting `modal.chooser`. The game draws the mode index/indices via
+/// `random_select_modal_indices` (seeded `state.rng`), then routes through the
+/// SAME finalization path the interactive controller-choice flow uses
+/// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
+/// stack-entry mutation stay identical.
+///
+/// Preconditions (the "push first, choose second" contract — see
+/// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
+/// stack entry is already pushed and tracked by `state.pending_trigger_entry`.
+///
+/// Returns `Ok(None)` when no mode can be chosen (CR 603.3c) so the caller drops
+/// the trigger exactly as the all-modes-unavailable branch does.
+pub(super) fn resolve_random_modal_trigger(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    modal: crate::types::ability::ModalChoice,
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    unavailable_modes: &[usize],
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(indices) =
+        super::ability_utils::random_select_modal_indices(state, &modal, unavailable_modes)
+    else {
+        // CR 603.3c: No legal mode — drop the trigger. The interactive branches
+        // already removed the in-flight stack entry before this point, so just
+        // clear the cursor here.
+        if let Some(entry_id) = state.pending_trigger_entry.take() {
+            if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                state.stack.pop_back();
+                state.stack_paid_facts.remove(&entry_id);
+                state.stack_trigger_event_batches.remove(&entry_id);
+            }
+        }
+        state.pending_trigger = None;
+        return Ok(None);
+    };
+
+    // CR 700.2: Track per-turn/per-game mode usage exactly as the interactive
+    // path does, then build the chained resolved ability for the drawn modes.
+    record_modal_mode_choices(state, source_id, &modal, &indices);
+    let resolved = build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+
+    handle_triggered_mode_choice(
+        state,
+        TriggeredModeChoice {
+            player,
+            source_id,
+            resolved,
+            modal,
+            mode_abilities,
+            indices,
+        },
+        events,
+    )
+    .map(Some)
+}
+
 fn handle_triggered_mode_choice(
     state: &mut GameState,
     choice: TriggeredModeChoice,

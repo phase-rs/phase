@@ -693,6 +693,35 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
 /// Also handles "gets +N/+M for each [clause]" dynamic P/T patterns.
+/// CR 611.3a: In a self-referential static the pronoun "it" co-refers with the
+/// source permanent, so rewrite a leading "it's "/"it is " subject to the
+/// canonical "~ is " before the condition is typed (e.g. Giant Tortoise's
+/// "as long as it's untapped").
+///
+/// Two guards keep this safe:
+/// 1. Callers MUST only apply it when the affected subject is `SelfRef` — for
+///    attached-subject statics (an Aura/Equipment whose "it" refers to the
+///    enchanted/equipped creature) the pronoun is not the source.
+/// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
+///    typed condition are rewritten. "it" is otherwise overloaded: "it's your
+///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
+///    "it's red" / "it's legendary" are type/characteristic gates with their own
+///    parse paths. Rewriting those would break or mis-bind them, so they are
+///    left untouched.
+///
+/// Returns the condition unchanged when neither guard matches.
+fn rewrite_self_pronoun_subject(condition: &str) -> String {
+    let lower = condition.to_lowercase();
+    if let Some(rest) =
+        nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
+    {
+        if matches!(rest.trim(), "tapped" | "untapped") {
+            return format!("~ is {}", rest.trim());
+        }
+    }
+    condition.to_string()
+}
+
 pub(crate) fn parse_continuous_gets_has(
     text: &str,
     affected: TargetFilter,
@@ -710,10 +739,17 @@ pub(crate) fn parse_continuous_gets_has(
         if let Some(mut def) =
             parse_continuous_gets_has(continuous_text, affected.clone(), description)
         {
-            let condition =
-                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                    text: condition_text.to_string(),
-                });
+            // CR 611.3a: only resolve the self-pronoun "it" to the source when the
+            // static modifies itself; attached-subject statics keep "it" bound to
+            // the enchanted/equipped creature and stay an honest gap.
+            let typed = if matches!(affected, TargetFilter::SelfRef) {
+                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
+            } else {
+                parse_static_condition(condition_text)
+            };
+            let condition = typed.unwrap_or(StaticCondition::Unrecognized {
+                text: condition_text.to_string(),
+            });
             def.condition = Some(condition);
             return Some(def);
         }

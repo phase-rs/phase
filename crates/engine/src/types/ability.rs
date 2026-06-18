@@ -2801,6 +2801,13 @@ impl TargetSelectionMode {
     pub fn is_chosen(&self) -> bool {
         matches!(self, TargetSelectionMode::Chosen)
     }
+
+    /// CR 700.2b (override) + CR 701.9b (analogous): The game selects uniformly
+    /// at random instead of the controller choosing (Cult of Skaro "choose one
+    /// at random").
+    pub fn is_random(&self) -> bool {
+        matches!(self, TargetSelectionMode::Random)
+    }
 }
 
 /// CR 701.9a: How cards are selected from a zone during an effect or cost.
@@ -3727,6 +3734,19 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+    },
+    /// CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+    /// over the most recent chain tracked set (sum/max/min), reading the same set as
+    /// [`QuantityRef::FilteredTrackedSetSize`] but aggregating a per-member value
+    /// instead of counting members. The set is selected by highest id (the set
+    /// the immediately-preceding chain effect published) and is zone-independent —
+    /// its members are addressed by identity, so cards the producer moved to exile
+    /// are read in place. Used by "deals damage equal to the total mana value of
+    /// those exiled cards" (Ensnared by the Mara — `Sum` over `ManaValue` of the
+    /// set the preceding `ExileTop` published).
+    TrackedSetAggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
     },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
@@ -8068,6 +8088,13 @@ pub enum Effect {
         /// Used for ETB choices that other abilities reference ("the chosen type/color").
         #[serde(default)]
         persist: bool,
+        /// CR 608.2d (override) + CR 701.9b (analogous): When `Random`, the game
+        /// selects the value uniformly at random (Strax "choose a player at
+        /// random") instead of `chooser`/controller announcing the choice per
+        /// CR 608.2d. Default `Chosen` preserves controller-choice. Serialized
+        /// as a type-tagged enum (omitted when `Chosen`).
+        #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+        selection: TargetSelectionMode,
     },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
@@ -8593,6 +8620,20 @@ pub enum Effect {
         /// CR 609.3: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
+        /// CR 608.2d (override): When `Random`, the game selects the card(s)
+        /// uniformly at random (River Song's Diary "choose one of them at
+        /// random") rather than `chooser` announcing the choice per CR 608.2d.
+        /// CR 701.9b (analogous): same random-selection idiom the engine already
+        /// uses for random discard. Orthogonal to `chooser` (who would otherwise
+        /// pick). Serialized as a bare `random` bool to match the
+        /// Discard/RevealHand card-data shape.
+        #[serde(
+            default,
+            with = "card_selection_bool_compat",
+            rename = "random",
+            skip_serializing_if = "CardSelectionMode::is_chosen"
+        )]
+        selection: CardSelectionMode,
         /// Additional validation rules for the chosen subset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
@@ -11233,6 +11274,12 @@ pub struct ModalChoice {
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
+    /// CR 700.2b (override) + CR 701.9b (analogous): When `Random`, the game
+    /// selects the mode(s) uniformly at random (Cult of Skaro "choose one at
+    /// random") instead of `chooser` choosing per CR 700.2a/700.2b. Default
+    /// `Chosen` preserves controller-choice; omitted from card-data when default.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub selection: TargetSelectionMode,
 }
 
 /// Selection constraints attached to a modal choice header.
@@ -11511,6 +11558,10 @@ pub struct AbilityDefinition {
     /// single authority for sorcery-speed timing. The legacy `sorcery_speed`
     /// JSON field is migrated into this `Vec` by the hand-written `Deserialize`.
     pub activation_restrictions: Vec<ActivationRestriction>,
+    /// CR 602.2a: Who may begin to activate this ability. `None` = only the
+    /// permanent's controller. `Some(All)` = any player. `Some(Opponent)` =
+    /// only opponents of the permanent's controller.
+    pub activator_filter: Option<PlayerFilter>,
     /// CR 602.1: Zone from which this ability can be activated.
     /// `None` = battlefield (default). `Some(Zone::Hand)` for Channel, Cycling, etc.
     pub activation_zone: Option<Zone>,
@@ -11631,6 +11682,8 @@ struct AbilityDefinitionRepr<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     activation_restrictions: &'a Vec<ActivationRestriction>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    activator_filter: &'a Option<PlayerFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     activation_zone: &'a Option<Zone>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ability_tag: &'a Option<AbilityTag>,
@@ -11693,6 +11746,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activator_filter,
             activation_zone,
             ability_tag,
             condition,
@@ -11730,6 +11784,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activator_filter,
             activation_zone,
             ability_tag,
             condition,
@@ -11810,6 +11865,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     activation_restrictions: Vec<ActivationRestriction>,
     #[serde(default)]
+    activator_filter: Option<PlayerFilter>,
+    #[serde(default)]
     activation_zone: Option<Zone>,
     #[serde(default)]
     ability_tag: Option<AbilityTag>,
@@ -11881,6 +11938,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             description: de.description,
             target_prompt: de.target_prompt,
             activation_restrictions,
+            activator_filter: de.activator_filter,
             activation_zone: de.activation_zone,
             ability_tag: de.ability_tag,
             condition: de.condition,
@@ -12015,6 +12073,7 @@ impl AbilityDefinition {
             description: None,
             target_prompt: None,
             activation_restrictions: Vec::new(),
+            activator_filter: None,
             activation_zone: None,
             ability_tag: None,
             condition: None,
@@ -12224,6 +12283,17 @@ pub enum AbilityCondition {
     ///     kicker" clauses. Database synthesis resolves this to `variant`
     ///     once the card's kicker declarations are visible.
     AdditionalCostPaid {
+        /// CR 608.2c + CR 115.1 + CR 113.7: which object's casting-time payments this
+        /// condition reads. `Source` (default, CR 113.7) = the resolving ability's own
+        /// SpellContext (every legacy kicker/Gift/Buyback/Casualty/Replicate card).
+        /// `Target` (CR 115.1) = the first object target's stamped payments — "counter
+        /// target spell if it was kicked" (Ertai's Trickery): "it" anaphors to the
+        /// countered spell (CR 608.2c, whose own example is a counter-target-spell rider).
+        #[serde(
+            default = "AbilityCondition::default_subject_source",
+            skip_serializing_if = "AbilityCondition::is_subject_source"
+        )]
+        subject: ObjectScope,
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12569,6 +12639,19 @@ impl AbilityCondition {
         *value == 1
     }
 
+    /// CR 113.7: Default `subject` for `AdditionalCostPaid` is `Source` — the
+    /// resolving ability reads its own SpellContext payments.
+    pub(crate) fn default_subject_source() -> ObjectScope {
+        ObjectScope::Source
+    }
+
+    /// Skip-serialization predicate: omit `subject` from JSON when it equals the
+    /// default (`Source`). Keeps card-data.json compact for the common case.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_subject_source(value: &ObjectScope) -> bool {
+        matches!(value, ObjectScope::Source)
+    }
+
     /// Construct the default-shape `AdditionalCostPaid` condition: any single
     /// optional-additional-cost payment was made. Equivalent to the legacy
     /// nullary `AdditionalCostPaid` variant; preserves call sites in
@@ -12577,6 +12660,7 @@ impl AbilityCondition {
     /// `game/effects/change_zone.rs` (Collect Evidence).
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Any,
             origin: None,
             origin_ordinal: None,
@@ -12590,6 +12674,7 @@ impl AbilityCondition {
     /// specific kicker variant being paid.
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12604,6 +12689,7 @@ impl AbilityCondition {
     /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12617,12 +12703,27 @@ impl AbilityCondition {
     /// payment count meeting a minimum.
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count,
+        }
+    }
+
+    /// CR 115.1 + CR 608.2c: "if it was kicked" where "it" = the resolving ability's
+    /// first object target (the countered spell), not the source.
+    pub fn additional_cost_paid_target() -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Target,
+            source: AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
         }
     }
 }
@@ -13422,6 +13523,14 @@ pub enum ReplacementCondition {
     /// "twice that many of each of those kinds of counters" doubling
     /// replacement) is the canonical case.
     ClassLevelGE { level: u8 },
+    /// CR 502.3 + CR 502.4: True only during the untap step. Permanents untap as
+    /// a turn-based action during the untap step (502.3) and no player receives
+    /// priority then (502.4), so the only `ProposedEvent::Untap` raised during
+    /// this phase is the turn-based untap. Gates an untap replacement ("if [X]
+    /// would untap during [its controller's / your] untap step, [effect]
+    /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
+    /// effect-untaps ("untap target creature") at other times.
+    DuringUntapStep,
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring

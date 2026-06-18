@@ -147,10 +147,13 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 
 // ─── Room Effects ───────────────────────────────────────────────────────────
 
+use crate::game::ability_utils::build_resolved_from_def;
+use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{
-    AbilityCondition, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ResolvedAbility,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityKind, CastingPermission, ContinuousModification, ControllerRef,
+    Duration, Effect, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+    ResolvedAbility, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -580,18 +583,9 @@ pub fn room_effects(
             ),
             vec![],
         ),
-        // 8: Throne of the Dead Three — complex multi-step effect, deferred
+        // 8: Throne of the Dead Three — reveal 10, put creature with counters, hexproof, shuffle
         (DungeonId::Undercity, 8) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Throne of the Dead Three".to_string(),
-                    description: Some(
-                        "Reveal the top ten cards of your library. Put a creature card from among them onto the battlefield with three +1/+1 counters on it. It gains hexproof until your next turn. Then shuffle.".to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
+            throne_of_dead_three(source_id, controller),
             vec![],
         ),
 
@@ -951,6 +945,74 @@ fn creature_token(
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+    }
+}
+
+/// Undercity room 8 (Throne of the Dead Three): reveal 10, put a creature from
+/// among them onto the battlefield with three +1/+1 counters, grant hexproof
+/// until your next turn, then shuffle.
+fn throne_of_dead_three(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    const ORACLE: &str = "Reveal the top ten cards of your library. Put a creature card from among them onto the battlefield with three +1/+1 counters on it. It gains hexproof until your next turn. Then shuffle.";
+    let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+    patch_throne_parsed_chain(build_resolved_from_def(&def, source_id, controller))
+}
+
+/// The oracle parser covers reveal / hexproof / shuffle but the dig-from-among form
+/// does not lift "with N +1/+1 counters on it" onto `Effect::Dig`. Wire the counter
+/// clause explicitly and retarget the hexproof grant at the dug creature (CR 608.2c).
+fn patch_throne_parsed_chain(mut root: ResolvedAbility) -> ResolvedAbility {
+    if !resolved_chain_contains(&root, |effect| {
+        matches!(
+            effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                ..
+            }
+        )
+    }) {
+        let tail = root.sub_ability.take();
+        let mut counters = simple(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: fixed(3),
+                target: TargetFilter::ParentTarget,
+            },
+            root.source_id,
+            root.controller,
+        );
+        counters.sub_ability = tail;
+        root.sub_ability = Some(Box::new(counters));
+    }
+    retarget_hexproof_to_parent(&mut root);
+    root
+}
+
+fn resolved_chain_contains(
+    ability: &ResolvedAbility,
+    mut pred: impl FnMut(&Effect) -> bool,
+) -> bool {
+    if pred(&ability.effect) {
+        return true;
+    }
+    ability
+        .sub_ability
+        .as_ref()
+        .is_some_and(|sub| resolved_chain_contains(sub, pred))
+}
+
+fn retarget_hexproof_to_parent(ability: &mut ResolvedAbility) {
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut ability.effect
+    {
+        for st in static_abilities.iter_mut() {
+            if matches!(st.affected, Some(TargetFilter::SelfRef)) {
+                st.affected = Some(TargetFilter::ParentTarget);
+            }
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        retarget_hexproof_to_parent(sub);
     }
 }
 
@@ -1445,6 +1507,83 @@ mod tests {
             room_name(DungeonId::DungeonOfTheMadMage, 8),
             "Mad Wizard's Lair"
         );
+    }
+
+    // ── Undercity room effect tests ─────────────────────────────────────
+
+    fn undercity_effect(room: u8) -> ResolvedAbility {
+        room_effects(DungeonId::Undercity, room, ObjectId(1), PlayerId(0)).0
+    }
+
+    fn assert_no_unimplemented_resolved(ability: &ResolvedAbility) {
+        assert!(
+            !matches!(ability.effect, Effect::Unimplemented { .. }),
+            "unexpected Unimplemented effect: {:?}",
+            ability.effect
+        );
+        if let Some(sub) = ability.sub_ability.as_ref() {
+            assert_no_unimplemented_resolved(sub);
+        }
+    }
+
+    fn assert_throne_room_chain(ability: &ResolvedAbility) {
+        assert_no_unimplemented_resolved(ability);
+        assert!(
+            matches!(
+                ability.effect,
+                Effect::Dig {
+                    reveal: true,
+                    count: QuantityExpr::Fixed { value: 10 },
+                    ..
+                }
+            ),
+            "Throne must reveal top ten, got {:?}",
+            ability.effect
+        );
+        assert!(
+            super::resolved_chain_contains(ability, |effect| matches!(
+                effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::ParentTarget,
+                }
+            )),
+            "Throne must put three +1/+1 counters on the dug creature, got {:?}",
+            ability
+        );
+        assert!(
+            super::resolved_chain_contains(ability, |effect| {
+                matches!(effect, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|st| {
+                    matches!(st.affected, Some(TargetFilter::ParentTarget))
+                        && st.modifications.iter().any(|m| matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Hexproof
+                            }
+                        ))
+                }))
+            }),
+            "Throne must grant hexproof to the dug creature, got {:?}",
+            ability
+        );
+        assert!(
+            super::resolved_chain_contains(ability, |effect| matches!(
+                effect,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            )),
+            "Throne must shuffle the controller's library, got {:?}",
+            ability
+        );
+    }
+
+    #[test]
+    fn room_effects_undercity_throne_of_dead_three() {
+        assert_throne_room_chain(&undercity_effect(8));
     }
 
     // ── Baldur's Gate Wilderness room effect tests ────────────────────
