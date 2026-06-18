@@ -34,7 +34,7 @@ fn elder_deep_fiend_cast_trigger_parses_up_to_four_multi_target() {
     let cast_trigger = parsed
         .triggers
         .iter()
-        .find(|t| matches!(t.mode, TriggerMode::SpellCast { .. }))
+        .find(|t| matches!(&t.mode, TriggerMode::SpellCast))
         .expect("Elder Deep-Fiend must have a When-you-cast trigger");
     let execute = cast_trigger
         .execute
