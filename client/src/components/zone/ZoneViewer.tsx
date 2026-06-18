@@ -15,6 +15,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import {
   getPlayerZoneIds,
   getWaitingForObjectChoiceIds,
+  isFaceDownExileCardVisibleToViewer,
   isLibraryCardRevealedToViewer,
 } from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
@@ -156,13 +157,26 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
+              // CR 406.3 + CR 702.75a + CR 702.143e: a face-down card sitting
+              // in the shared exile pile (Hideaway, Foretell) carries its real
+              // name/printed_ref in the raw single-player state regardless of
+              // viewer — `isFaceDownExileCardVisibleToViewer` is the client
+              // half of the engine's look-permission gate, so an opponent's
+              // hidden exile renders as a face-down placeholder instead of
+              // leaking its identity.
+              const isHiddenFromViewer =
+                zone === "exile" && obj.face_down && !isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
               return (
                 <ZoneCard
                   key={obj.id}
                   obj={obj}
                   isValidTarget={isValidTarget}
                   canCast={castActions.length > 0}
-                  castTitle={t("zone.castFromZone", { zone: zoneLabel, name: obj.name })}
+                  castTitle={t("zone.castFromZone", {
+                    zone: zoneLabel,
+                    name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
+                  })}
+                  hiddenFromViewer={isHiddenFromViewer}
                   onTarget={() => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })}
                   onCast={() => handleCast(obj, castActions)}
                 />
@@ -180,6 +194,7 @@ function ZoneCard({
   isValidTarget,
   canCast,
   castTitle,
+  hiddenFromViewer,
   onTarget,
   onCast,
 }: {
@@ -187,6 +202,7 @@ function ZoneCard({
   isValidTarget: boolean;
   canCast: boolean;
   castTitle: string;
+  hiddenFromViewer: boolean;
   onTarget: () => void;
   onCast: () => void;
 }) {
@@ -230,8 +246,13 @@ function ZoneCard({
           DFC / transformed / back-face cards (e.g. a transformed planeswalker),
           which then falls back to the broken-image div. In the zone strip that
           fallback is sized up to ~560px, so a failed image rendered "huge" with
-          text instead of art. */}
-      <CardImage {...objectImageProps(obj)} size="normal" />
+          text instead of art. `faceDown` overrides all of that with the shared
+          card-back placeholder (CardImage.tsx) whenever this viewer has no
+          look-permission on a face-down exile (see `hiddenFromViewer` above) —
+          it must NOT be the raw `obj.face_down`, which is also true for the
+          legitimate Hideaway/Foretell controller who the engine intends to
+          let see the real card. */}
+      <CardImage {...objectImageProps(obj)} size="normal" faceDown={hiddenFromViewer} />
       {canCast && !isValidTarget && (
         <>
           {/* Arena-style purple "playable" affordance — same treatment as the

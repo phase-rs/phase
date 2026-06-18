@@ -15,12 +15,14 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
 /// Ashaya's "Nontoken creatures you control are Forest lands" line.
 const ASHAYA: &str = "Ashaya, Soul of the Wild's power and toughness are each \
 equal to the number of lands you control.\nNontoken creatures you control are \
 Forest lands in addition to their other types.";
+const LANDFALL_DRAW: &str = "Whenever a land you control enters, draw a card.";
 
 /// CR 205.1b / CR 707.9d: Ashaya adds the Land type and Forest subtype "in
 /// addition to" the creature's existing types — the `AddType`/`AddSubtype`
@@ -136,4 +138,27 @@ fn ashaya_does_not_affect_opponent_creatures() {
         "Opponent's creature must NOT gain the Forest subtype, got {:?}",
         opponent.card_types.subtypes
     );
+}
+
+/// Issue #3675 — Ashaya + Lotus Cobra landfall interaction. When a nontoken
+/// creature enters the battlefield with Ashaya in play, it should trigger
+/// landfall abilities because Ashaya's layer effect adds the Land type.
+///
+#[test]
+fn ashaya_creature_etb_triggers_landfall() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_creature_from_oracle(P0, "Landfall Observer", 1, 1, LANDFALL_DRAW);
+    let entering_creature = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.add_card_to_library_top(P0, "Drawn Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(entering_creature).resolve();
+
+    outcome.assert_hand_drawn(P0, 1);
 }
