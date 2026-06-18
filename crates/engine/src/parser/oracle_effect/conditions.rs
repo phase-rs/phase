@@ -539,6 +539,18 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
     }
 }
 
+/// Strip optional punctuation/space between a parsed reflexive clause and its body.
+fn strip_reflexive_conditional_body_separator(input: &str) -> &str {
+    opt(alt((
+        tag::<_, _, OracleError<'_>>(", "),
+        tag(". "),
+        tag(" "),
+    )))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input)
+}
+
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -571,13 +583,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
         if let Ok((after_clause, (filter, _negated))) =
             crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(rest)
         {
-            // Strip leading punctuation/space between "this way" and the body.
-            // Possible separators: ", ", ". ", " ".
-            let body_lower = after_clause
-                .strip_prefix(", ") // allow-noncombinator: structural separator after parsed clause
-                .or_else(|| after_clause.strip_prefix(". ")) // allow-noncombinator: structural separator after parsed clause
-                .or_else(|| after_clause.strip_prefix(' ')) // allow-noncombinator: structural separator after parsed clause
-                .unwrap_or(after_clause);
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
                 Some(AbilityCondition::ZoneChangedThisWay { filter }),
@@ -590,11 +596,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                     rest,
                 )
             {
-                let body_lower = after_clause
-                    .strip_prefix(", ")
-                    .or_else(|| after_clause.strip_prefix(". "))
-                    .or_else(|| after_clause.strip_prefix(' '))
-                    .unwrap_or(after_clause);
+                let body_lower = strip_reflexive_conditional_body_separator(after_clause);
                 let offset = text.len() - body_lower.len();
                 return (
                     Some(AbilityCondition::ZoneChangedThisWay { filter }),
