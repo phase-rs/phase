@@ -12,13 +12,13 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
   useGameDispatch: () => dispatchMock,
 }));
 
-function makeObject(id: number, name: string): GameObject {
+function makeObject(id: number, name: string, zone: GameObject["zone"] = "Hand"): GameObject {
   return {
     id,
     card_id: id,
     owner: 0,
     controller: 0,
-    zone: "Hand",
+    zone,
     tapped: false,
     face_down: false,
     flipped: false,
@@ -157,12 +157,13 @@ describe("Discard cost modal", () => {
         data: {
           player: 0,
           kind: { type: "Sacrifice" },
-          choices: [],
+          choices: [10],
           count: 1,
           min_count: 0,
           resume: { type: "Spell", Spell: {} },
         },
       },
+      { 10: makeObject(10, "Food Token", "Battlefield") },
     ],
     [
       "PayCost ReturnToHand",
@@ -171,12 +172,13 @@ describe("Discard cost modal", () => {
         data: {
           player: 0,
           kind: { type: "ReturnToHand" },
-          choices: [],
+          choices: [10],
           count: 1,
           min_count: 0,
           resume: { type: "Spell", Spell: {} },
         },
       },
+      { 10: makeObject(10, "Kor Skyfisher", "Battlefield") },
     ],
     [
       "BlightChoice",
@@ -189,6 +191,7 @@ describe("Discard cost modal", () => {
           pending_cast: {},
         },
       },
+      {},
     ],
     [
       "HarmonizeTapChoice",
@@ -200,9 +203,10 @@ describe("Discard cost modal", () => {
           pending_cast: {},
         },
       },
+      {},
     ],
-  ])("suppresses the modal for board-native %s", (_label, waitingFor) => {
-    setWaitingFor(waitingFor as unknown as WaitingFor);
+  ])("suppresses the modal for board-native %s", (_label, waitingFor, objects) => {
+    setWaitingFor(waitingFor as unknown as WaitingFor, objects);
 
     render(<CardChoiceModal />);
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameAction, GameObject, GameState, PlayerId } from "../../adapter/types";
+import type { GameAction, GameObject, GameState, PlayerId, WaitingFor } from "../../adapter/types";
 import {
   boardChoiceSelectedPower,
   buildBoardChoiceAction,
@@ -187,25 +187,31 @@ describe("getBattlefieldSacrificeChoice", () => {
 
 describe("getBoardChoiceView", () => {
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
-    const choice = getBoardChoiceView({
-      type: "PayCost",
-      data: {
-        player: 0,
-        kind: { type: "ReturnToHand" },
-        choices: [4, 5],
-        count: 1,
-        min_count: 1,
-        resume: {
-          type: "Spell",
-          Spell: {
-            object_id: 99,
-            card_id: 990,
-            ability: { targets: [] },
-            cost: { type: "NoCost" },
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 1,
+          min_count: 1,
+          resume: {
+            type: "Spell",
+            Spell: {
+              object_id: 99,
+              card_id: 990,
+              ability: { targets: [] },
+              cost: { type: "NoCost" },
+            },
           },
         },
       },
-    });
+      {
+        4: { id: 4, zone: "Battlefield" },
+        5: { id: 5, zone: "Battlefield" },
+      } as unknown as Record<number, GameObject>,
+    );
 
     expect(choice).toMatchObject({
       player: 0,
@@ -290,6 +296,27 @@ describe("getBoardChoiceView", () => {
           resume: { type: "ManaAbility", ManaAbility: {} },
         },
       }),
+    ).toBeNull();
+  });
+
+  it("keeps PayCost choices modal-only unless every candidate is on the battlefield", () => {
+    const waitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "ExilePermanent", filter: null },
+        choices: [4, 5],
+        count: 1,
+        min_count: 1,
+        resume: { type: "ManaAbility", ManaAbility: {} },
+      },
+    } as unknown as WaitingFor;
+
+    expect(
+      getBoardChoiceView(waitingFor, {
+        4: { id: 4, zone: "Battlefield" },
+        5: { id: 5, zone: "Graveyard" },
+      } as unknown as Record<number, GameObject>),
     ).toBeNull();
   });
 });

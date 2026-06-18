@@ -136,12 +136,18 @@ describe("TargetingOverlay", () => {
   it("allows cancelling tap-creatures spell costs", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
+      objects: {
+        "7": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 7,
+          name: "Memnite",
+        }),
+      },
       waiting_for: {
         type: "PayCost",
         data: {
           player: 0,
           kind: { type: "TapCreatures" },
-          choices: [],
+          choices: [7],
           count: 1,
           min_count: 0,
           resume: {

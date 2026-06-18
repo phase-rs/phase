@@ -270,9 +270,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
   const boardChoice = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor);
+    const choice = getBoardChoiceView(waitingFor, gameObjects);
     return choice?.player === playerId ? choice : null;
-  }, [playerId, waitingFor]);
+  }, [gameObjects, playerId, waitingFor]);
   const equipTargetChoice = useGameStore((s) =>
     s.waitingFor?.type === "EquipTarget" && s.waitingFor.data.player === playerId
       ? s.waitingFor.data

@@ -130,7 +130,7 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);

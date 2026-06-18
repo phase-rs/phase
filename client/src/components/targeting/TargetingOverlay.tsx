@@ -49,7 +49,7 @@ export function TargetingOverlay() {
     : undefined;
   const isTapCreatureChoice =
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
-  const boardChoice = getBoardChoiceView(waitingFor);
+  const boardChoice = getBoardChoiceView(waitingFor, objects);
   const isBoardChoice = boardChoice != null;
   const selectedBoardChoiceIds = useMemo(
     () => boardChoice

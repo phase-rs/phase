@@ -1,11 +1,10 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
+import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { GameObject } from "../../adapter/types.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
 import {
   boardChoiceMaxSelection,
@@ -84,6 +83,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const setGroupSelectedCards = useUiStore((s) => s.setGroupSelectedCards);
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const gameObjects = useGameStore((s) => s.gameState?.objects);
   const {
     boardChoiceObjectIds,
     committedAttackerIds,
@@ -104,7 +104,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     if (renderMode !== "collapsed") return null;
     if (waitingForPlayer(waitingFor) !== playerId) return null;
 
-    const boardChoice = getBoardChoiceView(waitingFor);
+    const boardChoice = getBoardChoiceView(waitingFor, gameObjects);
     if (boardChoice) {
       const eligibleIds = group.ids.filter((id) => boardChoiceObjectIds.has(id));
       return eligibleIds.length > 0
@@ -155,6 +155,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     boardChoiceObjectIds,
     combatClickHandler,
     combatMode,
+    gameObjects,
     group.ids,
     playerId,
     renderMode,

@@ -249,6 +249,7 @@ function confirmedCountSelection(count: number, minCount: number): BoardChoiceSe
 
 export function getBoardChoiceView(
   waitingFor: WaitingFor | null | undefined,
+  objects?: Record<ObjectId, GameObject | undefined>,
 ): BoardChoiceView | null {
   switch (waitingFor?.type) {
     case "EffectZoneChoice": {
@@ -276,6 +277,7 @@ export function getBoardChoiceView(
       };
     }
     case "PayCost": {
+      if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
       switch (waitingFor.data.kind.type) {
         case "Sacrifice":
           return {
@@ -398,6 +400,25 @@ export function getBoardChoiceView(
       };
     default:
       return null;
+  }
+}
+
+function isBattlefieldCostChoice(
+  waitingFor: Extract<WaitingFor, { type: "PayCost" }>,
+  objects?: Record<ObjectId, GameObject | undefined>,
+): boolean {
+  switch (waitingFor.data.kind.type) {
+    case "Sacrifice":
+    case "ReturnToHand":
+    case "ExilePermanent":
+    case "TapCreatures":
+      return (
+        objects != null &&
+        waitingFor.data.choices.length > 0 &&
+        waitingFor.data.choices.every((id) => objects[id]?.zone === "Battlefield")
+      );
+    default:
+      return false;
   }
 }
 

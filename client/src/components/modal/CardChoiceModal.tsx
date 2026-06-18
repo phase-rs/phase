@@ -112,6 +112,7 @@ export function CardChoiceModal() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (!waitingFor) return null;
 
@@ -150,7 +151,7 @@ export function CardChoiceModal() {
       return <ChooseFromZoneModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
-      if (getBoardChoiceView(waitingFor)) return null;
+      if (getBoardChoiceView(waitingFor, objects)) return null;
       return <EffectZoneModal data={waitingFor.data} />;
     case "DrawnThisTurnTopdeckChoice":
       if (!canActForWaitingState) return null;
@@ -178,7 +179,7 @@ export function CardChoiceModal() {
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
     case "PayCost":
       if (!canActForWaitingState) return null;
-      if (getBoardChoiceView(waitingFor)) return null;
+      if (getBoardChoiceView(waitingFor, objects)) return null;
       return <PayCostDispatch data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
