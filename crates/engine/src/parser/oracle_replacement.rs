@@ -4769,11 +4769,12 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
         let effect = effect
             .strip_suffix(" instead")
             .map_or(effect, |trimmed| trimmed.trim_end());
-        // Strip leading "instead ..." marker (e.g., "instead you draw two cards").
-        // This form appears when the subject follows the replacement word, as in
-        // Blood Scrivener: "..., instead you draw two cards and you lose 1 life."
+        // CR 614.1a: Strip leading "instead ..." marker (e.g., "instead you
+        // draw two cards"). This form appears when the subject follows the
+        // replacement word, as in Blood Scrivener: "..., instead you draw two
+        // cards and you lose 1 life."
         let effect = effect
-            .strip_prefix("instead ")
+            .strip_prefix("instead ") // allow-noncombinator: TextPair structural cleanup on an already-extracted replacement effect fragment, mirroring the trailing "instead" strip above.
             .map_or(effect, |stripped| stripped.trim_start());
         if !effect.original.is_empty() {
             return Some(effect.original.to_string());
