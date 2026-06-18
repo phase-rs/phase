@@ -1047,6 +1047,7 @@ pub fn random_select_modal_indices(
     unavailable_modes: &[usize],
 ) -> Option<Vec<usize>> {
     use rand::seq::{IndexedRandom, SliceRandom}; // rand 0.9
+    use rand::Rng; // random_bool for the "up to" stop coin flip
 
     let legal: Vec<usize> = (0..modal.mode_count)
         .filter(|idx| !unavailable_modes.contains(idx))
@@ -1054,6 +1055,40 @@ pub fn random_select_modal_indices(
     if legal.is_empty() {
         // CR 603.3c: No legal mode — the ability is removed from the stack.
         return None;
+    }
+
+    if !modal.mode_pawprints.is_empty() {
+        // CR 700.2i + CR 700.2b: random selection of a pawprint points-budget
+        // modal respects the budget (`max_choices` is the point budget here, not
+        // a mode count). Draw incrementally among modes that still fit, stopping
+        // once `min_choices` is met and an "up to" coin flip lands, or when no
+        // legal mode fits the remaining budget. No in-corpus card uses random
+        // selection of a pawprint modal, so the exact stop-distribution is
+        // unspecified by the CR; the only invariant the rules pin down is that
+        // the result must be budget-legal (asserted below).
+        let budget = modal.max_choices as u32;
+        let mut spent = 0u32;
+        let mut indices: Vec<usize> = Vec::new();
+        loop {
+            let affordable: Vec<usize> = legal
+                .iter()
+                .copied()
+                .filter(|&i| spent + u32::from(modal.mode_pawprints[i]) <= budget)
+                .filter(|&i| modal.allow_repeat_modes || !indices.contains(&i))
+                .collect();
+            if affordable.is_empty() {
+                break;
+            }
+            let pick = *affordable.choose(&mut state.rng)?;
+            spent += u32::from(modal.mode_pawprints[pick]);
+            indices.push(pick);
+            // "up to" — once the minimum is met, randomly decide to stop.
+            if indices.len() >= modal.min_choices && state.rng.random_bool(0.5) {
+                break;
+            }
+        }
+        debug_assert!(pawprint_budget_satisfied(modal, &indices));
+        return Some(indices);
     }
 
     // CR 700.2d: Without repeats the chosen count cannot exceed the legal-set
@@ -4950,20 +4985,53 @@ fn minimum_targets_after_deferred_effect(
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
 /// as part of casting. If a mode would be illegal, it can't be chosen.
+/// CR 700.2i: For a pawprint points-budget modal, returns whether a chosen
+/// index sequence respects the budget: Σ mode_pawprints[idx] ≤ max_choices.
+/// Returns `true` unconditionally for non-pawprint modals (`mode_pawprints`
+/// empty) so callers can apply it uniformly.
+///
+/// Indexing `mode_pawprints[i]` is safe at every call site: `validate_modal_indices`
+/// runs the per-index range check (`idx < mode_count`, which equals
+/// `mode_pawprints.len()` for pawprint modals) before invoking this; the candidate
+/// generator and the random path only ever produce indices in `0..mode_count`.
+pub fn pawprint_budget_satisfied(modal: &ModalChoice, indices: &[usize]) -> bool {
+    if modal.mode_pawprints.is_empty() {
+        return true;
+    }
+    let spent: u32 = indices
+        .iter()
+        .map(|&i| u32::from(modal.mode_pawprints[i]))
+        .sum();
+    spent <= modal.max_choices as u32
+}
+
 /// CR 700.2d: A player normally can't choose the same mode more than once.
 pub fn validate_modal_indices(
     modal: &ModalChoice,
     indices: &[usize],
     unavailable_modes: &[usize],
 ) -> Result<(), EngineError> {
-    if indices.len() < modal.min_choices || indices.len() > modal.max_choices {
+    // Lower bound (min_choices) applies to both modal kinds.
+    if indices.len() < modal.min_choices {
         return Err(EngineError::InvalidAction(format!(
-            "Must choose between {} and {} modes, got {}",
+            "Must choose at least {} modes, got {}",
             modal.min_choices,
-            modal.max_choices,
             indices.len()
         )));
     }
+    if modal.mode_pawprints.is_empty() {
+        // CR 700.2d: count-capped modal — the upper bound is a mode count.
+        if indices.len() > modal.max_choices {
+            return Err(EngineError::InvalidAction(format!(
+                "Must choose between {} and {} modes, got {}",
+                modal.min_choices,
+                modal.max_choices,
+                indices.len()
+            )));
+        }
+    }
+    // CR 700.2i: for pawprint modals the count-cap is REPLACED by the budget gate
+    // below (not augmented), so `max_choices` is reinterpreted as the point budget.
 
     let mut seen = std::collections::HashSet::new();
     for &idx in indices {
@@ -4985,6 +5053,15 @@ pub fn validate_modal_indices(
                 "Mode index {idx} is unavailable"
             )));
         }
+    }
+
+    // CR 700.2i: budget check runs AFTER the per-index range check guarantees
+    // every `idx < mode_count`, so `pawprint_budget_satisfied` can index safely.
+    if !pawprint_budget_satisfied(modal, indices) {
+        return Err(EngineError::InvalidAction(format!(
+            "Pawprint budget exceeded: chosen modes total more than {} {{P}}",
+            modal.max_choices
+        )));
     }
 
     Ok(())
@@ -5068,6 +5145,54 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
     use crate::types::{FormatConfig, GameAction};
+
+    /// A pawprint points-budget modal mirroring a "Season of …" card: three
+    /// modes weighted {P}/{P}{P}/{P}{P}{P}, budget 5, repeats allowed.
+    fn season_pawprint_modal() -> ModalChoice {
+        ModalChoice {
+            min_choices: 0,
+            max_choices: 5, // CR 700.2i: the point budget, not a mode count.
+            mode_count: 3,
+            allow_repeat_modes: true,
+            mode_pawprints: vec![1, 2, 3],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pawprint_budget_satisfied_sums_chosen_weights() {
+        let modal = season_pawprint_modal();
+        // CR 700.2i: Σ weight ≤ budget.
+        assert!(pawprint_budget_satisfied(&modal, &[0, 0, 0, 0, 0])); // Σ = 5
+        assert!(pawprint_budget_satisfied(&modal, &[2, 0, 0])); // Σ = 5
+        assert!(!pawprint_budget_satisfied(&modal, &[2, 2])); // Σ = 6
+        assert!(!pawprint_budget_satisfied(&modal, &[2, 0, 0, 0])); // Σ = 6
+    }
+
+    #[test]
+    fn pawprint_budget_satisfied_is_vacuous_for_non_pawprint_modals() {
+        // Empty `mode_pawprints` → always true (callers apply it uniformly).
+        let plain = ModalChoice {
+            min_choices: 1,
+            max_choices: 2,
+            mode_count: 3,
+            ..Default::default()
+        };
+        assert!(pawprint_budget_satisfied(&plain, &[0, 1, 2, 2, 2]));
+    }
+
+    #[test]
+    fn validate_modal_indices_enforces_pawprint_budget_not_count() {
+        let modal = season_pawprint_modal();
+        // Five 1-point modes is COUNT 5 > a naive 3-mode cap, but budget-legal.
+        assert!(validate_modal_indices(&modal, &[0, 0, 0, 0, 0], &[]).is_ok());
+        // Overspend by budget is rejected even though the count (2) is small.
+        assert!(validate_modal_indices(&modal, &[2, 2], &[]).is_err());
+        // Empty selection is legal (min_choices == 0).
+        assert!(validate_modal_indices(&modal, &[], &[]).is_ok());
+        // Out-of-range index is caught before the budget indexing.
+        assert!(validate_modal_indices(&modal, &[3], &[]).is_err());
+    }
 
     /// Issue: Alela, Cunning Conqueror hung the controller in a 4-player game.
     /// "Whenever one or more Faeries you control deal combat damage to a player,

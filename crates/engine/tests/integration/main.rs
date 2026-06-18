@@ -354,6 +354,7 @@ mod saddle_state_model;
 mod sba_lethal_damage_redirect_single_application;
 mod scarab_god_regression;
 mod screaming_nemesis_life_lock;
+mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;
 mod serras_emissary_chosen_card_type_protection;
 mod skullwinder_chosen_opponent;

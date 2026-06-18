@@ -23426,6 +23426,7 @@ mod push_first_contract_tests {
             allow_repeat_modes: false,
             constraints: vec![],
             mode_costs: vec![],
+            mode_pawprints: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -23537,6 +23538,7 @@ mod push_first_contract_tests {
             allow_repeat_modes: false,
             constraints: vec![],
             mode_costs: vec![],
+            mode_pawprints: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             // The axis under test: the game selects the mode at random.

@@ -838,7 +838,10 @@ fn finish_pending_cost_or_cast(
             &modal,
             &pending.ability.context,
         );
-        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
+        if capped.mode_pawprints.is_empty() {
+            capped.max_choices = capped.max_choices.min(capped.mode_count);
+        }
         pending.target_constraints = target_constraints_from_modal(&capped);
         let mode_abilities = state
             .objects
@@ -2538,7 +2541,10 @@ pub(super) fn begin_modal_additional_cost_declaration(
     else {
         let mut capped =
             modal_choice_for_player(state, player, object_id, &modal, &ability.context);
-        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
+        if capped.mode_pawprints.is_empty() {
+            capped.max_choices = capped.max_choices.min(capped.mode_count);
+        }
         let mut pending = PendingCast::new(object_id, card_id, ability, cost);
         pending.base_cost = base_cost;
         pending.casting_variant = casting_variant;

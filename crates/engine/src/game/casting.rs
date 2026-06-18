@@ -8485,7 +8485,7 @@ fn continue_with_prepared(
                     events,
                 );
             }
-            // Cap max_choices to actual mode count
+            // Cap max_choices to actual mode count for count-capped modals.
             let mut capped = modal_choice_for_player(
                 state,
                 player,
@@ -8493,7 +8493,14 @@ fn continue_with_prepared(
                 modal_choice,
                 &crate::types::ability::SpellContext::default(),
             );
-            capped.max_choices = capped.max_choices.min(capped.mode_count);
+            // CR 700.2i: for a pawprint points-budget modal, `max_choices` is the
+            // POINT BUDGET (Σ of chosen weights), NOT a mode count — do NOT clamp
+            // it to `mode_count`. Mirrors the same discriminant branch in
+            // `build_modal_choice` (parser) so the runtime prompt carries the full
+            // budget (e.g. 5) rather than a count cap (3).
+            if capped.mode_pawprints.is_empty() {
+                capped.max_choices = capped.max_choices.min(capped.mode_count);
+            }
             let target_constraints = target_constraints_from_modal(&capped);
 
             // Build a placeholder resolved ability -- will be replaced after mode selection

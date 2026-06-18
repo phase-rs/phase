@@ -11276,6 +11276,12 @@ pub struct ModalChoice {
     /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_costs: Vec<ManaCost>,
+    /// CR 700.2i: Per-mode pawprint weight for points-budget modals ("up to N {P}
+    /// worth of modes"). Empty for all non-pawprint modals. When non-empty, the
+    /// modal is a pawprint budget modal and `max_choices` is reinterpreted as the
+    /// point budget (Σ of chosen `mode_pawprints` ≤ `max_choices`), NOT a mode count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_pawprints: Vec<u8>,
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entwine_cost: Option<ManaCost>,

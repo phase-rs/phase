@@ -1063,6 +1063,12 @@ export interface ModalChoice {
   allow_repeat_modes: boolean;
   /** Per-mode additional mana costs (Spree). Empty/absent for standard modal spells. */
   mode_costs?: ManaCost[];
+  /**
+   * CR 700.2i: Per-mode pawprint weights for points-budget modals ("up to N {P}
+   * worth of modes"). Empty/absent for non-pawprint modals. When present,
+   * `max_choices` is the point budget (Σ of chosen weights ≤ budget), not a count.
+   */
+  mode_pawprints?: number[];
   constraints?: Array<{ type: string }>;
 }
 
