@@ -60,6 +60,7 @@ fn expected_policies(kind: FeatureKind) -> &'static [&'static str] {
         FeatureKind::Equipment => &["EquipmentPayoff"],
         FeatureKind::Blink => &["BlinkPayoff"],
         FeatureKind::Mill => &["MillPayoff"],
+        FeatureKind::Energy => &["EnergyPayoff"],
     }
 }
 

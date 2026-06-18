@@ -1,11 +1,19 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import {
+  boardChoiceSelectedPower,
+  buildBoardChoiceAction,
+  canConfirmBoardChoice,
+  getBoardChoiceView,
+  isBoardChoiceImmediate,
+  type BoardChoiceView,
+} from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import type { GameObject } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
@@ -41,6 +49,14 @@ export function TargetingOverlay() {
     : undefined;
   const isTapCreatureChoice =
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
+  const boardChoice = getBoardChoiceView(waitingFor);
+  const isBoardChoice = boardChoice != null;
+  const selectedBoardChoiceIds = useMemo(
+    () => boardChoice
+      ? selectedCardIds.filter((id) => boardChoice.objectIds.includes(id))
+      : [],
+    [boardChoice, selectedCardIds],
+  );
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
   const currentTargetSlot = isCopyRetarget
@@ -48,21 +64,19 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
-  const sourceId = waitingFor?.type === "TriggerTargetSelection"
-    ? waitingFor.data.source_id
-    : waitingFor?.type === "TargetSelection"
-      ? waitingFor.data.pending_cast?.object_id
-      : waitingFor?.type === "ExploreChoice"
-        ? waitingFor.data.source_id
-      : waitingFor?.type === "PopulateChoice"
-        ? waitingFor.data.source_id
-      : waitingFor?.type === "ReturnAsAuraTarget"
-        ? waitingFor.data.source_id
-      : waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures"
-        ? waitingFor.data.resume.type === "ManaAbility"
-          ? (waitingFor.data.resume.ManaAbility as { source_id?: number } | undefined)?.source_id
-          : (waitingFor.data.resume.Spell as { object_id?: number } | undefined)?.object_id
-      : undefined;
+  const sourceId = boardChoice?.sourceId ?? (
+    waitingFor?.type === "TriggerTargetSelection"
+      ? waitingFor.data.source_id
+      : waitingFor?.type === "TargetSelection"
+        ? waitingFor.data.pending_cast?.object_id
+        : waitingFor?.type === "ExploreChoice"
+          ? waitingFor.data.source_id
+        : waitingFor?.type === "PopulateChoice"
+          ? waitingFor.data.source_id
+        : waitingFor?.type === "ReturnAsAuraTarget"
+          ? waitingFor.data.source_id
+        : undefined
+  );
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
 
   const inferredPrompt = buildInferredTargetPrompt({
@@ -94,16 +108,31 @@ export function TargetingOverlay() {
     dispatch({ type: "SelectCards", data: { cards: selectedCardIds } });
   }, [dispatch, selectedCardIds]);
 
+  const handleConfirmBoardChoice = useCallback(() => {
+    if (!boardChoice) return;
+    dispatch(buildBoardChoiceAction(boardChoice, selectedBoardChoiceIds));
+  }, [boardChoice, dispatch, selectedBoardChoiceIds]);
+
+  const handleSkipBoardChoice = useCallback(() => {
+    if (!boardChoice?.skipAction) return;
+    dispatch(boardChoice.skipAction);
+  }, [boardChoice, dispatch]);
+
+  const handleCancelBoardChoice = useCallback(() => {
+    if (!boardChoice?.cancelAction) return;
+    dispatch(boardChoice.cancelAction);
+  }, [boardChoice, dispatch]);
+
   useEffect(() => {
-    if (!isTapCreatureChoice) {
+    if (!isBoardChoice) {
       clearSelectedCards();
       return;
     }
     clearSelectedCards();
     return () => clearSelectedCards();
-  }, [clearSelectedCards, isTapCreatureChoice]);
+  }, [clearSelectedCards, isBoardChoice, waitingFor]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isPopulateChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isPopulateChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -153,6 +182,8 @@ export function TargetingOverlay() {
                 ? (retargetSpellName
                     ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
                     : t("targeting.chooseNewTarget"))
+              : boardChoice
+                ? boardChoicePrompt(boardChoice, selectedBoardChoiceIds, objects, t)
               : isTapCreatureChoice
                 ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
               : inferredPrompt ?? (
@@ -171,8 +202,9 @@ export function TargetingOverlay() {
         {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
 
         <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
-          {(waitingFor.type === "TargetSelection" ||
-            (waitingFor.type === "PayCost" &&
+          {(waitingFor?.type === "TargetSelection" ||
+            (!boardChoice &&
+              waitingFor?.type === "PayCost" &&
               waitingFor.data.kind.type === "TapCreatures" &&
               waitingFor.data.resume.type === "Spell")) && (
             <button
@@ -182,13 +214,38 @@ export function TargetingOverlay() {
               {t("common:actions.cancel")}
             </button>
           )}
-          {isTapCreatureChoice && (
+          {!boardChoice && isTapCreatureChoice && (
             <button
               onClick={handleConfirmTap}
               disabled={selectedCardIds.length !== waitingFor.data.count}
               className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400"
             >
               {t("targeting.confirmTap", { selected: selectedCardIds.length, count: waitingFor.data.count })}
+            </button>
+          )}
+          {boardChoice?.cancelAction && (
+            <button
+              onClick={handleCancelBoardChoice}
+              className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
+            >
+              {t("common:actions.cancel")}
+            </button>
+          )}
+          {boardChoice && !isBoardChoiceImmediate(boardChoice) && (
+            <button
+              onClick={handleConfirmBoardChoice}
+              disabled={!canConfirmBoardChoice(boardChoice, selectedBoardChoiceIds, objects)}
+              className={`${boardChoiceConfirmClass(boardChoice)} rounded-lg px-6 py-2 font-semibold text-gray-100 shadow-lg transition disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400`}
+            >
+              {boardChoiceConfirmLabel(boardChoice, selectedBoardChoiceIds, objects, t)}
+            </button>
+          )}
+          {boardChoice?.skipAction && (
+            <button
+              onClick={handleSkipBoardChoice}
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+            >
+              {t("boardChoice.skip")}
             </button>
           )}
           {canKeepCurrentTargets && (
@@ -310,4 +367,106 @@ function inferTargetNoun(
     return t("targeting.nounPlaneswalker");
   }
   return t("targeting.nounTargetPermanent");
+}
+
+function boardChoicePrompt(
+  choice: BoardChoiceView,
+  selectedIds: number[],
+  objects: Record<number, GameObject> | undefined,
+  t: TFunction<"game">,
+): string {
+  const action = t(`boardChoice.actions.${choice.intent}`);
+  switch (choice.selection.type) {
+    case "single":
+      return t("boardChoice.prompt.single", { action });
+    case "exactCount":
+      return t("boardChoice.prompt.exactCount", {
+        action,
+        count: choice.selection.count,
+      });
+    case "rangeCount":
+      return choice.selection.min > 0
+        ? t("boardChoice.prompt.rangeCount", {
+            action,
+            min: choice.selection.min,
+            count: choice.selection.max,
+          })
+        : t("boardChoice.prompt.upToCount", {
+            action,
+            count: choice.selection.max,
+          });
+    case "totalPowerAtLeast":
+      return t("boardChoice.prompt.totalPower", {
+        action,
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        required: choice.selection.power,
+      });
+  }
+}
+
+function boardChoiceConfirmLabel(
+  choice: BoardChoiceView,
+  selectedIds: number[],
+  objects: Record<number, GameObject> | undefined,
+  t: TFunction<"game">,
+): string {
+  switch (choice.selection.type) {
+    case "single":
+      return t("boardChoice.confirm");
+    case "exactCount":
+      if (choice.intent === "tap") {
+        return t("targeting.confirmTap", {
+          selected: selectedIds.length,
+          count: choice.selection.count,
+        });
+      }
+      if (choice.intent === "sacrifice") {
+        return t("targeting.confirmSacrifice", {
+          selected: selectedIds.length,
+          count: choice.selection.count,
+        });
+      }
+      return t("boardChoice.confirmCount", {
+        selected: selectedIds.length,
+        count: choice.selection.count,
+      });
+    case "rangeCount":
+      if (selectedIds.length === 0 && choice.selection.min === 0) {
+        return t("boardChoice.skip");
+      }
+      if (choice.intent === "sacrifice") {
+        return t("targeting.confirmSacrifice", {
+          selected: selectedIds.length,
+          count: choice.selection.max,
+        });
+      }
+      return t("boardChoice.confirmCount", {
+        selected: selectedIds.length,
+        count: choice.selection.max,
+      });
+    case "totalPowerAtLeast":
+      return t("boardChoice.confirmPower", {
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        required: choice.selection.power,
+      });
+  }
+}
+
+function boardChoiceConfirmClass(choice: BoardChoiceView): string {
+  switch (choice.intent) {
+    case "sacrifice":
+      return "bg-red-700 hover:bg-red-600";
+    case "tap":
+      return "bg-emerald-700 hover:bg-emerald-600";
+    case "blight":
+      return "bg-purple-700 hover:bg-purple-600";
+    case "ringBearer":
+      return "bg-amber-700 hover:bg-amber-600";
+    case "return":
+    case "exile":
+    case "crew":
+    case "saddle":
+    case "station":
+      return "bg-sky-700 hover:bg-sky-600";
+  }
 }

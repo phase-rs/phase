@@ -154,6 +154,51 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").toMatch(/fixed/);
   });
 
+  it("anchors battlefield sacrifice choices but leaves them click-through", () => {
+    setWaitingFor({
+      type: "EffectZoneChoice",
+      data: {
+        player: 0,
+        cards: [1],
+        count: 1,
+        source_id: 99,
+        effect_kind: "Sacrifice",
+        zone: "Battlefield",
+        destination: null,
+      },
+    } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it("anchors ward sacrifice choices but leaves them click-through", () => {
+    setWaitingFor({
+      type: "WardSacrificeChoice",
+      data: {
+        player: 0,
+        permanents: [1],
+        pending_effect: {},
+        remaining: 1,
+      },
+    } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
     setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(

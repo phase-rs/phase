@@ -14,7 +14,7 @@
 
 use lobby_broker::{
     parse_lobby_client_message, Broker, BrokerEnv, ConnState, LobbyClientMessage,
-    LobbyServerMessage, Outbound, ParsedFrame,
+    LobbyServerMessage, Outbound, ParsedFrame, PROTOCOL_VERSION,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -36,13 +36,17 @@ impl BrokerEnv for WorkerEnv {
 
     fn new_token(&self) -> String {
         let mut rng = rand::rng();
-        (0..32).map(|_| format!("{:x}", rng.random_range(0u8..16))).collect()
+        (0..32)
+            .map(|_| format!("{:x}", rng.random_range(0u8..16)))
+            .collect()
     }
 
     fn new_game_code(&self) -> String {
         let mut rng = rand::rng();
         let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".chars().collect();
-        (0..6).map(|_| chars[rng.random_range(0..chars.len())]).collect()
+        (0..6)
+            .map(|_| chars[rng.random_range(0..chars.len())])
+            .collect()
     }
 }
 
@@ -136,7 +140,9 @@ impl WasmBroker {
     /// Fresh empty broker — cold start with no stored snapshot.
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmBroker {
-        WasmBroker { inner: Broker::new() }
+        WasmBroker {
+            inner: Broker::new(),
+        }
     }
 
     /// Restore from a DO-storage snapshot. Falls back to an empty broker if the
@@ -145,7 +151,9 @@ impl WasmBroker {
     pub fn from_snapshot(json: &str) -> WasmBroker {
         match serde_json::from_str::<Broker>(json) {
             Ok(inner) => WasmBroker { inner },
-            Err(_) => WasmBroker { inner: Broker::new() },
+            Err(_) => WasmBroker {
+                inner: Broker::new(),
+            },
         }
     }
 
@@ -167,7 +175,9 @@ impl WasmBroker {
     /// attachment, `now_ms` is JS `Date.now()`. Returns a [`CallResult`] as JSON.
     pub fn handle(&mut self, conn_json: &str, raw_frame: &str, now_ms: f64) -> String {
         let mut conn: ConnState = serde_json::from_str(conn_json).unwrap_or_default();
-        let env = WorkerEnv { now_ms: now_ms as u64 };
+        let env = WorkerEnv {
+            now_ms: now_ms as u64,
+        };
 
         let (outbounds, dirty, reject) = match parse_lobby_client_message(raw_frame) {
             ParsedFrame::Message(msg) => {
@@ -189,7 +199,12 @@ impl WasmBroker {
             }
         };
 
-        result_json(CallResult { conn, outbounds: to_dtos(outbounds), dirty, reject })
+        result_json(CallResult {
+            conn,
+            outbounds: to_dtos(outbounds),
+            dirty,
+            reject,
+        })
     }
 
     /// Socket-close teardown: release the connection's seat reservations and
@@ -199,14 +214,21 @@ impl WasmBroker {
         let outbounds = self.inner.on_disconnect(&mut conn);
         // A close releases reservations / removes a hosted entry — treat as a
         // mutation so the shell snapshots (cheap: close is low-frequency).
-        result_json(CallResult { conn, outbounds: to_dtos(outbounds), dirty: true, reject: None })
+        result_json(CallResult {
+            conn,
+            outbounds: to_dtos(outbounds),
+            dirty: true,
+            reject: None,
+        })
     }
 
     /// Staleness reaper, driven by a DO alarm (a hibernated DO has no tokio
     /// interval). Returns the ordered `Outbound`s (a `LobbyGameRemoved` per
     /// reaped entry) as a JSON array — there is no connection scope here.
     pub fn reap_expired(&mut self, timeout_secs: f64, now_ms: f64) -> String {
-        let env = WorkerEnv { now_ms: now_ms as u64 };
+        let env = WorkerEnv {
+            now_ms: now_ms as u64,
+        };
         let outbounds = self.inner.reap_expired(timeout_secs as u64, &env);
         serde_json::to_string(&to_dtos(outbounds)).expect("outbounds always serialize")
     }
@@ -216,6 +238,14 @@ impl Default for WasmBroker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The shared phase.rs wire-protocol version. The Cloudflare Worker shell uses
+/// this for `ServerHello` and its pre-broker handshake gate, so it cannot drift
+/// from the Rust protocol constant.
+#[wasm_bindgen]
+pub fn protocol_version() -> u32 {
+    PROTOCOL_VERSION
 }
 
 fn result_json(r: CallResult) -> String {

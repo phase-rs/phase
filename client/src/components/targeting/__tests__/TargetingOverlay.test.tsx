@@ -228,6 +228,58 @@ describe("TargetingOverlay", () => {
     });
   });
 
+  it("confirms aggregate-power board choices when the selected power is high enough", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: {
+        "20": buildGameObjectWithCoreTypes(["Artifact"], {
+          id: 20,
+          name: "Vehicle",
+        }),
+        "21": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Pilot One",
+          power: 2,
+        }),
+        "22": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 22,
+          name: "Pilot Two",
+          power: 3,
+        }),
+      },
+      waiting_for: {
+        type: "CrewVehicle",
+        data: {
+          player: 0,
+          vehicle_id: 20,
+          crew_power: 4,
+          eligible_creatures: [21, 22],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [21, 22] });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm (5/4 power)" }));
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "CrewVehicle",
+      data: { vehicle_id: 20, creature_ids: [21, 22] },
+    });
+  });
+
   it("informs the player when the target slot is a spell on the stack", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const stackSpellTarget = buildGameObjectWithCoreTypes(["Instant"], {

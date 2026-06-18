@@ -7436,6 +7436,41 @@ fn graveyard_keyword_grant_clause_escape() {
 }
 
 #[test]
+fn graveyard_keyword_grant_clause_non_lesson_instant_sorcery() {
+    let (filter, kind) = try_parse_graveyard_keyword_grant_clause(
+        "Each non-Lesson instant and sorcery card in your graveyard has flashback.",
+    )
+    .expect("non-Lesson instant/sorcery graveyard flashback");
+    assert_eq!(kind, GraveyardGrantedKeywordKind::Flashback);
+    let has_non_lesson = |tf: &TypedFilter| {
+        tf.type_filters.iter().any(|f| {
+            matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )
+        })
+    };
+    match filter {
+        TargetFilter::Or { ref filters } => {
+            assert_eq!(filters.len(), 2);
+            assert!(
+                filters.iter().all(|branch| {
+                    let TargetFilter::Typed(tf) = branch else {
+                        return false;
+                    };
+                    has_non_lesson(tf)
+                        && tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        })
+                }),
+                "each branch should be non-Lesson instant/sorcery in graveyard: {filter:?}"
+            );
+        }
+        other => panic!("expected Or filter, got {other:?}"),
+    }
+}
+
+#[test]
 fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
     let clause = try_parse_graveyard_keyword_grant_clause(
         "Each nonland card in their graveyard has escape.",
@@ -7444,6 +7479,61 @@ fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
         clause.is_none(),
         "only your graveyard scope is currently supported"
     );
+}
+
+#[test]
+fn iroh_non_lesson_graveyard_flashback_self_mana_cost() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::keywords::{FlashbackCost, Keyword};
+
+    let parsed = parse_oracle_text(
+        "During your turn, each non-Lesson instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.",
+        "Iroh, Grand Lotus",
+        &[],
+        &["Creature".to_string(), "Planeswalker".to_string()],
+        &[],
+    );
+    let non_lesson = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            def.condition == Some(StaticCondition::DuringYourTurn)
+                && matches!(
+                    def.modifications.first(),
+                    Some(ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    })
+                )
+        })
+        .expect("non-Lesson graveyard flashback static");
+    assert_eq!(non_lesson.condition, Some(StaticCondition::DuringYourTurn));
+    let TargetFilter::Or { filters } = non_lesson.affected.as_ref().expect("affected filter")
+    else {
+        panic!("expected Or filter for instant/sorcery");
+    };
+    assert_eq!(filters.len(), 2);
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected typed branch");
+        };
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )),
+            "missing Non(Lesson): {:?}",
+            tf.type_filters
+        );
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+    }
+    match &non_lesson.modifications[0] {
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+        } => {}
+        other => panic!("expected SelfManaCost flashback, got {other:?}"),
+    }
 }
 
 // --- Graveyard play permission tests (Crucible of Worlds / Icetill Explorer) ---

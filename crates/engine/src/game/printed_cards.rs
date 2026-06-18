@@ -124,9 +124,17 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.card_types = card_face.card_type.clone();
     obj.mana_cost = card_face.mana_cost.clone();
     obj.keywords = keywords.clone();
-    obj.abilities = Arc::new(card_face.abilities.clone());
+    let mut abilities = card_face.abilities.clone();
+    for ability in &mut abilities {
+        ability.normalize_parsed_replacement_flags();
+    }
+    let mut replacements = card_face.replacements.clone();
+    for replacement in &mut replacements {
+        replacement.fix_legacy_parse_time_consumed_flag();
+    }
+    obj.abilities = Arc::new(abilities.clone());
     obj.trigger_definitions = card_face.triggers.clone().into();
-    obj.replacement_definitions = card_face.replacements.clone().into();
+    obj.replacement_definitions = replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
     // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
     // casting flow can swap it in when the spell is cast for its cleave cost.
@@ -140,9 +148,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_card_types = card_face.card_type.clone();
     obj.base_mana_cost = card_face.mana_cost.clone();
     obj.base_keywords = keywords;
-    obj.base_abilities = Arc::new(card_face.abilities.clone());
+    obj.base_abilities = Arc::new(abilities);
     obj.base_trigger_definitions = Arc::new(card_face.triggers.clone());
-    obj.base_replacement_definitions = Arc::new(card_face.replacements.clone());
+    obj.base_replacement_definitions = Arc::new(replacements);
     obj.base_static_definitions = Arc::new(card_face.static_abilities.clone());
     obj.base_color = color;
     obj.base_characteristics_initialized = true;
@@ -701,6 +709,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost => {}
     }
 }

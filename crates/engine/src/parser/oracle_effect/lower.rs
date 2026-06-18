@@ -5449,7 +5449,8 @@ fn apply_where_x_continuous_modification(
         }
         // Resolution-time-consumed; where-X counter quantities are applied by
         // the counter/enter-with parser paths before this continuous grant pass.
-        ContinuousModification::AddCounterOnEnter { .. } => {}
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => {}
         // Non-dynamic modifications carry fixed integers, enum payloads, or
         // nested definitions that are already parsed/lowered independently.
         // Keep this wildcard-free so a future QuantityExpr-carrying variant
@@ -5546,7 +5547,8 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
             rebind_cost_paid_object_pt_to_target(value);
         }
-        ContinuousModification::AddCounterOnEnter { .. } => {}
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }

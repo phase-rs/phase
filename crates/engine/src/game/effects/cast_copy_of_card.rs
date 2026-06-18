@@ -79,7 +79,7 @@ pub fn resolve(
         let copy_id =
             cast_one_copy(state, source_id, ability, events).map_err(EffectError::InvalidParam)?;
 
-        if open_copy_target_selection(state, copy_id, ability.controller)
+        if open_copy_target_selection(state, copy_id, ability.controller, None)
             .map_err(EffectError::InvalidParam)?
         {
             let mut resume = ability.clone();

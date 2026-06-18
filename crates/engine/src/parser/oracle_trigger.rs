@@ -9189,6 +9189,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
         def.damage_kind = DamageKindFilter::CombatOnly;
         def.valid_source = Some(filter);
         def.valid_target = Some(TargetFilter::Player);
+        def.batched = true;
         return Some((TriggerMode::DamageDoneOnceByController, def));
     }
 
@@ -13801,6 +13802,20 @@ mod tests {
             ))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(
+            def.batched,
+            "one-or-more combat damage triggers are batched"
+        );
+    }
+
+    #[test]
+    fn grim_hireling_combat_damage_trigger_is_batched() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, create two Treasure tokens.",
+            "Grim Hireling",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert!(def.batched);
     }
 
     #[test]

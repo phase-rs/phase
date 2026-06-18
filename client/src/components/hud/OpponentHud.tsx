@@ -14,7 +14,7 @@ import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multip
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
-import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
+import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
@@ -66,7 +66,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   }, [gameState, playerId]);
 
   const eliminated = gameState?.eliminated_players ?? [];
-  const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
+  const liveOpponents = useMemo(() => getOpponentIds(gameState, playerId), [gameState, playerId]);
   // Routed through `isOneOnOne` so this can't drift from GameBoard's
   // layout decision — the bug that motivated the helper was exactly
   // those two derivations disagreeing after an elimination. The
@@ -80,7 +80,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   // The cross-board glimpse must exclude the *visually* focused opponent,
   // not just the explicit one — otherwise the default-focused tab lights
   // up a redundant badge at game start.
-  const effectiveFocused = focusedOpponent ?? liveOpponents[0] ?? null;
+  const effectiveFocused = resolveFocusedOpponent(focusedOpponent, liveOpponents);
   const activeOpponentId = gameState?.active_player;
   const activeFollowedOpponent =
     activeOpponentId != null && liveOpponents.includes(activeOpponentId)
@@ -119,6 +119,16 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     }
     return map;
   }, [attackers, objectsMap, playerId, effectiveFocused]);
+
+  useEffect(() => {
+    if (
+      focusedOpponent != null
+      && liveOpponents.length > 0
+      && !liveOpponents.includes(focusedOpponent)
+    ) {
+      setFocusedOpponent(liveOpponents[0] ?? null);
+    }
+  }, [focusedOpponent, liveOpponents, setFocusedOpponent]);
 
   useEffect(() => {
     const activeOpponentId = gameState?.active_player;
@@ -316,7 +326,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   }
 
   // Multiplayer: tabbed opponent selector
-  const focusedId = focusedOpponent ?? liveOpponents[0];
+  const focusedId = effectiveFocused;
   const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
   const effectiveCompact = forceCompactHud || opponentHudDensity === "compact";
 
@@ -775,7 +785,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       // ~14rem (~227px at the default 16px root, verified in-browser). Cap at
       // 16rem gives headroom; the reveal is gated at 15rem so a tab too narrow
       // to fit the breakdown collapses to the HAND-only tier (tap to focus).
-      className={`@container relative flex min-w-0 max-w-[16rem] flex-1 items-center gap-1.5 rounded-lg border px-1.5 backdrop-blur-xl transition-all duration-200 ${compact ? "py-0.5" : "py-1"} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`@container relative flex min-w-0 items-center gap-1.5 rounded-lg border px-1.5 backdrop-blur-xl transition-all duration-200 ${compact ? "py-0.5" : "py-1"} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : "max-w-[16rem] min-w-[5.5rem] flex-1"} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div

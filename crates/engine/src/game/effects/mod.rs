@@ -1017,6 +1017,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = stack_pushed_object_context_from_events(state, events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -1136,6 +1140,29 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
     });
     let first = moved.next()?;
     moved.next().is_none().then_some(first)
+}
+
+/// CR 707.10 + CR 608.2c: A `CopySpell` that puts a copy onto the stack
+/// introduces a singular object a chained `ParentTarget` consumer (Isochron
+/// Scepter's free cast) binds to.
+fn stack_pushed_object_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
+    let mut pushed = events.iter().filter_map(|event| match event {
+        GameEvent::StackPushed { object_id } => {
+            state
+                .objects
+                .get(object_id)
+                .map(|obj| CostPaidObjectSnapshot {
+                    object_id: *object_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                })
+        }
+        _ => None,
+    });
+    let first = pushed.next()?;
+    pushed.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -7238,6 +7265,43 @@ mod tests {
         assert!(
             parent_referent_context_from_events(&state, &events).is_none(),
             "two tapped creatures have no singular anaphoric referent"
+        );
+    }
+
+    /// CR 707.10 + CR 608.2c: a spell copy put onto the stack can be an
+    /// anaphoric referent only when the parent resolution produced exactly one
+    /// copied stack object.
+    #[test]
+    fn stack_pushed_parent_referent_requires_singular_copy() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First Copy".to_string(),
+            Zone::Stack,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Copy".to_string(),
+            Zone::Stack,
+        );
+        let single = [GameEvent::StackPushed { object_id: first }];
+        let multiple = [
+            GameEvent::StackPushed { object_id: first },
+            GameEvent::StackPushed { object_id: second },
+        ];
+
+        assert_eq!(
+            parent_referent_context_from_events(&state, &single).map(|snapshot| snapshot.object_id),
+            Some(first),
+            "one copied spell can feed ParentTarget"
+        );
+        assert!(
+            parent_referent_context_from_events(&state, &multiple).is_none(),
+            "multiple copied spells must not bind ParentTarget arbitrarily"
         );
     }
 

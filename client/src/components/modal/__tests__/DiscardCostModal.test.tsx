@@ -118,37 +118,6 @@ describe("Discard cost modal", () => {
 
   it.each([
     [
-      "PayCost Sacrifice",
-      {
-        player: 0,
-        kind: { type: "Sacrifice" },
-        choices: [],
-        count: 1,
-        min_count: 0,
-        resume: { type: "Spell", Spell: {} },
-      },
-    ],
-    [
-      "PayCost ReturnToHand",
-      {
-        player: 0,
-        kind: { type: "ReturnToHand" },
-        choices: [],
-        count: 1,
-        min_count: 0,
-        resume: { type: "Spell", Spell: {} },
-      },
-    ],
-    [
-      "BlightChoice",
-      {
-        player: 0,
-        count: 1,
-        creatures: [],
-        pending_cast: {},
-      },
-    ],
-    [
       "PayCost ExileFromZone",
       {
         player: 0,
@@ -168,17 +137,9 @@ describe("Discard cost modal", () => {
         resume: {},
       },
     ],
-    [
-      "HarmonizeTapChoice",
-      {
-        player: 0,
-        eligible_creatures: [],
-        pending_cast: {},
-      },
-    ],
   ])("allows cancelling %s", (label, data) => {
-    // BlightChoice/CollectEvidence/Harmonize keep their own variant `type`;
-    // the PayCost-prefixed labels all map to the unified `PayCost` variant.
+    // CollectEvidence keeps its own variant `type`; the PayCost-prefixed labels
+    // all map to the unified `PayCost` variant.
     const type = label.startsWith("PayCost") ? "PayCost" : label;
     setWaitingFor({ type, data } as unknown as WaitingFor);
 
@@ -186,6 +147,66 @@ describe("Discard cost modal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it.each([
+    [
+      "PayCost Sacrifice",
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "Sacrifice" },
+          choices: [],
+          count: 1,
+          min_count: 0,
+          resume: { type: "Spell", Spell: {} },
+        },
+      },
+    ],
+    [
+      "PayCost ReturnToHand",
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [],
+          count: 1,
+          min_count: 0,
+          resume: { type: "Spell", Spell: {} },
+        },
+      },
+    ],
+    [
+      "BlightChoice",
+      {
+        type: "BlightChoice",
+        data: {
+          player: 0,
+          count: 1,
+          creatures: [],
+          pending_cast: {},
+        },
+      },
+    ],
+    [
+      "HarmonizeTapChoice",
+      {
+        type: "HarmonizeTapChoice",
+        data: {
+          player: 0,
+          eligible_creatures: [],
+          pending_cast: {},
+        },
+      },
+    ],
+  ])("suppresses the modal for board-native %s", (_label, waitingFor) => {
+    setWaitingFor(waitingFor as unknown as WaitingFor);
+
+    render(<CardChoiceModal />);
+
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("handles discard prompts for mana ability costs", () => {
@@ -256,7 +277,7 @@ describe("Discard cost modal", () => {
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
   });
 
-  it("describes hand destination without saying battlefield", () => {
+  it("suppresses battlefield return choices for board-native selection", () => {
     setWaitingFor(
       {
         type: "EffectZoneChoice",
@@ -279,18 +300,8 @@ describe("Discard cost modal", () => {
 
     render(<CardChoiceModal />);
 
-    expect(screen.getByText("Return")).toBeInTheDocument();
-    expect(screen.getByText("Choose 1 permanent to return to its owner's hand")).toBeInTheDocument();
-    expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Kor Skyfisher/i }));
-    expect(screen.getAllByText("Return")).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "Return (1/1)" }));
-
-    expect(dispatchMock).toHaveBeenCalledWith({
-      type: "SelectCards",
-      data: { cards: [10] },
-    });
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it("shows topdeck order and dispatches selected cards in click order", () => {

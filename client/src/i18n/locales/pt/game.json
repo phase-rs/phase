@@ -137,7 +137,9 @@
       "incoming": "in",
       "mana": "mana",
       "selected": "sel",
-      "target": "target"
+      "target": "target",
+      "choice": "pick",
+      "sacrifice": "sac"
     },
     "badgeTooltips": {
       "activate": "Hidden objects with activated abilities available.",
@@ -146,7 +148,9 @@
       "incoming": "Attacks currently aimed at hidden objects in this drawer.",
       "mana": "Hidden objects that can be tapped for mana.",
       "selected": "Hidden objects currently selected for the active choice.",
-      "target": "Hidden objects that are legal targets."
+      "target": "Hidden objects that are legal targets.",
+      "choice": "Hidden objects eligible for the active board choice.",
+      "sacrifice": "Hidden objects that can be sacrificed."
     }
   },
   "permanent": {
@@ -166,7 +170,19 @@
     "copy": "Cópia",
     "copyTooltip": "Cópia em ficha de uma carta real",
     "ringBearer": "Anel",
-    "ringBearerTooltip": "Portador do Anel"
+    "ringBearerTooltip": "Portador do Anel",
+    "sacrifice": "Sacrifice",
+    "boardChoiceBadges": {
+      "sacrifice": "Sac",
+      "return": "Return",
+      "exile": "Exile",
+      "tap": "Tap",
+      "crew": "Crew",
+      "saddle": "Saddle",
+      "station": "Station",
+      "blight": "-1/-1",
+      "ringBearer": "Ring"
+    }
   },
   "player": {
     "opponent": "Op {{seat}}",
@@ -515,7 +531,15 @@
     "keepCurrentTargets": "Manter Alvos Atuais",
     "skip": "Pular",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
-    "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}"
+    "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}",
+    "sacrificeExact_one": "Sacrifice {{count}} permanent",
+    "sacrificeExact_other": "Sacrifice {{count}} permanents",
+    "sacrificeUpTo_one": "Sacrifice up to {{count}} permanent",
+    "sacrificeUpTo_other": "Sacrifice up to {{count}} permanents",
+    "sacrificeRange_one": "Sacrifice {{min}}-{{count}} permanent",
+    "sacrificeRange_other": "Sacrifice {{min}}-{{count}} permanents",
+    "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
+    "skipSacrifice": "Skip Sacrifice"
   },
   "log": {
     "title": "Registro do Jogo",
@@ -1737,5 +1761,34 @@
     "banner": "Spectating — read only",
     "leave": "Leave",
     "watchingWith": "Also watching: {{names}}"
+  },
+  "boardChoice": {
+    "actions": {
+      "sacrifice": "Sacrifice",
+      "return": "Return",
+      "exile": "Exile",
+      "tap": "Tap",
+      "crew": "Crew",
+      "saddle": "Saddle",
+      "station": "Station",
+      "blight": "Blight",
+      "ringBearer": "Choose"
+    },
+    "prompt": {
+      "single": "{{action}} a permanent",
+      "exactCount_one": "{{action}} {{count}} permanent",
+      "exactCount_other": "{{action}} {{count}} permanents",
+      "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
+      "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
+      "upToCount_one": "{{action}} up to {{count}} permanent",
+      "upToCount_other": "{{action}} up to {{count}} permanents",
+      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+    },
+    "confirm": "Confirm",
+    "confirmCount": "Confirm ({{selected}}/{{count}})",
+    "confirmPower": "Confirm ({{selected}}/{{required}} power)",
+    "skip": "Skip",
+    "groupCount": "{{selected}} / {{count}} selected",
+    "groupPower": "Power {{selected}} / {{required}}"
   }
 }

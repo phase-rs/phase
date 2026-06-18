@@ -984,6 +984,76 @@ mod tests {
         }
     }
 
+    /// Fall of the First Civilization chapter I: "you and target opponent each
+    /// draw two cards" — both halves distribute; the opponent half keeps a real
+    /// `Player` target slot (not a context ref).
+    #[test]
+    fn parser_distributes_you_and_target_opponent_each_draw_two() {
+        let parsed = parse_effect_chain_with_context(
+            "you and target opponent each draw two cards",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        match *parsed.effect {
+            Effect::Draw {
+                ref target, count, ..
+            } => {
+                assert_eq!(*target, TargetFilter::OriginalController);
+                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!(
+                "expected Draw {{ target: OriginalController, count: 2 }} for first half, got {:?}",
+                other
+            ),
+        }
+        let sub = parsed
+            .sub_ability
+            .expect("expected second-half sub_ability");
+        match *sub.effect {
+            Effect::Draw {
+                ref target, count, ..
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!(
+                "expected Draw {{ target: Player, count: 2 }} for second half, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Issue #3667 — the opponent half must surface a real player target slot.
+    #[test]
+    fn you_and_target_opponent_each_draw_surfaces_opponent_target_slot() {
+        use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
+        use crate::types::ability::TargetRef;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+
+        let parsed = parse_effect_chain_with_context(
+            "you and target opponent each draw two cards",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let state = GameState::new_two_player(42);
+        let resolved = build_resolved_from_def(&parsed, ObjectId(1), PlayerId(0));
+        let slots =
+            build_target_slots(&state, &resolved).expect("target opponent draw needs a slot");
+        assert_eq!(
+            slots.len(),
+            1,
+            "opponent half must declare one player target"
+        );
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(1))),
+            "target slot must offer the opponent"
+        );
+    }
+
     /// Full-line typed-token body (Citizen reward path): "1/1 green and white
     /// Citizen creature token" must round-trip through the body parser and
     /// retain its full type description on both halves.

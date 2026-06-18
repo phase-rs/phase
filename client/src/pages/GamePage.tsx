@@ -138,6 +138,7 @@ import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts
 import {
   getCastableZoneViewerTarget,
   getWaitingForObjectChoiceIds,
+  resolveFocusedOpponent,
   type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
@@ -811,7 +812,8 @@ function GamePageContent({
     return orderedPlayers.filter((id) => id !== perspectivePlayerId && !eliminated.has(id));
   }, [eliminatedPlayers, perspectivePlayerId, players, seatOrder]);
   const activeOpponentId =
-    focusedOpponent ?? opponents[0] ?? (perspectivePlayerId === 0 ? 1 : 0);
+    resolveFocusedOpponent(focusedOpponent, opponents)
+    ?? (perspectivePlayerId === 0 ? 1 : 0);
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element

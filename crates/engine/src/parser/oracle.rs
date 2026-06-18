@@ -740,14 +740,24 @@ fn parse_graveyard_keyword_continuation(
 fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<StaticDefinition> {
     let lower = line.to_lowercase();
     let (prefix, continuation) = split_once_on_lower(line, &lower, ". ")?;
-    let (affected, kind) = try_parse_graveyard_keyword_grant_clause(prefix)?;
+    let prefix_lower = prefix.to_lowercase();
+    let (turn_condition, grant_prefix) = nom_on_lower(prefix, &prefix_lower, |input| {
+        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
+    })
+    .map_or((None, prefix), |(condition, rest)| (Some(condition), rest));
+    let (affected, kind) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
     let keyword = parse_graveyard_keyword_continuation(continuation, kind)?;
-    kind.matches_keyword(&keyword).then_some(
-        StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
-            .description(line.to_string()),
-    )
+    if !kind.matches_keyword(&keyword) {
+        return None;
+    }
+    let mut def = StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+        .description(line.to_string());
+    if let Some(condition) = turn_condition {
+        def = def.condition(condition);
+    }
+    Some(def)
 }
 
 /// Returns every `StaticDefinition` produced by `line`, with the

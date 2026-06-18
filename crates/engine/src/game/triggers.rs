@@ -21231,6 +21231,28 @@ mod dedup_regression_tests {
         id
     }
 
+    fn install_delney(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(103),
+            PlayerId(0),
+            "Delney, Streetwise Lookout".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::parser::oracle_static::parse_static_line(
+                    "If a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.",
+                )
+                .expect("expected Delney trigger-doubler static"),
+            );
+        id
+    }
+
     /// CR 603.2d: Splinter's source filter ("a Ninja creature you control")
     /// doubles a Ninja source's trigger to 2 instances.
     #[test]
@@ -21389,6 +21411,113 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "Harmonic Prodigy must not double unrelated controlled source triggers"
+        );
+    }
+
+    /// CR 603.2d: Delney's parsed power-filtered source clause doubles a
+    /// controlled creature with power 2 or less.
+    #[test]
+    fn delney_parsed_static_doubles_low_power_creature_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Delney must double a power-2-or-less creature source's trigger"
+        );
+    }
+
+    /// CR 603.2d: Delney must not double triggers from creatures with power
+    /// greater than 2.
+    #[test]
+    fn delney_parsed_static_does_not_double_high_power_creature_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Delney must not double a power-greater-than-2 creature source's trigger"
+        );
+    }
+
+    /// CR 603.2d: Delney must not double triggered abilities from non-creature
+    /// permanents you control.
+    #[test]
+    fn delney_parsed_static_does_not_double_non_creature_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.subtypes.clear();
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Delney must not double non-creature source triggers"
         );
     }
 

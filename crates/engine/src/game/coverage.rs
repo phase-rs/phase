@@ -160,6 +160,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
             // safety net. Parameterized — no registry entry; coverage support here.
             | StaticMode::MaxUntapPerType { .. }
+            // CR 702.122a / 702.171a / 702.184a: CrewContribution carries the
+            // modifier kind + action list (Giant Ox, Hotshot Mechanic). Runtime
+            // enforcement is in static_abilities.rs::object_crew_power_contribution.
+            | StaticMode::CrewContribution { .. }
     )
 }
 
@@ -3010,6 +3014,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
                 ),
                 None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
+        }
+        ContinuousModification::SetStartingLoyalty { value } => {
+            format!("starting loyalty {value}")
         }
         ContinuousModification::RemoveManaCost => "no mana cost".to_string(),
     }

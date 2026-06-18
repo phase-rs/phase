@@ -13,6 +13,7 @@ use super::context::PolicyContext;
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::enchantments_payoff::EnchantmentsPayoffPolicy;
+use super::energy_payoff::EnergyPayoffPolicy;
 use super::equipment_payoff::EquipmentPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
@@ -120,6 +121,7 @@ pub enum PolicyId {
     LandAnimation,
     MillTargeting,
     MillPayoff,
+    EnergyPayoff,
     ChaliceAvoidance,
     PaymentSelection,
     SeparatePilesTiming,
@@ -333,6 +335,7 @@ impl Default for PolicyRegistry {
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
             Box::new(MillPayoffPolicy),
+            Box::new(EnergyPayoffPolicy),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
             Box::new(SeparatePilesTimingPolicy),

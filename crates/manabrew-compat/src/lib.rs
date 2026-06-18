@@ -1928,6 +1928,7 @@ mod tests {
                     effect_kind: EffectKind::CopySpell,
                     effect_source_id: Some(ObjectId(1)),
                     current_slot: 0,
+                    paradigm_remaining_offers: None,
                 },
                 PlayerId(0),
             ),

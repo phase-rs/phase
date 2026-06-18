@@ -1245,6 +1245,21 @@ fn damage_done_applier(
     ApplyResult::Modified(event)
 }
 
+/// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
+fn mark_replacement_consumed(state: &mut GameState, rid: ReplacementId) {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get_mut(rid.index)
+    } else {
+        state
+            .objects
+            .get_mut(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+    };
+    if let Some(repl) = repl {
+        repl.is_consumed = true;
+    }
+}
+
 /// Consume or update a prevention shield on either an object or the game-state registry.
 /// If `new_amount` is `None`, marks the shield as consumed.
 /// If `new_amount` is `Some(amount)`, updates the remaining shield capacity.
@@ -4810,7 +4825,7 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect) = match repl_def_ref {
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply) = match repl_def_ref {
         Some(repl_def) => {
             let ability = match branch {
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
@@ -4919,7 +4934,12 @@ fn apply_single_replacement(
             // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
             // event modifier so it is written onto the `ZoneChange` below.
             modifiers.controller_override = repl_def.enters_under.clone();
-            (repl_def.event.clone(), modifiers, post_effect)
+            (
+                repl_def.event.clone(),
+                modifiers,
+                post_effect,
+                repl_def.consume_on_apply,
+            )
         }
         None => return Ok(proposed),
     };
@@ -4984,6 +5004,9 @@ fn apply_single_replacement(
                         _ => {}
                     }
                 }
+                if consume_on_apply {
+                    mark_replacement_consumed(state, rid);
+                }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement
                 // effect when it has work beyond the event modifiers (e.g., a Choose
                 // prompt for Siege protector / Tribute opponent selection). Runs after
@@ -5003,6 +5026,9 @@ fn apply_single_replacement(
                 return Ok(new_event);
             }
             ApplyResult::Prevented => {
+                if consume_on_apply {
+                    mark_replacement_consumed(state, rid);
+                }
                 // CR 615.5: A prevention effect's additional effect (e.g.
                 // Phyrexian Hydra's "Put a -1/-1 counter on ~ for each 1 damage
                 // prevented this way") is stashed as a post-replacement effect
@@ -5791,12 +5817,13 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, FilterProp,
-        OriginConstraint, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
-        ReplacementMode, ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
+        ChosenAttribute, ControllerRef, Effect, FilterProp, OriginConstraint, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::DamageRecord;
+    use crate::types::game_state::{DamageRecord, ManaSpentSourceSnapshot};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
@@ -8931,6 +8958,26 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::DamageDone).damage_modification(modification)
     }
 
+    #[test]
+    fn consume_on_apply_prevention_is_consumed_when_damage_fully_prevented() {
+        // CR 614.5 + CR 615.1a: A one-shot replacement that fully prevents damage
+        // still successfully applied, so the live replacement must be consumed.
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All);
+        repl.consume_on_apply = true;
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let result = replace_event(&mut state, damage_event(3), &mut events);
+
+        assert!(matches!(result, ReplacementResult::Prevented));
+        let obj = state.objects.get(&ObjectId(10)).unwrap();
+        assert!(
+            obj.replacement_definitions[0].is_consumed,
+            "consume_on_apply replacement should be consumed after full prevention"
+        );
+    }
+
     fn test_state_with_damage_repl(
         obj_id: ObjectId,
         controller: PlayerId,
@@ -10670,6 +10717,94 @@ mod tests {
                     enter_with_counters,
                     vec![(CounterType::Plus1Plus1, 3u32)],
                     "expected 3 P1P1 counters (3 distinct colors spent)"
+                );
+            }
+            other => panic!("expected Execute(ZoneChange), got {:?}", other),
+        }
+    }
+
+    /// CR 614.1c + CR 601.2h: Coin of Mastery — artifact-source mana spent to
+    /// cast the entering creature resolves via payment-time source snapshots on
+    /// the spell object, not the static replacement source.
+    #[test]
+    fn artifact_mana_spent_on_self_resolves_against_entering_object() {
+        let coin_id = ObjectId(10);
+        let creature_id = ObjectId(20);
+        let treasure_id = ObjectId(30);
+
+        let etb_counter_ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::FromSource {
+                            source_filter: TargetFilter::Typed(TypedFilter::new(
+                                TypeFilter::Artifact,
+                            )),
+                        },
+                    },
+                },
+            },
+        );
+
+        let creature_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(etb_counter_ability)
+            .valid_card(creature_filter)
+            .destination_zone(Zone::Battlefield);
+
+        let mut state = test_state_with_object(coin_id, Zone::Battlefield, vec![repl]);
+
+        let mut treasure = GameObject::new(
+            treasure_id,
+            CardId(98),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        treasure.card_types.core_types.push(CoreType::Artifact);
+        treasure.card_types.subtypes.push("Treasure".to_string());
+        state.objects.insert(treasure_id, treasure);
+
+        let mut spell = GameObject::new(
+            creature_id,
+            CardId(99),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Stack,
+        );
+        spell.card_types.core_types.push(CoreType::Creature);
+        spell.mana_spent_source_snapshots = vec![
+            ManaSpentSourceSnapshot {
+                source_id: treasure_id,
+                lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+            },
+            ManaSpentSourceSnapshot {
+                source_id: treasure_id,
+                lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+            },
+        ];
+        state.objects.insert(creature_id, spell);
+
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(creature_id, Zone::Stack, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters,
+                    vec![(CounterType::Plus1Plus1, 2u32)],
+                    "expected 2 P1P1 counters (2 artifact-source mana units spent)"
                 );
             }
             other => panic!("expected Execute(ZoneChange), got {:?}", other),

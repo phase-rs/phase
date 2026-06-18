@@ -782,6 +782,15 @@ pub(super) fn handle_copy_target_choice(
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
         return Ok(waiting_for);
     }
+    // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
+    // while paused on `CopyTargetChoice` must run combat placement after the copy
+    // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
+    if state.pending_batch_deliveries.is_some() {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
+    }
     Ok(WaitingFor::Priority {
         player: state.active_player,
     })

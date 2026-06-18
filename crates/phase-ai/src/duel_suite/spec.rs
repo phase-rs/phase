@@ -403,6 +403,24 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         },
     },
     MatchupSpec {
+        id: "kaladesh-energy-mirror",
+        p0_label: "Kaladesh Energy (P0)",
+        p1_label: "Kaladesh Energy (P1)",
+        p0: snap("modern", "kaladesh-energy.json"),
+        p1: snap("modern", "kaladesh-energy.json"),
+        // Kaladesh Energy is the canonical energy-engine list: a dense producer
+        // package (Attune with Aether, Rogue Refiner, Servant of the Conduit,
+        // Aether Meltdown, Aetherworks Marvel) feeding activated-ability sinks
+        // (Bristling Hydra, Longtusk Cub, Whirler Virtuoso, Confiscation Coup).
+        // It clears `energy::COMMITMENT_FLOOR`, so this matchup is the gate's
+        // exercise of `EnergyPayoffPolicy` (verified by
+        // `kaladesh_energy_deck_activates_energy_payoff` below).
+        exercises: &[FeatureKind::Energy],
+        expected: Expected::Mirror {
+            tolerance: MIRROR_TOLERANCE,
+        },
+    },
+    MatchupSpec {
         id: "landfall-vs-niv",
         p0_label: "Mono-Green Landfall",
         p1_label: "Niv to Light",

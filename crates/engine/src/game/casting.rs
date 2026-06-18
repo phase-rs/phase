@@ -11899,6 +11899,7 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_sac.activation_cost = Some(cost.clone());
             pending_sac.activation_ability_index = Some(ability_index);
+            pending_sac.deferred_target_selection = true;
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Sacrifice,
