@@ -557,6 +557,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             def = def.multi_target(spec);
         } else if let Some(spec) = extract_bounded_target_multi_target(&clause_ir.source_text) {
             def = def.multi_target(spec);
+        } else if let Some(spec) = extract_optional_target_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
+        } else if let Some(spec) = extract_verb_up_to_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
         } else if let Some(ref spec) = clause_ir.parsed.multi_target {
@@ -2968,6 +2972,34 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
         }
     }
     None
+}
+
+/// CR 115.1d: Recover "up to N target …" from imperative text where the verb
+/// precedes the count phrase — "tap up to four target permanents" (Elder
+/// Deep-Fiend). The targeted-action parser strips the count via
+/// `strip_optional_target_prefix` but does not attach `MultiTargetSpec`.
+pub(crate) fn extract_optional_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    for verb in MULTI_TARGET_VERBS {
+        let Ok((after_verb, _)) =
+            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
+        else {
+            continue;
+        };
+        let (_, multi_target) = strip_optional_target_prefix(after_verb);
+        if multi_target.is_some() {
+            return multi_target;
+        }
+    }
+    None
+}
+
+/// CR 115.1d: Recover "verb up to N <filter>" when the phrase omits the word
+/// "target" — "untap up to five lands" (Peregrine Drake). Delegates to
+/// `strip_any_number_quantifier`, which is the single authority for that shape.
+pub(crate) fn extract_verb_up_to_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let (_, multi_target) = strip_any_number_quantifier(text);
+    multi_target
 }
 
 fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
@@ -6077,6 +6109,28 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn extract_optional_target_multi_target_recovers_tap_up_to_four() {
+        use crate::types::ability::MultiTargetSpec;
+        let spec = super::extract_optional_target_multi_target("tap up to four target permanents")
+            .expect("Elder Deep-Fiend cast trigger shape");
+        assert_eq!(
+            spec,
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })
+        );
+    }
+
+    #[test]
+    fn extract_verb_up_to_multi_target_recovers_untap_lands() {
+        use crate::types::ability::MultiTargetSpec;
+        let spec = super::extract_verb_up_to_multi_target("untap up to five lands")
+            .expect("Peregrine Drake ETB shape");
+        assert_eq!(
+            spec,
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 5 })
+        );
+    }
 
     #[test]
     fn distribute_damage_power_equal_pattern() {
