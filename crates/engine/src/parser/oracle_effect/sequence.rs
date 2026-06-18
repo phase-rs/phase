@@ -3273,44 +3273,55 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         .parse(lower)
         {
             let before_of = before_of.trim();
-            let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
-                .parse(before_of)
-                .map(|(rest, _)| rest)
-                .unwrap_or(before_of);
-
-            // Delegate to nom combinator (input already lowercase from lower).
-            let quantity = if let Ok((_rest, _)) = alt((
-                tag::<_, _, OracleError<'_>>("any number of "),
-                tag("any number"),
+            // CR 608.2c: Only the bare "put N of them" idiom — not unrelated
+            // "of them" anaphors such as Gilgamesh's trailing "attach one of
+            // them" reflexive gate, which also contains " onto the battlefield".
+            if let Ok((after_put, _)) = alt((
+                tag::<_, _, OracleError<'_>>("you may put "),
+                tag("put "),
+                tag("you may reveal "),
+                tag("reveal "),
+                tag("you may return "),
+                tag("return "),
             ))
-            .parse(after_put)
+            .parse(before_of)
             {
-                PutCount::AnyNumber
-            } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-                nom_primitives::parse_number
-                    .parse(rest)
-                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-                PutCount::Exactly(n)
-            } else {
-                // "a/an" or unrecognized → treat as up_to 1
-                PutCount::Up(1)
-            };
+                // Delegate to nom combinator (input already lowercase from lower).
+                let quantity = if let Ok((_rest, _)) = alt((
+                    tag::<_, _, OracleError<'_>>("any number of "),
+                    tag("any number"),
+                ))
+                .parse(after_put)
+                {
+                    PutCount::AnyNumber
+                } else if let Ok((rest, _)) =
+                    tag::<_, _, OracleError<'_>>("up to ").parse(after_put)
+                {
+                    nom_primitives::parse_number
+                        .parse(rest)
+                        .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
+                } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
+                    PutCount::Exactly(n)
+                } else {
+                    // "a/an" or unrecognized → treat as up_to 1
+                    PutCount::Up(1)
+                };
 
-            // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
-            let rest_destination = parse_of_them_rest_destination(lower);
+                // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
+                let rest_destination = parse_of_them_rest_destination(lower);
 
-            return Some(ContinuationAst::DigFromAmong {
-                quantity,
-                filter: TargetFilter::Any,
-                destination,
-                rest_destination,
-                enters_under: None,
-                face_down_profile: None,
-                enter_tapped,
-                // "put N of them" strips only "put" — never a reveal verb (private).
-                reveal_verb: false,
-            });
+                return Some(ContinuationAst::DigFromAmong {
+                    quantity,
+                    filter: TargetFilter::Any,
+                    destination,
+                    rest_destination,
+                    enters_under: None,
+                    face_down_profile: None,
+                    enter_tapped,
+                    // "put N of them" strips only "put" — never a reveal verb (private).
+                    reveal_verb: false,
+                });
+            }
         }
     }
 
@@ -8459,6 +8470,20 @@ mod tests {
                 })
             ),
             "expected bare of-them DigFromAmong, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn attach_one_of_them_reflexive_gate_is_not_dig_from_among() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "When you put one or more Equipment onto the battlefield this way, you may attach one of them to a Samurai you control.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            result.is_none(),
+            "reflexive attach gate must not re-patch the Dig, got {result:?}"
         );
     }
 }
