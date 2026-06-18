@@ -17870,6 +17870,45 @@ fn multi_keyword_flying_and_protection_unchanged() {
     );
 }
 
+/// CR 205.3m: A subtype anthem whose subject uses the "-es" plural of a
+/// sibilant/consonant+o creature subtype must resolve the canonical singular
+/// subtype in the affected filter. Zarda, the Power Princess: "Other Heroes you
+/// control have exalted." Regression — previously the naive trailing-'s' strip
+/// produced the bogus subtype "Heroe", matching no creature, so the anthem was
+/// silently inert. The assertion below flips (Subtype("Heroe")) if the
+/// parse_subtype "-es" plural arm is reverted.
+#[test]
+fn subtype_anthem_es_plural_resolves_canonical_singular() {
+    let defs = parse_static_line_multi("Other Heroes you control have exalted.");
+    let def = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Exalted,
+                })
+        })
+        .expect("expected an exalted anthem StaticDefinition");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Hero".to_string())),
+                "expected canonical Subtype(\"Hero\"), got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .contains(&TypeFilter::Subtype("Heroe".to_string())),
+                "must not emit the de-pluralization artifact Subtype(\"Heroe\"), got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("affected must be Typed(Heroes you control), got {other:?}"),
+    }
+}
+
 /// CR 604.1 / 613.1f: a granted QUOTED activated ability whose body contains an
 /// internal ". " must reach the quoted-ability path (GrantAbility) and NOT be
 /// truncated by the new bare-keyword ". " split — proving quoted text bypasses it.

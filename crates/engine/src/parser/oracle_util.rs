@@ -1178,6 +1178,7 @@ const SUBTYPES: &[&str] = &[
     "Survivor",
     "Suspect",
     "Symbiote",
+    "Synth",
     "Tentacle",
     "Tetravite",
     "Thalakos",
@@ -1466,7 +1467,45 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
         }
     }
 
+    // Try regular "-es" plural: subtypes ending in a sibilant (s, x, z, ch, sh)
+    // or in consonant+o pluralize with "-es" rather than "-s" (e.g. "Hero" →
+    // "Heroes", "Sphinx" → "Sphinxes"). Without this, such plurals fall through
+    // to a naive trailing-'s' strip at call sites, corrupting the subtype name
+    // (e.g. "Heroes" → "Heroe"). Irregular forms still take priority via
+    // SUBTYPE_PLURALS above.
+    if takes_es_plural(subtype) {
+        let es_plural_len = subtype.len() + 2;
+        if text.len() >= es_plural_len
+            && text.is_char_boundary(subtype.len())
+            && text[..subtype.len()].eq_ignore_ascii_case(subtype)
+            && text[subtype.len()..es_plural_len].eq_ignore_ascii_case("es")
+        {
+            let after = &text[es_plural_len..];
+            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Some((subtype.to_string(), es_plural_len));
+            }
+        }
+    }
+
     None
+}
+
+/// Whether an English noun forms its plural by appending "-es" rather than
+/// "-s": nouns ending in a sibilant (s, x, z, ch, sh) or in consonant + "o"
+/// (e.g. "Hero" → "Heroes"). Words ending in vowel + "o" take a plain "-s"
+/// ("Radio" → "Radios") and are excluded.
+fn takes_es_plural(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if lower.ends_with('s') || lower.ends_with('x') || lower.ends_with('z') {
+        return true;
+    }
+    if lower.ends_with("ch") || lower.ends_with("sh") {
+        return true;
+    }
+    if let Some(rest) = lower.strip_suffix('o') {
+        return !rest.ends_with(['a', 'e', 'i', 'o', 'u']);
+    }
+    false
 }
 
 /// Infer the core type for a known subtype name.
@@ -3017,6 +3056,26 @@ mod tests {
     fn parse_subtype_regular_plural() {
         assert_eq!(parse_subtype("zombies"), Some(("Zombie".to_string(), 7)));
         assert_eq!(parse_subtype("vampires"), Some(("Vampire".to_string(), 8)));
+    }
+
+    #[test]
+    fn parse_subtype_es_plural() {
+        // Regression: "-es" plurals for sibilant-ending and consonant+o subtypes
+        // must resolve to the canonical singular rather than falling through to a
+        // naive trailing-'s' strip (which produced "Heroe" from "Heroes").
+        assert_eq!(parse_subtype("Heroes"), Some(("Hero".to_string(), 6)));
+        assert_eq!(parse_subtype("heroes"), Some(("Hero".to_string(), 6)));
+        assert_eq!(parse_subtype("sphinxes"), Some(("Sphinx".to_string(), 8)));
+        assert_eq!(
+            parse_subtype("Heroes you control"),
+            Some(("Hero".to_string(), 6))
+        );
+        // The singular still parses, and an unrelated word does not.
+        assert_eq!(parse_subtype("Hero"), Some(("Hero".to_string(), 4)));
+        // "Synth" is now registered (real artifact-creature subtype, Fallout set).
+        assert_eq!(parse_subtype("Synth"), Some(("Synth".to_string(), 5)));
+        assert_eq!(parse_subtype("Synths"), Some(("Synth".to_string(), 6)));
+        assert_eq!(parse_subtype("Villains"), Some(("Villain".to_string(), 8)));
     }
 
     #[test]
