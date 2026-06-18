@@ -25,7 +25,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "engine"
-version = "0.1.37"
+version = "0.2.0"
 dependencies = [
  "im",
  "indexmap",
@@ -33,8 +33,10 @@ dependencies = [
  "petgraph",
  "rand",
  "rand_chacha",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "smallvec",
  "strum",
  "thiserror",
  "toml",
@@ -157,7 +159,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "lobby-broker"
-version = "0.1.37"
+version = "0.2.0"
 dependencies = [
  "engine",
  "serde",
@@ -292,6 +294,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+
+[[package]]
 name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +372,15 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "strum"
