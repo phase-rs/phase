@@ -9790,6 +9790,9 @@ impl TargetFilter {
                 }
             }
             TargetFilter::Not { filter } => filter.collect_zones(out),
+            TargetFilter::ExiledBySource if !out.contains(&crate::types::zones::Zone::Exile) => {
+                out.push(crate::types::zones::Zone::Exile);
+            }
             _ => {}
         }
     }
