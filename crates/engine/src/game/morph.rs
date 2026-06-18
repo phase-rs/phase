@@ -249,6 +249,17 @@ pub fn turn_face_up(
 
     crate::game::layers::mark_layers_full(state);
 
+    // CR 614.1e + CR 708.11: now that the permanent is face up
+    // (carrying its real abilities), apply any "As ~ is turned face up, [effect]"
+    // replacement effects as part of turning it up. The turn-up is not prevented
+    // — the applier returns the event unchanged and performs its actions (e.g.
+    // Hooded Hydra's +1/+1 counters) bound to this permanent.
+    let proposed = crate::types::proposed_event::ProposedEvent::TurnFaceUp {
+        object_id,
+        applied: std::collections::HashSet::new(),
+    };
+    let _ = crate::game::replacement::replace_event(state, proposed, events);
+
     events.push(GameEvent::TurnedFaceUp { object_id });
 
     Ok(())
@@ -598,6 +609,131 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    #[test]
+    fn turn_face_up_applies_as_turned_face_up_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // CR 614.1e + CR 708.11: give the real face a Hooded-Hydra-style
+        // "As ~ is turned face up, put five +1/+1 counters on it." replacement.
+        {
+            let def = crate::parser::oracle_replacement::parse_replacement_line(
+                "As this creature is turned face up, put five +1/+1 counters on it.",
+                "Secret Creature",
+            )
+            .expect("turn-face-up replacement should parse");
+            assert_eq!(def.event, crate::types::ReplacementEvent::TurnFaceUp);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        // The replacement applied AS the permanent was turned face up — it gains
+        // five +1/+1 counters (and there is no stack trigger / response window).
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            5,
+            "the As-turned-face-up replacement must put five +1/+1 counters on it"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_self_resolving_chain_applies_each_step_once() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // A two-step self-resolving "As ~ is turned face up" replacement: put two
+        // +1/+1 counters on it, then put one more on it (both steps `SelfRef`).
+        // `resolve_ability_chain` follows the typed `sub_ability` chain itself, so
+        // each step must run EXACTLY once — total 3 counters, not 4 from a
+        // double-resolved second step.
+        {
+            let inner = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            let mut outer = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            outer.sub_ability = Some(Box::new(inner));
+            let def = crate::types::ability::ReplacementDefinition::new(
+                crate::types::ReplacementEvent::TurnFaceUp,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .execute(outer);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "each self-resolving step must apply exactly once (2 + 1), not double the sub-ability"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_gaps_attach_to_external_target() {
+        // CR 708.11: Gift of Doom's "As ~ is turned face up, you may attach it to
+        // a creature" needs an external host *choice* made during the turn-up,
+        // which the replacement-apply path does not model. It is gapped honestly
+        // (no TurnFaceUp replacement is produced) rather than silently attaching
+        // the Aura to the wrong object — only the self-resolving counter class is
+        // modeled here.
+        let attach = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this permanent is turned face up, you may attach it to a creature.",
+            "Secret Creature",
+        );
+        assert!(
+            !attach
+                .as_ref()
+                .is_some_and(|d| d.event == crate::types::ReplacementEvent::TurnFaceUp),
+            "attach-to-an-external-creature turn-face-up must not be modeled as a \
+             TurnFaceUp replacement (needs a turn-up-time choice)"
+        );
+
+        // The self-resolving counter class IS modeled.
+        let counters = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this creature is turned face up, put five +1/+1 counters on it.",
+            "Secret Creature",
+        )
+        .expect("self-counter turn-face-up replacement should parse");
+        assert_eq!(counters.event, crate::types::ReplacementEvent::TurnFaceUp);
     }
 
     #[test]

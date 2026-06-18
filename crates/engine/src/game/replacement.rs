@@ -26,6 +26,7 @@ use crate::types::proposed_event::{
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+use super::ability_utils::build_resolved_from_def;
 use super::game_object::GameObject;
 
 // CR 122.1c shield-counter effects are intrinsic to counters, not stored
@@ -2627,6 +2628,53 @@ fn untap_applier(
     ApplyResult::Prevented
 }
 
+// --- 13. TurnFaceUp ---
+
+fn turn_face_up_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::TurnFaceUp { .. })
+}
+
+// CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+// applies its alternative action AS the permanent is turned face up. Unlike a
+// prevention the turn-up still happens, so the applier performs the replacement's
+// actions (bound to the permanent being turned up) and returns the event
+// unchanged. The effect's `it`/SelfRef anaphor binds to that permanent.
+fn turn_face_up_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::TurnFaceUp { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
+    };
+    let controller = source.controller;
+    let execute = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone());
+
+    if let Some(execute) = execute {
+        // Bind only the anaphoric self-reference: the execute is resolved with the
+        // turned-up permanent as its `source_id`, so "it"/`SelfRef` references the
+        // permanent ("put five +1/+1 counters on it"). The permanent is NOT stuffed
+        // into ordinary target slots — effects with their own host/target (e.g.
+        // Gift of Doom's `Effect::Attach` "attach it to a creature") must resolve
+        // that target/host themselves rather than consuming the permanent as the
+        // host. `resolve_ability_chain` walks the typed `sub_ability` chain itself,
+        // so the root execute is resolved exactly once — iterating the chain here
+        // too would run each sub-ability a second time.
+        let ability = build_resolved_from_def(execute.as_ref(), object_id, controller);
+        let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+    }
+
+    ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied })
+}
+
 // --- 14. Counter (spell countering) ---
 
 fn counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
@@ -2770,21 +2818,6 @@ fn pay_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState
 }
 
 fn pay_life_applier(
-    event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    ApplyResult::Modified(event)
-}
-
-// --- Placeholder handlers (no ProposedEvent variant yet) ---
-
-fn placeholder_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    false
-}
-
-fn placeholder_applier(
     event: ProposedEvent,
     _rid: ReplacementId,
     _state: &mut GameState,
@@ -3019,11 +3052,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: produce_mana_applier,
         },
     );
-    let placeholder = || ReplacementHandlerEntry {
-        matcher: placeholder_matcher,
-        applier: placeholder_applier,
-    };
-    registry.insert(ReplacementEvent::TurnFaceUp, placeholder());
+    registry.insert(
+        ReplacementEvent::TurnFaceUp,
+        ReplacementHandlerEntry {
+            matcher: turn_face_up_matcher,
+            applier: turn_face_up_applier,
+        },
+    );
 
     // CR 614.1b + CR 614.10: BeginTurn skip replacements (Stranglehold, etc.)
     registry.insert(
