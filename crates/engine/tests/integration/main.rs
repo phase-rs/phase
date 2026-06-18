@@ -256,6 +256,7 @@ mod issue_3301_izzet_charm_counter;
 mod issue_3302_breach_multiverse;
 mod issue_3303_adeline_tapped_attacking;
 mod issue_3309_rise_etb_returns;
+mod issue_3310_condemn_two_targets;
 mod issue_3311_manifest_dread_land;
 mod issue_3314_killian;
 mod issue_3316_stinging_study;
