@@ -1499,11 +1499,18 @@ fn takes_es_plural(word: &str) -> bool {
     if lower.ends_with('s') || lower.ends_with('x') || lower.ends_with('z') {
         return true;
     }
-    if lower.ends_with("ch") || lower.ends_with("sh") {
+    let bytes = lower.as_bytes();
+    if matches!(
+        bytes.get(bytes.len().saturating_sub(2)..),
+        Some(b"ch" | b"sh")
+    ) {
         return true;
     }
-    if let Some(rest) = lower.strip_suffix('o') {
-        return !rest.ends_with(['a', 'e', 'i', 'o', 'u']);
+    if matches!(bytes.last(), Some(b'o')) {
+        return !matches!(
+            bytes.get(bytes.len().saturating_sub(2)),
+            Some(b'a' | b'e' | b'i' | b'o' | b'u')
+        );
     }
     false
 }
