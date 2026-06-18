@@ -1731,6 +1731,21 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }
+    // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after body "its
+    // controller may … if they do, they draw" refers to that creature's
+    // controller, not the damaged opponent from the trigger condition.
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::ParentTargetController)
+    ) {
+        return TargetFilter::ParentTargetController;
+    }
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::ParentTargetOwner)
+    ) {
+        return TargetFilter::ParentTargetOwner;
+    }
     // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
     // "attacks a player" trigger introduces the damaged/attacked player as the
     // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
