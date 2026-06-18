@@ -7726,6 +7726,8 @@ mod tests {
 
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::engine_resolution_choices::handle_resolution_choice;
+    use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
@@ -13458,6 +13460,141 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
         assert!(
             !runner.state().cancelled_casts.contains(&spell_id),
             "a completed multikicker cast must not be in cancelled_casts"
+        );
+    }
+
+    /// Issue #738 (Consult the Star Charts): "Kicker {1}{U} ... Look at the
+    /// top X cards of your library, where X is the number of lands you
+    /// control. Put one of those cards into your hand. If this spell was
+    /// kicked, put two of those cards into your hand instead. Put the rest
+    /// on the bottom of your library in a random order." Reported to draw 0
+    /// cards both kicked and unkicked. Drives the *real* end-to-end pipeline
+    /// (`CastSpell` -> `OptionalCostChoice` kicker decision -> mana payment ->
+    /// stack resolution -> `DigChoice`) from Oracle text — no `CardDatabase`
+    /// involved — to discriminate a cast-pipeline defect from the isolated
+    /// `resolve_ability_chain` unit coverage in `effects::dig::tests`.
+    const CONSULT_THE_STAR_CHARTS_ORACLE: &str = "Kicker {1}{U} (You may pay an additional \
+{1}{U} as you cast this spell.)\nLook at the top X cards of your library, where X is the \
+number of lands you control. Put one of those cards into your hand. If this spell was \
+kicked, put two of those cards into your hand instead. Put the rest on the bottom of your \
+library in a random order.";
+
+    fn consult_the_star_charts_scenario(
+        num_lands: usize,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        for _ in 0..num_lands {
+            scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        }
+        for i in 0..5 {
+            scenario.add_spell_to_library_top(PlayerId(0), &format!("Library Card {i}"), false);
+        }
+
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Consult the Star Charts",
+            true,
+            CONSULT_THE_STAR_CHARTS_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    fn fund_blue(runner: &mut crate::game::scenario::GameRunner, count: usize) {
+        let p0 = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..count {
+            p0.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    fn cast_consult_the_star_charts(kick: bool) -> usize {
+        let (mut runner, spell_id, card_id) = consult_the_star_charts_scenario(3);
+        fund_blue(&mut runner, 3); // {1}{U} base + {1}{U} kicker, generic from blue too
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting Consult the Star Charts must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { cost, .. } => {
+                assert!(
+                    matches!(cost, AdditionalCost::Kicker { .. }),
+                    "kicker decision prompt must carry a real Kicker cost: {cost:?}"
+                );
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: kick })
+                    .expect("kicker decision must be accepted");
+            }
+            other => panic!("expected OptionalCostChoice for kicker, got {other:?}"),
+        }
+
+        runner.advance_until_stack_empty();
+
+        if let WaitingFor::DigChoice {
+            selectable_cards,
+            keep_count,
+            ..
+        } = runner.state().waiting_for.clone()
+        {
+            let chosen: Vec<_> = selectable_cards.into_iter().take(keep_count).collect();
+            let mut events = Vec::new();
+            let waiting = runner.state().waiting_for.clone();
+            handle_resolution_choice(
+                runner.state_mut(),
+                waiting,
+                GameAction::SelectCards { cards: chosen },
+                &mut events,
+            )
+            .expect("DigChoice resolution must succeed");
+        }
+
+        runner.state().players[0].hand.len()
+    }
+
+    #[test]
+    fn consult_the_star_charts_unkicked_draws_one_card_via_full_cast_pipeline() {
+        let hand_after = cast_consult_the_star_charts(false);
+        assert_eq!(
+            hand_after, 1,
+            "unkicked Consult the Star Charts must put exactly 1 card into hand \
+             via the real cast pipeline (issue #738)"
+        );
+    }
+
+    #[test]
+    fn consult_the_star_charts_kicked_draws_two_cards_via_full_cast_pipeline() {
+        let hand_after = cast_consult_the_star_charts(true);
+        assert_eq!(
+            hand_after, 2,
+            "kicked Consult the Star Charts must put exactly 2 cards into hand \
+             via the real cast pipeline (issue #738)"
         );
     }
 

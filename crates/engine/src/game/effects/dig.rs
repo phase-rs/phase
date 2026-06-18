@@ -290,10 +290,17 @@ fn resolve_mass_put_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine_resolution_choices::{
+        handle_resolution_choice, ResolutionChoiceOutcome,
+    };
     use crate::game::zones::create_object;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::SpellContext;
     use crate::types::ability::{
         AbilityCondition, AbilityKind, FilterProp, QuantityExpr, TypedFilter,
     };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -1742,5 +1749,157 @@ mod tests {
                 "non-matching card {id:?} must be at the bottom of the library"
             );
         }
+    }
+
+    /// Issue #738 (Consult the Star Charts): "Look at the top X cards of your
+    /// library, where X is the number of lands you control. Put one of those
+    /// cards into your hand. If this spell was kicked, put two of those cards
+    /// into your hand instead. Put the rest on the bottom of your library in
+    /// a random order." Parses the real Oracle text through the live parser
+    /// (`parse_effect_chain` — same entry point `birthing_ritual_runtime_dig_
+    /// filter_respects_sacrificed_creature_mana_value` uses) so the test tracks
+    /// the actual parser output rather than a hand-authored AST, and asserts
+    /// the shape: a top-level `Dig` (kicked, keep_count 2) gated by
+    /// `AbilityCondition::AdditionalCostPaidInstead`, with an `else_ability`
+    /// carrying the unkicked `Dig` (keep_count 1) — see `resolve_ability_
+    /// chain`'s top-level-condition + `else_ability` fallback (CR 608.2c).
+    fn consult_the_star_charts_ability(
+        controller: crate::types::player::PlayerId,
+        source: ObjectId,
+        kicked: bool,
+    ) -> ResolvedAbility {
+        let def = parse_effect_chain(
+            "Look at the top X cards of your library, where X is the number of lands you \
+             control. Put one of those cards into your hand. If this spell was kicked, put \
+             two of those cards into your hand instead. Put the rest on the bottom of your \
+             library in a random order.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Dig {
+                    keep_count: Some(2),
+                    ..
+                }
+            ),
+            "parser must assemble the kicked Dig (keep_count 2) as the root effect, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead),
+            "the root Dig must be gated on AdditionalCostPaidInstead"
+        );
+        match def.else_ability.as_deref() {
+            Some(else_def) => assert!(
+                matches!(
+                    &*else_def.effect,
+                    Effect::Dig {
+                        keep_count: Some(1),
+                        ..
+                    }
+                ),
+                "else_ability must carry the unkicked Dig (keep_count 1), got {:?}",
+                else_def.effect
+            ),
+            None => panic!("parser must produce an else_ability for the unkicked branch"),
+        }
+
+        let mut ability = ResolvedAbility::new((*def.effect).clone(), vec![], source, controller);
+        ability.condition = def.condition.clone();
+        ability.else_ability = def.else_ability.as_deref().map(|e| {
+            Box::new(ResolvedAbility::new(
+                (*e.effect).clone(),
+                vec![],
+                source,
+                controller,
+            ))
+        });
+        ability.context = SpellContext {
+            additional_cost_paid: kicked,
+            ..Default::default()
+        };
+        ability
+    }
+
+    fn run_consult_the_star_charts(kicked: bool) -> (GameState, usize) {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let controller = PlayerId(0);
+
+        for i in 0..3 {
+            let land = create_object(
+                &mut state,
+                CardId(i + 1),
+                controller,
+                format!("Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 10),
+                controller,
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let ability = consult_the_star_charts_ability(controller, source, kicked);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Consult the Star Charts resolution must succeed");
+
+        let (selectable_cards, keep_count) = match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                keep_count,
+                ..
+            } => (selectable_cards.clone(), *keep_count),
+            other => panic!("expected DigChoice, got {other:?}"),
+        };
+        let chosen: Vec<_> = selectable_cards.into_iter().take(keep_count).collect();
+        let waiting = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: chosen },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+
+        (state, keep_count)
+    }
+
+    #[test]
+    fn consult_the_star_charts_unkicked_puts_one_card_in_hand() {
+        let (state, keep_count) = run_consult_the_star_charts(false);
+        assert_eq!(keep_count, 1, "unkicked must keep exactly 1 card");
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "unkicked Consult the Star Charts must put exactly 1 card into hand"
+        );
+    }
+
+    #[test]
+    fn consult_the_star_charts_kicked_puts_two_cards_in_hand() {
+        let (state, keep_count) = run_consult_the_star_charts(true);
+        assert_eq!(keep_count, 2, "kicked must keep exactly 2 cards");
+        assert_eq!(
+            state.players[0].hand.len(),
+            2,
+            "kicked Consult the Star Charts must put exactly 2 cards into hand"
+        );
     }
 }
