@@ -3261,53 +3261,57 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     let (destination, enter_tapped) = parse_dig_kept_destination(lower);
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
-    // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = alt((
-        take_until::<_, _, OracleError<'_>>(" of those cards"),
-        take_until(" of those"),
-        take_until(" of them"),
-    ))
-    .parse(lower)
-    {
-        let before_of = before_of.trim();
-        let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
-            .parse(before_of)
-            .map(|(rest, _)| rest)
-            .unwrap_or(before_of);
-
-        // Delegate to nom combinator (input already lowercase from lower).
-        let quantity = if let Ok((_rest, _)) = alt((
-            tag::<_, _, OracleError<'_>>("any number of "),
-            tag("any number"),
+    // Must be checked BEFORE the "from among" path for bare "of them" forms, but MUST NOT
+    // fire when "from among them/those cards" is present — that substring also contains
+    // " of them" and would mis-route (Gilgamesh, Collected Company).
+    if !nom_primitives::scan_contains(lower, "from among") {
+        if let Ok((_, before_of)) = alt((
+            take_until::<_, _, OracleError<'_>>(" of those cards"),
+            take_until(" of those"),
+            take_until(" of them"),
         ))
-        .parse(after_put)
+        .parse(lower)
         {
-            PutCount::AnyNumber
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-            nom_primitives::parse_number
-                .parse(rest)
-                .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-            PutCount::Exactly(n)
-        } else {
-            // "a/an" or unrecognized → treat as up_to 1
-            PutCount::Up(1)
-        };
+            let before_of = before_of.trim();
+            let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
+                .parse(before_of)
+                .map(|(rest, _)| rest)
+                .unwrap_or(before_of);
 
-        // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
-        let rest_destination = parse_of_them_rest_destination(lower);
+            // Delegate to nom combinator (input already lowercase from lower).
+            let quantity = if let Ok((_rest, _)) = alt((
+                tag::<_, _, OracleError<'_>>("any number of "),
+                tag("any number"),
+            ))
+            .parse(after_put)
+            {
+                PutCount::AnyNumber
+            } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+                nom_primitives::parse_number
+                    .parse(rest)
+                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
+            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
+                PutCount::Exactly(n)
+            } else {
+                // "a/an" or unrecognized → treat as up_to 1
+                PutCount::Up(1)
+            };
 
-        return Some(ContinuationAst::DigFromAmong {
-            quantity,
-            filter: TargetFilter::Any,
-            destination,
-            rest_destination,
-            enters_under: None,
-            face_down_profile: None,
-            enter_tapped,
-            // "put N of them" strips only "put" — never a reveal verb (private).
-            reveal_verb: false,
-        });
+            // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
+            let rest_destination = parse_of_them_rest_destination(lower);
+
+            return Some(ContinuationAst::DigFromAmong {
+                quantity,
+                filter: TargetFilter::Any,
+                destination,
+                rest_destination,
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped,
+                // "put N of them" strips only "put" — never a reveal verb (private).
+                reveal_verb: false,
+            });
+        }
     }
 
     // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
@@ -8398,6 +8402,63 @@ mod tests {
             result,
             Some(ContinuationAst::ExileOneOfThemFaceDown),
             "a pure-peek 'you may reveal it' must not be fused into the Gonti exile continuation"
+        );
+    }
+
+    #[test]
+    fn from_among_any_number_equipment_not_misrouted_as_of_them() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "You may put any number of Equipment cards from among them onto the battlefield.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::AnyNumber);
+        assert!(
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    ref type_filters,
+                    ..
+                }) if type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                )
+            ),
+            "expected Equipment filter, got {filter:?}"
+        );
+        assert_eq!(destination, Some(Zone::Battlefield));
+    }
+
+    #[test]
+    fn put_two_of_them_into_hand_still_uses_of_them_arm() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put two of them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(ContinuationAst::DigFromAmong {
+                    quantity: PutCount::Exactly(2),
+                    filter: TargetFilter::Any,
+                    destination: Some(Zone::Hand),
+                    ..
+                })
+            ),
+            "expected bare of-them DigFromAmong, got {result:?}"
         );
     }
 }

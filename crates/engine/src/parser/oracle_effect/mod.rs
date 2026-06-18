@@ -49827,6 +49827,94 @@ mod tests {
         }
     }
 
+    /// Gilgamesh, Master-at-Arms (issue #3286): any-number Equipment dig-from-among
+    /// plus CR 603.12 active-voice reflexive attach to Samurai.
+    #[test]
+    fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let def = parse_effect_chain(
+            "Look at the top six cards of your library. You may put any number of Equipment cards from among them onto the battlefield. Put the rest on the bottom of your library in a random order. When you put one or more Equipment onto the battlefield this way, you may attach one of them to a Samurai you control.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected outer Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+        assert_eq!(*destination, Some(Zone::Battlefield));
+        assert_eq!(*keep_count, Some(u32::MAX), "any number → unbounded keep");
+        assert!(*up_to);
+        assert!(
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                    if type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                    )
+            ),
+            "expected Equipment filter on Dig, got {filter:?}"
+        );
+        assert_eq!(*rest_destination, Some(Zone::Library));
+        assert!(
+            def.forward_result,
+            "Dig parent must forward the just-moved Equipment to the Attach sub_ability"
+        );
+
+        let attach = def
+            .sub_ability
+            .as_ref()
+            .expect("expected Attach sub_ability after Dig");
+        match &*attach.effect {
+            Effect::Attach { attachment, target } => {
+                assert!(
+                    matches!(attachment, TargetFilter::ParentTarget),
+                    "attachment should bind to a chosen moved Equipment, got {attachment:?}"
+                );
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::You),
+                            ref type_filters,
+                            ..
+                        }) if type_filters.iter().any(
+                            |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Samurai"))
+                        )
+                    ),
+                    "expected Samurai you control attach target, got {target:?}"
+                );
+            }
+            other => panic!("expected Attach sub_ability, got {other:?}"),
+        }
+        match &attach.condition {
+            Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                    ),
+                    "expected Equipment on ZoneChangedThisWay, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
+        }
+        assert!(
+            attach.optional,
+            "\"you may attach\" makes the attach step optional"
+        );
+    }
+
     /// Quest for the Holy Relic / Stonehewer Giant pattern:
     /// SearchLibrary → ChangeZone(destination=Battlefield) → Attach. The
     /// rewire detects the ChangeZone-to-battlefield parent and sets
