@@ -4,6 +4,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_quantity::parse_cda_quantity;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
@@ -498,6 +499,16 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some(rest_lower) = lower.strip_prefix('x') {
         let rest = &text[1..];
         if rest_lower.is_empty() || rest_lower.starts_with(|c: char| !c.is_alphanumeric()) {
+            // CR 107.3a + CR 701.47a: "X, where X is <description>" binds the
+            // variable to a defined quantity (e.g. amass's "where X is that
+            // spell's mana value") rather than a paid cost. Without this, X
+            // falls through to a bare `Variable` ref that always resolves to 0
+            // outside an actually-paid-X cost — a silent no-op (issue #720).
+            if let Some(description) = strip_where_x_is_clause(rest_lower) {
+                if let Some(expr) = parse_cda_quantity(description) {
+                    return Some((expr, ""));
+                }
+            }
             return Some((
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -574,6 +585,21 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
+/// (already-lowercased) text following a bare `X`, returning the lowercase
+/// description that defines the variable. Shared by every count-position
+/// keyword that uses this binding shape (amass, mobilize, firebending).
+pub(crate) fn strip_where_x_is_clause(rest_lower: &str) -> Option<&str> {
+    let trimmed = rest_lower.trim_start();
+    let (description, _) = alt((
+        tag::<_, _, OracleError<'_>>(", where x is "),
+        tag("where x is "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    Some(description.trim_end_matches('.').trim())
 }
 
 /// Parse an English ordinal number word at the start of text.

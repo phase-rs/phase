@@ -10938,6 +10938,36 @@ mod tests {
         }
     }
 
+    /// Issue #720: "amass Orcs X, where X is that spell's mana value" (Saruman,
+    /// the White Hand) must bind X to the triggering spell's mana value, not
+    /// fall through to a bare `Variable` ref — which always resolves to 0
+    /// outside an actually-paid-X cost, silently amassing nothing.
+    #[test]
+    fn parse_amass_orcs_x_where_x_is_spell_mana_value() {
+        let result = try_parse_amass(
+            "amass Orcs X, where X is that spell's mana value",
+            "amass orcs x, where x is that spell's mana value",
+        );
+        assert!(
+            result.is_some(),
+            "Should parse 'amass Orcs X, where X is ...'"
+        );
+        match result.unwrap() {
+            Effect::Amass { subtype, count } => {
+                assert_eq!(subtype, "Orc");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
+                    }
+                );
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_monstrosity_4() {
         let result = try_parse_monstrosity("monstrosity 4.");
