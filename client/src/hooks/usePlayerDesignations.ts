@@ -1,4 +1,4 @@
-import { useShallow } from "zustand/react/shallow";
+import { useMemo } from "react";
 
 import type {
   DungeonId,
@@ -24,8 +24,8 @@ export interface PlayerDesignations {
   activeDungeon: DungeonId | null;
   currentRoom: number;
   /** Engine-aggregated continuous conditions afflicting this player (can't gain
-   *  life, can't cast, etc.). Shared empty array when none, so `useShallow`
-   *  stays stable in the dominant case. */
+   *  life, can't cast, etc.). Shared empty array when none, so the memoized
+   *  result stays stable in the dominant case. */
   statusConditions: PlayerStatusView[];
   /** CR 601.2f: pending one-shot modifiers for this player's next spell. */
   pendingSpellModifiers: PendingNextSpellModifier[];
@@ -40,8 +40,8 @@ export interface PlayerDesignations {
 const playerKey = (id: PlayerId): string => String(id);
 
 // Shared empty arrays: returned by reference when a player has no conditions /
-// pending modifiers (the common case) so `useShallow` sees a stable value and
-// skips re-render. A fresh `.filter([])` result would defeat that.
+// pending modifiers (the common case) so the memoized result can reuse stable
+// references. A fresh `.filter([])` result would defeat that.
 const NO_CONDITIONS: PlayerStatusView[] = [];
 const NO_MODIFIERS: PendingNextSpellModifier[] = [];
 const NO_REDUCTIONS: PendingSpellCostReduction[] = [];
@@ -74,55 +74,55 @@ function forPlayer<T extends { player: PlayerId }>(
 }
 
 export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
-  return useGameStore(
-    useShallow((s) => {
-      const gs = s.gameState;
-      if (!gs) return EMPTY;
-      const dungeon = gs.dungeon_progress?.[playerKey(playerId)];
-      const activeDungeon = dungeon?.current_dungeon ?? null;
-      const isMonarch = gs.monarch != null && gs.monarch === playerId;
-      const hasInitiative = gs.initiative != null && gs.initiative === playerId;
-      const hasCityBlessing = gs.city_blessing?.includes(playerId) ?? false;
-      const ringLevel = gs.ring_level?.[playerKey(playerId)] ?? 0;
-      const ringBearerId = gs.ring_bearer?.[playerKey(playerId)] ?? null;
-      const ringBearerName = ringBearerId != null ? (gs.objects[String(ringBearerId)]?.name ?? null) : null;
-      const energy = gs.players[playerId]?.energy ?? 0;
-      const statusConditions = forPlayer(gs.derived?.player_status, playerId, NO_CONDITIONS);
-      const pendingSpellModifiers = forPlayer(
-        gs.pending_next_spell_modifiers,
-        playerId,
-        NO_MODIFIERS,
-      );
-      const pendingSpellReductions = forPlayer(
-        gs.pending_next_spell_cost_reductions,
-        playerId,
-        NO_REDUCTIONS,
-      );
-      const hasAny =
-        isMonarch
-        || hasInitiative
-        || hasCityBlessing
-        || activeDungeon != null
-        || ringLevel > 0
-        || energy > 0
-        || statusConditions.length > 0
-        || pendingSpellModifiers.length > 0
-        || pendingSpellReductions.length > 0;
-      return {
-        isMonarch,
-        hasInitiative,
-        hasCityBlessing,
-        ringLevel,
-        ringBearerId,
-        ringBearerName,
-        energy,
-        activeDungeon,
-        currentRoom: dungeon?.current_room ?? 0,
-        statusConditions,
-        pendingSpellModifiers,
-        pendingSpellReductions,
-        hasAny,
-      };
-    }),
-  );
+  const gameState = useGameStore((s) => s.gameState);
+
+  return useMemo(() => {
+    const gs = gameState;
+    if (!gs) return EMPTY;
+    const dungeon = gs.dungeon_progress?.[playerKey(playerId)];
+    const activeDungeon = dungeon?.current_dungeon ?? null;
+    const isMonarch = gs.monarch != null && gs.monarch === playerId;
+    const hasInitiative = gs.initiative != null && gs.initiative === playerId;
+    const hasCityBlessing = gs.city_blessing?.includes(playerId) ?? false;
+    const ringLevel = gs.ring_level?.[playerKey(playerId)] ?? 0;
+    const ringBearerId = gs.ring_bearer?.[playerKey(playerId)] ?? null;
+    const ringBearerName = ringBearerId != null ? (gs.objects[String(ringBearerId)]?.name ?? null) : null;
+    const energy = gs.players[playerId]?.energy ?? 0;
+    const statusConditions = forPlayer(gs.derived?.player_status, playerId, NO_CONDITIONS);
+    const pendingSpellModifiers = forPlayer(
+      gs.pending_next_spell_modifiers,
+      playerId,
+      NO_MODIFIERS,
+    );
+    const pendingSpellReductions = forPlayer(
+      gs.pending_next_spell_cost_reductions,
+      playerId,
+      NO_REDUCTIONS,
+    );
+    const hasAny =
+      isMonarch
+      || hasInitiative
+      || hasCityBlessing
+      || activeDungeon != null
+      || ringLevel > 0
+      || energy > 0
+      || statusConditions.length > 0
+      || pendingSpellModifiers.length > 0
+      || pendingSpellReductions.length > 0;
+    return {
+      isMonarch,
+      hasInitiative,
+      hasCityBlessing,
+      ringLevel,
+      ringBearerId,
+      ringBearerName,
+      energy,
+      activeDungeon,
+      currentRoom: dungeon?.current_room ?? 0,
+      statusConditions,
+      pendingSpellModifiers,
+      pendingSpellReductions,
+      hasAny,
+    };
+  }, [gameState, playerId]);
 }
