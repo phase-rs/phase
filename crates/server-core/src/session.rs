@@ -141,9 +141,12 @@ pub struct GameSession {
     /// A "request takeback" awaiting unanimous human approval, if any. See
     /// `crate::takeback` for the GH #1507 multiplayer-safe undo flow.
     pub pending_takeback: Option<PendingTakeback>,
-    /// Rolling buffer of authoritative states immediately preceding each
-    /// state-mutating action, used to restore on an approved takeback.
-    pub takeback_history: VecDeque<GameState>,
+    /// Rolling buffer of (actor, state) pairs — the authoritative state
+    /// immediately preceding each state-mutating action, tagged with which
+    /// player took that action. Tagged by actor so a takeback request can
+    /// find the requester's *own* last action even when other players have
+    /// acted since (see `crate::takeback::GameSession::request_takeback`).
+    pub takeback_history: VecDeque<(PlayerId, GameState)>,
 }
 
 impl GameSession {
@@ -1075,7 +1078,7 @@ impl SessionManager {
         // the rules; players may arrange them as they choose. Hand reordering
         // has no game-rules consequence.
         if matches!(action, GameAction::ReorderHand { .. }) {
-            session.push_takeback_snapshot();
+            session.push_takeback_snapshot(player);
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1105,7 +1108,7 @@ impl SessionManager {
                 | GameAction::GrantDebugPermission { .. }
                 | GameAction::RevokeDebugPermission { .. }
         ) {
-            session.push_takeback_snapshot();
+            session.push_takeback_snapshot(player);
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1190,7 +1193,7 @@ impl SessionManager {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        session.push_takeback_snapshot();
+        session.push_takeback_snapshot(player);
         let result = apply(&mut session.state, player, action).map_err(|e| {
             warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
             format!("Engine error: {}", e)
@@ -1802,6 +1805,69 @@ mod tests {
         assert!(session.pending_takeback.is_none());
     }
 
+    /// Player A acts, then player B acts. A's takeback request must restore
+    /// the state to right before A's *own* action — not merely undo B's more
+    /// recent action while leaving A's action intact. Regression test for a
+    /// bug where `takeback_history` ignored which player produced each
+    /// checkpoint and always restored the single most recent global entry.
+    #[test]
+    fn takeback_restores_requesters_own_action_not_latest_global_action() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (player_a, token_a, player_b, token_b) = if priority_player == PlayerId(0) {
+            (PlayerId(0), token0.clone(), PlayerId(1), token1.clone())
+        } else {
+            (PlayerId(1), token1.clone(), PlayerId(0), token0.clone())
+        };
+
+        let state_before_a = mgr.sessions.get(&code).unwrap().state.clone();
+
+        let result = mgr.handle_action(&code, &token_a, GameAction::PassPriority);
+        assert!(
+            result.is_ok(),
+            "A's PassPriority should succeed: {:?}",
+            result.err()
+        );
+        let state_after_a = mgr.sessions.get(&code).unwrap().state.clone();
+        assert_ne!(
+            state_after_a.waiting_for, state_before_a.waiting_for,
+            "sanity: A's action should have changed turn state"
+        );
+
+        let result = mgr.handle_action(&code, &token_b, GameAction::PassPriority);
+        assert!(
+            result.is_ok(),
+            "B's PassPriority should succeed: {:?}",
+            result.err()
+        );
+        let state_after_b = mgr.sessions.get(&code).unwrap().state.clone();
+        assert_ne!(
+            state_after_b.waiting_for, state_after_a.waiting_for,
+            "sanity: B's action should have changed turn state further"
+        );
+
+        // A requests a takeback — must target the checkpoint before A's own
+        // action, not the checkpoint before B's (more recent) action.
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let outcome = session.request_takeback(player_a).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Pending);
+        let outcome = session.respond_takeback(player_b, true).unwrap();
+        assert_eq!(outcome, TakebackOutcome::Approved);
+
+        assert_eq!(
+            session.state.waiting_for, state_before_a.waiting_for,
+            "takeback must restore to before the REQUESTER's own action"
+        );
+        assert_ne!(
+            session.state.waiting_for, state_after_a.waiting_for,
+            "must not merely undo only the other player's later action"
+        );
+    }
+
     /// A single decline withdraws the request and leaves state untouched.
     #[test]
     fn takeback_decline_leaves_state_untouched() {
@@ -1912,9 +1978,81 @@ mod tests {
         let session = mgr.sessions.get_mut(&code).unwrap();
         // Force a known checkpoint to take back to, since the AI may have
         // already acted past mulligans by the time the game starts.
-        session.push_takeback_snapshot();
+        session.push_takeback_snapshot(PlayerId(0));
         let outcome = session.request_takeback(PlayerId(0)).unwrap();
         assert_eq!(outcome, TakebackOutcome::Approved);
+    }
+
+    /// `pending_takeback_message` is what a reconnecting socket replays to
+    /// learn about an in-flight vote — `None` when nothing is pending, and
+    /// the requester's identity once a request exists.
+    #[test]
+    fn pending_takeback_message_reflects_request_state() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let acting_token = if priority_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        assert!(mgr
+            .sessions
+            .get(&code)
+            .unwrap()
+            .pending_takeback_message()
+            .is_none());
+
+        let _ = mgr.handle_action(&code, acting_token, GameAction::PassPriority);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.request_takeback(priority_player).unwrap();
+
+        match session.pending_takeback_message() {
+            Some(crate::protocol::ServerMessage::TakebackRequested { requester, .. }) => {
+                assert_eq!(requester, priority_player);
+            }
+            other => panic!("expected TakebackRequested, got {:?}", other),
+        }
+    }
+
+    /// GH #1507 regression guard: a pending takeback request must survive a
+    /// disconnect/reconnect cycle so the reconnecting socket can still be
+    /// told about it (see `pending_takeback_message` and the phase-server
+    /// Reconnect handler that replays it).
+    #[test]
+    fn pending_takeback_survives_disconnect_and_reconnect() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        let (acting_token, approver, approver_token) = if priority_player == PlayerId(0) {
+            (token0.clone(), PlayerId(1), token1.clone())
+        } else {
+            (token1.clone(), PlayerId(0), token0.clone())
+        };
+
+        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.request_takeback(priority_player).unwrap();
+
+        mgr.handle_disconnect(&code, approver);
+        let reconnected_state = mgr.handle_reconnect(&code, &approver_token);
+        assert!(
+            reconnected_state.is_ok(),
+            "reconnect should succeed: {:?}",
+            reconnected_state.err()
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(
+            session.pending_takeback.is_some(),
+            "the pending takeback must still be there for the reconnecting socket to be told about"
+        );
+        assert!(session.pending_takeback_message().is_some());
     }
 
     // ── Sandbox capability tests ─────────────────────────────────────────

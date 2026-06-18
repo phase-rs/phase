@@ -17,7 +17,7 @@
 //! told why it was handed an older `GameState`; it just continues from
 //! whatever state it's given, exactly as it does on reconnect/restore.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -60,13 +60,18 @@ pub enum TakebackOutcome {
 
 impl GameSession {
     /// Records the current authoritative state as a takeback checkpoint,
-    /// to be called immediately before a state-mutating action is applied.
-    /// Caps retention at [`MAX_TAKEBACK_HISTORY`] (oldest dropped first).
-    pub fn push_takeback_snapshot(&mut self) {
+    /// tagged with the player about to act — to be called immediately
+    /// before that player's action is applied. Caps retention at
+    /// [`MAX_TAKEBACK_HISTORY`] (oldest dropped first).
+    ///
+    /// Tagging by actor (rather than just "most recent action") is what lets
+    /// `request_takeback` find *this player's* last action even when other
+    /// players have acted since — see its doc comment.
+    pub fn push_takeback_snapshot(&mut self, actor: PlayerId) {
         if self.takeback_history.len() >= MAX_TAKEBACK_HISTORY {
             self.takeback_history.pop_front();
         }
-        self.takeback_history.push_back(self.state.clone());
+        self.takeback_history.push_back((actor, self.state.clone()));
     }
 
     /// Human (non-AI) seats in this session, in seat order. AI seats never
@@ -97,9 +102,15 @@ impl GameSession {
     }
 
     /// A human player requests rolling the game back to the state just
-    /// before their most recent action. Auto-resolves to `Approved`
-    /// immediately when the requester is the only human at the table
-    /// (e.g. solo vs. AI) since there is nobody else to ask.
+    /// before *their own* most recent action — not simply the most recent
+    /// action by anyone. Other players may have acted since; rolling back
+    /// to before the requester's action necessarily discards those later
+    /// actions too (there is no way to keep them while undoing an earlier
+    /// action they were built on), but it must never target a snapshot that
+    /// precedes a different player's action while leaving the requester's
+    /// own action untouched. Auto-resolves to `Approved` immediately when
+    /// the requester is the only human at the table (e.g. solo vs. AI)
+    /// since there is nobody else to ask.
     pub fn request_takeback(&mut self, player: PlayerId) -> Result<TakebackOutcome, String> {
         if self.pending_takeback.is_some() {
             return Err("A takeback request is already pending for this game".to_string());
@@ -109,9 +120,11 @@ impl GameSession {
         }
         let target_state = self
             .takeback_history
-            .back()
-            .cloned()
-            .ok_or_else(|| "There is no previous action to take back".to_string())?;
+            .iter()
+            .rev()
+            .find(|(actor, _)| *actor == player)
+            .map(|(_, state)| state.clone())
+            .ok_or_else(|| "There is no previous action of yours to take back".to_string())?;
 
         let mut approvals = HashSet::new();
         approvals.insert(player);
@@ -164,10 +177,23 @@ impl GameSession {
             None => Err("There is no pending takeback request".to_string()),
         }
     }
-}
 
-/// Empty history/no pending request — the value every freshly constructed
-/// `GameSession` starts with.
-pub fn fresh_takeback_state() -> (Option<PendingTakeback>, VecDeque<GameState>) {
-    (None, VecDeque::new())
+    /// The `TakebackRequested` notification for the current pending request,
+    /// if any. Used both for the original broadcast when a request goes out
+    /// and to replay the same prompt to a socket that (re)connects while the
+    /// vote is still in flight — otherwise a disconnected approver comes
+    /// back with no way to respond, and `handle_action` rejects all actions
+    /// while a request is pending, stalling the table.
+    pub fn pending_takeback_message(&self) -> Option<crate::protocol::ServerMessage> {
+        let pending = self.pending_takeback.as_ref()?;
+        let requester_name = self
+            .display_names
+            .get(pending.requested_by.0 as usize)
+            .cloned()
+            .unwrap_or_default();
+        Some(crate::protocol::ServerMessage::TakebackRequested {
+            requester: pending.requested_by,
+            requester_name,
+        })
+    }
 }

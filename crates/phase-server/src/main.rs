@@ -3179,6 +3179,10 @@ async fn handle_client_message(
                     player: PlayerId,
                     game_started_msg: Box<ServerMessage>,
                     ai_result: Option<Box<ActionResult>>,
+                    /// GH #1507: present when a takeback vote is in flight,
+                    /// so the reconnecting socket gets the same prompt it
+                    /// would have received had it stayed connected.
+                    pending_takeback_msg: Option<Box<ServerMessage>>,
                 },
                 Err(String),
             }
@@ -3227,10 +3231,13 @@ async fn handle_client_message(
                             // re-see the first-player roll).
                             let game_started_msg =
                                 build_game_started_message(session, player, None, Vec::new());
+                            let pending_takeback_msg =
+                                session.pending_takeback_message().map(Box::new);
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
                                 ai_result,
+                                pending_takeback_msg,
                             }
                         }
                         Err(e) => ReconnectOutcome::Err(e),
@@ -3269,6 +3276,7 @@ async fn handle_client_message(
                     player,
                     game_started_msg,
                     ai_result,
+                    pending_takeback_msg,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token);
@@ -3295,6 +3303,15 @@ async fn handle_client_message(
 
                     if let Ok(json) = serde_json::to_string(&game_started_msg) {
                         let _ = socket.send(Message::text(json)).await;
+                    }
+
+                    // GH #1507: replay the pending takeback prompt, if any,
+                    // so this socket isn't left with no way to approve or
+                    // decline a vote that started while it was disconnected.
+                    if let Some(msg) = pending_takeback_msg {
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
                     }
 
                     if let Some(result) = ai_result {
@@ -4516,11 +4533,11 @@ async fn handle_client_message(
                 return;
             };
             let outcome = session.request_takeback(player_id);
-            let requester_name = session
-                .display_names
-                .get(player_id.0 as usize)
-                .cloned()
-                .unwrap_or_default();
+            // `pending_takeback_message` reads `session.pending_takeback`,
+            // which `request_takeback` already cleared on an Approved
+            // outcome — so this is `Some` exactly when we need it (the
+            // Pending arm below) and `None` otherwise.
+            let requested_msg = session.pending_takeback_message();
             let player_count = session.player_count;
             let approved_snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
                 .then(|| session.current_broadcast_snapshot());
@@ -4535,14 +4552,12 @@ async fn handle_client_message(
                 }
                 Ok(server_core::TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, "takeback requested");
-                    let conns = connections.lock().await;
-                    if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackRequested {
-                            requester: player_id,
-                            requester_name,
-                        };
-                        for sender in players.values() {
-                            let _ = sender.send(msg.clone());
+                    if let Some(msg) = requested_msg {
+                        let conns = connections.lock().await;
+                        if let Some(players) = conns.get(&game_code) {
+                            for sender in players.values() {
+                                let _ = sender.send(msg.clone());
+                            }
                         }
                     }
                 }
