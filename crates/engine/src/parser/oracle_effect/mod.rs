@@ -10940,6 +10940,23 @@ fn replace_definition_targets_with_parent(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 115.10a: True when an `Attach` effect names an explicit typed
+/// recipient ("attach … to a Samurai you control" — Gilgamesh; "attach it to a
+/// creature you control" — Stonehewer Giant). The chunk-loop anaphor rewriter
+/// must not collapse such recipients to `ParentTarget` just because the
+/// attachment side uses a set anaphor ("one of them").
+fn attach_recipient_is_explicitly_typed(target: &TargetFilter) -> bool {
+    match target {
+        TargetFilter::Typed(tf) => {
+            !tf.type_filters.is_empty() || tf.controller.is_some() || !tf.properties.is_empty()
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(attach_recipient_is_explicitly_typed)
+        }
+        _ => false,
+    }
+}
+
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
@@ -10997,7 +11014,10 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        Effect::Attach { target, .. }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !attach_recipient_is_explicitly_typed(target) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
