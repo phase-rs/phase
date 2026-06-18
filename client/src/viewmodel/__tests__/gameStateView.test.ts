@@ -6,6 +6,7 @@ import {
   getOpponentIds,
   getSeatCount,
   getWaitingForObjectChoiceIds,
+  isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
 } from "../gameStateView";
 
@@ -233,5 +234,101 @@ describe("getOpponentIds", () => {
     // guards against — `opponents[0]` is undefined here, and the layout
     // must not index `gameState.players[undefined]`.
     expect(getOpponentIds(makeState([0, 1], [1]), 0)).toEqual([]);
+  });
+});
+
+// Issue #2889: single-player renders the raw, unredacted state, so a
+// Hideaway/Foretell face-down exile's real `name`/`printed_ref` sit on the
+// object regardless of viewer. This helper is the client-side half of the
+// engine's `hidden_facedown_exile_ids` look-permission gate
+// (crates/engine/src/game/visibility.rs, CR 406.3 + CR 702.75a + CR 702.143e).
+describe("isFaceDownExileCardVisibleToViewer", () => {
+  function faceDownObject(overrides: Partial<GameObject> = {}): GameObject {
+    return {
+      id: 2,
+      card_id: 200,
+      owner: 1,
+      controller: 1,
+      zone: "Exile",
+      tapped: false,
+      face_down: true,
+      flipped: false,
+      transformed: false,
+      damage_marked: 0,
+      dealt_deathtouch_damage: false,
+      attached_to: null,
+      attachments: [],
+      counters: {},
+      name: "Ghalta, Primal Hunter",
+      power: null,
+      toughness: null,
+      loyalty: null,
+      card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+      mana_cost: { type: "Cost", shards: [], generic: 0 },
+      keywords: [],
+      abilities: [],
+      trigger_definitions: [],
+      replacement_definitions: [],
+      static_definitions: [],
+      color: [],
+      base_power: null,
+      base_toughness: null,
+      base_keywords: [],
+      base_color: [],
+      timestamp: 1,
+      entered_battlefield_turn: null,
+      ...overrides,
+    };
+  }
+
+  function stateWithSourceAndExiled(
+    source: GameObject,
+    exiled: GameObject,
+    kind: string,
+  ): GameState {
+    return {
+      objects: { [source.id]: source, [exiled.id]: exiled },
+      exile_links: [{ exiled_id: exiled.id, source_id: source.id, kind }],
+    } as unknown as GameState;
+  }
+
+  it("is false for a card that isn't face down", () => {
+    const obj = faceDownObject({ face_down: false });
+    expect(isFaceDownExileCardVisibleToViewer({ objects: {} } as GameState, obj, 1)).toBe(false);
+  });
+
+  it("is true for the controller of the Hideaway permanent that exiled it", () => {
+    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
+    const exiled = faceDownObject();
+    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
+    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(true);
+  });
+
+  it("is false for an opponent of the Hideaway permanent's controller", () => {
+    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
+    const exiled = faceDownObject();
+    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
+    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(false);
+  });
+
+  it("is false for a plain TrackedBySource link even for the source's controller", () => {
+    // Bomat Courier ("(You can't look at it.)") tracks its face-down exile by
+    // source for later retrieval but grants no look-permission.
+    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
+    const exiled = faceDownObject();
+    const state = stateWithSourceAndExiled(source, exiled, "TrackedBySource");
+    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
+  });
+
+  it("is true for the owner of a foretold card", () => {
+    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
+    const state = { objects: { [exiled.id]: exiled }, exile_links: [] } as unknown as GameState;
+    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(true);
+  });
+
+  it("is false for an opponent of a foretold card's owner", () => {
+    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
+    const state = { objects: { [exiled.id]: exiled }, exile_links: [] } as unknown as GameState;
+    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
   });
 });

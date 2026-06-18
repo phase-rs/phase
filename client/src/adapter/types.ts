@@ -810,6 +810,12 @@ export interface GameObject {
     color: ManaColor[];
     printed_ref?: PrintedRef | null;
   } | null;
+  /**
+   * CR 702.143c-d: Whether this card in exile is foretold. Its owner may look
+   * at it (and cast it on a later turn) even though `face_down` is true.
+   * Cleared when the card leaves exile (a zone change creates a new object).
+   */
+  foretold?: boolean;
 }
 
 export interface PrintedRef {
@@ -1866,6 +1872,23 @@ export interface EpicEffect {
 /** CR 731: the day/night designation, absent when neither is in effect. */
 export type DayNight = "Day" | "Night";
 
+/**
+ * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
+ * Unit variants serialize as bare strings; the two struct variants serialize
+ * as a single-key object under serde's default external tagging. Only
+ * `HideawayLookable` is currently read on the client (the exile-visibility
+ * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
+ * round-trips the full wire shape rather than widening it to `unknown`.
+ */
+export type ExileLinkKind =
+  | "TrackedBySource"
+  | "Cipher"
+  | "Haunt"
+  | "HideawayLookable"
+  | "CraftMaterial"
+  | { UntilSourceLeaves: { return_zone: Zone } }
+  | { ParadigmSource: { player: PlayerId } };
+
 export interface GameState {
   turn_number: number;
   active_player: PlayerId;
@@ -1938,7 +1961,7 @@ export interface GameState {
   ring_level?: Record<string, number>;
   ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
-  exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
+  exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId; kind?: ExileLinkKind }>;
   match_config?: MatchConfig;
   match_phase?: MatchPhase;
   match_score?: MatchScore;
