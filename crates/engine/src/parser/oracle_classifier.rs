@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::verify;
-use nom::sequence::terminated;
+use nom::combinator::{opt, verify};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::primitives as nom_primitives;
@@ -464,10 +464,21 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return false;
     }
-    if alt((
-        tag::<_, _, OracleError<'_>>("you may play"),
-        tag("you may cast"),
-    ))
+    // CR 604.2 + CR 601.2a: head-anchor the "you may play"/"you may cast"
+    // permission lead, allowing an optional leading once-per-turn frequency
+    // phrase ("Once during each of your turns, " / "Once each turn, ") to be
+    // stripped first. This classifies the disjunctive once-per-turn play/cast-
+    // from-zone permission (The Eighth Doctor, Serra Paragon) as static so it
+    // routes ahead of the Priority 8 "would" replacement fallback — the granted
+    // rider's "would leave the battlefield" text would otherwise misclassify the
+    // whole line as a replacement. Class-level anchor, not a per-card branch.
+    if preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("once during each of your turns, "),
+            tag("once each turn, "),
+        ))),
+        alt((tag("you may play"), tag("you may cast"))),
+    )
     .parse(lower)
     .is_ok()
         && (scan_contains(lower, "from your graveyard")
