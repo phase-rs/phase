@@ -24,11 +24,11 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
-    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    CastFromZoneDriver, Comparator, ContinuousModification, ControllerRef, DamageSource,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, MultiTargetSpec,
+    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -422,12 +422,45 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             clause_ir.parsed.sub_ability.clone()
         };
 
+        // CR 118.9 + CR 608.2g: A *standing-duration* `CastFromZone` lingering
+        // grant (no DuringResolution driver, no alternative cost, no
+        // eligibility constraint, and an explicit duration — Discover/Nashi/
+        // Urza-class "until end of turn, you may play that card without
+        // paying its mana cost") is unconditional, like
+        // `GrantCastingPermission`: the "may" describes the later cast
+        // decision, not the grant itself. Gating the grant behind an
+        // immediate accept/decline drops the permission entirely when
+        // declined (issue #720 follow-up: Urza, Lord High Artificer).
+        // `constraint`/`alt_ability_cost` are EXCLUDED from this carve-out:
+        // Beseech the Mirror's "...if that spell's mana value is 4 or less"
+        // (constraint) and Infamous Cruelclaw's "...by discarding a card
+        // rather than paying its mana cost" (alt_ability_cost) both need the
+        // immediate accept/decline because declining branches into a
+        // fallback action (hand fallback) or an alternative payment the
+        // engine must resolve right now, not later. A missing `duration` is
+        // ALSO excluded: Memory Plunder's "you may cast target instant or
+        // sorcery card... without paying its mana cost" carries no standing
+        // duration at all, so its "may" is the immediate resolution-time
+        // decision the existing `OptionalEffectChoice` prompt correctly
+        // drives (issue #2884) — only an explicit duration marks the grant
+        // as deferred to a later priority window.
+        let is_lingering_cast_from_zone = matches!(
+            &clause_ir.parsed.effect,
+            Effect::CastFromZone {
+                driver: CastFromZoneDriver::LingeringPermission,
+                constraint: None,
+                alt_ability_cost: None,
+                duration: Some(_),
+                ..
+            }
+        );
         if clause_ir.is_optional
             && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
             && !matches!(
                 &clause_ir.parsed.effect,
                 Effect::GrantCastingPermission { .. }
             )
+            && !is_lingering_cast_from_zone
         {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
@@ -438,6 +471,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 &clause_ir.parsed.effect,
                 Effect::GrantCastingPermission { .. }
             )
+            && !is_lingering_cast_from_zone
         {
             def.optional = true;
         }
