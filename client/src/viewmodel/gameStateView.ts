@@ -228,11 +228,22 @@ export function buildPlayerBattlefieldView(
   const playerObjects = battlefieldObjects.filter(
     (object) => object.controller === playerId,
   );
-  return buildPlayerBattlefieldViewFromObjects(playerObjects);
+  // CR 701.54: the Ring-bearer must render as its own card even when a
+  // same-named, identically-statted permanent (e.g. another Army token)
+  // would otherwise collapse it into a shared group — otherwise the
+  // ring-bearer badge can land on the wrong representative or disappear
+  // entirely behind a stack badge.
+  const ringBearerIds = new Set(
+    Object.values(gameState.ring_bearer ?? {}).filter(
+      (id): id is ObjectId => id != null,
+    ),
+  );
+  return buildPlayerBattlefieldViewFromObjects(playerObjects, ringBearerIds);
 }
 
 export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
+  ringBearerIds: ReadonlySet<ObjectId> = new Set(),
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -242,11 +253,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures)),
-    lands: groupByName(resolveObjects(partition.lands)),
-    support: groupByName(resolveObjects(partition.support)),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers)),
-    other: groupByName(resolveObjects(partition.other)),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds),
   };
 }
 
