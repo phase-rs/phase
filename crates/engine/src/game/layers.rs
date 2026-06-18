@@ -4405,9 +4405,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, SacrificeCost, StaticCondition, StaticDefinition, TargetFilter,
-        TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, SacrificeCost, StaticCondition, StaticDefinition,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -6030,6 +6030,42 @@ mod tests {
         assert_eq!(state.objects[&ordinary].toughness, Some(2));
         assert_eq!(state.objects[&opponent_legend].power, Some(2));
         assert_eq!(state.objects[&opponent_legend].toughness, Some(2));
+    }
+
+    #[test]
+    fn dynamic_pt_lost_game_player_count_scales_past_one_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.players[1].is_eliminated = true;
+        state.players[2].is_eliminated = true;
+
+        let frogantua = make_creature(&mut state, "Rampant Frogantua", 3, 3, PlayerId(0));
+        let qty = QuantityExpr::Multiply {
+            factor: 10,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::HasLostTheGame,
+                },
+            }),
+        };
+        state
+            .objects
+            .get_mut(&frogantua)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+
+        evaluate_layers(&mut state);
+
+        let frogantua = state.objects.get(&frogantua).unwrap();
+        assert_eq!(frogantua.power, Some(23));
+        assert_eq!(frogantua.toughness, Some(23));
     }
 
     #[test]
