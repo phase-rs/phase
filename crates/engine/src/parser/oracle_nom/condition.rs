@@ -1536,6 +1536,15 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
 fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
         tag("its "),
+        // CR 201.5: a possessive pronoun in a self-referential ability refers to
+        // the object that has the ability (the source). Legendary creatures with
+        // she/he pronouns use the gendered possessive instead of "its" (e.g. "if
+        // her power is 4 or greater" — Viv Vision; "if her power is 1 or less" —
+        // Stature). Mirrors the "it " source pronoun already accepted by
+        // `parse_subject_has_property`. ("their" is intentionally omitted — it is
+        // ambiguous between a singular-they object and a player possessive.)
+        tag("her "),
+        tag("his "),
         tag("enchanted creature's "),
         tag("equipped creature's "),
     ))
@@ -9505,6 +9514,45 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
             other => panic!("expected SelfPower LE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gendered_possessive_pronoun_power_condition() {
+        // CR 201.5: "her"/"his"/"their power is N" refers to the source creature,
+        // mirroring "its power is N". Real cards: Viv Vision ("if her power is 4
+        // or greater") and Stature, Size Shifter ("if her power is 1 or less").
+        // Before this fix the possessive-pronoun form was unmatched, so the gating
+        // condition was silently dropped and the ability fired unconditionally.
+        for (text, expected) in [
+            ("her power is 4 or greater", (Comparator::GE, 4)),
+            ("his power is 4 or greater", (Comparator::GE, 4)),
+            ("her toughness is 1 or less", (Comparator::LE, 1)),
+        ] {
+            let (rest, c) = parse_inner_condition(text)
+                .unwrap_or_else(|e| panic!("{text:?} must parse, got {e:?}"));
+            assert_eq!(rest, "", "{text:?} left remainder");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                } => {
+                    assert!(
+                        matches!(
+                            qty,
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source
+                            } | QuantityRef::Toughness {
+                                scope: crate::types::ability::ObjectScope::Source
+                            }
+                        ),
+                        "{text:?} wrong qty ref: {qty:?}"
+                    );
+                    assert_eq!((comparator, value), expected, "{text:?}");
+                }
+                other => panic!("{text:?} expected source P/T comparison, got {other:?}"),
+            }
         }
     }
 

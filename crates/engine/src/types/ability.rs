@@ -4539,6 +4539,22 @@ pub enum QuantityExpr {
         left: Box<QuantityExpr>,
         right: Box<QuantityExpr>,
     },
+    /// The maximum of N independent quantity expressions. Powers the
+    /// "A or B, whichever is greater" / "the greatest of A, B, …" Oracle
+    /// templating class (Triumphant Chomp: `max(2, greatest power among
+    /// Dinosaurs you control)`). A general arithmetic peer of
+    /// `Sum`/`Offset`/`Multiply`/`Difference`: composes any "greater of"
+    /// card from existing `QuantityExpr` leaves. Mirrors `Sum`'s `Vec` shape
+    /// so it generalizes from two operands to N.
+    ///
+    /// CR 107.1: the only numbers Magic uses are integers — this maximizes
+    /// computed integer amounts. CR 120.4a / CR 120.10 establish the in-rules
+    /// "the greatest of the calculated amounts" precedent for taking a maximum
+    /// over multiple computed values. "Whichever is greater" itself has no
+    /// dedicated CR number (cf. `Difference`, likewise an Oracle templating
+    /// convention without a dedicated rule); CR 107.2 authorizes the empty
+    /// fallback to 0.
+    Max { exprs: Vec<QuantityExpr> },
 }
 
 /// CR 107: Back-compatible `Deserialize` for [`QuantityExpr`]. Accepts BOTH the
@@ -4608,6 +4624,9 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
                         left: Box<QuantityExpr>,
                         right: Box<QuantityExpr>,
                     },
+                    Max {
+                        exprs: Vec<QuantityExpr>,
+                    },
                 }
                 let tagged: Tagged =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -4632,6 +4651,7 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
                     Tagged::UpTo { max } => QuantityExpr::UpTo { max },
                     Tagged::Power { base, exponent } => QuantityExpr::Power { base, exponent },
                     Tagged::Difference { left, right } => QuantityExpr::Difference { left, right },
+                    Tagged::Max { exprs } => QuantityExpr::Max { exprs },
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -4681,7 +4701,9 @@ impl QuantityExpr {
             | QuantityExpr::Power {
                 exponent: inner, ..
             } => inner.contains_x(),
-            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_x),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(QuantityExpr::contains_x)
+            }
             QuantityExpr::Difference { left, right } => left.contains_x() || right.contains_x(),
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
         }
@@ -4708,7 +4730,9 @@ impl QuantityExpr {
             | QuantityExpr::Power {
                 exponent: inner, ..
             } => inner.contains_vote_count(),
-            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_vote_count),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(QuantityExpr::contains_vote_count)
+            }
             QuantityExpr::Difference { left, right } => {
                 left.contains_vote_count() || right.contains_vote_count()
             }
