@@ -326,20 +326,14 @@ pub(super) fn parse_choice_partition_destination(
     .parse(input)
 }
 
-fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: AbilityDefinition) {
     let mut cursor = ability;
     loop {
         if cursor.sub_ability.is_none() {
             if cursor.optional
-                && matches!(*cursor.effect, Effect::CastFromZone { .. })
-                && matches!(
-                    *next.effect,
-                    Effect::PutAtLibraryPosition {
-                        target: TargetFilter::ExiledBySource,
-                        ..
-                    }
-                )
+                && super::lower::is_linked_exile_cast_bottom_cleanup(&cursor.effect, &next.effect)
             {
+                super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
             }
             cursor.sub_ability = Some(Box::new(next));
@@ -849,6 +843,9 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             // single-clause path.
                             if let Some(prepend) =
                                 combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
+                                    .or_else(|| {
+                                        exile_conjunct_prepend(&before_lower, remainder_trimmed)
+                                    })
                             {
                                 push_clause_chunk(
                                     &mut chunks,
@@ -1883,6 +1880,56 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// distribution, e.g. Gogo's "~ and that creature each get +2/+0 and gain haste
 /// ... and attack this turn if able"), there is no subject to thread — return
 /// `Some("")` so the conjunct splits with no prepend.
+/// CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile cost — "exile a
+/// Human you control **and** an artifact you control" elides the second
+/// "exile". The two conjuncts name *distinct* objects (a Human and an artifact),
+/// so they lower to two separate `ChangeZone(Exile)` effects, not one `And`
+/// filter. The bare-`and` recognizer never matches a noun-phrase continuation
+/// (correctly — it must not over-split "target creature and all other
+/// creatures"), so we restore the elided verb here: when conjunct 1 begins with
+/// `"exile "` and conjunct 2 is a bare article-led object phrase, return
+/// `"exile "` to prepend so the second conjunct reaches the exile parser as its
+/// own clause (Fugitive of the Judoon III).
+///
+/// Tightly gated so it never fires on a genuine single-object continuation: the
+/// remainder must be `a/an <phrase>` AND must parse to a concrete typed filter
+/// with no unparsed remainder (other than an optional possessive tail).
+fn exile_conjunct_prepend(before_lower: &str, remainder_trimmed: &str) -> Option<String> {
+    // Conjunct 1 must contain the elided exile verb (the chunk may begin with an
+    // optional "you may " frame: "You may exile a Human you control and …").
+    if !nom_primitives::scan_contains(before_lower, "exile ") {
+        return None;
+    }
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    // Conjunct 2 must be an article-led noun phrase (never a verb-headed clause —
+    // those are already handled by `starts_bare_and_clause`).
+    if alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(remainder_lower.as_str())
+    .is_err()
+    {
+        return None;
+    }
+    // Isolate the object phrase: it ends at the first sentence/clause boundary
+    // (". If you do, …" continuation, or a comma). Bounding the slice prevents
+    // the trailing continuation from defeating the "no stray remainder" check.
+    // allow-noncombinator: structural clause-boundary scan (locate the sentence/comma terminator), not parsing dispatch.
+    let phrase_end = remainder_trimmed
+        .find(['.', ','])
+        .unwrap_or(remainder_trimmed.len());
+    let phrase = remainder_trimmed[..phrase_end].trim();
+    // The phrase must parse to a concrete typed object filter with no stray
+    // remainder — this rejects open-ended continuations ("... and an opponent
+    // gains control of it") and incomplete noun phrases.
+    let (filter, rem) = parse_target(phrase);
+    if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some("exile ".to_string())
+}
+
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -3999,6 +4046,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Tribute { .. }
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -4091,6 +4139,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
@@ -5178,6 +5228,35 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    // CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile — "exile a Human
+    // you control and an artifact you control" splits into two clauses, the
+    // second prefixed with the elided "exile " so both objects are exiled.
+    // Building block for Fugitive of the Judoon III.
+    #[test]
+    fn conjoined_exile_restores_elided_verb() {
+        let chunks = clause_texts("exile a Human you control and an artifact you control");
+        assert_eq!(
+            chunks,
+            vec!["exile a Human you control", "exile an artifact you control"],
+            "second conjunct must regain the elided exile verb"
+        );
+    }
+
+    // Guard: the verb-gapping recognizer must NOT split a genuine single-object
+    // noun-phrase continuation that is not an exile object ("... and an opponent
+    // gains control of it" is a verb-headed clause handled elsewhere; a bare
+    // noun continuation with no exile head stays one clause).
+    #[test]
+    fn exile_conjunct_prepend_rejects_non_object_continuation() {
+        assert_eq!(
+            exile_conjunct_prepend(
+                "exile a creature you control",
+                "an opponent gains control of it"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn rest_cards_reference_matches_bare_the_other() {

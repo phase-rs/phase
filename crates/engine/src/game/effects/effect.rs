@@ -592,6 +592,12 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
                 .map(|e| snapshot_resolution_context_quantity(e, events))
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .iter()
+                .map(|e| snapshot_resolution_context_quantity(e, events))
+                .collect(),
+        },
         QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
             max: Box::new(snapshot_resolution_context_quantity(max, events)),
         },

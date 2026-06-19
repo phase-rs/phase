@@ -18,7 +18,6 @@ use super::token::{
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
-use crate::parser::oracle_quantity;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -75,7 +74,7 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         let after_where_lower = after_where.to_lowercase();
         rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
 
-        let qty = oracle_quantity::parse_quantity_ref(&after_where_lower)?;
+        let (_, qty) = nom_quantity::parse_quantity_ref_complete(&after_where_lower).ok()?;
         let dynamic_qty = QuantityExpr::Ref { qty };
         spec.dynamic_power = Some(dynamic_qty.clone());
         spec.dynamic_toughness = Some(dynamic_qty);

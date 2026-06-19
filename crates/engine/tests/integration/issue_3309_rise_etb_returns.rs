@@ -186,6 +186,54 @@ fn rise_of_dark_realms_mandatory_etb_return_resolves_without_crash() {
 }
 
 #[test]
+fn issue_3309_rise_karmic_guide_etb_chain_advances_to_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let karmic = scenario
+        .add_creature_to_graveyard(P0, "Karmic Guide", 2, 2)
+        .from_oracle_text(KARMIC_GUIDE_ORACLE)
+        .id();
+    let returnee = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+
+    let rise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rise of the Dark Realms", false, RISE_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(rise).target_objects(&[returnee]).resolve();
+
+    let mut guard = 0;
+    while guard < 64 {
+        guard += 1;
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(returnee)),
+                    })
+                    .expect("choose return target");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            _ => break,
+        }
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().objects[&karmic].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&returnee].zone, Zone::Battlefield);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
 fn rise_of_dark_realms_optional_etb_return_with_observers_resolves() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

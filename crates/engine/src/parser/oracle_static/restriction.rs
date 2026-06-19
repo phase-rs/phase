@@ -1448,6 +1448,26 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         );
     }
 
+    // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive once-per-turn permission —
+    // "Once during each of your turns, you may play a <land-filter> or cast a
+    // <spell-filter> from your graveyard." (The Eighth Doctor, Serra Paragon).
+    // `Play` mode covers both the land-play branch (CR 305.1) and the
+    // spell-cast branch (CR 601.2a); the two branch filters are merged so the
+    // permission's `affected` admits either class of card. Parsed before the
+    // single-verb dispatch below because the disjunctive lead shares the
+    // "once during each of your turns, you may" prefix with the cast-only form.
+    //
+    // The granted leave-battlefield rider ("If you do, it gains \"…exile…\"")
+    // that may follow is a CR 614.1a Moved replacement on the *resolved*
+    // permanent (origin Battlefield → Exile), NOT the stack-exit
+    // `graveyard_destination_replacement` (which is structurally unreachable for
+    // permanent spells). Attaching it requires a resolution-grant carrier on the
+    // permission. Until that exists, decline this parser so the unmodeled rider
+    // remains an honest coverage gap instead of being silently dropped.
+    if let Some(def) = try_parse_disjunctive_graveyard_cast_permission(text, lower) {
+        return Some(def);
+    }
+
     // Determine pattern and extract the rest after the prefix
     let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
         lower,
@@ -1516,6 +1536,129 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         def = def.active_zones(vec![Zone::Graveyard]);
     }
     Some(def)
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive once-per-turn
+/// graveyard play/cast permission — "Once during each of your turns, you may
+/// play a <land-filter> or cast a <spell-filter> from your graveyard." — into a
+/// single `GraveyardCastPermission { frequency: OncePerTurn, play_mode: Play }`
+/// whose `affected` filter is the union of the two branch filters.
+///
+/// Two zone-placement variants are accepted (both observed in printed cards):
+/// - tail-zone: "play a <land> or cast a <spell> from your graveyard"
+///   (The Eighth Doctor — "from your graveyard" once, at the end).
+/// - per-branch-zone: "play a <land> from your graveyard or cast a <spell> from
+///   your graveyard" (Serra Paragon — "from your graveyard" on each branch).
+///
+/// The parser parses whatever filter each branch carries (it does NOT assume
+/// "historic"): Serra Paragon's spell branch carries "mana value 3 or less",
+/// proving the filter axis is general. When both branches resolve to the same
+/// filter (The Eighth Doctor: both "historic permanent"), the union collapses
+/// to that single filter; otherwise it emits `TargetFilter::Or`.
+///
+/// A trailing rider ("If you do, it gains \"…\"") is intentionally rejected:
+/// the granted leave-battlefield exile rider is a CR 614.1a Moved replacement
+/// on the resolved permanent. Parsing only the permission would make coverage
+/// report support while dropping rules text.
+fn try_parse_disjunctive_graveyard_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 601.2a: Frequency prefix. Only the once-per-turn lead is a real printed
+    // shape for this disjunctive form today; accept both the canonical wording
+    // and the shorter "once each turn" synonym via the file-wide `or_else` chain.
+    let rest = nom_tag_lower(
+        lower,
+        lower,
+        "once during each of your turns, you may play ",
+    )
+    .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
+    if nom_primitives::scan_contains(rest, "if you do, it gains") {
+        return None;
+    }
+
+    // CR 305.1 + CR 601.2a: The disjunction connector " or cast " splits the
+    // land-play branch from the spell-cast branch. `split_once_on` is the
+    // structural "everything up to delimiter" combinator.
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " or cast ")
+        .ok()
+        .map(|(_, pair)| pair)?;
+
+    // The spell branch must end with the source-zone anchor. Strip a per-branch
+    // " from your graveyard" if present (Serra form); otherwise the tail-zone
+    // anchor (Eighth form) lives on the spell branch alone.
+    let spell_branch = strip_graveyard_zone_anchor(spell_branch)?;
+
+    // The land branch optionally carries its own zone anchor (Serra form); strip
+    // it when present so the bare filter phrase reaches the filter parser.
+    let land_branch = strip_graveyard_zone_anchor(land_branch).unwrap_or(land_branch);
+
+    let land_filter = parse_graveyard_branch_filter(land_branch)?;
+    let spell_filter = parse_graveyard_branch_filter(spell_branch)?;
+
+    // CR 700.6: a land is itself a permanent, so when both branches resolve to
+    // the same typed filter (historic land ⊆ historic permanent), collapse the
+    // union to that single filter rather than emitting a redundant `Or`.
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            // CR 305.1: `Play` covers both the land-play and spell-cast branches.
+            play_mode: CardPlayMode::Play,
+            // Stack-exit redirect is wrong for the granted leave-battlefield
+            // rider (see doc comment); leave it unset.
+            graveyard_destination_replacement: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// Strip the trailing " from your graveyard" source-zone anchor (plus any
+/// leading whitespace) from a branch phrase, returning the bare filter text.
+/// Returns `None` when the anchor is absent.
+fn strip_graveyard_zone_anchor(branch: &str) -> Option<&str> {
+    nom_primitives::split_once_on(branch, " from your graveyard")
+        .ok()
+        .map(|(_, (before, _))| before.trim())
+}
+
+/// Strip the leading article and trailing " spell"/" spells" from a single
+/// disjunctive-permission branch, then resolve it through
+/// `parse_graveyard_permission_filter`. Mirrors the cleanup the single-verb
+/// graveyard parser performs, so both paths share one filter grammar. Returns
+/// `None` if the branch does not resolve to a usable typed filter.
+fn parse_graveyard_branch_filter(branch: &str) -> Option<TargetFilter> {
+    let branch = branch.trim();
+    // Strip the leading article ("a "/"an ").
+    let branch = nom_tag_lower(branch, branch, "a ")
+        .or_else(|| nom_tag_lower(branch, branch, "an "))
+        .unwrap_or(branch);
+
+    // Drop " spell"/" spells" so `parse_type_phrase` sees the bare type word;
+    // "land"/"lands" is already a valid type phrase and needs no stripping.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(branch, "spells") {
+        Cow::Owned(branch.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(branch, "spell") {
+        Cow::Owned(branch.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(branch)
+    };
+
+    let (filter, _self_ref) = parse_graveyard_permission_filter(&cleaned);
+    // Reject the unparseable fallbacks so a branch we cannot model declines the
+    // whole disjunctive parse rather than silently admitting everything.
+    match &filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
+        _ => None,
+    }
 }
 
 /// CR 122.2 + CR 113.6b: Parse the counter-persistence static — "Counters

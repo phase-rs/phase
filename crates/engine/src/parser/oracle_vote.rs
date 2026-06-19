@@ -28,7 +28,7 @@ use nom::Parser;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
-    VoterScope,
+    VoteTally, VoterScope,
 };
 
 use super::oracle_effect::parse_effect_chain_with_context;
@@ -62,6 +62,21 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     let (i, choices, voter_scope) = parse_each_player_votes_clause(i)?;
     if choices.len() < 2 {
         return None;
+    }
+    // CR 701.38a: Will-of-the-council threshold votes. Shape:
+    //   "If <a> gets more votes, <effect-a>. If <b> gets more votes or the
+    //    vote is tied, <effect-b>."
+    // The strict-majority/tie outcome is card-defined, not a CR subrule.
+    // Exactly ONE outcome resolves (the winner), with the tie clause naming
+    // the default. This is structurally distinct from the per-vote fan-out
+    // loop below — try it first; on `None` fall through to the classic
+    // Council's-dilemma per-choice parser. Covers Plea for Power, Split
+    // Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, and the
+    // Trial of a Time Lord IV chapter clause.
+    if let Some(def) =
+        parse_threshold_vote_clauses(i, &choices, kind, starting_with.clone(), voter_scope)
+    {
+        return Some(def);
     }
     // Phase 3: per-choice clauses. Three shapes covered, dispatched by scope:
     //   * "For each <choice> vote, <effect>."                     (Tivit / classic)
@@ -160,8 +175,161 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             per_choice_effect,
             starting_with,
             voter_scope,
+            tally_mode: VoteTally::PerVote,
         },
     ))
+}
+
+/// CR 701.38a: Parse the Will-of-the-council threshold-clause body that
+/// follows the "each player votes for <a> or <b>." opener. The strict-majority
+/// / tie outcome is card-defined, not a CR subrule. Two sub-shapes:
+///
+/// ```text
+/// // Binary outcome (Plea for Power, Split Decision, Coercive Portal, ...):
+/// If <choice-x> gets more votes, <effect-x>.
+/// If <choice-y> gets more votes or the vote is tied, <effect-y>.
+///
+/// // Single conditional (Trial of a Time Lord IV):
+/// If <choice-x> gets more votes, <effect-x>.
+/// ```
+///
+/// Each `If` clause names one of the vote `choices` and a single outcome
+/// effect. A choice with no clause resolves to `Effect::NoOp` (CR 101.3 — no
+/// effect). The `tie_breaker_index` is the choice whose clause carries the
+/// "...or the vote is tied" qualifier; in the single-conditional shape (no tie
+/// clause) the tie/loss outcome does nothing, so the tie-breaker points at the
+/// unlisted no-op choice. Clauses may appear in either order; each effect binds
+/// to its named choice's slot.
+///
+/// Returns a synthesized `Effect::Vote` with `tally_mode =
+/// VoteTally::Threshold`, or `None` when the body is not in this shape (so the
+/// caller falls through to the classic per-vote fan-out parser).
+fn parse_threshold_vote_clauses(
+    input: &str,
+    choices: &[String],
+    kind: AbilityKind,
+    starting_with: ControllerRef,
+    voter_scope: VoterScope,
+) -> Option<AbilityDefinition> {
+    // Per-choice effect slots, parallel to `choices`, plus the discovered
+    // tie-breaker index. Each named clause binds to its choice's slot; unlisted
+    // choices stay `None` and are filled with `Effect::NoOp` below.
+    let mut slots: Vec<Option<Box<AbilityDefinition>>> = (0..choices.len()).map(|_| None).collect();
+    let mut tie_breaker_index: Option<u8> = None;
+    let mut walk = input.trim_start();
+    let mut clause_count = 0usize;
+
+    while !walk.is_empty() {
+        let (rest, choice_lower, has_tie, effect_text) = parse_one_threshold_clause(walk, choices)?;
+        let idx = choices.iter().position(|c| c == &choice_lower)?;
+        if slots[idx].is_some() {
+            // Same choice named twice — not a shape we model.
+            return None;
+        }
+        let parsed =
+            parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+        slots[idx] = Some(Box::new(parsed));
+        if has_tie {
+            if tie_breaker_index.is_some() {
+                // Two "...or the vote is tied" qualifiers — malformed.
+                return None;
+            }
+            tie_breaker_index = Some(idx as u8);
+        }
+        clause_count += 1;
+        walk = rest.trim_start();
+    }
+
+    // At least one well-formed "If <choice> gets more votes, ..." clause is
+    // required — otherwise the body is not a threshold vote and the caller
+    // should fall through to the per-vote parser.
+    if clause_count == 0 {
+        return None;
+    }
+
+    // Resolve the tie-breaker. If a clause carried the explicit "...or the vote
+    // is tied" qualifier, use it. Otherwise (single-conditional shape: "If X
+    // gets more votes, Y" with no alternative) the tie/loss does nothing, so
+    // the tie-breaker is the first choice with no clause — its NoOp slot. If
+    // every choice has a clause but none carried the tie qualifier, the body is
+    // ambiguous about ties; reject so it isn't silently mis-modeled.
+    let tie_breaker_index = match tie_breaker_index {
+        Some(idx) => idx,
+        None => slots.iter().position(|s| s.is_none()).map(|i| i as u8)?,
+    };
+
+    // CR 101.3: Fill any unlisted choice with a no-op outcome so the
+    // `per_choice_effect.len() == choices.len()` Vote invariant holds.
+    let per_choice_effect: Vec<Box<AbilityDefinition>> = slots
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| Box::new(AbilityDefinition::new(kind, Effect::NoOp))))
+        .collect();
+
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::Vote {
+            choices: choices.to_vec(),
+            per_choice_effect,
+            starting_with,
+            voter_scope,
+            tally_mode: VoteTally::Threshold { tie_breaker_index },
+        },
+    ))
+}
+
+/// Parse a single `"If <choice> gets more votes[ or the vote is tied], <effect>."`
+/// clause. Returns the unconsumed remainder, the matched choice (lowercase),
+/// whether the "...or the vote is tied" qualifier was present, and the inner
+/// effect text (trailing period stripped).
+fn parse_one_threshold_clause<'a>(
+    input: &'a str,
+    choices: &[String],
+) -> Option<(&'a str, String, bool, &'a str)> {
+    // "if " opener (case-insensitive); operate on original-case input so the
+    // extracted effect text keeps its casing.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case("if ")).parse(input);
+    let (after_if, ()) = res.ok()?;
+
+    let (choice, after_choice) = read_word(after_if)?;
+    let choice_lower = choice.to_lowercase();
+    if !choices.iter().any(|c| c == &choice_lower) {
+        return None;
+    }
+
+    // " gets more votes" then an optional " or the vote is tied" before the
+    // comma that introduces the effect body.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case(" gets more votes")).parse(after_choice);
+    let (after_votes, ()) = res.ok()?;
+
+    let tie_res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case(" or the vote is tied")).parse(after_votes);
+    let (after_tie, has_tie) = match tie_res {
+        Ok((rest, ())) => (rest, true),
+        Err(_) => (after_votes, false),
+    };
+
+    let res: nom::IResult<&'a str, (), OracleError<'a>> = value((), tag(", ")).parse(after_tie);
+    let (after_comma, ()) = res.ok()?;
+
+    // The effect body extends until the next "If " clause or end of input.
+    let (effect_text, rest) = read_effect_until_next_if(after_comma);
+    Some((rest, choice_lower, has_tie, effect_text))
+}
+
+/// Read maximally up to the next `"If "` clause or end of input, stripping a
+/// trailing period. Mirrors `read_effect_until_next_clause` but splits on the
+/// threshold-vote `"If "` boundary.
+fn read_effect_until_next_if(input: &str) -> (&str, &str) {
+    let (head, tail) = scan_split_at_phrase(input, |i| {
+        tag_no_case::<_, _, OracleError<'_>>("if ").parse(i)
+    })
+    .unwrap_or((input, ""));
+    let head_trimmed = head.trim_end();
+    // allow-noncombinator: structural period strip on pre-extracted sentence clause
+    let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
+    (head_no_period.trim(), tail.trim_start())
 }
 
 /// Parse the optional "starting with you, " prefix. Returns the unconsumed
@@ -561,6 +729,7 @@ mod tests {
                 ref per_choice_effect,
                 starting_with,
                 voter_scope,
+                ..
             } => {
                 assert_eq!(
                     choices,
@@ -791,6 +960,7 @@ mod tests {
                 ref per_choice_effect,
                 starting_with,
                 voter_scope,
+                ..
             } => {
                 assert_eq!(choices, &vec!["profit".to_string(), "security".to_string()]);
                 assert_eq!(starting_with, ControllerRef::You);
@@ -1227,6 +1397,7 @@ mod tests {
                 ref per_choice_effect,
                 starting_with,
                 voter_scope,
+                ..
             } => {
                 assert_eq!(choices, &vec!["time".to_string(), "money".to_string()]);
                 assert_eq!(starting_with, ControllerRef::You);
@@ -1288,5 +1459,153 @@ mod tests {
             }
             other => panic!("expected Vote, got {:?}", other),
         }
+    }
+
+    // --- Will-of-the-council threshold votes (CR 701.38a; strict-majority/tie
+    //     outcome is card-defined, not a CR subrule) ---
+
+    /// CR 701.38a: Binary Will-of-the-council vote (Plea for Power shape). Both
+    /// outcomes are printed; the second clause carries "...or the vote is
+    /// tied", making it the `tie_breaker_index`. Exactly one effect resolves.
+    #[test]
+    fn parses_plea_for_power_threshold_vote() {
+        let text = "Starting with you, each player votes for time or knowledge. \
+                    If time gets more votes, take an extra turn after this one. \
+                    If knowledge gets more votes or the vote is tied, draw three cards.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("threshold vote parses");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                tally_mode,
+                ..
+            } => {
+                assert_eq!(choices, &vec!["time".to_string(), "knowledge".to_string()]);
+                assert_eq!(
+                    tally_mode,
+                    VoteTally::Threshold {
+                        tie_breaker_index: 1
+                    }
+                );
+                assert!(matches!(
+                    *per_choice_effect[0].effect,
+                    Effect::ExtraTurn { .. }
+                ));
+                assert!(matches!(*per_choice_effect[1].effect, Effect::Draw { .. }));
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    /// CR 701.38a + CR 101.3: Single-conditional Will-of-the-council vote
+    /// (Trial of a Time Lord IV shape). Only the winning outcome is printed;
+    /// the unlisted choice resolves to `Effect::NoOp` and the tie-breaker
+    /// points at it ("If guilty gets more votes, X" — innocent / tied does
+    /// nothing).
+    #[test]
+    fn parses_single_conditional_threshold_vote_with_noop_default() {
+        let text = "Starting with you, each player votes for innocent or guilty. \
+                    If guilty gets more votes, the owner of each card exiled with ~ \
+                    puts that card on the bottom of their library.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("threshold vote parses");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                tally_mode,
+                ..
+            } => {
+                assert_eq!(choices, &vec!["innocent".to_string(), "guilty".to_string()]);
+                // innocent (index 0) is unlisted → NoOp and the tie-breaker.
+                assert_eq!(
+                    tally_mode,
+                    VoteTally::Threshold {
+                        tie_breaker_index: 0
+                    }
+                );
+                assert!(matches!(*per_choice_effect[0].effect, Effect::NoOp));
+                // guilty (index 1) reaches the source-linked exile owner path.
+                assert_eq!(
+                    per_choice_effect[1].player_scope,
+                    Some(PlayerFilter::OwnersOfCardsExiledBySource)
+                );
+                assert!(matches!(
+                    *per_choice_effect[1].effect,
+                    Effect::PutAtLibraryPosition { .. }
+                ));
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    /// CR 701.38a + CR 406.2 + CR 610.3: End-to-end regression for Trial of a
+    /// Time Lord IV. Drives the FULL chapter-IV Oracle text (post self-ref
+    /// normalization to `~`) through `parse_vote_block` and asserts the
+    /// owner-of-exiled clause is genuinely reachable — the bottom-of-library
+    /// move targets `ExiledBySource` (the source-linked exile pool), not the
+    /// `ParentTarget` anaphor it parses to before the `rewrite_player_scope_refs`
+    /// rebind. This is the assertion that fails if the vote-threshold grammar
+    /// regresses and the card falls back to `Effect::Unimplemented`.
+    #[test]
+    fn trial_of_a_time_lord_iv_reaches_owner_of_exiled_clause() {
+        use crate::types::ability::{LibraryPosition, TargetFilter};
+        let text = "Starting with you, each player votes for innocent or guilty. \
+                    If guilty gets more votes, the owner of each card exiled with ~ \
+                    puts that card on the bottom of their library.";
+        let def = parse_vote_block(text, AbilityKind::Spell)
+            .expect("Trial of a Time Lord IV must parse as a threshold vote");
+        let Effect::Vote {
+            ref per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        // The "guilty" outcome must lower to the source-linked exile cleanup —
+        // NOT remain Unimplemented and NOT target the trigger source.
+        match &*per_choice_effect[1].effect {
+            Effect::PutAtLibraryPosition {
+                target,
+                position: LibraryPosition::Bottom,
+                ..
+            } => {
+                assert!(
+                    matches!(target, TargetFilter::ExiledBySource),
+                    "owner-of-exiled clause must move the exiled cards (ExiledBySource), got {target:?}"
+                );
+            }
+            other => {
+                panic!("guilty outcome must reach PutAtLibraryPosition(Bottom), got {other:?}")
+            }
+        }
+        assert_eq!(
+            per_choice_effect[1].player_scope,
+            Some(PlayerFilter::OwnersOfCardsExiledBySource),
+            "guilty outcome must carry the OwnersOfCardsExiledBySource scope"
+        );
+    }
+
+    /// A two-clause body where both choices have effects but neither carries
+    /// the "...or the vote is tied" qualifier is ambiguous about ties and must
+    /// be rejected (fall through to the per-vote parser) rather than silently
+    /// guessing a tie-breaker.
+    #[test]
+    fn rejects_threshold_body_without_tie_clause_when_all_choices_listed() {
+        let text = "Starting with you, each player votes for time or knowledge. \
+                    If time gets more votes, draw a card. \
+                    If knowledge gets more votes, investigate.";
+        // No tie clause and no unlisted no-op choice → ambiguous → None.
+        assert!(parse_threshold_vote_clauses(
+            "If time gets more votes, draw a card. If knowledge gets more votes, investigate.",
+            &["time".to_string(), "knowledge".to_string()],
+            AbilityKind::Spell,
+            ControllerRef::You,
+            VoterScope::AllPlayers,
+        )
+        .is_none());
+        // The full block falls through to the per-vote parser, which also
+        // rejects (these are not "For each ... vote" clauses), so the whole
+        // detector returns None.
+        assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 }

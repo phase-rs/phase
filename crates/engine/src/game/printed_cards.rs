@@ -777,6 +777,9 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
 fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
     match effect {
         Effect::Intensify { .. } => {}
+        // Heist exiles a card from an opponent's library at random; it does not
+        // name a conjure card, so there is no static face to preload.
+        Effect::Heist { .. } | Effect::HeistExile => {}
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
             // registry. Duplicate-conjure copies a card already in play (its face
@@ -927,6 +930,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Tribute { .. }
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -2697,6 +2701,7 @@ mod tests {
             per_choice_effect: vec![Box::new(conjure_ability("vote", Zone::Hand))],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
+            tally_mode: crate::types::ability::VoteTally::PerVote,
         };
         walk_effect(&vote, &mut names);
 

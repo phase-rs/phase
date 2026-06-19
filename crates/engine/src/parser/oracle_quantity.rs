@@ -835,6 +835,15 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" lives in the
+    // nom quantity grammar; this legacy entry point only delegates so dynamic
+    // quantity recognition has one authority.
+    if let Ok((rest, expr)) = nom_quantity::parse_max_quantity(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // CR 107.x: Binary arithmetic over two dynamic quantities, e.g. "the number
     // of Caves you control plus the number of Cave cards in your graveyard"
     // (Calamitous Cave-In) or "the number of cards in their hand minus 4"

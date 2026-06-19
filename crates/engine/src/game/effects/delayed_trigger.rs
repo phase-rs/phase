@@ -447,7 +447,7 @@ fn snapshot_quantity_expr(expr: &mut QuantityExpr, state: &GameState, ability: &
         | QuantityExpr::DivideRounded { inner, .. } => {
             snapshot_quantity_expr(inner, state, ability);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for e in exprs.iter_mut() {
                 snapshot_quantity_expr(e, state, ability);
             }

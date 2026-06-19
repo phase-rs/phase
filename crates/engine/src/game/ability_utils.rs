@@ -858,6 +858,7 @@ pub fn choose_target_for_ability(
 
     let slot = &target_slots[progress.current_slot];
     let mut selected_slots = progress.selected_slots.clone();
+    let skipped_current = target.is_none();
     match target {
         Some(target) => {
             if !progress.current_legal_targets.contains(&target) {
@@ -877,11 +878,43 @@ pub fn choose_target_for_ability(
         }
     }
 
-    let next_slot = progress.current_slot + 1;
+    let specs = target_slot_specs(state, ability);
+    let mut next_slot = progress.current_slot + 1;
+    // CR 601.2c: A variable "up to N target ..." phrase announces one target
+    // count for a single target instance. Once the controller declines the next
+    // optional slot in that same instance, they have announced no more targets
+    // for the phrase; do not force one Skip click per remaining possible slot.
+    if skipped_current {
+        if let Some(skipped_instance) = specs.get(progress.current_slot).map(|spec| spec.instance) {
+            while next_slot < target_slots.len()
+                && target_slots[next_slot].optional
+                && specs
+                    .get(next_slot)
+                    .is_some_and(|spec| spec.instance == skipped_instance)
+            {
+                selected_slots.push(None);
+                if !has_legal_completion_with_specs(
+                    state,
+                    ability,
+                    &specs,
+                    target_slots,
+                    constraints,
+                    next_slot + 1,
+                    &selected_slots,
+                ) {
+                    selected_slots.pop();
+                    break;
+                }
+                next_slot += 1;
+            }
+        }
+    }
+
     if next_slot == target_slots.len() {
-        validate_selected_slots_for_ability(
+        validate_selected_slots_with_specs(
             state,
             ability,
+            &specs,
             target_slots,
             &selected_slots,
             constraints,
@@ -1982,7 +2015,7 @@ fn quantity_expr_has_unresolved_variable(
         | QuantityExpr::Power {
             exponent: inner, ..
         } => quantity_expr_has_unresolved_variable(state, ability, inner),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),
         QuantityExpr::Difference { left, right } => {
@@ -2562,7 +2595,9 @@ fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<TargetFilter>
         | QuantityExpr::Power {
             exponent: inner, ..
         } => quantity_expr_target_slot_filter(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().find_map(quantity_expr_target_slot_filter),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().find_map(quantity_expr_target_slot_filter)
+        }
         QuantityExpr::Difference { left, right } => quantity_expr_target_slot_filter(left)
             .or_else(|| quantity_expr_target_slot_filter(right)),
         QuantityExpr::Fixed { .. } => None,
@@ -6831,6 +6866,46 @@ mod tests {
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(ObjectId(42))]
+        );
+    }
+
+    #[test]
+    fn choose_target_for_ability_skip_completes_optional_multi_target_tail() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_creature(&mut state, PlayerId(0), CardId(1), "Source");
+        let first = create_creature(&mut state, PlayerId(0), CardId(2), "First");
+        let second = create_creature(&mut state, PlayerId(0), CardId(3), "Second");
+
+        let ability = up_to_n_target_creatures(source, PlayerId(0), 3);
+        let target_slots = build_target_slots(&state, &ability).expect("target slots");
+        let progress = begin_target_selection_for_ability(&state, &ability, &target_slots, &[])
+            .expect("selection should start");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &target_slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(first)),
+        )
+        .expect("first target should be accepted") else {
+            panic!("expected target selection to continue");
+        };
+
+        let TargetSelectionAdvance::Complete(selected_slots) =
+            choose_target_for_ability(&state, &ability, &target_slots, &[], &progress, None)
+                .expect("skipping the optional tail should complete")
+        else {
+            panic!("expected skip to complete the optional target run");
+        };
+
+        assert_eq!(
+            selected_slots,
+            vec![Some(TargetRef::Object(first)), None, None,]
+        );
+        assert!(
+            !selected_slots.contains(&Some(TargetRef::Object(second))),
+            "skip must not auto-pick later legal targets"
         );
     }
 

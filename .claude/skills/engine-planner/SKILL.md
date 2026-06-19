@@ -60,6 +60,7 @@ The plan MUST include these sections with substantive, specific answers:
 - **Extension vs Creation** — Does this extend an existing pattern or create a new one? Justify any new pattern.
 - **Analogous Trace** — Name the traced feature and the full file path (e.g., "Traced `Scry` through `types/ability.rs` → `parser/oracle_effect/imperative.rs` → `game/effects/scry.rs` → `game/effects/mod.rs`").
 - **Variant Discoverability** (if adding any enum variant) — Confirm `cargo engine-inventory` was consulted and run the `/add-engine-variant` checklist.
+- **Verification Matrix** — For every behavioral claim, specify the changed seam/function, production entry point, runtime test to add or update, revert-failing assertion, sibling/negative cases, and coverage status impact. For parser changes, explicitly state whether any Oracle text is accepted while semantics remain deferred; if yes, plan how coverage remains red/honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
 
 ### Step 5: Write the plan
 

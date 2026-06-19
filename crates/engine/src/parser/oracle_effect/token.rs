@@ -963,6 +963,12 @@ pub(super) fn scope_token_for_each_to_iterating_player(expr: QuantityExpr) -> Qu
                 .map(scope_token_for_each_to_iterating_player)
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(scope_token_for_each_to_iterating_player)
+                .collect(),
+        },
         other => other,
     }
 }

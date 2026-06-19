@@ -193,7 +193,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_recipient)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_uses_recipient(exponent),
         QuantityExpr::Difference { left, right } => {
@@ -226,7 +228,9 @@ pub(crate) fn quantity_expr_uses_object_count(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_object_count(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_object_count),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_object_count)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_uses_object_count(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_uses_object_count(exponent),
         QuantityExpr::Difference { left, right } => {
@@ -367,7 +371,7 @@ pub(crate) fn entered_object_perturbs_quantity_expr(
         | QuantityExpr::Multiply { inner, .. } => {
             entered_object_perturbs_quantity_expr(state, entered, ctx, inner)
         }
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|e| entered_object_perturbs_quantity_expr(state, entered, ctx, e)),
         QuantityExpr::UpTo { max } => {
@@ -580,7 +584,7 @@ pub fn resolve_quantity_with_ctx(
 
 /// Compose recursively-resolved inner values for the non-leaf
 /// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`,
-/// `Power`, `UpTo`, `Difference`). All resolver entry points share this
+/// `Power`, `UpTo`, `Difference`, `Max`). All resolver entry points share this
 /// logic; only the leaf arms (`Fixed`, `Ref`) differ in context handling.
 /// `recurse` is a closure the caller supplies that re-enters its own
 /// resolver with the inner expression.
@@ -630,6 +634,12 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // same operation as an absolute value; it confirms only that the
         // resulting amount is non-negative.)
         QuantityExpr::Difference { left, right } => (recurse(left) - recurse(right)).abs(),
+        // CR 107.1: the maximum of the computed integer operands. CR 120.4a /
+        // CR 120.10 establish the in-rules "the greatest of the calculated
+        // amounts" precedent for taking a maximum over multiple computed
+        // values; "whichever is greater" itself has no dedicated CR number.
+        // CR 107.2: an empty operand list (undeterminable) resolves to 0.
+        QuantityExpr::Max { exprs } => exprs.iter().map(&recurse).max().unwrap_or(0),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
             unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }

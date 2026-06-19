@@ -11,7 +11,7 @@ use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
-use super::oracle_quantity::parse_for_each_clause;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_mana_symbols;
@@ -431,8 +431,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 )
                 .parse(after_n)
                 {
-                    if let Some(qty) =
-                        parse_for_each_clause(for_each_clause.trim().trim_end_matches('.'))
+                    if let Ok((_, qty)) =
+                        nom_quantity::parse_for_each_clause_ref_complete(for_each_clause)
                     {
                         return AbilityCost::PayLife {
                             amount: QuantityExpr::Multiply {
@@ -1008,7 +1008,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 
     // Try parse_for_each_clause first (handles counters, player counts, etc.),
     // then fall back to parse_type_phrase for standard object count patterns.
-    if let Some(qty) = parse_for_each_clause(after_less) {
+    if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
             amount_per,
             count: QuantityExpr::Ref { qty },
@@ -1669,8 +1669,10 @@ mod tests {
     fn cost_pay_life_for_each_counter() {
         // CR 119.4 + CR 122.1: Tornado — "Pay 3 life for each velocity counter
         // on this enchantment". The per-counter multiplier must be preserved.
-        let expected_qty =
-            parse_for_each_clause("velocity counter on this enchantment").expect("for-each clause");
+        let (_, expected_qty) = nom_quantity::parse_for_each_clause_ref_complete(
+            "velocity counter on this enchantment",
+        )
+        .expect("for-each clause");
         assert!(matches!(
             expected_qty,
             QuantityRef::CountersOn {
@@ -1692,9 +1694,11 @@ mod tests {
     #[test]
     fn cost_pay_life_for_each_creature() {
         // Building-block test: the for-each composition covers any
-        // `parse_for_each_clause` form, not just counter scopes. factor: 1 is
+        // `parse_for_each_clause_ref` form, not just counter scopes. factor: 1 is
         // kept intentionally (resolves identically to a bare Ref).
-        let expected_qty = parse_for_each_clause("creature you control").expect("for-each clause");
+        let (_, expected_qty) =
+            nom_quantity::parse_for_each_clause_ref_complete("creature you control")
+                .expect("for-each clause");
         assert_eq!(
             parse_oracle_cost("Pay 1 life for each creature you control"),
             AbilityCost::PayLife {

@@ -918,6 +918,10 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
             let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
             format!("({})", parts.join(" + "))
         }
+        QuantityExpr::Max { exprs } => {
+            let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
+            format!("max({})", parts.join(", "))
+        }
         QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
         QuantityExpr::Power { base, exponent } => {
             format!("{}^{}", base, fmt_quantity(exponent))
@@ -2597,6 +2601,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Discover { mana_value_limit } => {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
         }
+        // Heist (Arena digital-only): look step records the look count.
+        Effect::Heist { look_count, .. } => {
+            d.push(("look".into(), look_count.to_string()));
+        }
+        // Heist finalizer continuation — no displayable parameter.
+        Effect::HeistExile => {}
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
@@ -2784,6 +2794,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Explore
         | Effect::Investigate
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -5519,7 +5530,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 extract_quantity_features(inner, features);
             }
@@ -11055,8 +11066,11 @@ mod tests {
                 .to_string(),
         );
         face.static_abilities.push(
-            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
-                .description("No more than one creature can attack each combat.".to_string()),
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: None,
+            })
+            .description("No more than one creature can attack each combat.".to_string()),
         );
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
