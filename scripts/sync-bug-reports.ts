@@ -61,6 +61,7 @@ const TRIAGE_DELTA_PATH = "triage/triage-delta.jsonl";
 const DASHBOARD_PATH = "triage/dashboard.md";
 const LEGACY_EXPORT_PATH = "tmp/discord-thread-messages.json";
 const CARD_DATA_PATH = "client/public/card-data.json";
+const DISCORD_EPOCH_MS = 1420070400000n;
 
 function defaultSyncState(): SyncState {
   return {
@@ -89,6 +90,32 @@ function hashContent(content: string): string {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(content);
   return hasher.digest("hex");
+}
+
+function snowflakeTimestampIso(id: string | null | undefined): string | null {
+  if (id === null || id === undefined) return null;
+  try {
+    const timestampMs = (BigInt(id) >> 22n) + DISCORD_EPOCH_MS;
+    return new Date(Number(timestampMs)).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function parseFetchSinceArg(state: SyncState): string | undefined {
+  if (process.argv.includes("--full")) return undefined;
+
+  const sinceArg = process.argv
+    .slice(3)
+    .find((arg) => arg.startsWith("--since="));
+  const since = sinceArg?.slice("--since=".length) ?? state.last_fetch_at;
+
+  if (Number.isNaN(Date.parse(since))) {
+    console.error(`Invalid --since timestamp: ${since}`);
+    process.exit(1);
+  }
+
+  return since;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +221,7 @@ async function fetchIncremental(
   guildId: string,
   channelId: string,
   cursors: Record<string, string>,
+  since?: string,
 ): Promise<{ newMessages: number; cursors: Record<string, string> }> {
   let active: DiscordThread[] = [];
   try {
@@ -204,14 +232,14 @@ async function fetchIncremental(
 
   let publicArchived: DiscordThread[] = [];
   try {
-    publicArchived = await fetchArchivedThreads(channelId, "public");
+    publicArchived = await fetchArchivedThreads(channelId, "public", since);
   } catch (err) {
     console.error(`Warning: could not fetch public archived threads: ${(err as Error).message}`);
   }
 
   let privateArchived: DiscordThread[] = [];
   try {
-    privateArchived = await fetchArchivedThreads(channelId, "private");
+    privateArchived = await fetchArchivedThreads(channelId, "private", since);
   } catch (err) {
     console.error(`Skipping private archived threads: ${(err as Error).message}`);
   }
@@ -224,8 +252,14 @@ async function fetchIncremental(
   const fetched_at = new Date().toISOString();
   const newMessages: RawDiscordMessage[] = [];
   const updatedCursors = { ...cursors };
+  const candidateThreads = [...threadsById.values()].filter((thread) => {
+    if (since === undefined) return true;
+    if (cursors[thread.id] === undefined) return true;
+    const lastMessageAt = snowflakeTimestampIso(thread.last_message_id);
+    return lastMessageAt === null || lastMessageAt > since;
+  });
 
-  for (const [i, thread] of [...threadsById.values()].entries()) {
+  for (const [i, thread] of candidateThreads.entries()) {
     const after = cursors[thread.id];
     let msgs: DiscordMessage[] = [];
     try {
@@ -268,11 +302,16 @@ async function fetchIncremental(
     }
 
     process.stdout.write(
-      `\rFetching thread ${i + 1}/${threadsById.size}: ${thread.name.slice(0, 40).padEnd(40)}`,
+      `\rFetching thread ${i + 1}/${candidateThreads.length}: ${thread.name.slice(0, 40).padEnd(40)}`,
     );
   }
 
-  if (threadsById.size > 0) process.stdout.write("\n");
+  if (candidateThreads.length > 0) process.stdout.write("\n");
+  if (since !== undefined) {
+    console.log(
+      `  Skipped ${threadsById.size - candidateThreads.length} threads with no activity after ${since}.`,
+    );
+  }
 
   if (newMessages.length > 0) {
     await appendJsonl(MESSAGES_PATH, newMessages);
@@ -374,11 +413,14 @@ async function cmdFetch(): Promise<void> {
   }
 
   // Incremental fetch from Discord API
-  console.log("Fetching new messages from Discord API...");
+  const since = parseFetchSinceArg(state);
+  const mode = since === undefined ? "full scan" : `activity after ${since}`;
+  console.log(`Fetching new messages from Discord API (${mode})...`);
   const { newMessages, cursors } = await fetchIncremental(
     guildId,
     channelId,
     state.last_thread_cursors,
+    since,
   );
 
   state.last_thread_cursors = cursors;
@@ -1183,6 +1225,8 @@ function printHelp(): void {
 
 Commands:
   fetch     Fetch Discord messages → triage/raw/discord-messages.jsonl
+            Defaults to threads with activity after the previous successful
+            fetch. Flags: --since=<ISO timestamp>, --full
   extract   Extract report items from messages → triage/report-items.jsonl
   triage    Classify report items → triage/triage-items.jsonl
             Also emits triage/triage-delta.jsonl: ONLY the reports from the
