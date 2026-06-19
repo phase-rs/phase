@@ -8927,6 +8927,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         ));
         TriggerMode::YouAttack
     };
+    def.mode = mode.clone();
     if n == 1 {
         // CR 508.1 + CR 603.2c: the matcher's "at least one attacker matching
         // valid_card" gate is the whole "one or more" condition.
@@ -28945,6 +28946,31 @@ mod tests {
             })
         ));
         assert!(def.batched);
+    }
+
+    /// CR 508.1 + CR 603.2c: Aurelia, the Law Above — any-player attack batch
+    /// count uses `TriggeringPlayer` scope and `Attacks` mode (not the
+    /// opponent/you-scoped `YouAttack` siblings above).
+    #[test]
+    fn trigger_a_player_attacks_with_three_or_more_creatures() {
+        let def = parse_trigger_line(
+            "Whenever a player attacks with three or more creatures, you draw a card.",
+            "Aurelia, the Law Above",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert!(def.batched);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::TriggeringPlayer,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 3,
+            })
+        ));
     }
 
     #[test]
