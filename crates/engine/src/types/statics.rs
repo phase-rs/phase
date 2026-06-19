@@ -611,6 +611,13 @@ pub enum CombatAloneRequirement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StaticMode {
     Continuous,
+    /// CR 514.2: Normally all damage marked on permanents is removed as a
+    /// turn-based action during the cleanup step. This static suppresses that
+    /// removal for the permanents matched by the definition's `affected` filter
+    /// ("Damage isn't removed from [filter] during cleanup steps" — Ancient
+    /// Adamantoise, Patient Zero, Uthgardt Fury, …), so their marked damage
+    /// persists across turns.
+    DamageNotRemovedDuringCleanup,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -1693,6 +1700,7 @@ impl StaticMode {
             | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
+            | StaticMode::DamageNotRemovedDuringCleanup
             | StaticMode::Other(_) => None,
         }
     }
@@ -1702,6 +1710,9 @@ impl fmt::Display for StaticMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StaticMode::Continuous => write!(f, "Continuous"),
+            StaticMode::DamageNotRemovedDuringCleanup => {
+                write!(f, "DamageNotRemovedDuringCleanup")
+            }
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),

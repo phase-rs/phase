@@ -44,7 +44,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 fn is_data_carrying_static(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::ReduceAbilityCost { .. }
+        // CR 514.2: nullary marker static — runtime enforcement is the cleanup
+        // turn-based action in turns.rs::execute_cleanup, which skips removing
+        // marked damage from permanents matching an active such static's
+        // `affected` filter. Not registry-keyed (mirrors the marker cluster).
+        StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }

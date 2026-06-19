@@ -18149,3 +18149,46 @@ fn ichormoon_gauntlet_grants_loyalty_abilities_to_planeswalkers() {
         grants[1].effect
     );
 }
+
+#[test]
+fn damage_not_removed_during_cleanup_self_subject() {
+    // CR 514.2: "this creature" subject → SelfRef-affected DamageNotRemoved static.
+    let def = parse_static_line("Damage isn't removed from this creature during cleanup steps.")
+        .expect("self-subject cleanup-damage static");
+    assert_eq!(def.mode, StaticMode::DamageNotRemovedDuringCleanup);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn damage_not_removed_during_cleanup_filtered_subject() {
+    // CR 514.2: a typed subject ("creatures your opponents control") is carried
+    // as the affected filter (Patient Zero), not collapsed to SelfRef.
+    let def = parse_static_line(
+        "Damage isn't removed from creatures your opponents control during cleanup steps.",
+    )
+    .expect("filtered cleanup-damage static");
+    assert_eq!(def.mode, StaticMode::DamageNotRemovedDuringCleanup);
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::SelfRef) | None),
+        "affected must be the typed opponent-creatures filter, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn damage_not_removed_during_cleanup_rejects_non_cleanup_during() {
+    // CR 514.2: the grammar anchors on the "during cleanup steps" suffix, so a
+    // "during <something-else>" sentence that merely mentions cleanup elsewhere
+    // must NOT be classified as a cleanup-damage static.
+    let def = parse_static_line(
+        "Damage isn't removed from creatures during combat this turn. Skip your cleanup step.",
+    );
+    assert!(
+        !matches!(
+            def.as_ref().map(|d| &d.mode),
+            Some(StaticMode::DamageNotRemovedDuringCleanup)
+        ),
+        "a non-\"during cleanup steps\" sentence must not be a cleanup-damage static, got {:?}",
+        def.map(|d| d.mode)
+    );
+}
