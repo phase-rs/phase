@@ -44,16 +44,13 @@ fn add_library_card(
 #[test]
 fn sanwell_declined_cast_puts_exiled_cards_on_library_bottom() {
     let execute = sanwell_execute();
-    let cast = execute
-        .sub_ability
-        .as_ref()
-        .expect("cast branch");
-    let cleanup = cast
-        .sub_ability
-        .as_ref()
-        .expect("cleanup sub");
+    let cast = execute.sub_ability.as_ref().expect("cast branch");
+    let cleanup = cast.sub_ability.as_ref().expect("cleanup sub");
     let Effect::PutAtLibraryPosition { target, count, .. } = &*cleanup.effect else {
-        panic!("expected PutAtLibraryPosition cleanup, got {:?}", cleanup.effect);
+        panic!(
+            "expected PutAtLibraryPosition cleanup, got {:?}",
+            cleanup.effect
+        );
     };
     assert_eq!(*target, TargetFilter::ExiledBySource);
     assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
