@@ -5390,13 +5390,11 @@ fn attackers_declared_count(
             attacker_ids
                 .iter()
                 .filter(|id| {
-                    let scope_ok = state.objects.get(id).is_some_and(|obj| {
-                        match scope {
-                            crate::types::ability::ControllerRef::TriggeringPlayer => {
-                                triggering_player.is_some_and(|tp| obj.controller == tp)
-                            }
-                            _ => controller_ref_matches_player(obj.controller, trigger_controller, scope),
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
+                        crate::types::ability::ControllerRef::TriggeringPlayer => {
+                            triggering_player.is_some_and(|tp| obj.controller == tp)
                         }
+                        _ => controller_ref_matches_player(obj.controller, trigger_controller, scope),
                     });
 
                     // CR 508.1: only attackers matching the filtered class count
