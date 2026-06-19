@@ -4022,7 +4022,7 @@ fn parse_damage_modification_static(
     let (_, (_, after_that)) = nom_primitives::split_once_on(norm_lower, "that ").ok()?;
     let (_, (subject, _)) = nom_primitives::split_once_on(after_that, " would deal").ok()?;
 
-    let source_filter = parse_damage_source_subject(subject.trim());
+    let source_filter = parse_damage_source_subject_filter(subject.trim());
 
     // --- 3. Extract combat scope ---
     let combat_scope = scan_combat_scope(norm_lower);
@@ -4388,13 +4388,22 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         return None;
     }
 
+    if let Some(filter) = parse_damage_source_subject_filter(subject) {
+        return Some(filter);
+    }
+
+    None
+}
+
+fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
     }
 
-    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
-    // counter on it", …) — delegate to the shared type-phrase parser
-    // (Uncivil Unrest, Torbran-adjacent prints).
+    // Typed damage sources ("creature you control with a +1/+1 counter on it",
+    // "creatures you control with counters on them", ...) share the normal
+    // target grammar; damage replacement parsing should not maintain a parallel
+    // counter/property grammar.
     let (filter, rest) = parse_type_phrase(subject);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
@@ -11049,6 +11058,36 @@ mod tests {
             }
             other => panic!("Expected Typed filter with IsChosenCreatureType, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn damage_double_all_typed_subject_with_counters() {
+        let def = parse_replacement_line(
+            "Double all damage that creatures you control with counters on them would deal.",
+            "Raphael, the Muscle",
+        )
+        .expect("typed no-instead damage doubler should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            )),
+            "expected any-counter qualifier, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]
