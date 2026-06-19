@@ -1379,11 +1379,38 @@ fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 111.3 + CR 702.6a: "Create a … token. It has …" permanent grants belong
-/// on the token's own `static_abilities` (Urza's Saga Construct pattern), not
-/// as a sibling `GenericEffect` transient. Folds `SequentialSibling`
-/// `GenericEffect { target: LastCreated | ParentTarget | SelfRef, duration:
-/// Permanent }` subs into the preceding `Effect::Token`.
+/// CR 111.3 + CR 702.6a: Intrinsic token statics (Equipment tokens with Equip,
+/// Urza's Saga Construct-style explicit permanent grants) belong on the token's
+/// own `static_abilities`. Transient resolution-time grants — keyword pumps and
+/// `GrantTrigger` installs such as Rite of the Raging Storm (#3297) — must
+/// remain sibling `GenericEffect`s targeting `LastCreated`.
+fn token_it_has_grant_should_fold_into_statics(
+    token_effect: &Effect,
+    static_abilities: &[StaticDefinition],
+    duration: &Option<Duration>,
+) -> bool {
+    if static_abilities.iter().any(|static_def| {
+        static_def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. }))
+    }) {
+        return false;
+    }
+
+    if matches!(duration, Some(Duration::Permanent)) {
+        return true;
+    }
+
+    matches!(
+        token_effect,
+        Effect::Token { types, .. }
+            if types
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("equipment"))
+    )
+}
+
 fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefinition) {
     if !matches!(&*def.effect, Effect::Token { .. }) {
         return;
@@ -1405,16 +1432,19 @@ fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefinition) {
         def.sub_ability = Some(Box::new(grant));
         return;
     };
-    let permanent = duration
-        .as_ref()
-        .is_none_or(|d| matches!(d, Duration::Permanent));
     let token_scoped = target.as_ref().is_none_or(|t| {
         matches!(
             t,
             TargetFilter::LastCreated | TargetFilter::ParentTarget | TargetFilter::SelfRef
         )
     });
-    if !permanent || !token_scoped {
+    if !token_scoped
+        || !token_it_has_grant_should_fold_into_statics(
+            def.effect.as_ref(),
+            static_abilities,
+            duration,
+        )
+    {
         def.sub_ability = Some(Box::new(grant));
         return;
     }
