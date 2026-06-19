@@ -107,12 +107,7 @@ fn nahiri_plus_two_does_not_collect_attach_targets_at_activation() {
         "Bonesplitter".to_string(),
         Zone::Battlefield,
     );
-    wire_nahiri_abilities(
-        runner.state_mut(),
-        nahiri,
-        5,
-        parsed.abilities.clone(),
-    );
+    wire_nahiri_abilities(runner.state_mut(), nahiri, 5, parsed.abilities.clone());
     {
         let state = runner.state();
         let resolved = build_resolved_from_def(&parsed.abilities[0], nahiri, P0);
