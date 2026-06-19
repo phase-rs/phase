@@ -1,9 +1,9 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{all_consuming, map, map_opt, not, opt, rest as nom_rest, value};
-use nom::multi::many1;
+use nom::character::complete::{anychar, char};
+use nom::combinator::{all_consuming, map, map_opt, not, opt, recognize, rest as nom_rest, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
 
@@ -1399,71 +1399,67 @@ pub(crate) fn parse_mana_spend_restriction(
     // CR 106.6: Extract "and that spell can't be countered" grant before parsing restriction.
     let (rest, grants) = extract_spell_grants(rest);
     let rest = rest.trim();
+
+    // CR 106.6: Prefer the whole-remainder single-clause reading first, so a
+    // type union inside one clause ("instant or sorcery spells") stays a single
+    // `SpellType` and only genuinely heterogeneous disjunctions fall through to
+    // the multi-clause path below.
+    if let Some(restriction) = parse_single_cast_clause(rest) {
+        return Some((restriction, grants));
+    }
+
+    // CR 106.6: Disjunctive spend restriction ("cast X or Y", "cast X, Y, or
+    // activate Z"). Each top-level clause is parsed independently; only when ≥2
+    // clauses all parse to self-evaluable restrictions do we emit `Any`.
+    if let Some(restriction) = parse_disjunctive_cast_clauses(rest) {
+        return Some((restriction, grants));
+    }
+
+    None
+}
+
+/// CR 106.6: Parse a single post-"to cast " clause (no grant extraction, no
+/// disjunction) into a `ManaSpendRestriction`. This is the body of the legacy
+/// single-clause logic, extracted verbatim so the disjunction path can reuse it
+/// per clause. Returns `None` for any phrase it does not recognize.
+fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
+    let rest = rest.trim();
     let rest_lower = rest.to_lowercase();
     if nom_on_lower(rest, &rest_lower, |i| {
         value((), all_consuming(tag("spells"))).parse(i)
     })
     .is_some()
     {
-        return Some((ManaSpendRestriction::SpellOnly, grants));
+        return Some(ManaSpendRestriction::SpellOnly);
     }
 
     // CR 106.6: "spells with mana value N or greater" / "a spell with mana
     // value N or less" — parameterized over Comparator by the threshold suffix.
     if let Some((comparator, value)) = parse_mana_value_threshold(rest) {
-        return Some((
-            ManaSpendRestriction::SpellWithManaValue { comparator, value },
-            grants,
-        ));
+        return Some(ManaSpendRestriction::SpellWithManaValue { comparator, value });
     }
 
     // CR 105.2 + CR 106.6: "spells with exactly N colors" / "a spell with N or
     // more colors" — parameterized over Comparator by the color-count suffix.
     if let Some((comparator, count)) = parse_color_count(rest) {
-        return Some((
-            ManaSpendRestriction::SpellWithColorCount { comparator, count },
-            grants,
-        ));
+        return Some(ManaSpendRestriction::SpellWithColorCount { comparator, count });
     }
 
-    if matches!(rest, "spells with flashback" | "a spell with flashback") {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback),
-            grants,
-        ));
-    }
-
-    if matches!(
-        rest,
-        "spells with flashback from a graveyard" | "a spell with flashback from a graveyard"
-    ) {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKindFromZone {
-                kind: KeywordKind::Flashback,
-                zone: crate::types::zones::Zone::Graveyard,
-            },
-            grants,
-        ));
-    }
-
-    if matches!(
-        rest,
-        "spells with flashback from your graveyard" | "a spell with flashback from your graveyard"
-    ) {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKindFromZone {
-                kind: KeywordKind::Flashback,
-                zone: crate::types::zones::Zone::Graveyard,
-            },
-            grants,
-        ));
+    // CR 106.6 + CR 702: "[a spell|spells] [with|that has|that have] <keyword>"
+    // — keyword-gated spend, optionally with a "from <zone>" tail. Parameterized
+    // over the keyword name so a single arm covers flashback, freerunning, etc.
+    if let Some((kind, zone)) = parse_spell_with_keyword(rest) {
+        return Some(match zone {
+            Some(zone) => ManaSpendRestriction::SpellWithKeywordKindFromZone { kind, zone },
+            None => ManaSpendRestriction::SpellWithKeywordKind(kind),
+        });
     }
 
     // CR 106.6 + CR 400.7: "[a spell|spells] from your graveyard" / "from exile"
     // — zone-gated spend (no keyword required). Checked before the type-phrase
     // fallback, which does not recognize a "from <zone>" tail.
     if let Some(zone) = parse_spell_from_zone(rest) {
-        return Some((ManaSpendRestriction::SpellFromZone(zone), grants));
+        return Some(ManaSpendRestriction::SpellFromZone(zone));
     }
 
     // CR 106.6: Check for an "or activate …" ability-activation suffix. If
@@ -1472,7 +1468,7 @@ pub(crate) fn parse_mana_spend_restriction(
     let (spell_part, activation_tail) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
-        return Some((ManaSpendRestriction::ChosenCreatureType, grants));
+        return Some(ManaSpendRestriction::ChosenCreatureType);
     }
 
     // "creature spells" / "a creature spell" / "artifact spells" etc.
@@ -1487,26 +1483,165 @@ pub(crate) fn parse_mana_spend_restriction(
         ActivationTail::OfType(source_quality)
             if source_quality.eq_ignore_ascii_case(&type_phrase) =>
         {
-            Some((
-                ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                    spell_type: type_phrase,
-                    ability: AbilityActivationScope::OfSpellType,
-                },
-                grants,
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: type_phrase,
+                ability: AbilityActivationScope::OfSpellType,
+            })
         }
         // A typed activation suffix whose source quality differs from the spell
         // type is an unsupported compound — gap it rather than guess.
         ActivationTail::OfType(_) => None,
-        ActivationTail::Any => Some((
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                spell_type: type_phrase,
-                ability: AbilityActivationScope::Any,
-            },
-            grants,
-        )),
-        ActivationTail::None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
+        ActivationTail::Any => Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            spell_type: type_phrase,
+            ability: AbilityActivationScope::Any,
+        }),
+        ActivationTail::None => Some(ManaSpendRestriction::SpellType(type_phrase)),
     }
+}
+
+/// CR 106.6: Parse one clause of a disjunctive spend restriction. A clause is
+/// either a CAST clause (handled by [`parse_single_cast_clause`], tolerating a
+/// leading "to cast "/"cast " that the split may have left on a trailing
+/// clause) or an ACTIVATE clause ("to activate an ability of an X source"),
+/// which is lowered to a `SpellTypeOrAbilityActivation`/`ActivateOnly` reading.
+///
+/// Returns `None` for any clause that does not independently parse — the caller
+/// then drops the whole disjunction rather than guessing.
+fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
+    let clause = clause.trim();
+    let clause_lower = clause.to_lowercase();
+
+    // ACTIVATE clause: "to activate an ability of an X source" / "activate an
+    // equip ability" / "to activate an ability". Reuse the existing activation
+    // tail combinator by treating the clause itself as the post-" or " tail.
+    if nom_on_lower(clause, &clause_lower, |i| {
+        value((), alt((tag("to activate "), tag("activate ")))).parse(i)
+    })
+    .is_some()
+    {
+        let (_, source_quality) = all_consuming(parse_activation_tail_after_or)
+            .parse(clause_lower.as_str())
+            .ok()?;
+        return Some(match source_quality {
+            // CR 106.6: "activate an ability of an X source" — abilities of
+            // permanents of type X. There is no pure "activate abilities of type
+            // X" `ManaRestriction`; the closest self-evaluable reading is
+            // `SpellTypeOrAbilityActivation { X, OfSpellType }`, whose activation
+            // half is exactly "abilities of type X" (and whose spell half also
+            // allows X spells — harmless inside a disjunction that already lists
+            // the matching X cast clause, e.g. Brotherhood Headquarters).
+            Some(quality) => ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: quality,
+                ability: AbilityActivationScope::OfSpellType,
+            },
+            // CR 106.6: "to activate an ability" with no qualifier — any ability.
+            None => ManaSpendRestriction::ActivateOnly,
+        });
+    }
+
+    // CAST clause: tolerate a leading "to cast "/"cast " the split may have left.
+    let cast_clause = nom_on_lower(clause, &clause_lower, |i| {
+        value((), alt((tag("to cast "), tag("cast ")))).parse(i)
+    })
+    .map_or(clause, |(_, rest)| rest);
+
+    parse_single_cast_clause(cast_clause)
+}
+
+/// CR 106.6: Split a post-"to cast " remainder into top-level disjunction
+/// clauses and, if every clause parses to a self-evaluable restriction (and
+/// there are ≥2 of them), emit a `ManaSpendRestriction::Any`. Returns `None`
+/// when the remainder is not a multi-clause disjunction or any clause fails to
+/// parse / is an `XCostOnly` (deferred-eval) reading — leaving the restriction
+/// as a known gap rather than guessing.
+///
+/// Splitting is done on " or " and the Oxford-comma forms (", " / ", or "); a
+/// candidate split is only accepted when it yields ≥2 fragments that EACH
+/// independently parse via [`parse_disjunctive_clause`]. Because the caller
+/// already tried the whole remainder as a single clause first, a type union
+/// inside one clause ("instant or sorcery spells") never reaches this path.
+/// CR 106.6: Recognize one disjunction clause — the run of input up to (but not
+/// including) the next clause delimiter (" or " / ", " / ", or ") or end of
+/// input. nom combinator (a `not`-guarded `anychar` repetition) per the
+/// parser-combinator mandate, rather than `str::split`.
+fn parse_one_disjunction_clause(input: &str) -> OracleResult<'_, &str> {
+    recognize(many1(preceded(
+        not(alt((tag(", or "), tag(", "), tag(" or ")))),
+        anychar,
+    )))
+    .parse(input)
+}
+
+fn parse_disjunctive_cast_clauses(rest: &str) -> Option<ManaSpendRestriction> {
+    // CR 106.6: Split the remainder into top-level disjunction clauses with a nom
+    // separated list — delimiters are " or " and the Oxford-comma forms (", " /
+    // ", or "). Longest delimiter first so ", or " wins over its ", " prefix.
+    // Each clause is the run of input up to the next delimiter; a type union
+    // inside one clause ("instant or sorcery spells") never reaches here because
+    // the caller tries the whole remainder as a single clause first.
+    let (_, fragments) = all_consuming(separated_list1(
+        alt((tag(", or "), tag(", "), tag(" or "))),
+        parse_one_disjunction_clause,
+    ))
+    .parse(rest)
+    .ok()?;
+
+    if fragments.len() < 2 {
+        return None;
+    }
+
+    let mut subs = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        let restriction = parse_disjunctive_clause(fragment)?;
+        // CR 106.6: XCostOnly defers full {X}-cost detection to its call site and
+        // cannot be self-evaluated inside a disjunction — drop the whole thing.
+        if matches!(restriction, ManaSpendRestriction::XCostOnly) {
+            return None;
+        }
+        subs.push(restriction);
+    }
+
+    // Only emit a disjunction for ≥2 successfully-parsed clauses.
+    (subs.len() >= 2).then_some(ManaSpendRestriction::Any(subs))
+}
+
+/// CR 106.6 + CR 702: Parse "[a spell|spells] [with|that has|that have]
+/// <keyword> [from <zone>]" into the keyword kind and optional origin zone.
+/// Parameterized over the keyword name (an `alt` of keyword tags) so one arm
+/// covers every keyword-gated spend filter (flashback, freerunning, …) rather
+/// than a hardcoded per-keyword `matches!`. The optional "from <zone>" tail
+/// upgrades the result to a keyword+zone reading (Flashback from graveyard).
+fn parse_spell_with_keyword(rest: &str) -> Option<(KeywordKind, Option<Zone>)> {
+    let rest_lower = rest.to_lowercase();
+    let (kind, after_kw) = nom_on_lower(rest, &rest_lower, |i| {
+        let (i, _) = alt((tag("spells"), tag("a spell"))).parse(i)?;
+        let (i, _) = alt((tag(" with "), tag(" that has "), tag(" that have "))).parse(i)?;
+        // CR 702: keyword name → KeywordKind. Extend this `alt` per keyword.
+        alt((
+            value(KeywordKind::Flashback, tag("flashback")),
+            value(KeywordKind::Freerunning, tag("freerunning")),
+        ))
+        .parse(i)
+    })?;
+
+    let after_lower = after_kw.to_lowercase();
+    if after_kw.trim().is_empty() {
+        return Some((kind, None));
+    }
+    // Optional "from [your|a] <zone>" tail.
+    let (_, after_from) = nom_on_lower(after_kw, &after_lower, |i| {
+        value((), (tag(" from "), opt(alt((tag("your "), tag("a ")))))).parse(i)
+    })?;
+    let after_from_lower = after_from.to_lowercase();
+    let (zone, _) = nom_on_lower(after_from, &after_from_lower, |i| {
+        all_consuming(alt((
+            value(Zone::Graveyard, tag("graveyard")),
+            value(Zone::Exile, tag("exile")),
+            value(Zone::Hand, tag("hand")),
+        )))
+        .parse(i)
+    })?;
+    Some((kind, Some(zone)))
 }
 
 /// CR 106.6 + CR 400.7: Parse "[a spell|spells] from <zone>" (the post-"to cast"

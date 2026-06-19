@@ -1485,6 +1485,9 @@ pub enum ManaSpendRestriction {
     /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
     /// which additionally requires a keyword. Resolved against `SpellMeta.cast_from_zone`.
     SpellFromZone(Zone),
+    /// CR 106.6: Disjunction of spend restrictions ("cast X or Y or activate Z").
+    /// Lowered to `ManaRestriction::OnlyForAny`.
+    Any(Vec<ManaSpendRestriction>),
 }
 
 /// Duration for temporary effects.

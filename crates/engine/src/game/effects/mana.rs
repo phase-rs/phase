@@ -304,6 +304,13 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellFromZone(zone) => {
                 Some(ManaRestriction::OnlyForSpellFromZone(*zone))
             }
+            // CR 106.6: Disjunction — recursively lower each branch. If every branch
+            // dropped (e.g. an unresolvable `ChosenCreatureType` with no chosen type),
+            // the disjunction has no payable cases, so drop it too.
+            ManaSpendRestriction::Any(subs) => {
+                let inner = resolve_restrictions(subs, state, source_id);
+                (!inner.is_empty()).then_some(ManaRestriction::OnlyForAny(inner))
+            }
         })
         .collect()
 }

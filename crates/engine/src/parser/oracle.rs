@@ -14646,6 +14646,73 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_disjunction_two_spell_types() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // Maelstrom of the Spirit Dragon: two heterogeneous spell-type clauses.
+        let (restriction, grants) = parse_mana_spend_restriction(
+            "spend this mana only to cast a dragon spell or an omen spell",
+        )
+        .expect("disjunction should parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Dragon".to_string()),
+                ManaSpendRestriction::SpellType("Omen".to_string()),
+            ])
+        );
+        assert!(grants.is_empty());
+    }
+
+    #[test]
+    fn mana_spend_restriction_disjunction_three_way_heterogeneous() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::AbilityActivationScope;
+        // Brotherhood Headquarters: spell type / keyword / activation-of-type.
+        let (restriction, _) = parse_mana_spend_restriction(
+            "spend this mana only to cast an assassin spell or a spell that has freerunning, or to activate an ability of an assassin source",
+        )
+        .expect("three-way disjunction should parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Assassin".to_string()),
+                ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Freerunning),
+                ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Assassin".to_string(),
+                    ability: AbilityActivationScope::OfSpellType,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_disjunction_with_xcost_clause_gaps() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // Cultivator Drone: the "pay a cost that contains {c}" clause has no
+        // self-evaluable restriction, so the whole disjunction is left as a gap.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a colorless spell, activate an ability of a colorless permanent, or pay a cost that contains {c}"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_type_union_stays_single_clause() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // A type union inside one clause must NOT split into a disjunction.
+        let (restriction, _) =
+            parse_mana_spend_restriction("spend this mana only to cast instant or sorcery spells")
+                .expect("type union should parse as a single SpellType");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellType("Instant or Sorcery".to_string())
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_chosen_type_cant_be_countered() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::mana::ManaSpellGrant;

@@ -346,6 +346,13 @@ pub enum ManaRestriction {
     /// `SpellMeta.cast_from_zone`. A distinct axis from
     /// `OnlyForSpellWithKeywordKindFromZone` (which also requires a keyword).
     OnlyForSpellFromZone(Zone),
+    /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
+    /// payment that satisfies at least one inner restriction. Composition
+    /// combinator (each branch is itself a full restriction), not a leaf
+    /// parameterization. Models "… to cast a Dragon spell or an Omen spell" and
+    /// "… to cast an Assassin spell, a spell that has freerunning, or to activate
+    /// an ability of an Assassin source."
+    OnlyForAny(Vec<ManaRestriction>),
     /// CR 702.51a: Internal marker for a convoke tap that substitutes for
     /// paying mana. The payment algorithm may consume it for the current spell,
     /// but cast-spent metrics and mana-added triggers must ignore it.
@@ -451,6 +458,8 @@ impl ManaRestriction {
             // CR 106.6 + CR 400.7: zone-gated spend — the spell must be cast from
             // the named zone. A spell with no recorded cast-from zone is ineligible.
             ManaRestriction::OnlyForSpellFromZone(zone) => meta.cast_from_zone == Some(*zone),
+            // CR 106.6: Disjunction — the spell is payable if it satisfies any branch.
+            ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             ManaRestriction::ConvokePayment => true,
         }
     }
@@ -487,6 +496,10 @@ impl ManaRestriction {
             },
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
+            // CR 106.6: Disjunction — the activation is payable if any branch allows it.
+            ManaRestriction::OnlyForAny(subs) => subs
+                .iter()
+                .any(|r| r.allows_activation(source_types, source_subtypes)),
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
             ManaRestriction::OnlyForXCosts | ManaRestriction::ConvokePayment => false,
@@ -1492,6 +1505,62 @@ mod tests {
         let legendary_restriction = ManaRestriction::OnlyForSpellType("Legendary".to_string());
         assert!(legendary_restriction.allows_spell(&legendary_spell));
         assert!(!legendary_restriction.allows_spell(&creature_spell));
+    }
+
+    // CR 106.6: A disjunctive restriction allows a spell if it satisfies ANY
+    // inner branch (Maelstrom of the Spirit Dragon: Dragon spell OR Omen spell).
+    #[test]
+    fn restriction_only_for_any_allows_spell_matching_a_branch() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Dragon".to_string()),
+            ManaRestriction::OnlyForSpellType("Omen".to_string()),
+        ]);
+        let dragon_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Dragon".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let omen_spell = SpellMeta {
+            types: vec!["Enchantment".to_string(), "Omen".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let goblin_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        // Matches one branch each.
+        assert!(restriction.allows_spell(&dragon_spell));
+        assert!(restriction.allows_spell(&omen_spell));
+        // Matches no branch.
+        assert!(!restriction.allows_spell(&goblin_spell));
+    }
+
+    // CR 106.6: A disjunction allows an activation if any branch's activation
+    // half allows it (e.g. "… or to activate an ability of an Assassin source").
+    #[test]
+    fn restriction_only_for_any_allows_activation_via_branch() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Assassin".to_string()),
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: "Assassin".to_string(),
+                ability: AbilityActivationScope::OfSpellType,
+            },
+        ]);
+        // An Assassin source's ability is allowed via the second branch.
+        assert!(restriction.allows_activation(&["Creature".to_string()], &["Assassin".to_string()]));
+        // A non-Assassin source's ability is allowed by no branch.
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &["Goblin".to_string()]));
     }
 
     // CR 106.6: "Spend this mana only to cast Ninja spells" (Turtle Lair, issue
