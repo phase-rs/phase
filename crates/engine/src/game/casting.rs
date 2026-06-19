@@ -11943,9 +11943,10 @@ pub fn handle_activate_ability(
         // (CR 601.2c), then `casting_targets::pay_activation_costs_after_target_selection`
         // surfaces this same cost prompt before the ability reaches the stack.
         if let Some((count, zone, filter)) = find_non_self_exile(cost) {
-            let has_effect_targets = build_target_slots(state, &resolved)
-                .map(|slots| !slots.is_empty())
-                .unwrap_or(false);
+            let has_effect_targets = {
+                let slots = build_target_slots(state, &resolved)?;
+                !slots.is_empty()
+            };
             if !has_effect_targets {
                 let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                     .expect("find_non_self_exile restricts zone to Hand or Graveyard");
@@ -18277,6 +18278,73 @@ mod tests {
                 .any(|entry| entry.source_id == lavamancer),
             "activated ability should be on the stack after full cost payment"
         );
+    }
+
+    #[test]
+    fn targeted_exile_cost_activation_with_no_legal_target_does_not_prompt_or_pay_cost() {
+        use super::super::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(993),
+            PlayerId(0),
+            "Targeted Exile-Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        let filler_a = create_object(
+            &mut state,
+            CardId(994),
+            PlayerId(0),
+            "Graveyard Filler A".to_string(),
+            Zone::Graveyard,
+        );
+        let filler_b = create_object(
+            &mut state,
+            CardId(995),
+            PlayerId(0),
+            "Graveyard Filler B".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{T}, Exile two cards from your graveyard: Destroy target artifact.",
+                "Targeted Exile-Cost Source",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        let err = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect_err("activation with no legal target must fail before cost payment");
+
+        assert!(
+            format!("{err:?}").contains("No legal targets"),
+            "expected target-legality error, got {err:?}"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "illegal activation must not enter an exile-cost prompt"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "tap cost must not be paid when target selection is impossible"
+        );
+        assert_eq!(state.objects[&filler_a].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&filler_b].zone, Zone::Graveyard);
     }
 
     /// Issues #520 (Curse of the Cabal) + #521 (Profane Tutor): activating a
