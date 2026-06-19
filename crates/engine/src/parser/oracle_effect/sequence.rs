@@ -3570,6 +3570,10 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         return parsed;
     }
 
+    if let Some(parsed) = parse_milled_this_way_destination(lower) {
+        return parsed;
+    }
+
     let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
         Some(Zone::Battlefield)
     } else if nom_primitives::scan_contains(lower, "into your hand")
@@ -3582,6 +3586,47 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         None
     };
     (destination, false)
+}
+
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+    for marker in ["that was milled this way", "milled this way"] {
+        if let Some(index) = lower.find(marker) {
+            let tail = lower[index + marker.len()..].trim_start();
+            if let Ok((rest, _)) = alt((
+                tag::<_, _, OracleError<'_>>("onto the battlefield"),
+                tag("to the battlefield"),
+            ))
+            .parse(tail)
+            {
+                let (_, tapped) = opt(tag::<_, _, OracleError<'_>>(" tapped"))
+                    .parse(rest)
+                    .ok()?;
+                return Some((Some(Zone::Battlefield), tapped.is_some()));
+            }
+            if alt((
+                tag::<_, _, OracleError<'_>>("into your hand"),
+                tag("into their hand"),
+                tag("to your hand"),
+                tag("to their hand"),
+            ))
+            .parse(tail)
+            .is_ok()
+            {
+                return Some((Some(Zone::Hand), false));
+            }
+            if alt((
+                tag::<_, _, OracleError<'_>>("on top of your library"),
+                tag("on top of their library"),
+                tag("on top"),
+            ))
+            .parse(tail)
+            .is_ok()
+            {
+                return Some((Some(Zone::Library), false));
+            }
+        }
+    }
+    None
 }
 
 fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
@@ -7389,17 +7434,18 @@ mod tests {
             AbilityKind::Spell,
         );
 
-        let mut chain = vec![];
+        let mut chain: Vec<&Effect> = vec![];
         let mut node = Some(&def);
         while let Some(d) = node {
-            chain.push(&d.effect);
+            chain.push(d.effect.as_ref());
             node = d.sub_ability.as_deref();
         }
 
         let put = chain
             .iter()
-            .find(|e| matches!(e, Effect::ChangeZoneAll { .. }))
+            .find(|effect| matches!(***effect, Effect::ChangeZoneAll { .. }))
             .expect("expected a ChangeZoneAll effect");
+        let put = *put;
         match put {
             Effect::ChangeZoneAll { enter_tapped, .. } => {
                 assert!(
