@@ -1462,8 +1462,8 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // permanent (origin Battlefield → Exile), NOT the stack-exit
     // `graveyard_destination_replacement` (which is structurally unreachable for
     // permanent spells). Attaching it requires a resolution-grant carrier on the
-    // permission — deferred per the plan's STOP gate — so it is left `None` here
-    // and the trailing rider text is tolerated rather than modeled.
+    // permission. Until that exists, decline this parser so the unmodeled rider
+    // remains an honest coverage gap instead of being silently dropped.
     if let Some(def) = try_parse_disjunctive_graveyard_cast_permission(text, lower) {
         return Some(def);
     }
@@ -1556,9 +1556,10 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 /// filter (The Eighth Doctor: both "historic permanent"), the union collapses
 /// to that single filter; otherwise it emits `TargetFilter::Or`.
 ///
-/// Any trailing rider ("If you do, it gains \"…\"") is tolerated and ignored —
-/// the granted leave-battlefield exile rider is a CR 614.1a Moved replacement on
-/// the resolved permanent that requires resolution-grant plumbing (deferred).
+/// A trailing rider ("If you do, it gains \"…\"") is intentionally rejected:
+/// the granted leave-battlefield exile rider is a CR 614.1a Moved replacement
+/// on the resolved permanent. Parsing only the permission would make coverage
+/// report support while dropping rules text.
 fn try_parse_disjunctive_graveyard_cast_permission(
     text: &str,
     lower: &str,
@@ -1572,6 +1573,9 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         "once during each of your turns, you may play ",
     )
     .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
+    if nom_primitives::scan_contains(rest, "if you do, it gains") {
+        return None;
+    }
 
     // CR 305.1 + CR 601.2a: The disjunction connector " or cast " splits the
     // land-play branch from the spell-cast branch. `split_once_on` is the

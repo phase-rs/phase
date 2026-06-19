@@ -7540,18 +7540,26 @@ fn graveyard_cast_permission_muldrotha_legacy_and() {
     ));
 }
 
-/// CR 305.1 + CR 601.2a + CR 700.6: The Eighth Doctor's disjunctive permission
-/// — "Once during each of your turns, you may play a historic land or cast a
+#[test]
+fn graveyard_cast_permission_disjunctive_rejects_unmodeled_granted_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+    assert!(
+        parse_static_line(text).is_none(),
+        "unmodeled granted leave-battlefield replacement must remain an honest coverage gap"
+    );
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Tail-zone disjunctive permission —
+/// "Once during each of your turns, you may play a historic land or cast a
 /// historic permanent spell from your graveyard." — lowers to a single
 /// `GraveyardCastPermission { frequency: OncePerTurn, play_mode: Play,
 /// graveyard_destination_replacement: None }`. The two branches resolve to
 /// distinct typed filters (historic land vs. historic permanent), so the merged
 /// `affected` is a `TargetFilter::Or` over both — each branch carries the
-/// `Historic` property (CR 700.6). The trailing granted leave-battlefield rider
-/// is tolerated and does not block the permission.
+/// `Historic` property (CR 700.6).
 #[test]
-fn graveyard_cast_permission_disjunctive_eighth_doctor_tail_zone() {
-    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+fn graveyard_cast_permission_disjunctive_tail_zone_without_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard.";
     let def = parse_static_line(text).expect("should parse The Eighth Doctor disjunctive line");
     assert!(
         matches!(
