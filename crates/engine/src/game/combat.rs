@@ -4676,6 +4676,64 @@ mod tests {
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
     }
 
+    #[test]
+    fn kappa_cannoneer_artifact_enter_trigger_makes_it_unblockable() {
+        use crate::game::scenario::GameScenario;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::move_to_zone;
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+        use crate::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        let cannoneer = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Kappa Cannoneer",
+                4,
+                4,
+                "Improvise\nWard {4}\nWhenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+            )
+            .as_artifact()
+            .id();
+        let artifact = scenario
+            .add_creature_to_hand(PlayerId(0), "Servo", 1, 1)
+            .as_artifact()
+            .id();
+        let blocker = scenario.add_creature(PlayerId(1), "Blocker", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), artifact, Zone::Battlefield, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        assert!(
+            runner.state().stack.len() == 1,
+            "artifact ETB should put Kappa Cannoneer's trigger on the stack"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("active player should pass priority");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("nonactive player should pass priority");
+
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&cannoneer)
+                .unwrap()
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "Kappa Cannoneer's trigger should put the counter on itself"
+        );
+        assert!(
+            validate_blockers(runner.state(), &[(blocker, cannoneer)]).is_err(),
+            "Kappa Cannoneer's resolved trigger should make it unblockable this turn"
+        );
+    }
+
     /// CR 509.1b + CR 301.5a: An Equipment-owned `CantBeBlocked` static must
     /// propagate to the equipped creature. Mirrors Silver Shroud Costume,
     /// Whispersilk Cloak, Trailblazer's Boots, etc.

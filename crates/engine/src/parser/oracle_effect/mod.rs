@@ -11171,6 +11171,30 @@ fn replace_target_with_self(effect: &mut Effect) {
         Effect::Transform { target, .. } => {
             *target = TargetFilter::SelfRef;
         }
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            if target.as_ref().is_some_and(|target| {
+                matches!(
+                    target,
+                    TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                )
+            }) {
+                *target = Some(TargetFilter::SelfRef);
+            }
+            for static_def in static_abilities {
+                if static_def.affected.as_ref().is_some_and(|affected| {
+                    matches!(
+                        affected,
+                        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                    )
+                }) {
+                    static_def.affected = Some(TargetFilter::SelfRef);
+                }
+            }
+        }
         _ => {
             // Effects without a target field, or outside this anaphor class,
             // stay as-is.

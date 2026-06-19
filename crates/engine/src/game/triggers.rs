@@ -5352,6 +5352,21 @@ pub(crate) fn check_trigger_condition(
         } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
+        // CR 608.2c + CR 603.2 + CR 603.4: spell-cast intervening-if on targets.
+        TriggerCondition::TriggeringSpellTargetsFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|spell_id| {
+                let context_source_id = source_id.unwrap_or(spell_id);
+                super::restrictions::triggering_spell_targets_filter(
+                    state,
+                    spell_id,
+                    filter,
+                    context_source_id,
+                )
+            }),
     }
 }
 
@@ -12406,6 +12421,106 @@ pub mod tests {
     }
 
     #[test]
+    fn command_zone_phase_trigger_fires_at_controllers_upkeep() {
+        // CR 113.6b + CR 603.4: Oloro-class — a beginning-of-upkeep trigger that
+        // functions from the command zone (trigger_zones = [Command], intervening-if
+        // SourceInZone{Command}) must fire while its source sits in the command zone
+        // and the controller's upkeep begins. This is the Phase-mode counterpart to
+        // the SpellCast-mode Eminence path covered by #817 / PR #1031.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        // Drive the actual upkeep event through the collection pipeline.
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Command-zone beginning-of-upkeep trigger must fire while its source is in the command zone"
+        );
+    }
+
+    #[test]
+    fn command_zone_phase_trigger_does_not_fire_at_opponents_upkeep() {
+        // CR 113.6b: The same Oloro-class trigger must NOT fire during an
+        // opponent's upkeep — "your upkeep" means the controller's upkeep only.
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Command-zone upkeep trigger must NOT fire during opponent's upkeep"
+        );
+    }
+
+    #[test]
     fn suppress_triggers_torpor_blocks_creature_etb_observer() {
         // CR 603.2g + CR 603.6a: Torpor Orb-class static on battlefield suppresses
         // an observer's ETB trigger when a CREATURE enters. Soul Warden reading.
@@ -19032,6 +19147,65 @@ pub mod tests {
             state.players[0].life, 21,
             "the Blood Artist-class dies-observer must resolve from the \
              deferred-trigger flush (issue #423)"
+        );
+    }
+
+    #[test]
+    fn midnight_reaper_self_sacrifice_fires_own_nontoken_creature_dies_trigger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let reaper = make_creature(&mut state, PlayerId(0), "Midnight Reaper", 3, 2);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a nontoken creature you control dies, this creature deals 1 damage to you and you draw a card.",
+            "Midnight Reaper",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = parsed.triggers[0].clone();
+        let valid_card = trigger
+            .valid_card
+            .as_ref()
+            .expect("Midnight Reaper trigger must filter the dying creature");
+        let TargetFilter::Typed(typed) = valid_card else {
+            panic!("expected typed dying-creature filter, got {valid_card:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::NonToken));
+        assert!(
+            !typed.properties.contains(&FilterProp::Another),
+            "Midnight Reaper must observe itself; the text does not say another"
+        );
+
+        {
+            let obj = state.objects.get_mut(&reaper).expect("reaper exists");
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, reaper, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let reaper_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == reaper)
+            .collect();
+        assert_eq!(
+            reaper_triggers.len(),
+            1,
+            "Midnight Reaper should trigger when its controller sacrifices it"
+        );
+        assert!(
+            matches!(
+                reaper_triggers[0].pending.ability.effect,
+                Effect::DealDamage { .. }
+            ),
+            "parsed trigger should start with the self-damage effect"
         );
     }
 
