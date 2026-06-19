@@ -14,7 +14,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::WardCost;
@@ -3301,6 +3301,73 @@ pub(crate) fn handle_order_triggers(
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let pending = collect_pending_triggers(state, events);
     state.deferred_triggers.extend(pending);
+}
+
+/// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time
+/// player choice that pauses on another prompt before the action settles.
+/// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
+/// `deferred_triggers` for dispatch once the outer action reaches Priority.
+///
+/// Used by handlers that return `ActionResult` directly (e.g. `OpponentMayChoice`)
+/// and therefore bypass `run_post_action_pipeline`. Do not call from
+/// `OptionalEffectChoice` — those handlers return through `apply_action`, and
+/// copy-sensitive events such as `SpellCopied` are already collected by their
+/// dedicated resolution owners (`copy_spell.rs`).
+pub(crate) fn park_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &[GameEvent],
+    slice_start: usize,
+) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| {
+            // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+            // announcement and drains them after CopyRetarget finalization.
+            // Re-parking the same event duplicates Magecraft (issue #2866).
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+}
+
+/// CR 603.2 + CR 603.3b: For choice handlers that return `ActionResult` directly
+/// and bypass `run_post_action_pipeline`. When the action settles to Priority,
+/// collect this action's observer triggers and drain the deferred queue; when
+/// still paused on another prompt, park only (B2).
+pub(crate) fn collect_and_drain_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        park_observer_triggers_if_paused(state, events, slice_start);
+        return;
+    }
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| {
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+    if !state.deferred_triggers.is_empty() {
+        let _ = drain_deferred_trigger_queue(state, events);
+    }
 }
 
 /// CR 106.6 + CR 603.3b: Queue a synthetic cost-payment trigger for the same

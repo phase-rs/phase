@@ -2437,6 +2437,73 @@ fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
     );
 }
 
+/// CR 601.2f: a self-spell cost reduction written with a LEADING condition —
+/// "If [condition], this spell costs {N} less to cast." — must attach the
+/// gate. Before the leading-`if` extraction fix the condition was silently
+/// dropped (the trailing-only `rfind(" if ")` scan never saw the front-of-line
+/// "if"), so every Avatar in the cycle reduced unconditionally.
+#[test]
+fn self_cost_reduction_leading_if_you_have_n_or_less_life() {
+    // Avatar of Hope.
+    let def = parse_static_line("If you have 3 or less life, this spell costs {6} less to cast.")
+        .expect("Avatar of Hope cost reduction must parse");
+    match def.condition {
+        Some(StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) => {}
+        other => panic!("leading-if gate must be LifeTotal{{Controller}} LE 3, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_cost_reduction_leading_if_opponent_controls_threshold() {
+    // Avatar of Fury — exercises the "an opponent controls N or more [type]"
+    // condition family through the leading-`if` cost-mod path.
+    let def = parse_static_line(
+        "If an opponent controls seven or more lands, this spell costs {6} less to cast.",
+    )
+    .expect("Avatar of Fury cost reduction must parse");
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+                ..
+            })
+        ),
+        "leading-if gate must survive as an opponent-controls >= 7 comparison, got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn self_cost_reduction_leading_if_extracts_across_condition_forms() {
+    // The leading-`if` extraction is condition-agnostic: it routes the clause
+    // through `parse_inner_condition`, so every already-supported condition form
+    // gates the reduction. Avatar of Might ("an opponent controls at least four
+    // more creatures than you") and "you weren't the starting player"
+    // (Phantasmal Extraction / Unforgiving Overtake / Unnatural Summons).
+    for line in [
+        "If an opponent controls at least four more creatures than you, this spell costs {6} less to cast.",
+        "If you weren't the starting player, this spell costs {1} less to cast.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line:?} must parse"));
+        assert!(
+            def.condition.is_some(),
+            "leading-if condition must be attached for {line:?}, got None"
+        );
+    }
+}
+
 #[test]
 fn self_cost_reduction_if_night_uses_day_night_condition() {
     let def = parse_static_line("This spell costs {2} less to cast if it's night.").unwrap();
