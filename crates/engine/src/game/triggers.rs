@@ -14,7 +14,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::WardCost;
@@ -3301,6 +3301,33 @@ pub(crate) fn handle_order_triggers(
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let pending = collect_pending_triggers(state, events);
     state.deferred_triggers.extend(pending);
+}
+
+/// CR 603.2 + CR 603.3b: Park or dispatch observer triggers emitted during a
+/// resolution-time player choice (`OptionalEffectChoice`, `OpponentMayChoice`,
+/// etc.) when `run_post_action_pipeline` will not run on this action because
+/// `waiting_for` is no longer `Priority`. Without this, events such as
+/// `CardDrawn` from Kwain's per-player optional draw are dropped when the next
+/// player's "may" prompt opens before the action settles (issue #3265).
+pub(crate) fn park_or_drain_observer_triggers_from_events(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if trigger_events.is_empty() {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        collect_triggers_into_deferred(state, &trigger_events);
+        let _ = drain_deferred_trigger_queue(state, events);
+    } else {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
 }
 
 /// CR 106.6 + CR 603.3b: Queue a synthetic cost-payment trigger for the same

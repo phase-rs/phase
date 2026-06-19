@@ -30,6 +30,7 @@ pub(super) fn handle_optional_effect_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let events_before = events.len();
     state.cost_payment_failed_flag = false;
     set_active_priority(state);
 
@@ -60,6 +61,7 @@ pub(super) fn handle_optional_effect_choice(
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::park_or_drain_observer_triggers_from_events(state, events, events_before);
     if state.resolving_begin_game_abilities
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
@@ -93,6 +95,7 @@ pub(super) fn handle_opponent_may_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    let events_before = events.len();
     let WaitingFor::OpponentMayChoice {
         player: promptee,
         remaining,
@@ -231,6 +234,7 @@ pub(super) fn handle_opponent_may_choice(
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::park_or_drain_observer_triggers_from_events(state, events, events_before);
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
