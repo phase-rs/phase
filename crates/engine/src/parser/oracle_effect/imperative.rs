@@ -13324,10 +13324,7 @@ mod tests {
                                     scope,
                                 },
                         } => {
-                            assert!(matches!(
-                                zone,
-                                crate::types::ability::ZoneRef::Literal(Zone::Hand)
-                            ));
+                            assert!(matches!(zone, crate::types::ability::ZoneRef::Hand));
                             assert!(card_types.is_empty());
                             assert!(filter.is_none());
                             assert!(matches!(
