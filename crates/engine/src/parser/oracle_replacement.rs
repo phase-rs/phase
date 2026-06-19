@@ -4824,21 +4824,43 @@ fn strip_optional_instead_lead_in(effect_text: &str) -> (bool, &str) {
 enum MillReplacementSubject {
     You,
     Opponent,
+    AnyPlayer,
 }
 
 fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     let ((subject, count), rest) = nom_on_lower(lower, lower, |input| {
         let (input, _) = tag("if ").parse(input)?;
+        // CR 614.1a: the antecedent subject scopes whose mill event is replaced.
         let (input, subject) = alt((
             value(MillReplacementSubject::Opponent, tag("an opponent")),
             value(MillReplacementSubject::Opponent, tag("opponent")),
+            // CR 614.1a: "a player" scopes the replacement to every player's mill
+            // (Bruvac the Grandiloquent), mirroring the "a player" arms in the
+            // proliferate/draw replacement parsers (→ ReplacementPlayerScope::AnyPlayer).
+            value(MillReplacementSubject::AnyPlayer, tag("a player")),
             value(MillReplacementSubject::You, tag("you")),
         ))
         .parse(input)?;
         let (input, _) = tag(" would mill one or more cards, ").parse(input)?;
-        let (input, _) = alt((tag("they mill "), tag("you mill "))).parse(input)?;
+        // CR 614.1a: two printed word orders for the consequence —
+        //   trailing-instead: "they mill twice that many cards instead"
+        //   leading-instead:  "instead that player mills twice that many cards" (Bruvac)
+        let (input, lead_instead) = opt(tag("instead ")).parse(input)?;
+        let (input, _) = alt((
+            tag("they mill "),
+            tag("you mill "),
+            tag("that player mills "),
+        ))
+        .parse(input)?;
         let (input, count) = parse_mill_replacement_count.parse(input)?;
-        let (input, _) = alt((tag(" cards instead"), tag(" instead"))).parse(input)?;
+        let input = if lead_instead.is_some() {
+            // The leading "instead" already supplied the replacement marker; the
+            // tail is just an optional "cards" noun (no second "instead").
+            opt(tag(" cards")).parse(input)?.0
+        } else {
+            let (input, _) = alt((tag(" cards instead"), tag(" instead"))).parse(input)?;
+            input
+        };
         let (input, _) = opt(char('.')).parse(input)?;
         Ok((input, (subject, count)))
     })?;
@@ -4857,8 +4879,16 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
         ))
         .description(original_text.to_string());
 
-    if matches!(subject, MillReplacementSubject::Opponent) {
-        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    // CR 614.1a: scope the replacement to the antecedent subject's mill events.
+    match subject {
+        MillReplacementSubject::Opponent => {
+            def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        }
+        MillReplacementSubject::AnyPlayer => {
+            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        }
+        // "you" keeps the default controller-only scope (valid_player = None).
+        MillReplacementSubject::You => {}
     }
 
     Some(def)
@@ -12849,6 +12879,42 @@ mod tests {
 
         assert_eq!(def.event, ReplacementEvent::Mill);
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        let execute = def.execute.as_ref().expect("mill replacement must execute");
+        match &*execute.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(destination, &Zone::Graveyard);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        })
+                    }
+                );
+            }
+            other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bruvac_player_mill_replacement_leading_instead() {
+        // CR 614.1a: Bruvac the Grandiloquent's actual printed Oracle text uses
+        // the "a player" antecedent and the leading-`instead` consequence word
+        // order. Both must parse to an AnyPlayer-scoped 2x mill replacement.
+        let text =
+            "If a player would mill one or more cards, instead that player mills twice that many cards.";
+        let def = parse_replacement_line(text, "Bruvac the Grandiloquent")
+            .expect("must parse Bruvac mill replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Mill);
+        // Scopes to every player's mill (not just the controller's / an opponent's).
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
         let execute = def.execute.as_ref().expect("mill replacement must execute");
         match &*execute.effect {
             Effect::Mill {
