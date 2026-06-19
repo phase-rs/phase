@@ -343,6 +343,16 @@ fn restriction_scope_matches_player(
             );
             false
         }
+        RestrictionPlayerScope::DefendingPlayer => {
+            // CR 508.5a: resolved to `SpecificPlayer` by `add_restriction` when
+            // the restriction is created. An unresolved scope here means the
+            // source was not attacking, so it restricts no one.
+            debug_assert!(
+                false,
+                "DefendingPlayer should be resolved by add_restriction"
+            );
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }

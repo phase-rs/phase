@@ -446,6 +446,10 @@ fn restriction_affected_players(
         RestrictionPlayerScope::TargetedPlayer | RestrictionPlayerScope::ParentTargetedPlayer => {
             Vec::new()
         }
+        // CR 508.5a: `add_restriction` resolves the defending player to
+        // `SpecificPlayer` when the restriction is created, so a stored
+        // restriction never carries an unresolved `DefendingPlayer` scope here.
+        RestrictionPlayerScope::DefendingPlayer => Vec::new(),
     }
 }
 

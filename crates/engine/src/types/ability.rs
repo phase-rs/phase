@@ -1610,6 +1610,13 @@ pub enum RestrictionPlayerScope {
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
     OpponentsOfSourceController,
+    /// CR 508.5 / CR 508.5a: The defending player for the source's attack
+    /// ("Whenever ~ attacks, defending player can't cast spells this turn." —
+    /// Xantid Swarm). Resolved to `SpecificPlayer` by `add_restriction` at
+    /// resolution time via `combat::defending_player_for_attacker`, capturing
+    /// the player as the restriction is created (the defending player is fixed
+    /// once attackers are declared and does not change for the turn).
+    DefendingPlayer,
 }
 
 // ---------------------------------------------------------------------------

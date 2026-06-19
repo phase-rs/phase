@@ -2027,6 +2027,13 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 RestrictionPlayerScope::ParentTargetedPlayer,
                 tag("that player"),
             ),
+            // CR 508.5: "defending player" — the player being attacked by the
+            // source ("Whenever ~ attacks, defending player can't cast spells
+            // this turn." — Xantid Swarm).
+            value(
+                RestrictionPlayerScope::DefendingPlayer,
+                tag("defending player"),
+            ),
         ))
         .parse(input)
     })?;
@@ -42395,6 +42402,31 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn cant_cast_spells_this_turn_defending_player() {
+        // CR 508.5 + CR 101.2: Xantid Swarm — "defending player can't cast
+        // spells this turn" (the combat-attack-trigger effect).
+        let def = parse_effect_chain(
+            "Defending player can't cast spells this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::DefendingPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                        ..
+                    }
+                }
+            ),
+            "got {:?}",
+            def.effect
+        );
     }
 
     #[test]
