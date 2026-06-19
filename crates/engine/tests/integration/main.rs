@@ -143,6 +143,7 @@ mod issue_1333_brain_in_a_jar;
 mod issue_1334_marchesa;
 mod issue_1335_kain_traitorous_dragoon;
 mod issue_1337_tekuthal_proliferate_twice;
+mod issue_1341_orvar;
 mod issue_1343_debug_m1m1_pt;
 mod issue_1345_brash_taunter_self_trigger;
 mod issue_1348_impostor_syndrome;

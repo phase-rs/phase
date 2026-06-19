@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-17T00:00:00Z",
+  "updated": "2026-06-19T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1120,88 +1120,84 @@
       "name": "Hidden Strings",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "G"
+        "G",
+        "B"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Arboreal Grazer"
-        },
-        {
-          "count": 4,
-          "name": "Vizier of Tumbling Sands"
-        },
-        {
-          "count": 2,
-          "name": "Formidable Speaker"
-        },
-        {
           "count": 1,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 2,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 1,
-          "name": "Omniscience"
-        },
-        {
-          "count": 4,
-          "name": "Hidden Strings"
-        },
-        {
-          "count": 2,
-          "name": "Sylvan Scrying"
-        },
-        {
-          "count": 2,
-          "name": "Bala Ged Recovery"
-        },
-        {
-          "count": 4,
-          "name": "Pore Over the Pages"
-        },
-        {
-          "count": 1,
-          "name": "Peer into the Abyss"
-        },
-        {
-          "count": 2,
-          "name": "Fatal Push"
+          "name": "Zagoth Triome"
         },
         {
           "count": 4,
           "name": "Vibrance"
         },
         {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Arboreal Grazer"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
           "count": 2,
-          "name": "Llanowar Wastes"
+          "name": "Bala Ged Recovery"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 3,
+          "name": "Emergent Ultimatum"
         },
         {
           "count": 4,
           "name": "Lotus Field"
         },
         {
-          "count": 1,
-          "name": "Behold the Beyond"
+          "count": 2,
+          "name": "Llanowar Wastes"
+        },
+        {
+          "count": 3,
+          "name": "Sylvan Scrying"
         },
         {
           "count": 1,
+          "name": "Temple of Mystery"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Pore Over the Pages"
+        },
+        {
+          "count": 4,
+          "name": "Hidden Strings"
+        },
+        {
+          "count": 1,
+          "name": "Peer into the Abyss"
+        },
+        {
+          "count": 3,
           "name": "Overgrown Tomb"
         },
         {
-          "count": 2,
-          "name": "Temple of Malady"
+          "count": 1,
+          "name": "Mastermind's Acquisition"
         },
         {
           "count": 1,
@@ -1209,69 +1205,45 @@
         },
         {
           "count": 1,
-          "name": "Zagoth Triome"
+          "name": "Omniscience"
+        },
+        {
+          "count": 4,
+          "name": "Vizier of Tumbling Sands"
         },
         {
           "count": 4,
           "name": "Thespian's Stage"
         },
         {
-          "count": 4,
-          "name": "Blooming Marsh"
+          "count": 2,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Formidable Speaker"
         },
         {
           "count": 1,
           "name": "Atraxa, Grand Unifier"
-        },
-        {
-          "count": 3,
-          "name": "Emergent Ultimatum"
-        },
-        {
-          "count": 1,
-          "name": "Lair of the Hydra"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Culling Ritual"
+          "count": 1,
+          "name": "Ultima"
+        },
+        {
+          "count": 1,
+          "name": "Approach of the Second Sun"
         },
         {
           "count": 1,
           "name": "Tear Asunder"
         },
         {
-          "count": 1,
-          "name": "Atraxa, Grand Unifier"
-        },
-        {
           "count": 2,
-          "name": "Voyaging Satyr"
-        },
-        {
-          "count": 1,
-          "name": "Nezahal, Primal Tide"
-        },
-        {
-          "count": 2,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 1,
-          "name": "Grand Abolisher"
-        },
-        {
-          "count": 2,
-          "name": "Ultima"
-        },
-        {
-          "count": 1,
-          "name": "Kaervek, the Spiteful"
+          "name": "Culling Ritual"
         },
         {
           "count": 1,
@@ -1279,7 +1251,31 @@
         },
         {
           "count": 1,
+          "name": "Temporary Lockdown"
+        },
+        {
+          "count": 1,
+          "name": "Grand Abolisher"
+        },
+        {
+          "count": 1,
+          "name": "Kaervek, the Spiteful"
+        },
+        {
+          "count": 3,
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
           "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Atraxa, Grand Unifier"
+        },
+        {
+          "count": 1,
+          "name": "Nezahal, Primal Tide"
         }
       ]
     },
