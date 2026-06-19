@@ -6348,9 +6348,6 @@ mod tests {
     }
 
     #[test]
-    fn mill_put_all_face_down_defaults_to_vanilla_profile() {
-        use super::super::parse_effect_chain;
-    #[test]
     fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
         let dig = make_dig_effect();
         let result = parse_followup_continuation_ast(
