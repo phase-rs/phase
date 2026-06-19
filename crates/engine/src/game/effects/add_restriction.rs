@@ -56,11 +56,17 @@ fn fill_runtime_fields(
                 // CR 508.5 / CR 508.5a: capture the defending player as the
                 // restriction is created — they are fixed once attackers are
                 // declared (Xantid Swarm's "defending player can't cast spells").
-                // If the source is not attacking, leave the scope unresolved so
-                // it restricts no one rather than mis-binding a player.
+                // If the source has left combat before the trigger resolves,
+                // read the trigger event per CR 508.5.
                 RestrictionPlayerScope::DefendingPlayer => {
                     if let Some(defender) =
                         crate::game::combat::defending_player_for_attacker(state, ability.source_id)
+                            .or_else(|| {
+                                super::myriad::defending_player_from_attack_event(
+                                    state.current_trigger_event.as_ref(),
+                                    ability.source_id,
+                                )
+                            })
                     {
                         *affected_players = RestrictionPlayerScope::SpecificPlayer(defender);
                     }

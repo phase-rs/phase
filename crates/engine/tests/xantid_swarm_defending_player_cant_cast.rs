@@ -19,6 +19,7 @@
 
 use engine::game::casting::can_cast_object_now;
 use engine::game::combat::AttackTarget;
+use engine::game::effects::remove_from_combat::remove_object_from_combat;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{GameRestriction, ProhibitedActivity, RestrictionPlayerScope};
 use engine::types::actions::GameAction;
@@ -115,5 +116,45 @@ fn xantid_attack_prohibits_defending_player_casting() {
     assert!(
         can_cast_object_now(runner.state(), P0, p0_instant),
         "the attacking player P0 (not the defending player) must NOT be prohibited"
+    );
+}
+
+/// CR 508.5: an ability of an attacking creature still refers to the player
+/// that creature was attacking if the creature is no longer attacking when the
+/// ability resolves.
+#[test]
+fn xantid_restriction_uses_attack_event_after_source_leaves_combat() {
+    let (mut runner, xantid, _p0_instant, p1_instant) = board();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(xantid, AttackTarget::Player(P1))])
+        .expect("declaring Xantid as attacker must succeed");
+
+    remove_object_from_combat(runner.state_mut(), xantid);
+    assert!(
+        !runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == xantid)),
+        "test setup must remove Xantid from live combat before trigger resolution"
+    );
+
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() || runner.act(GameAction::PassPriority).is_err()
+                {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    assert!(
+        !can_cast_object_now(runner.state(), P1, p1_instant),
+        "CR 508.5: P1 remains the defending player even after Xantid leaves combat"
     );
 }
