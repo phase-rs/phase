@@ -1857,6 +1857,15 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
             }
             Some(total)
         }
+        // CR 107.1: the maximum of the computed operand values; empty → 0.
+        QuantityExpr::Max { exprs } => {
+            let mut best: Option<i32> = None;
+            for inner in exprs {
+                let value = resolve_event_replacement_quantity(inner, event_count)?;
+                best = Some(best.map_or(value, |b| b.max(value)));
+            }
+            Some(best.unwrap_or(0))
+        }
         // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice
@@ -5236,6 +5245,17 @@ fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
     }
 }
 
+/// CR 106.12b + CR 616.1: Mana-production modifiers on the same `ProduceMana`
+/// event. `Multiply` modifiers commute (×2 then ×3 == ×3 then ×2), so Mana
+/// Reflection + Nyxbloom Ancient auto-apply without a degenerate ordering prompt.
+fn mana_commute_class(modification: &crate::types::ability::ManaModification) -> CommuteClass {
+    use crate::types::ability::ManaModification;
+    match modification {
+        ManaModification::Multiply { .. } => CommuteClass::Multiplicative,
+        ManaModification::ReplaceWith { .. } => CommuteClass::NonCommuting,
+    }
+}
+
 /// CR 616.1 classification of a single replacement candidate.
 enum CandidateMateriality {
     /// An order-sensitive shape regardless of the other candidates (zone
@@ -5338,10 +5358,10 @@ fn candidate_materiality(
                 commute: quantity_commute_class(modification),
             };
         }
-        if repl_def.mana_modification.is_some() {
+        if let Some(modification) = repl_def.mana_modification.as_ref() {
             return CandidateMateriality::Writes {
                 field: EventField::ManaType,
-                commute: CommuteClass::NonCommuting,
+                commute: mana_commute_class(modification),
             };
         }
         if let Some(modification) = repl_def.damage_modification.as_ref() {

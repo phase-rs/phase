@@ -11456,7 +11456,7 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
         | QuantityExpr::Power {
             exponent: inner, ..
         } => rebind_source_amount(inner, target),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rebind_source_amount(inner, target);
             }
@@ -12370,7 +12370,7 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
         } => {
             rewrite_quantity_controller(inner, from, to);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rewrite_quantity_controller(inner, from.clone(), to.clone());
             }
@@ -12410,7 +12410,7 @@ fn rebind_anaphoric_object_scope(expr: &mut QuantityExpr, scope: ObjectScope) {
         } => {
             rebind_anaphoric_object_scope(inner, scope);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rebind_anaphoric_object_scope(inner, scope);
             }
@@ -15532,7 +15532,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rewrite_condition_quantity_expr(inner);
             }
@@ -15644,7 +15644,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
-            QuantityExpr::Sum { exprs } => {
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for inner in exprs {
                     rewrite_quantity_expr(inner);
                 }
@@ -15759,7 +15759,7 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } => {
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for inner in exprs {
                     rewrite_qty(inner);
                 }
@@ -15821,7 +15821,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } => {
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for inner in exprs {
                     rewrite_qty(inner);
                 }
@@ -15883,7 +15883,7 @@ fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool 
         | QuantityExpr::Power {
             exponent: inner, ..
         } => quantity_expr_references_controller_life_gained(inner),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(quantity_expr_references_controller_life_gained),
         QuantityExpr::Difference { left, right } => {
@@ -15924,7 +15924,7 @@ pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityD
             | QuantityExpr::Power {
                 exponent: inner, ..
             } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } => {
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for inner in exprs {
                     rewrite_qty(inner);
                 }
@@ -15974,7 +15974,7 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
             QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner, mode),
-            QuantityExpr::Sum { exprs } => {
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for inner in exprs {
                     rewrite_quantity_expr(inner, mode);
                 }

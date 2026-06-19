@@ -2549,6 +2549,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             left: Box::new(substitute_another_in_expr(left)),
             right: Box::new(substitute_another_in_expr(right)),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs.iter().map(substitute_another_in_expr).collect(),
+        },
         other => other.clone(),
     }
 }
@@ -8855,20 +8858,26 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     .parse(lower)
     .ok()?;
 
-    // Actor dispatch. Only scoped actors are handled here. "A player attacks
-    // with N or more creatures" (any-player scope, e.g. Aurelia the Law Above)
-    // would need a distinct any-player variant to be correct — until that
-    // exists, leave those triggers Unknown rather than misclassify.
-    let (after_actor, actor): (&str, ControllerRef) = alt((
+    // Actor dispatch. Handle scoped actors first (you / another player / an
+    // opponent). Also handle the any-player head-noun form "a player attacks"
+    // (e.g. Aurelia, the Law Above) by mapping it to `ControllerRef::TriggeringPlayer`
+    // and emitting an `Attacks` trigger so the triggering player becomes the
+    // event's subject during matching/resolution.
+    let actor_parse = alt((
         value(
             ControllerRef::You,
             tag::<_, _, OracleError<'_>>("you attack"),
         ),
         value(ControllerRef::Opponent, tag("another player attacks")),
         value(ControllerRef::Opponent, tag("an opponent attacks")),
+        value(
+            ControllerRef::TriggeringPlayer,
+            tag::<_, _, OracleError<'_>>("a player attacks"),
+        ),
     ))
     .parse(after_prefix)
     .ok()?;
+    let (after_actor, actor): (&str, ControllerRef) = actor_parse;
 
     // Required " with " separator.
     let (after_with, ()) = value((), tag::<_, _, OracleError<'_>>(" with "))
@@ -8906,19 +8915,27 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     }
 
     let mut def = make_base();
-    def.mode = TriggerMode::YouAttack;
     def.batched = true;
 
-    // `valid_target` drives both the matcher's attacking-player check and the
-    // "they" pronoun resolver in the effect body.
-    def.valid_target = Some(TargetFilter::Typed(
-        TypedFilter::default().controller(actor.clone()),
-    ));
+    // If the actor is the triggering player (the any-player head-noun form),
+    // emit an `Attacks` trigger scoped to a generic player source; otherwise
+    // emit the legacy `YouAttack` batched trigger and attach a controller
+    // filter to `valid_target` so the matcher resolves the attacking player.
+    let mode = if matches!(actor, ControllerRef::TriggeringPlayer) {
+        def.valid_source = Some(TargetFilter::Player);
+        TriggerMode::Attacks
+    } else {
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(actor.clone()),
+        ));
+        TriggerMode::YouAttack
+    };
+    def.mode = mode.clone();
     if n == 1 {
         // CR 508.1 + CR 603.2c: the matcher's "at least one attacker matching
         // valid_card" gate is the whole "one or more" condition.
         def.valid_card = Some(filter);
-        return Some((TriggerMode::YouAttack, def));
+        return Some((mode, def));
     }
 
     // CR 508.1: for count > 1, only typed head nouns need a condition-level
@@ -8937,7 +8954,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         count: n,
     });
 
-    Some((TriggerMode::YouAttack, def))
+    Some((mode, def))
 }
 
 /// Parse "whenever one or more [subject] die" patterns.
@@ -28932,6 +28949,31 @@ mod tests {
             })
         ));
         assert!(def.batched);
+    }
+
+    /// CR 508.1 + CR 603.2c: Aurelia, the Law Above — any-player attack batch
+    /// count uses `TriggeringPlayer` scope and `Attacks` mode (not the
+    /// opponent/you-scoped `YouAttack` siblings above).
+    #[test]
+    fn trigger_a_player_attacks_with_three_or_more_creatures() {
+        let def = parse_trigger_line(
+            "Whenever a player attacks with three or more creatures, you draw a card.",
+            "Aurelia, the Law Above",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert!(def.batched);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::TriggeringPlayer,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 3,
+            })
+        ));
     }
 
     #[test]

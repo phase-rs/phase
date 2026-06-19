@@ -5380,12 +5380,25 @@ fn attackers_declared_count(
 ) -> usize {
     match subject {
         crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            // Determine the triggering player from the first attacker in the
+            // event (attack declarations are per-attacking-player in the
+            // matcher/synthesis phase). Fall back to None if unavailable.
+            let triggering_player = attacker_ids
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|o| o.controller));
+
             attacker_ids
                 .iter()
                 .filter(|id| {
-                    let scope_ok = state.objects.get(id).is_some_and(|obj| {
-                        controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
+                        crate::types::ability::ControllerRef::TriggeringPlayer => {
+                            triggering_player.is_some_and(|tp| obj.controller == tp)
+                        }
+                        _ => {
+                            controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                        }
                     });
+
                     // CR 508.1: only attackers matching the filtered class count
                     // toward the typed minimum, preventing "attack with two or
                     // more Dinosaurs" from over-firing on mixed attacker batches.
@@ -14660,6 +14673,107 @@ pub mod tests {
         assert!(
             check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
             "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
+    }
+
+    // CR 508.1 + CR 603.2c: any-player "a player attacks with N or more creatures"
+    // (Aurelia, the Law Above) counts only the attacking player's declaration
+    // batch via `ControllerRef::TriggeringPlayer`, not the trigger controller's
+    // opponents or self.
+    #[test]
+    fn a_player_attacks_with_three_or_more_counts_triggering_attacking_player() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut make_attacker = |card_id: u64, controller: PlayerId, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let a1 = make_attacker(1, opponent, "A1");
+        let a2 = make_attacker(2, opponent, "A2");
+        let a3 = make_attacker(3, opponent, "A3");
+        let self_a1 = make_attacker(4, trigger_controller, "SelfA1");
+        let self_a2 = make_attacker(5, trigger_controller, "SelfA2");
+        let self_a3 = make_attacker(6, trigger_controller, "SelfA3");
+
+        let cond = TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::TriggeringPlayer,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 3,
+        };
+
+        let opponent_two = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&opponent_two)),
+            "opponent attacking with 2 creatures must NOT satisfy minimum=3"
+        );
+
+        let opponent_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2, a3],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a3,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &cond,
+                trigger_controller,
+                None,
+                Some(&opponent_three)
+            ),
+            "opponent attacking with 3 creatures must satisfy minimum=3"
+        );
+
+        let self_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![self_a1, self_a2, self_a3],
+            defending_player: opponent,
+            attacks: vec![
+                (self_a1, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a2, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a3, crate::game::combat::AttackTarget::Player(opponent)),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&self_three)),
+            "controller attacking with 3 creatures must satisfy minimum=3"
         );
     }
 

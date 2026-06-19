@@ -1510,6 +1510,12 @@ pub(crate) fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr
             left: Box::new(rebind_source_object_quantity_expr_to_recipient(*left)),
             right: Box::new(rebind_source_object_quantity_expr_to_recipient(*right)),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_source_object_quantity_expr_to_recipient)
+                .collect(),
+        },
         other => other,
     }
 }

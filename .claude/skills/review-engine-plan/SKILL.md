@@ -48,6 +48,17 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Identify applicable skills, such as `$add-engine-effect`, `$oracle-parser`, `$add-keyword`, `$add-trigger`, `$add-static-ability`, `$add-replacement-effect`, `$add-interactive-effect`, or `$casting-stack-conditions`.
    - Reject plans that omit required checklist steps from applicable skills.
 
+9. **Verification matrix**
+   - Reject plans without a claim-to-test map for every behavioral claim.
+   - Each map entry must name the changed seam/function, production entry point, runtime test, revert-failing assertion, sibling/negative cases, and coverage status impact.
+   - Reject helper-only tests for changes whose production path goes through `apply()`, `WaitingFor`/`GameAction`, casting/stack, combat declaration, replacement handling, or the scenario runner.
+   - Parser shape tests do not satisfy runtime semantics or coverage-support claims. Parser-only shape tests are acceptable only when unsupported semantics remain honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged red coverage.
+   - Reject parser plans that accept full Oracle text while dropping semantics unless the plan explicitly preserves an `Unimplemented`/coverage gap.
+
+10. **Scope matrix**
+   - For target, player, combat, controller, owner, protector, or defender changes, require the plan to enumerate the variants/scopes reachable at the touched production boundary.
+   - Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
+
 ## Review Loop
 
 Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.

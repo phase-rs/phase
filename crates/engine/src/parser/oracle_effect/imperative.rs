@@ -8303,6 +8303,12 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
                 .map(rebind_costpaid_scope_to_recipient)
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_costpaid_scope_to_recipient)
+                .collect(),
+        },
         QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
             max: Box::new(rebind_costpaid_scope_to_recipient(*max)),
         },
