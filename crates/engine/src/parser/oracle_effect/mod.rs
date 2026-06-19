@@ -12797,18 +12797,39 @@ fn sync_subject_into_nested_shuffle_sub(
     if !target_filter_can_target_player(subject_filter) {
         return;
     }
-    let Some(sub) = clause.sub_ability.as_mut() else {
-        return;
-    };
-    if let Effect::Shuffle { target } = &mut *sub.effect {
-        // CR 701.24a + CR 608.2c: `lower_change_zone_all_to_library` always
-        // chains `Shuffle { target: Controller }`. When the stripped subject
-        // is a player anaphor ("that player shuffles their hand into their
-        // library" — Jace, the Mind Sculptor −12), `inject_subject_target`
-        // rewrites the parent `ChangeZoneAll` but not this nested shuffle.
-        if matches!(*target, TargetFilter::Controller | TargetFilter::Any) {
-            *target = subject_filter.clone();
+
+    if !matches!(
+        &clause.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            ..
         }
+    ) {
+        return;
+    }
+
+    let mut next = clause.sub_ability.as_mut();
+    while let Some(sub) = next {
+        // CR 701.24a + CR 608.2c: `lower_change_zone_all_to_library` chains
+        // `ChangeZoneAll { target: Controller }` for every additional origin
+        // zone, ending in `Shuffle { target: Controller }`. When the stripped
+        // subject is a player anaphor ("that player shuffles their hand into
+        // their library" — Jace, the Mind Sculptor −12), keep the whole
+        // mass-move/shuffle chain bound to that player.
+        match &mut *sub.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target,
+                ..
+            }
+            | Effect::Shuffle { target }
+                if matches!(&*target, TargetFilter::Controller | TargetFilter::Any) =>
+            {
+                *target = subject_filter.clone();
+            }
+            _ => {}
+        }
+        next = sub.sub_ability.as_mut();
     }
 }
 
@@ -29098,6 +29119,53 @@ mod tests {
             &*shuffle.effect,
             Effect::Shuffle {
                 target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
+        let def = parse_effect_chain(
+            "Exile all cards from target player's library, then that player shuffles their hand and graveyard into their library.",
+            AbilityKind::Spell,
+        );
+
+        let hand = def
+            .sub_ability
+            .as_deref()
+            .expect("library exile should chain hand move");
+        assert!(matches!(
+            &*hand.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let graveyard = hand
+            .sub_ability
+            .as_deref()
+            .expect("hand move should chain graveyard move");
+        assert!(matches!(
+            &*graveyard.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let shuffle = graveyard
+            .sub_ability
+            .as_deref()
+            .expect("graveyard move should chain Shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController
             }
         ));
     }
