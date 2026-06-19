@@ -519,6 +519,51 @@ describe("TargetingOverlay", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders mana symbols and source names in active mode labels", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const sourceObject = buildGameObjectWithCoreTypes(["Instant"], {
+      id: 9,
+      card_id: 9,
+      name: "Kozilek's Command",
+      color: [],
+      base_color: [],
+    });
+    const gameState = createGameState({
+      objects: {
+        "9": sourceObject,
+      },
+      waiting_for: {
+        type: "TargetSelection",
+        data: {
+          player: 0,
+          pending_cast: {
+            object_id: 9,
+            card_id: 9,
+            ability: { targets: [] },
+            cost: { type: "NoCost" },
+          },
+          target_slots: [{ legal_targets: [{ Player: 1 }], optional: false }],
+          mode_labels: ["Target player creates a token with \"Sacrifice ~: Add {C}.\""],
+          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText(/Sacrifice Kozilek's Command: Add/)).toBeInTheDocument();
+    expect(screen.getByAltText("C")).toBeInTheDocument();
+    expect(screen.queryByText(/Sacrifice ~:/)).toBeNull();
+  });
+
   it("renders the populate creature-token prompt", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
