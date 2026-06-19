@@ -141,11 +141,18 @@ pub fn resolve(
                 if is_spell {
                     // CR 701.6a: A countered spell is put into its owner's
                     // graveyard — unless cast via an alt-cost keyword that
-                    // exiles on leaving the stack (Flashback, Harmonize).
+                    // exiles on leaving the stack (Flashback, Harmonize), or
+                    // the counter ability carries a CR 614.1a "exile it instead
+                    // of putting it into its owner's graveyard" rider (Force
+                    // of Negation, No More Lies, Defabricate).
                     // CR 702.34a / CR 702.127a / CR 702.180a: the exile destination
                     // is a static destination rule (not a replacement), so it is
                     // selected here, before the pipeline consult.
-                    let dest = if exiles_on_counter {
+                    let exile_instead_of_graveyard_on_counter = ability
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(super::cast_from_zone::is_graveyard_exile_rider_subability);
+                    let dest = if exiles_on_counter || exile_instead_of_graveyard_on_counter {
                         Zone::Exile
                     } else {
                         Zone::Graveyard
@@ -602,6 +609,65 @@ mod tests {
 
         assert!(state.stack.is_empty());
         assert!(state.exile.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
+    }
+
+    #[test]
+    fn counter_exile_rider_exiles_countered_spell_without_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let exile_rider = ResolvedAbility::new(
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(exile_rider));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
         assert!(!state.players[1].graveyard.contains(&obj_id));
     }
 

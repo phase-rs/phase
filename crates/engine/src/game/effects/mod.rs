@@ -5706,9 +5706,13 @@ fn resolve_chain_body(
         // exile-instead rider by stamping the granted casting permission. Do
         // not also execute the parser's structural `ChangeZone { ParentTarget }`
         // rider as an immediate move, or the graveyard card leaves before the
-        // player can cast it.
-        if matches!(&ability.effect, Effect::CastFromZone { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+        // player can cast it. Counter consumes the same structural rider during
+        // `counter::resolve` (stack -> exile directly) — skip the follow-up
+        // graveyard -> exile move so the spell never passes through the graveyard.
+        if matches!(
+            &ability.effect,
+            Effect::CastFromZone { .. } | Effect::Counter { .. }
+        ) && cast_from_zone::is_graveyard_exile_rider_subability(sub)
         {
             return Ok(());
         }

@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+use crate::game::quantity::{
+    continuous_modification_uses_unspent_mana, static_condition_uses_unspent_mana,
+};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ShardChoice};
 use crate::types::identifiers::ObjectId;
@@ -8,6 +11,7 @@ use crate::types::mana::{
     ManaUnit, PaymentContext,
 };
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 /// Color demand array indexed by WUBRG (White=0, Blue=1, Black=2, Red=3, Green=4).
 /// CR 107.4a: The five colors are white ({W}), blue ({U}), black ({B}), red ({R}), green ({G}).
@@ -28,6 +32,31 @@ const INFINITE_MANA_TYPES: [ManaType; 6] = [
     ManaType::Green,
     ManaType::Colorless,
 ];
+
+pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
+    state.transient_continuous_effects.iter().any(|effect| {
+        effect
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_uses_unspent_mana)
+            || effect
+                .modifications
+                .iter()
+                .any(continuous_modification_uses_unspent_mana)
+    }) || state.objects.values().any(|obj| {
+        obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && (def
+                    .condition
+                    .as_ref()
+                    .is_some_and(static_condition_uses_unspent_mana)
+                    || def
+                        .modifications
+                        .iter()
+                        .any(continuous_modification_uses_unspent_mana))
+        })
+    })
+}
 
 /// Debug-only: top every player in `GameState::debug_infinite_mana` back up to
 /// `INFINITE_MANA_PER_TYPE` unrestricted, non-expiring units of each mana type.
@@ -282,7 +311,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             tap_state: ManaTapState::from_tap(tapped_for_mana),
         });
     }
-    if final_count > 0 {
+    if final_count > 0 && has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 }
@@ -1882,9 +1911,19 @@ fn spend_two_or_more_color_source_eligible(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::game::game_object::GameObject;
+    use crate::types::ability::{
+        Comparator, ContinuousModification, Duration, QuantityExpr, QuantityRef, StaticCondition,
+        StaticDefinition, TargetFilter,
+    };
+    use crate::types::game_state::LayersDirty;
+    use crate::types::identifiers::CardId;
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaRestriction, SpellMeta};
+    use crate::types::zones::Zone;
 
     /// The building-block predicate must classify each shape the parser can produce.
     /// Generic + colored + snow + free `X` (pre-concretization sentinel) are all
@@ -2072,6 +2111,136 @@ mod tests {
                 tap_state: ManaTapState::FromTap,
             }
         ));
+    }
+
+    #[test]
+    fn produce_mana_without_unspent_mana_static_does_not_dirty_layers() {
+        let mut state = GameState::new_two_player(42);
+        state.layers_dirty = LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            ObjectId(5),
+            ManaType::Blue,
+            PlayerId(1),
+            true,
+            &mut events,
+        );
+
+        assert_eq!(state.layers_dirty, LayersDirty::Clean);
+    }
+
+    #[test]
+    fn produce_mana_with_unspent_mana_static_dirties_layers() {
+        let mut state = GameState::new_two_player(42);
+        let omnath_static = StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::UnspentMana {
+                        color: Some(crate::types::mana::ManaColor::Green),
+                    },
+                },
+            },
+        ]);
+        let source_id = ObjectId(99);
+        let mut source = GameObject::new(
+            source_id,
+            CardId(1),
+            PlayerId(0),
+            "Unspent Mana Static".to_string(),
+            Zone::Battlefield,
+        );
+        source.static_definitions.push(omnath_static.clone());
+        source.base_static_definitions = Arc::new(vec![omnath_static]);
+        state.objects.insert(source_id, source);
+        state.battlefield.push_back(source_id);
+        state.layers_dirty = LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            ObjectId(5),
+            ManaType::Green,
+            PlayerId(0),
+            true,
+            &mut events,
+        );
+
+        assert!(state.layers_dirty.is_dirty());
+    }
+
+    #[test]
+    fn produce_mana_with_unspent_mana_condition_dirties_layers() {
+        let mut state = GameState::new_two_player(42);
+        let conditional_static = StaticDefinition::continuous()
+            .condition(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::UnspentMana {
+                        color: Some(crate::types::mana::ManaColor::Green),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        let source_id = ObjectId(99);
+        let mut source = GameObject::new(
+            source_id,
+            CardId(1),
+            PlayerId(0),
+            "Unspent Mana Condition".to_string(),
+            Zone::Battlefield,
+        );
+        source.static_definitions.push(conditional_static.clone());
+        source.base_static_definitions = Arc::new(vec![conditional_static]);
+        state.objects.insert(source_id, source);
+        state.battlefield.push_back(source_id);
+        state.layers_dirty = LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            ObjectId(5),
+            ManaType::Green,
+            PlayerId(0),
+            true,
+            &mut events,
+        );
+
+        assert!(state.layers_dirty.is_dirty());
+    }
+
+    #[test]
+    fn produce_mana_with_unspent_mana_transient_dirties_layers() {
+        let mut state = GameState::new_two_player(42);
+        state.add_transient_continuous_effect(
+            ObjectId(99),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::Any,
+            vec![ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::UnspentMana {
+                        color: Some(crate::types::mana::ManaColor::Green),
+                    },
+                },
+            }],
+            None,
+        );
+        state.layers_dirty = LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            ObjectId(5),
+            ManaType::Green,
+            PlayerId(0),
+            true,
+            &mut events,
+        );
+
+        assert!(state.layers_dirty.is_dirty());
     }
 
     #[test]

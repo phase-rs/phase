@@ -8,12 +8,12 @@
  * 4. Deckbuilding: LimitedDeckBuilder (reuses Quick Draft component)
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
-import { SelectField } from "../components/ui/SelectField";
+import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
@@ -71,6 +71,17 @@ function PodSetup() {
     ? t("podSetup.policyCompetitiveDesc")
     : t("podSetup.policyCasualDesc");
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
+  const podSizeItems = useMemo(
+    () =>
+      [4, 6, 8].map((n) => ({
+        value: String(n),
+        label: t("podSetup.playerCount", { count: n }),
+      })),
+    [t],
+  );
+  const podSizeLabel =
+    podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
+    t("podSetup.playerCount", { count: config.podSize });
 
   if (mode === "choose") {
     return (
@@ -240,20 +251,19 @@ function PodSetup() {
           <p className="text-xs text-white/40">{policyDescription}</p>
         </div>
 
-        {/* Pod size */}
         <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-white/60">{t("podSetup.podSize")}</label>
-          <SelectField
-            value={config.podSize}
-            onChange={(e) => setConfig({ podSize: Number(e.target.value) })}
-            className="w-32 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-white outline-none focus:border-emerald-400/40"
-          >
-            {[4, 6, 8].map((n) => (
-              <option key={n} value={n}>
-                {t("podSetup.playerCount", { count: n })}
-              </option>
-            ))}
-          </SelectField>
+          <span className="text-sm font-medium text-white/60">{t("podSetup.podSize")}</span>
+          <MenuSelect
+            ariaLabel={t("podSetup.podSize")}
+            label={podSizeLabel}
+            selectedValue={String(config.podSize)}
+            items={podSizeItems}
+            onSelect={(value) => setConfig({ podSize: Number(value) })}
+            menuLayout="dropdown"
+            fitContainer
+            wrapperClassName="w-full max-w-[8rem]"
+            className="min-h-[44px] !rounded-lg border border-white/10 !bg-black/30 px-3 !py-2 text-base text-white shadow-none !hover:bg-black/30 !focus-visible:ring-emerald-400/50"
+          />
           <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 

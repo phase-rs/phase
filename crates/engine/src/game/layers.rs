@@ -15,7 +15,10 @@ use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
 };
-use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
+use crate::game::quantity::{
+    continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
+    QuantityContext,
+};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
@@ -1714,7 +1717,7 @@ pub(crate) fn incremental_flush_must_escalate(
     if collect_shared_active_continuous_effects(state)
         .iter()
         .any(|e| {
-            let magnitude = modification_dynamic_quantity(&e.modification);
+            let magnitude = continuous_modification_dynamic_quantity(&e.modification);
             let magnitude_sensitive =
                 magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
             let affected_sensitive =
@@ -3377,79 +3380,6 @@ fn record_attribution(
     }
 }
 
-/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by a
-/// `ContinuousModification`, if any. Both the dynamic-P/T apply site
-/// (`apply_continuous_effect`) and the incremental-flush escalation scan
-/// (`flush_layers`) call this so there is one place that decides which
-/// modifications carry a runtime-resolved magnitude.
-///
-/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
-/// variant that carries a `QuantityExpr` must be classified here at compile
-/// time rather than silently slipping past the escalation scan. `AddCounterOnEnter`
-/// also carries a `QuantityExpr` but is resolution-time-consumed by the
-/// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
-/// (see its doc comment), so it is excluded.
-/// CR 613.1: Dynamic continuous modifications are evaluated while applying
-/// continuous effects through the layer system.
-fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
-    match m {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
-        // Resolution-time-consumed; never an active continuous effect.
-        ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. } => None,
-        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
-        // magnitude. Enumerated explicitly (no wildcard) so a future
-        // QuantityExpr-carrying variant forces a decision here.
-        ContinuousModification::CopyValues { .. }
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::GrantAbility { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantTrigger { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => None,
-    }
-}
-
 fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -3634,7 +3564,7 @@ fn apply_continuous_effect_filtered(
     // referent. Recipient-relative quantities ("attached to it", "other",
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
-    let dynamic_pt_expr = modification_dynamic_quantity(&effect.modification);
+    let dynamic_pt_expr = continuous_modification_dynamic_quantity(&effect.modification);
     let effect_controller = state
         .objects
         .get(&effect.source_id)
