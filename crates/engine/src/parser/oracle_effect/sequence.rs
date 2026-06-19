@@ -6348,7 +6348,10 @@ mod tests {
             panic!("expected DigFromAmong continuation, got {result:?}");
         };
         assert_eq!(destination, Some(Zone::Battlefield));
-        assert!(enter_tapped, "enter_tapped must be true for tapped battlefield returns");
+        assert!(
+            enter_tapped,
+            "enter_tapped must be true for tapped battlefield returns"
+        );
     }
 
     #[test]
@@ -7399,7 +7402,10 @@ mod tests {
             .expect("expected a ChangeZoneAll effect");
         match put {
             Effect::ChangeZoneAll { enter_tapped, .. } => {
-                assert!(enter_tapped.is_tapped(), "expected milled cards to enter tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected milled cards to enter tapped"
+                );
             }
             _ => unreachable!(),
         }
