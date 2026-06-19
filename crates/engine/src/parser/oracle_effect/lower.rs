@@ -83,14 +83,61 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
     }
 }
 
-pub(super) fn is_linked_exile_cast_bottom_cleanup(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::PutAtLibraryPosition {
-            position: LibraryPosition::Bottom,
-            ..
+pub(super) fn is_linked_exile_cast_bottom_cleanup(
+    cast_effect: &Effect,
+    cleanup_effect: &Effect,
+) -> bool {
+    let Effect::CastFromZone { target, .. } = cast_effect else {
+        return false;
+    };
+    target.references_exiled_by_source()
+        && matches!(
+            cleanup_effect,
+            Effect::PutAtLibraryPosition {
+                position: LibraryPosition::Bottom,
+                ..
+            }
+        )
+}
+
+#[cfg(test)]
+mod linked_exile_cleanup_tests {
+    use super::*;
+
+    fn cast_from_zone(target: TargetFilter) -> Effect {
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost: false,
+            mode: crate::types::ability::CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
         }
-    )
+    }
+
+    fn bottom_cleanup() -> Effect {
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+        }
+    }
+
+    #[test]
+    fn linked_exile_cleanup_requires_cast_target_to_reference_exiled_by_source() {
+        let cleanup = bottom_cleanup();
+
+        assert!(is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::ExiledBySource),
+            &cleanup
+        ));
+        assert!(!is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::Any),
+            &cleanup
+        ));
+    }
 }
 
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
@@ -835,10 +882,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             // dedicated clause builders that construct sub-abilities directly
             // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
             chain.kind = AbilityKind::Spell;
-            if prev.optional
-                && matches!(*prev.effect, Effect::CastFromZone { .. })
-                && is_linked_exile_cast_bottom_cleanup(&chain.effect)
-            {
+            if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
                 normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
                 prev.else_ability = Some(Box::new(chain.clone()));
             }
