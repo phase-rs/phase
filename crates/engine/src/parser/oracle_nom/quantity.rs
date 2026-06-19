@@ -13,6 +13,7 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::context::ParseContext;
+use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
@@ -39,11 +40,41 @@ use crate::types::zones::Zone;
 /// same `parse_quantity_ref` / `parse_number` primitives used for plain quantities.
 pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
     alt((
+        parse_max_quantity,
         parse_fraction_rounded,
         map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
     .parse(input)
+}
+
+fn parse_quantity_operand(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        parse_fraction_rounded,
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
+    ))
+    .parse(input)
+}
+
+/// CR 107.1 + CR 120.4a/120.10: Parse "A or B, whichever is greater" into
+/// the maximum of independently parsed integer quantity operands. The suffix is
+/// mandatory so ordinary "or" type phrases and modal choices keep falling
+/// through to their specialized parsers.
+pub fn parse_max_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (rest, (left, _, right, _)) = (
+        parse_quantity_operand,
+        tag(" or "),
+        parse_quantity_operand,
+        alt((tag(", whichever is greater"), tag(" whichever is greater"))),
+    )
+        .parse(input)?;
+    Ok((
+        rest,
+        QuantityExpr::Max {
+            exprs: vec![left, right],
+        },
+    ))
 }
 
 /// CR 107.1a: Parse "half <inner>, rounded up/down" fractional expressions.
@@ -520,7 +551,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_object_count_by_shared_quality,
         parse_the_number_of,
-        parse_the_total_mana_value,
+        parse_object_property_aggregate_ref,
         parse_distinct_card_types_exiled_with_source,
         // Group mana-value aggregate parsers to reduce alt arity
         alt((
@@ -839,24 +870,66 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_number_of_inner(rest)
 }
 
-/// Parse "the total mana value" patterns used in "where X is the total mana value".
-/// Used for patterns like "where X is the total mana value of cards in your graveyard".
-/// Maps to `QuantityRef::Aggregate` summing mana values across the filter.
-fn parse_the_total_mana_value(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the total mana value").parse(input)?;
-    let (rest, _) = tag(" of ").parse(rest)?;
+/// CR 208.1 + CR 202.3: Parse object-property aggregate quantities such as
+/// "the greatest power among <filter>" and "the total mana value of <filter>".
+/// The aggregate axis and object-property axis are independent typed choices,
+/// so new siblings extend this combinator instead of adding one-off phrase
+/// recognition in the legacy quantity entry points.
+fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, (function, property)) = alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("the greatest mana value among "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::Power),
+            tag("the total power of "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::Toughness),
+            tag("the total toughness of "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::ManaValue),
+            tag("the total mana value of "),
+        ),
+    ))
+    .parse(input)?;
+    if let Ok((anaphor_rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("those exiled cards"),
+        tag("the exiled cards"),
+    ))
+    .parse(rest)
+    {
+        return Ok((
+            anaphor_rest,
+            QuantityRef::TrackedSetAggregate { function, property },
+        ));
+    }
     let (filter, remainder) = parse_type_phrase(rest);
-    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+    let final_remainder = parse_cast_snapshot_suffix(remainder.trim_start())
+        .ok()
+        .and_then(|(snapshot_rest, _)| snapshot_rest.trim().is_empty().then_some(snapshot_rest))
+        .unwrap_or(remainder);
+    if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
     Ok((
-        remainder,
+        final_remainder,
         QuantityRef::Aggregate {
-            function: AggregateFunction::Sum,
-            property: ObjectProperty::ManaValue,
+            function,
+            property,
             filter,
         },
     ))
@@ -3725,6 +3798,50 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn parse_object_property_aggregate_greatest_power() {
+        let (rest, q) =
+            parse_quantity_ref("the greatest power among dinosaurs you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_max_quantity_whichever_greater() {
+        let (rest, qty) = parse_max_quantity(
+            "2 or the greatest power among dinosaurs you control, whichever is greater",
+        )
+        .expect("max-of-two quantity should parse");
+        assert_eq!(rest, "");
+        let QuantityExpr::Max { exprs } = qty else {
+            panic!("expected QuantityExpr::Max, got {qty:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        assert!(matches!(exprs[0], QuantityExpr::Fixed { value: 2 }));
+        assert!(matches!(
+            exprs[1],
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_max_quantity_rejects_bare_or() {
+        assert!(parse_max_quantity("2 or the greatest power among dinosaurs you control").is_err());
     }
 
     #[test]
@@ -7096,11 +7213,13 @@ mod tests {
         );
     }
 
-    /// Test parse_the_total_mana_value for "where X is the total mana value" patterns.
+    /// Test the object-property aggregate parser for "where X is the total
+    /// mana value" patterns.
     #[test]
-    fn parse_the_total_mana_value_basic() {
+    fn parse_object_property_aggregate_total_mana_value_basic() {
         let (rest, q) =
-            parse_the_total_mana_value("the total mana value of cards in your graveyard").unwrap();
+            parse_object_property_aggregate_ref("the total mana value of cards in your graveyard")
+                .unwrap();
         assert_eq!(rest, "");
         match q {
             QuantityRef::Aggregate {

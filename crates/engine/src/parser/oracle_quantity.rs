@@ -835,48 +835,13 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" — the maximum
-    // of two recursively-parsed quantity operands (Triumphant Chomp:
-    // "2 or the greatest power among Dinosaurs you control, whichever is
-    // greater"). Composes `QuantityExpr::Max` over the existing CDA grammar so
-    // the whole "greater of two computed values" class types instead of falling
-    // through to an unresolved `Variable` (which resolves to 0 at runtime — a
-    // silent no-op). The comma form is tried first so the operand list never
-    // keeps a trailing comma; the arm fires only when the "whichever is greater"
-    // suffix is present AND both operands parse as quantities, so unrelated
-    // " or " text (type lists, modal choices) falls through untouched.
-    fn parse_max_operand(text: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
-        if let Some(qty) = parse_cda_quantity_with_context(text, ctx) {
-            return Some(qty);
+    // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" lives in the
+    // nom quantity grammar; this legacy entry point only delegates so dynamic
+    // quantity recognition has one authority.
+    if let Ok((rest, expr)) = nom_quantity::parse_max_quantity(text) {
+        if rest.is_empty() {
+            return Some(expr);
         }
-        // The CDA grammar has no standalone-constant arm, so fold a bare integer
-        // operand to `Fixed` here, mirroring the integer-offset fallback in the
-        // binary-arithmetic arm below.
-        let (rest, n) = nom_primitives::parse_number(text.trim()).ok()?;
-        rest.trim()
-            .is_empty()
-            .then_some(QuantityExpr::Fixed { value: n as i32 })
-    }
-    for suffix in [", whichever is greater", " whichever is greater"] {
-        let Ok((_, (operands, tail))) = nom_primitives::split_once_on(text, suffix) else {
-            continue;
-        };
-        if !tail.trim().is_empty() {
-            continue;
-        }
-        let Ok((_, (left_text, right_text))) = nom_primitives::split_once_on(operands, " or ")
-        else {
-            continue;
-        };
-        let Some(left) = parse_max_operand(left_text, ctx) else {
-            continue;
-        };
-        let Some(right) = parse_max_operand(right_text, ctx) else {
-            continue;
-        };
-        return Some(QuantityExpr::Max {
-            exprs: vec![left, right],
-        });
     }
 
     // CR 107.x: Binary arithmetic over two dynamic quantities, e.g. "the number
@@ -4226,42 +4191,6 @@ mod tests {
                 }
             }
         ));
-    }
-
-    #[test]
-    fn cda_quantity_max_of_two_whichever_greater() {
-        // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" — the
-        // max-of-two-quantities combinator powering Triumphant Chomp. Composes
-        // a `Fixed` constant with the existing "greatest power among <filter>"
-        // aggregate under `QuantityExpr::Max`.
-        let qty = parse_cda_quantity(
-            "2 or the greatest power among Dinosaurs you control, whichever is greater",
-        )
-        .expect("max-of-two quantity should parse");
-        let QuantityExpr::Max { exprs } = qty else {
-            panic!("expected QuantityExpr::Max, got {qty:?}");
-        };
-        assert_eq!(exprs.len(), 2);
-        assert!(matches!(exprs[0], QuantityExpr::Fixed { value: 2 }));
-        assert!(matches!(
-            exprs[1],
-            QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate {
-                    function: AggregateFunction::Max,
-                    property: ObjectProperty::Power,
-                    ..
-                }
-            }
-        ));
-    }
-
-    #[test]
-    fn cda_quantity_max_falls_through_without_suffix() {
-        // The arm must fire ONLY when "whichever is greater" is present, so a
-        // bare " or " disjunction does not get mis-read as a max.
-        assert!(
-            parse_cda_quantity("2 or the greatest power among Dinosaurs you control").is_none()
-        );
     }
 
     #[test]
