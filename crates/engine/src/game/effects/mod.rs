@@ -6644,7 +6644,9 @@ pub(crate) fn evaluate_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
-                super::restrictions::triggering_spell_targets_filter(state, spell_id, filter)
+                super::restrictions::triggering_spell_targets_filter(
+                    state, spell_id, filter, spell_id,
+                )
             }),
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
@@ -12733,6 +12735,7 @@ mod tests {
             count: 0,
             reveal: false,
             up_to: true,
+            allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
         };

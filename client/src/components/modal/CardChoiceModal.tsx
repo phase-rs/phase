@@ -64,6 +64,7 @@ import {
   EFFECT_ZONE_BADGE_KEYS,
   EFFECT_ZONE_VISUAL_CLASSES,
   canAssignDistinctCardTypes,
+  searchChoiceAllowsPartialFind,
   searchChoiceSubtitle,
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
@@ -424,7 +425,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
-  const countValid = data.up_to
+  const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
   const subtitle = searchChoiceSubtitle(data, t);

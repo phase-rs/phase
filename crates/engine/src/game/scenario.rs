@@ -4072,4 +4072,106 @@ mod tests {
             "CR 701.19a: regeneration removes all marked damage"
         );
     }
+
+    /// CR 613.1f + CR 613.4b + CR 205.1b: Curious Colossus end-to-end. Its ETB
+    /// targets an opponent; each creature that opponent controls "loses all
+    /// abilities, becomes a Coward in addition to its other types, and has base
+    /// power and toughness 1/1". After casting through the real pipeline and
+    /// evaluating layers, the affected creature must (a) have no abilities/
+    /// keywords (layer 6 RemoveAllAbilities), (b) gain the Coward subtype while
+    /// KEEPING its prior subtype (CR 205.1b additive), and (c) have effective
+    /// power/toughness 1/1 (layer 7b set). The comma-split guards are what keep
+    /// the trailing base-P/T conjunct in the GenericEffect; if reverted, the base
+    /// P/T conjunct orphans to Unimplemented and the creature stays 3/4.
+    #[test]
+    fn curious_colossus_etb_strips_abilities_adds_subtype_sets_base_pt() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // The opponent's victim: a 3/4 Bird with flying.
+        let victim = scenario
+            .add_creature(P1, "Victim Bird", 3, 4)
+            .with_subtypes(vec!["Bird"])
+            .flying()
+            .id();
+
+        // Curious Colossus in P0's hand, parsed from its real Oracle text.
+        let colossus = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Curious Colossus",
+                7,
+                7,
+                "When this creature enters, each creature target opponent controls \
+                 loses all abilities, becomes a Coward in addition to its other types, \
+                 and has base power and toughness 1/1.",
+            )
+            .id();
+
+        // Fund {5}{W}{W} from the pool (2 White + 5 Colorless).
+        let mut mana = vec![ManaUnit::new(ManaType::White, ObjectId(9_999), false, vec![]); 2];
+        mana.extend(vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![]
+            );
+            5
+        ]);
+        scenario.with_mana_pool(P0, mana);
+
+        let mut runner = scenario.build();
+
+        // Cast Curious Colossus; its ETB targets opponent P1.
+        let outcome = runner.cast(colossus).target_player(P1).resolve();
+
+        // Evaluate layers on the resolved state and inspect the affected creature.
+        let mut state = outcome.state().clone();
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let obj = state
+            .objects
+            .get(&victim)
+            .expect("victim still on battlefield");
+
+        // (a) CR 613.1f: all abilities/keywords removed.
+        assert!(
+            !crate::game::keywords::has_keyword(obj, &Keyword::Flying),
+            "RemoveAllAbilities must strip flying, keywords={:?}",
+            obj.keywords
+        );
+        assert!(
+            obj.abilities.is_empty(),
+            "RemoveAllAbilities must clear printed abilities, got {:?}",
+            obj.abilities
+        );
+
+        // (b) CR 205.1b: Coward added "in addition to its other types" — prior
+        // Bird subtype is KEPT.
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Coward"),
+            "must gain the Coward subtype, subtypes={:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Bird"),
+            "must KEEP the prior Bird subtype (additive), subtypes={:?}",
+            obj.card_types.subtypes
+        );
+
+        // (c) CR 613.4b: base power and toughness set to 1/1.
+        assert_eq!(
+            obj.power,
+            Some(1),
+            "effective power must be 1, got {:?}",
+            obj.power
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(1),
+            "effective toughness must be 1, got {:?}",
+            obj.toughness
+        );
+    }
 }

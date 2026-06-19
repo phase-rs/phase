@@ -2600,6 +2600,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
         };
@@ -2904,6 +2905,7 @@ mod tests {
             count: 4,
             reveal: true,
             up_to: true,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },

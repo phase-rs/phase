@@ -11938,35 +11938,45 @@ pub fn handle_activate_ability(
         }
 
         // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
-        // costs — detour to `WaitingFor::ExileForCost` before any cost payment,
-        // mirroring the Sacrifice/Discard detours above. The full `Composite`
-        // cost (including the `Mana` sub-cost) stays in `activation_cost`; the
-        // mana is paid by `push_activated_ability_to_stack` after the card
-        // selection completes (CR 601.2h: remaining costs paid in any order).
+        // costs. Untargeted abilities can detour to `WaitingFor::ExileForCost`
+        // immediately; targeted abilities must choose their effect targets first
+        // (CR 601.2c), then `casting_targets::pay_activation_costs_after_target_selection`
+        // surfaces this same cost prompt before the ability reaches the stack.
         if let Some((count, zone, filter)) = find_non_self_exile(cost) {
-            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
-                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
-            let eligible =
-                find_eligible_exile_for_cost_targets(state, player, source_id, narrow_zone, filter);
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible cards to exile".into(),
-                ));
+            let has_effect_targets = {
+                let slots = build_target_slots(state, &resolved)?;
+                !slots.is_empty()
+            };
+            if !has_effect_targets {
+                let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                    .expect("find_non_self_exile restricts zone to Hand or Graveyard");
+                let eligible = find_eligible_exile_for_cost_targets(
+                    state,
+                    player,
+                    source_id,
+                    narrow_zone,
+                    filter,
+                );
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible cards to exile".into(),
+                    ));
+                }
+                let mut pending_exile =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_exile.activation_cost = Some(cost.clone());
+                pending_exile.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_exile),
+                    },
+                });
             }
-            let mut pending_exile =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_exile.activation_cost = Some(cost.clone());
-            pending_exile.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
-                choices: eligible,
-                count: count as usize,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_exile),
-                },
-            });
         }
 
         // CR 702.167a/b: Pre-check for a craft materials cost — detour to
@@ -18153,6 +18163,188 @@ mod tests {
             ),
             "the exiled card must have suspend granted by Jhoira's sub-ability"
         );
+    }
+
+    #[test]
+    fn grim_lavamancer_targets_before_graveyard_exile_cost() {
+        use super::super::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let lavamancer = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Grim Lavamancer".to_string(),
+            Zone::Battlefield,
+        );
+        let filler_a = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Graveyard Filler A".to_string(),
+            Zone::Graveyard,
+        );
+        let filler_b = create_object(
+            &mut state,
+            CardId(992),
+            PlayerId(0),
+            "Graveyard Filler B".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&lavamancer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{R}, {T}, Exile two cards from your graveyard: This creature deals 2 damage to any target.",
+                "Grim Lavamancer",
+                &[],
+                &[String::from("Creature")],
+                &[String::from("Human"), String::from("Wizard")],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: lavamancer,
+                ability_index: 0,
+            },
+        )
+        .expect("Grim Lavamancer activation must enter targeting");
+
+        match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert!(
+                    target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Player(PlayerId(1))),
+                    "any-target damage must offer the opponent before cost payment"
+                );
+            }
+            other => panic!("expected target selection before exile cost, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        )
+        .expect("target selection should proceed to graveyard exile cost");
+
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
+                count,
+                choices,
+                ..
+            } => {
+                assert_eq!(*count, 2);
+                assert!(choices.contains(&filler_a));
+                assert!(choices.contains(&filler_b));
+            }
+            other => panic!("expected graveyard exile cost after targets, got {other:?}"),
+        }
+        assert!(
+            !state.objects[&lavamancer].tapped,
+            "tap cost is not paid until the exile selection completes"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![filler_a, filler_b],
+            },
+        )
+        .expect("paying Grim Lavamancer's exile cost should finish activation");
+
+        assert!(state.objects[&lavamancer].tapped);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.objects[&filler_a].zone, Zone::Exile);
+        assert_eq!(state.objects[&filler_b].zone, Zone::Exile);
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == lavamancer),
+            "activated ability should be on the stack after full cost payment"
+        );
+    }
+
+    #[test]
+    fn targeted_exile_cost_activation_with_no_legal_target_does_not_prompt_or_pay_cost() {
+        use super::super::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(993),
+            PlayerId(0),
+            "Targeted Exile-Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        let filler_a = create_object(
+            &mut state,
+            CardId(994),
+            PlayerId(0),
+            "Graveyard Filler A".to_string(),
+            Zone::Graveyard,
+        );
+        let filler_b = create_object(
+            &mut state,
+            CardId(995),
+            PlayerId(0),
+            "Graveyard Filler B".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{T}, Exile two cards from your graveyard: Destroy target artifact.",
+                "Targeted Exile-Cost Source",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        let err = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect_err("activation with no legal target must fail before cost payment");
+
+        assert!(
+            format!("{err:?}").contains("No legal targets"),
+            "expected target-legality error, got {err:?}"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "illegal activation must not enter an exile-cost prompt"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "tap cost must not be paid when target selection is impossible"
+        );
+        assert_eq!(state.objects[&filler_a].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&filler_b].zone, Zone::Graveyard);
     }
 
     /// Issues #520 (Curse of the Cabal) + #521 (Profane Tutor): activating a

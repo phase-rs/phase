@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, value};
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -1201,6 +1201,14 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
             },
         });
     }
+    // CR 115.9b: "one or more" is redundant with .any() semantics (Orvar — "if it
+    // targets one or more other permanents you control").
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("one or more "),
+        tag("one or more"),
+    )))
+    .parse(rest)
+    .ok()?;
     let (filter, remainder) = parse_type_phrase(rest);
     if !remainder.trim().is_empty() {
         return None;
@@ -1234,7 +1242,9 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter};
+    use crate::types::ability::{
+        ControllerRef, CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    };
 
     /// CR 508.1 + CR 601.3: a presence-style restriction condition ("Cast this
     /// spell only if a creature is attacking you" — Confront the Assault)
@@ -1750,6 +1760,23 @@ mod tests {
                 assert!(filter.type_filters.contains(&TypeFilter::Creature));
             }
             other => panic!("expected SpellTargetsFilter(Creature), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_one_or_more_other_permanents_you_control() {
+        let parsed =
+            parse_restriction_condition("it targets one or more other permanents you control")
+                .expect("Orvar intervening-if should parse");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected SpellTargetsFilter(Typed permanent), got {other:?}"),
         }
     }
 

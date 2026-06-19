@@ -5352,6 +5352,21 @@ pub(crate) fn check_trigger_condition(
         } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
+        // CR 608.2c + CR 603.2 + CR 603.4: spell-cast intervening-if on targets.
+        TriggerCondition::TriggeringSpellTargetsFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|spell_id| {
+                let context_source_id = source_id.unwrap_or(spell_id);
+                super::restrictions::triggering_spell_targets_filter(
+                    state,
+                    spell_id,
+                    filter,
+                    context_source_id,
+                )
+            }),
     }
 }
 
@@ -5365,12 +5380,25 @@ fn attackers_declared_count(
 ) -> usize {
     match subject {
         crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            // Determine the triggering player from the first attacker in the
+            // event (attack declarations are per-attacking-player in the
+            // matcher/synthesis phase). Fall back to None if unavailable.
+            let triggering_player = attacker_ids
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|o| o.controller));
+
             attacker_ids
                 .iter()
                 .filter(|id| {
-                    let scope_ok = state.objects.get(id).is_some_and(|obj| {
-                        controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
+                        crate::types::ability::ControllerRef::TriggeringPlayer => {
+                            triggering_player.is_some_and(|tp| obj.controller == tp)
+                        }
+                        _ => {
+                            controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                        }
                     });
+
                     // CR 508.1: only attackers matching the filtered class count
                     // toward the typed minimum, preventing "attack with two or
                     // more Dinosaurs" from over-firing on mixed attacker batches.
@@ -12406,6 +12434,106 @@ pub mod tests {
     }
 
     #[test]
+    fn command_zone_phase_trigger_fires_at_controllers_upkeep() {
+        // CR 113.6b + CR 603.4: Oloro-class — a beginning-of-upkeep trigger that
+        // functions from the command zone (trigger_zones = [Command], intervening-if
+        // SourceInZone{Command}) must fire while its source sits in the command zone
+        // and the controller's upkeep begins. This is the Phase-mode counterpart to
+        // the SpellCast-mode Eminence path covered by #817 / PR #1031.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        // Drive the actual upkeep event through the collection pipeline.
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Command-zone beginning-of-upkeep trigger must fire while its source is in the command zone"
+        );
+    }
+
+    #[test]
+    fn command_zone_phase_trigger_does_not_fire_at_opponents_upkeep() {
+        // CR 113.6b: The same Oloro-class trigger must NOT fire during an
+        // opponent's upkeep — "your upkeep" means the controller's upkeep only.
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Command-zone upkeep trigger must NOT fire during opponent's upkeep"
+        );
+    }
+
+    #[test]
     fn suppress_triggers_torpor_blocks_creature_etb_observer() {
         // CR 603.2g + CR 603.6a: Torpor Orb-class static on battlefield suppresses
         // an observer's ETB trigger when a CREATURE enters. Soul Warden reading.
@@ -14545,6 +14673,107 @@ pub mod tests {
         assert!(
             check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
             "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
+    }
+
+    // CR 508.1 + CR 603.2c: any-player "a player attacks with N or more creatures"
+    // (Aurelia, the Law Above) counts only the attacking player's declaration
+    // batch via `ControllerRef::TriggeringPlayer`, not the trigger controller's
+    // opponents or self.
+    #[test]
+    fn a_player_attacks_with_three_or_more_counts_triggering_attacking_player() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut make_attacker = |card_id: u64, controller: PlayerId, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let a1 = make_attacker(1, opponent, "A1");
+        let a2 = make_attacker(2, opponent, "A2");
+        let a3 = make_attacker(3, opponent, "A3");
+        let self_a1 = make_attacker(4, trigger_controller, "SelfA1");
+        let self_a2 = make_attacker(5, trigger_controller, "SelfA2");
+        let self_a3 = make_attacker(6, trigger_controller, "SelfA3");
+
+        let cond = TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::TriggeringPlayer,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 3,
+        };
+
+        let opponent_two = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&opponent_two)),
+            "opponent attacking with 2 creatures must NOT satisfy minimum=3"
+        );
+
+        let opponent_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2, a3],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a3,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &cond,
+                trigger_controller,
+                None,
+                Some(&opponent_three)
+            ),
+            "opponent attacking with 3 creatures must satisfy minimum=3"
+        );
+
+        let self_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![self_a1, self_a2, self_a3],
+            defending_player: opponent,
+            attacks: vec![
+                (self_a1, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a2, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a3, crate::game::combat::AttackTarget::Player(opponent)),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&self_three)),
+            "controller attacking with 3 creatures must satisfy minimum=3"
         );
     }
 
@@ -19032,6 +19261,65 @@ pub mod tests {
             state.players[0].life, 21,
             "the Blood Artist-class dies-observer must resolve from the \
              deferred-trigger flush (issue #423)"
+        );
+    }
+
+    #[test]
+    fn midnight_reaper_self_sacrifice_fires_own_nontoken_creature_dies_trigger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let reaper = make_creature(&mut state, PlayerId(0), "Midnight Reaper", 3, 2);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a nontoken creature you control dies, this creature deals 1 damage to you and you draw a card.",
+            "Midnight Reaper",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = parsed.triggers[0].clone();
+        let valid_card = trigger
+            .valid_card
+            .as_ref()
+            .expect("Midnight Reaper trigger must filter the dying creature");
+        let TargetFilter::Typed(typed) = valid_card else {
+            panic!("expected typed dying-creature filter, got {valid_card:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::NonToken));
+        assert!(
+            !typed.properties.contains(&FilterProp::Another),
+            "Midnight Reaper must observe itself; the text does not say another"
+        );
+
+        {
+            let obj = state.objects.get_mut(&reaper).expect("reaper exists");
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, reaper, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let reaper_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == reaper)
+            .collect();
+        assert_eq!(
+            reaper_triggers.len(),
+            1,
+            "Midnight Reaper should trigger when its controller sacrifices it"
+        );
+        assert!(
+            matches!(
+                reaper_triggers[0].pending.ability.effect,
+                Effect::DealDamage { .. }
+            ),
+            "parsed trigger should start with the self-damage effect"
         );
     }
 

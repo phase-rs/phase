@@ -12,8 +12,8 @@ use crate::game::quantity::{
 };
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, FilterProp,
-    PtStat, PtValueScope, QuantityExpr, ResolvedAbility, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    Parity, ParitySource, PtStat, PtValueScope, QuantityExpr, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -145,6 +145,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::WasPlayed
@@ -349,6 +350,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::WasPlayed
@@ -2417,6 +2419,10 @@ fn spell_object_matches_property(
             };
             comparator.evaluate(record.mana_value as i32, threshold)
         }
+        FilterProp::ManaValueParity { parity } => {
+            let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
+            mana_value_matches_parity_source(record.mana_value, parity, choice)
+        }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
                 .state
@@ -2593,6 +2599,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 false
             }
         },
+        FilterProp::ManaValueParity { parity } => {
+            mana_value_matches_parity_source(record.mana_value, parity, None)
+        }
         // CR 202.1: Exact printed mana cost is not captured in cast-history
         // snapshots. Fail closed rather than approximating with mana value
         // (CR 202.3), which would conflate {W} with {1}.
@@ -2894,6 +2903,32 @@ fn matches_last_chosen_land_or_nonland_kind(
     }
 }
 
+fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+    match source {
+        ParitySource::Fixed(parity) => Some(*parity),
+        ParitySource::LastNamedChoice => match choice {
+            Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
+            _ => None,
+        },
+    }
+}
+
+fn mana_value_matches_parity(mana_value: u32, parity: Parity) -> bool {
+    match parity {
+        Parity::Odd => !mana_value.is_multiple_of(2),
+        Parity::Even => mana_value.is_multiple_of(2),
+    }
+}
+
+fn mana_value_matches_parity_source(
+    mana_value: u32,
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+) -> bool {
+    parity_from_source(source, choice)
+        .is_some_and(|parity| mana_value_matches_parity(mana_value, parity))
+}
+
 fn attacking_defender_matches(
     state: &GameState,
     source: &SourceContext<'_>,
@@ -3043,6 +3078,10 @@ fn matches_filter_prop(
         FilterProp::Cmc { comparator, value } => {
             let cmc = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
+        }
+        FilterProp::ManaValueParity { parity } => {
+            let mana_value = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid);
+            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
         }
         // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
         FilterProp::ManaCostIn { costs } => costs.iter().any(|cost| cost == &obj.mana_cost),
@@ -3669,6 +3708,11 @@ fn zone_change_record_matches_property(
             record.mana_value as i32,
             resolve_filter_threshold(state, value, source),
         ),
+        // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
+        // snapshot; the chosen odd/even quality is read from resolution state.
+        FilterProp::ManaValueParity { parity } => {
+            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+        }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
         FilterProp::ManaCostIn { .. } => false,

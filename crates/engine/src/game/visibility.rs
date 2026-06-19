@@ -315,6 +315,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         count,
         reveal,
         up_to,
+        allows_partial_find,
         ref constraint,
         ref split,
     } = state.waiting_for
@@ -326,6 +327,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 count,
                 reveal,
                 up_to,
+                allows_partial_find,
                 constraint: constraint.clone(),
                 split: split.clone(),
             };
@@ -912,6 +914,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
         };
@@ -1132,6 +1135,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
         };

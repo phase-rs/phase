@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "im",
  "indexmap 2.14.0",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "engine",
  "rand",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "phase-tauri"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "engine",
  "phase-ai",

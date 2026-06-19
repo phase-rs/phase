@@ -1040,6 +1040,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 613.4b + CR 611.2a: the no-"and" sibling form ", has base power and
+    // toughness N/N" (e.g. the middle conjunct of "becomes a Spirit, has base
+    // power and toughness 1/1, and gains ...") is a layer-7b continuous
+    // modification, not an independent clause — keep it attached so
+    // parse_continuous_modifications emits SetPower/SetToughness rather than
+    // orphaning it as Unimplemented. Mirrors the bare-"and" guard below.
+    if starts_have_base_power_toughness(trimmed) {
+        return None;
+    }
     if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
@@ -2590,7 +2599,9 @@ pub(super) fn apply_clause_continuation(
                                     caused_by: None,
                                 },
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -2624,7 +2635,9 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
@@ -3619,6 +3632,10 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         return parsed;
     }
 
+    if let Some(parsed) = parse_milled_this_way_destination(lower) {
+        return parsed;
+    }
+
     let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
         Some(Zone::Battlefield)
     } else if nom_primitives::scan_contains(lower, "into your hand")
@@ -3631,6 +3648,16 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         None
     };
     (destination, false)
+}
+
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+    let (tail, _) = preceded(
+        take_until::<_, _, OracleError<'_>>("milled this way"),
+        tag::<_, _, OracleError<'_>>("milled this way"),
+    )
+    .parse(lower)
+    .ok()?;
+    parse_dig_destination_tail(tail)
 }
 
 fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
@@ -5556,6 +5583,20 @@ mod tests {
         );
     }
 
+    /// CR 613.4b: the no-"and" sibling form ", has base power and toughness N/N"
+    /// (the middle conjunct of e.g. "becomes a Spirit, has base power and
+    /// toughness 1/1, and gains ...") must also stay attached — the bare-"and"
+    /// guard above only covers the trailing ", and has ..." form.
+    #[test]
+    fn comma_no_and_does_not_split_has_base_pt() {
+        let chunks =
+            clause_texts("target creature loses all abilities, has base power and toughness 2/2");
+        assert_eq!(
+            chunks,
+            vec!["target creature loses all abilities, has base power and toughness 2/2"]
+        );
+    }
+
     #[test]
     fn bare_and_does_not_split_you_and_target_opponent() {
         let chunks = clause_texts("you and target opponent each draw a card");
@@ -6406,13 +6447,33 @@ mod tests {
         );
     }
 
-    /// Issue #2349 — Fertile Thicket. "reveal up to one basic land card from
-    /// among them, then put that card on top of your library and the rest on the
-    /// bottom in any order." The kept card routes to a fixed library position
-    /// (top), but the clause's verb is "reveal" (CR 701.20a, public), so
-    /// `reveal_verb` must be true. Previously `parse_dig_destination_tail` did
-    /// not recognize "on top of your library", so the kept destination resolved
-    /// to None and the clause became Unimplemented.
+    #[test]
+    fn put_all_milled_cards_onto_battlefield_tapped_patches_enter_tapped() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put all creature cards milled this way onto the battlefield tapped.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            enter_tapped,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Battlefield));
+        assert!(
+            enter_tapped,
+            "enter_tapped must be true for tapped battlefield returns"
+        );
+    }
+
     #[test]
     fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
         let dig = make_dig_effect();
@@ -7437,6 +7498,38 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    #[test]
+    fn mill_put_all_milled_cards_onto_battlefield_tapped_preserves_enter_tapped() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Put all creature cards milled this way onto the battlefield tapped.",
+            AbilityKind::Spell,
+        );
+
+        let mut chain: Vec<&Effect> = vec![];
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            chain.push(d.effect.as_ref());
+            node = d.sub_ability.as_deref();
+        }
+
+        let put = chain
+            .iter()
+            .find(|effect| matches!(***effect, Effect::ChangeZoneAll { .. }))
+            .expect("expected a ChangeZoneAll effect");
+        let put = *put;
+        match put {
+            Effect::ChangeZoneAll { enter_tapped, .. } => {
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected milled cards to enter tapped"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

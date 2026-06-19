@@ -5236,6 +5236,17 @@ fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
     }
 }
 
+/// CR 106.12b + CR 616.1: Mana-production modifiers on the same `ProduceMana`
+/// event. `Multiply` modifiers commute (×2 then ×3 == ×3 then ×2), so Mana
+/// Reflection + Nyxbloom Ancient auto-apply without a degenerate ordering prompt.
+fn mana_commute_class(modification: &crate::types::ability::ManaModification) -> CommuteClass {
+    use crate::types::ability::ManaModification;
+    match modification {
+        ManaModification::Multiply { .. } => CommuteClass::Multiplicative,
+        ManaModification::ReplaceWith { .. } => CommuteClass::NonCommuting,
+    }
+}
+
 /// CR 616.1 classification of a single replacement candidate.
 enum CandidateMateriality {
     /// An order-sensitive shape regardless of the other candidates (zone
@@ -5338,10 +5349,10 @@ fn candidate_materiality(
                 commute: quantity_commute_class(modification),
             };
         }
-        if repl_def.mana_modification.is_some() {
+        if let Some(modification) = repl_def.mana_modification.as_ref() {
             return CandidateMateriality::Writes {
                 field: EventField::ManaType,
-                commute: CommuteClass::NonCommuting,
+                commute: mana_commute_class(modification),
             };
         }
         if let Some(modification) = repl_def.damage_modification.as_ref() {

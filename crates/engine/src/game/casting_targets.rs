@@ -3,11 +3,14 @@ use crate::types::ability::{
     TargetRef, TargetSelectionMode,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    CostResume, GameState, PayCostKind, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::zones::ExileCostSourceZone;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
@@ -487,6 +490,35 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
+        if let Some((count, zone, filter)) = super::casting::find_non_self_exile(activation_cost) {
+            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
+            let eligible = super::casting::find_eligible_exile_for_cost_targets(
+                state,
+                player,
+                pending.object_id,
+                narrow_zone,
+                filter,
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards to exile".into(),
+                ));
+            }
+            let mut pending = pending.clone();
+            pending.ability = assigned_ability;
+            return Ok(Some(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            }));
+        }
+
         let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(activation_cost)
             && super::planeswalker::can_activate_loyalty_ability(
                 state,
