@@ -8097,9 +8097,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, head_type) = match core_head {
         Ok((rest, head_type)) => (rest, head_type),
         Err(_) => match crate::parser::oracle_util::parse_subtype(rest) {
-            Some((subtype, consumed)) => {
-                (&rest[consumed..], Some(TypeFilter::Subtype(subtype)))
-            }
+            Some((subtype, consumed)) => (&rest[consumed..], Some(TypeFilter::Subtype(subtype))),
             None => {
                 return Err(nom::Err::Error(OracleError::new(
                     rest,
