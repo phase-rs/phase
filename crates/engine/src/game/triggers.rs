@@ -15060,6 +15060,79 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn necroduality_runtime_copies_entering_zombie_not_enchantment_source() {
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+            "Necroduality",
+        );
+
+        let mut state = setup();
+        let necroduality = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Necroduality".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&necroduality).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions.push(trigger);
+        }
+        let zombie = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Diregraf Ghoul".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&zombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Zombie".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let zone_event = zone_changed_event(
+            zombie,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Zombie"],
+        );
+        process_triggers(&mut state, &[zone_event]);
+        assert_eq!(state.stack.len(), 1, "Necroduality trigger must be stacked");
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            1,
+            "Necroduality must create one copy token"
+        );
+        let token = state.objects.get(&state.last_created_token_ids[0]).unwrap();
+        assert_eq!(
+            token.name, "Diregraf Ghoul",
+            "the copy token must copy the entering Zombie, not Necroduality"
+        );
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Creature),
+            "the token must keep the copied creature type line"
+        );
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Zombie"),
+            "the token must keep the copied Zombie subtype"
+        );
+        assert_eq!(token.base_power, Some(2));
+        assert_eq!(token.base_toughness, Some(2));
+    }
+
     fn install_twilight_diviner_trigger(
         state: &mut GameState,
         trigger: TriggerDefinition,

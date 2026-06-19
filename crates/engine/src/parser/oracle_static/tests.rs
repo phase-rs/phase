@@ -17966,6 +17966,24 @@ fn protection_single_color_unchanged() {
     );
 }
 
+/// CR 702.16a + CR 105.2a: "protection from monocolored" (Guardian of the
+/// Guildpact, Providence of Night) parses end-to-end to the runtime-evaluated
+/// `Quality("monocolored")` (source.color.len() == 1), NOT an inert
+/// `CardType("monocolored")`. Fails if the parse_protection_target fix reverts.
+#[test]
+fn protection_from_monocolored_is_quality() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has protection from monocolored.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Quality("monocolored".to_string())),
+        }),
+        "expected Protection(Quality(\"monocolored\")), got {mods:?}"
+    );
+}
+
 /// Broader Ward-cycle class: a single-color Ward with a trailing sentence (Red
 /// Ward form) recovers the keyword via the same ". " split → Color(Red).
 #[test]

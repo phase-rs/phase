@@ -668,6 +668,9 @@ fn try_parse_can_attack_with_defender(
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CanAttackWithDefender,
+                }])
                 .description(text.to_string())],
             duration: duration.clone(),
             target: application.target,
@@ -2093,6 +2096,25 @@ fn build_continuous_clause(
     let (predicate_text, fallback_duration) = super::strip_trailing_duration(&normalized);
     let duration = duration.or(fallback_duration);
 
+    if let Some(static_abilities) =
+        build_defender_attack_continuous_compound(&application, predicate_text)
+    {
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities,
+                duration: duration.clone(),
+                target: application.target,
+            },
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     let modifications = parse_continuous_modifications(predicate_text);
     if modifications.is_empty() {
         return None;
@@ -2931,6 +2953,78 @@ fn build_restriction_clause(
         optional: false,
         unless_pay: None,
     })
+}
+
+fn build_defender_attack_continuous_compound(
+    application: &SubjectApplication,
+    predicate_text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // CR 702.3b + CR 510.1c + CR 611.2c: A resolved ability can grant one
+    // targeted creature multiple continuous pieces at once: characteristics
+    // (haste), a defender attack rule exception, and toughness-based damage
+    // assignment. Split only the grammar that contains the defender exception so
+    // ordinary keyword lists continue through the shared continuous parser.
+    let segments = split_continuous_compound_segments(predicate_text);
+    if segments.len() < 2
+        || !segments
+            .iter()
+            .any(|segment| is_can_attack_despite_defender_predicate(&segment.to_lowercase()))
+    {
+        return None;
+    }
+
+    let affected = static_affected_for_application(application);
+    let mut static_abilities = Vec::new();
+
+    for segment in segments {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let lower = segment.to_lowercase();
+        if is_can_attack_despite_defender_predicate(&lower) {
+            static_abilities.push(
+                StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                    .affected(affected.clone())
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CanAttackWithDefender,
+                    }])
+                    .description(segment.to_string()),
+            );
+            continue;
+        }
+
+        let modifications = parse_continuous_modifications(segment);
+        if modifications.is_empty() {
+            return None;
+        }
+        static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .description(segment.to_string()),
+        );
+    }
+
+    (!static_abilities.is_empty()).then_some(static_abilities)
+}
+
+fn split_continuous_compound_segments(predicate_text: &str) -> Vec<&str> {
+    predicate_text
+        .trim()
+        .trim_end_matches('.')
+        .split(',')
+        .map(|segment| strip_leading_conjunction(segment.trim()))
+        .collect()
+}
+
+fn strip_leading_conjunction(segment: &str) -> &str {
+    let lower = segment.to_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("and ").parse(lower.as_str()) {
+        let consumed = lower.len() - rest.len();
+        return segment[consumed..].trim_start();
+    }
+    segment
 }
 
 // CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
