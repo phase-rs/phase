@@ -25654,6 +25654,44 @@ mod tests {
     }
 
     #[test]
+    fn trigger_pronoun_after_self_ref_clause_stays_self_ref_for_generic_effect() {
+        // In "put a counter on this creature. It can't be blocked", the
+        // trailing pronoun refers to the object named by the prior effect
+        // clause, not the artifact/creature whose entry triggered the ability.
+        let def = parse_trigger_line(
+            "Whenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+            "Kappa Cannoneer",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "the counter clause should target the trigger source itself"
+                );
+            }
+            other => panic!("Expected PutCounter, got {:?}", other),
+        }
+        let sub = exec
+            .sub_ability
+            .as_ref()
+            .expect("should have evasion rider");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::SelfRef),
+                    "the evasion rider should stay bound to the prior SelfRef clause"
+                );
+            }
+            other => panic!("Expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn trigger_equipped_creature_it_resolves_to_triggering_source() {
         // "it" = equipped creature (AttachedTo subject → TriggeringSource)
         let def = parse_trigger_line(
