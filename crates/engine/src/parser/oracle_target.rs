@@ -1720,6 +1720,51 @@ pub fn parse_type_phrase_with_ctx<'a>(
         break;
     }
 
+    // CR 205.4a: A supertype adjective can also appear AFTER a `non-`
+    // token-identity/type negation prefix (e.g. "nontoken legendary permanent"
+    // in Cadric, Soul Kindler / issue #3677 class). The pre-negation arm above
+    // only fires when the supertype word leads the phrase, so a leading
+    // "nontoken " left it unparsed, dropping the legendary restriction entirely.
+    // Mirrors the post-negation `historic` re-check directly below.
+    if let Ok((rest, supertype)) = nom_target::parse_supertype_prefix(&lower[pos..]) {
+        if !properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::HasSupertype { .. }))
+        {
+            properties.push(FilterProp::HasSupertype { value: supertype });
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 105.1 + CR 105.2: A color adjective can also appear AFTER a `non-`
+    // token-identity/type negation prefix (e.g. "nontoken blue creature",
+    // Flare of Denial / issue #3677). The pre-negation arm above only fires
+    // when the color word leads the phrase, so a leading "nontoken " left the
+    // color word — and therefore the entire creature-type filter behind it —
+    // unparsed, silently degrading the cost to "sacrifice a nontoken
+    // permanent" (which a land never is, so any permanent paid the alt cost).
+    // Mirrors the post-negation `historic` re-check directly below.
+    if color_prop.is_none() {
+        if let Some((prop, color_len)) =
+            parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]))
+        {
+            properties.push(prop);
+            pos += color_len;
+        }
+    }
+
+    // CR 700.4 + CR 700.9: A "modified" adjective can also appear AFTER a
+    // `non-` token-identity/type negation prefix (e.g. "nontoken modified
+    // creature" in Akki Ember-Keeper / issue #3677 class). The pre-negation
+    // arm above only fires when "modified" leads the phrase. Mirrors the
+    // post-negation `historic` re-check directly below.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Modified) {
+            properties.push(FilterProp::Modified);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
     let mut adjective_type_filters: Vec<TypeFilter> = Vec::new();
 
     // CR 700.6: "historic" adjective prefix can appear AFTER negation prefixes
@@ -2628,19 +2673,24 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
         }
     }
     // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent",
-    // "non-Saga token" (Good King Mog XII chapter II — issue #3294).
+    // "non-Saga token" (Good King Mog XII chapter II — issue #3294), and
+    // negated-adjective compounds like "nontoken modified creature" (Akki
+    // Ember-Keeper / issue #3677 class) or "nontoken legendary permanent"
+    // (Cadric, Soul Kindler). Recurses into `starts_with_type_phrase_lead`
+    // (rather than only `parse_core_type`/`parse_token_suffix`) so the article
+    // guard recognizes every adjective that can lead a type phrase after a
+    // `non-` prefix — color, supertype, "modified", "renowned", "historic" —
+    // not just bare core types and tokens.
     if let Ok((after_non, _)) = alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(text)
     {
-        // Consume the negated word up to whitespace, then check for a core type or
-        // standalone "token"/"tokens" after the negation.
+        // Consume the negated word up to whitespace, then check what follows.
         if let Ok((after_space, _)) = (
             take_till::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
             tag::<_, _, OracleError<'_>>(" "),
         )
             .parse(after_non)
         {
-            if parse_core_type(after_space).0.is_some() || parse_token_suffix(after_space).is_some()
-            {
+            if starts_with_type_phrase_lead(after_space) {
                 return true;
             }
         }
@@ -5956,6 +6006,57 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// Issue #3677 (Flare of Denial): "sacrifice a nontoken blue creature" must
+    /// capture the color AND the creature type, not just the NonToken negation.
+    /// Before the fix, the color-prefix scan ran only BEFORE the `non-` negation
+    /// loop, so a leading "nontoken " left "blue creature" unconsumed and the
+    /// resulting filter silently matched any nontoken permanent — including a
+    /// land, which is never a token, allowing the alt cost to be paid with a
+    /// colorless land instead of a blue creature.
+    #[test]
+    fn nontoken_color_creature_captures_color_and_type() {
+        let (filter, rest) = parse_type_phrase("nontoken blue creature");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(tf.properties.contains(&FilterProp::HasColor {
+            color: ManaColor::Blue
+        }));
+    }
+
+    /// Issue #3677 class (Cadric, Soul Kindler): "another nontoken legendary
+    /// permanent you control" must capture the Legendary supertype, not just
+    /// the NonToken negation. Same root cause as the color case above — the
+    /// supertype-prefix scan only ran BEFORE the `non-` negation loop.
+    #[test]
+    fn nontoken_legendary_permanent_captures_supertype() {
+        let (filter, rest) = parse_type_phrase("another nontoken legendary permanent you control");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(tf.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// Issue #3677 class (Akki Ember-Keeper): "a nontoken modified creature
+    /// you control" must capture the Modified property, not just the
+    /// NonToken negation. Same root cause as the color case above — the
+    /// "modified" adjective scan only ran BEFORE the `non-` negation loop.
+    #[test]
+    fn nontoken_modified_creature_captures_modified_property() {
+        let (filter, rest) = parse_type_phrase("a nontoken modified creature you control");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(tf.properties.contains(&FilterProp::Modified));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the

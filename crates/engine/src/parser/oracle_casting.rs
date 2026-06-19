@@ -650,7 +650,7 @@ mod tests {
         ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
         TargetFilter, TypeFilter,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
 
     #[test]
@@ -1320,6 +1320,47 @@ mod tests {
                 condition: None,
             } if sac.requirement.fixed_count() == Some(3) => {}
             other => panic!("expected Sacrifice(count=3) alt-cost, got {other:?}"),
+        }
+    }
+
+    /// Issue #3677: Flare of Denial — "sacrifice a nontoken blue creature" must
+    /// keep BOTH the `NonToken` negation and the `blue creature` type/color
+    /// filter. Before the fix to `parse_type_phrase`'s color-prefix scan (which
+    /// only ran before the `non-` negation loop), the color and creature type
+    /// were silently dropped, leaving a filter that matched any nontoken
+    /// permanent — including a land — as a valid alternative-cost payment.
+    #[test]
+    fn alt_cost_sacrifice_nontoken_colored_creature_arm() {
+        let option = parse_spell_casting_option_line(
+            "You may sacrifice a nontoken blue creature rather than pay this spell's mana cost.",
+            "Flare of Denial",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost: Some(AbilityCost::Sacrifice(ref sac)),
+                condition: None,
+            } if sac.requirement.fixed_count() == Some(1) => match &sac.target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected Creature type filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::NonToken),
+                        "expected NonToken property, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::HasColor {
+                            color: ManaColor::Blue
+                        }),
+                        "expected blue HasColor property, got {tf:?}"
+                    );
+                }
+                other => panic!("expected Typed sacrifice target, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice(count=1) alt-cost, got {other:?}"),
         }
     }
 
