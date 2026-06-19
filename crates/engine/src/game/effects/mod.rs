@@ -2513,6 +2513,15 @@ pub fn resolve_effect(
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => time_travel::resolve(state, ability, events),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
+        // CR 101.3 + CR 608.2: An instruction with no game action. Emit
+        // `EffectResolved` so the chain continues, and do nothing else.
+        Effect::NoOp => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::NoOp,
+                source_id: ability.source_id,
+            });
+            Ok(())
+        }
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),

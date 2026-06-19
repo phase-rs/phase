@@ -3792,6 +3792,17 @@ pub enum WaitingFor {
         /// Use [`VoteActor::resolve`] with `player` to get the player
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
+        /// CR 701.38a: How the completed tally maps to effects (the
+        /// strict-majority/tie outcome of `Threshold` is card-defined, not a
+        /// CR subrule). Carried on the WaitingFor (not re-derived from the
+        /// source ability) so the final `resolve_tally` can branch between
+        /// per-vote fan-out (`VoteTally::PerVote`) and single-outcome
+        /// Will-of-the-council resolution (`VoteTally::Threshold`) once the
+        /// voter queue empties.
+        /// Defaults to `PerVote` so pre-existing serialized vote states
+        /// deserialize unchanged.
+        #[serde(default)]
+        tally_mode: super::ability::VoteTally,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`

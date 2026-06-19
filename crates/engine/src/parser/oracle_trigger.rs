@@ -772,6 +772,43 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     )
 }
 
+/// CR 109.4 + CR 115.1 + CR 506.2 + CR 603.7c: Derive the relative-player scope
+/// that a trigger condition introduces for `"that player"`/`"they"`-style
+/// anaphors in the trigger's effect body.
+///
+/// This is the single authority for mapping a trigger condition to the
+/// `ControllerRef` that a later `"that player controls"` reference must resolve
+/// against. Both the in-line trigger body parser (`parse_trigger`) and the
+/// delayed-trigger split path (`parse_delayed_whenever_trigger` in
+/// `oracle_effect`) call this so the same condition yields the same scope —
+/// otherwise the delayed-trigger effect would lose the `TriggeringPlayer`
+/// binding for "...deals combat damage to a player ... target creature that
+/// player controls" (The Sea Devils III).
+///
+/// DamageDone (`TriggeringPlayer`) is checked BEFORE `condition_introduces_target_player`
+/// because both match "deals [combat] damage to a player", but DamageDone needs
+/// `TriggeringPlayer` while generic target-player triggers need `TargetPlayer`.
+pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<ControllerRef> {
+    if is_damage_done_trigger_pattern(cond_lower) {
+        Some(ControllerRef::TriggeringPlayer)
+    } else if condition_introduces_damage_source_controller_player(cond_lower) {
+        Some(ControllerRef::ParentTargetController)
+    } else if condition_introduces_defending_player(cond_lower) {
+        // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
+        // in combat), not TargetPlayer (which requires a player target to be
+        // bound at runtime).
+        Some(ControllerRef::DefendingPlayer)
+    } else if condition_introduces_target_player(cond_lower) {
+        Some(ControllerRef::TargetPlayer)
+    } else if condition_introduces_chosen_player_phase(cond_lower) {
+        Some(ControllerRef::SourceChosenPlayer)
+    } else if condition_introduces_scoped_phase_player(cond_lower) {
+        Some(ControllerRef::ScopedPlayer)
+    } else {
+        None
+    }
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -897,28 +934,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         ..Default::default()
     };
 
-    // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
-    // TargetPlayer resolution inside the trigger effect body.
-    // CR 603.7c: DamageDone triggers ("...deals damage to a player") use
-    // TriggeringPlayer for "that player" in the effect body. This must be
-    // checked BEFORE `condition_introduces_target_player` because both match
-    // "deals [combat] damage to a player", but DamageDone needs TriggeringPlayer
-    // while generic target-player triggers need TargetPlayer.
-    if is_damage_done_trigger_pattern(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::TriggeringPlayer);
-    } else if condition_introduces_damage_source_controller_player(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
-    } else if condition_introduces_defending_player(&cond_lower) {
-        // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
-        // in combat), not TargetPlayer (which requires a player target to be
-        // bound at runtime).
-        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
-    } else if condition_introduces_target_player(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
-    } else if condition_introduces_chosen_player_phase(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::SourceChosenPlayer);
-    } else if condition_introduces_scoped_phase_player(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+    // CR 109.4 + CR 115.1 + CR 506.2 + CR 603.7c: Set relative-player scope for
+    // `"that player"` resolution inside the trigger effect body. Delegated to the
+    // single-authority `relative_player_scope_for_condition` so the delayed-trigger
+    // split path derives the identical scope from the same condition.
+    if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(scope);
     }
     // Snapshot the condition-established scope before body parsing (which may
     // temporarily rebind it via `with_player_scope`) so lowering sees the scope
@@ -8087,7 +8108,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // CR 109.4: Head noun — "source" (any), a card type, or a negated type
     // prefix ("noncreature source"). The negated variant uses
     // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
-    let (rest, head_type) = alt((
+    let core_head = alt((
         value(
             Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
             (
@@ -8106,7 +8127,25 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
         value(Some(TypeFilter::Battle), tag("battle")),
         value(Some(TypeFilter::Land), tag("land")),
     ))
-    .parse(rest)?;
+    .parse(rest);
+    // CR 205.3 + CR 603.2: When the damage source is named by a creature subtype
+    // ("a Salamander deals combat damage to a player" — The Sea Devils III)
+    // rather than a core type or "source", fall back to the shared subtype
+    // recognizer so the DamageDone trigger pattern is detected and "that player"
+    // binds to TriggeringPlayer. `parse_subtype` is the single subtype authority
+    // (oracle_util.rs); it returns the canonical name and consumed byte length.
+    let (rest, head_type) = match core_head {
+        Ok((rest, head_type)) => (rest, head_type),
+        Err(_) => match crate::parser::oracle_util::parse_subtype(rest) {
+            Some((subtype, consumed)) => (&rest[consumed..], Some(TypeFilter::Subtype(subtype))),
+            None => {
+                return Err(nom::Err::Error(OracleError::new(
+                    rest,
+                    nom::error::ErrorKind::Alt,
+                )))
+            }
+        },
+    };
 
     // Optional controller scope. Absence → no controller restriction
     // (matches any source — Phyrexian Obliterator class, deferred).

@@ -272,6 +272,7 @@ mod issue_3303_adeline_tapped_attacking;
 mod issue_3309_rise_etb_returns;
 mod issue_3310_condemn_two_targets;
 mod issue_3311_manifest_dread_land;
+mod issue_3312_shared_trauma;
 mod issue_3313_assault_formation;
 mod issue_3314_killian;
 mod issue_3315_explore;

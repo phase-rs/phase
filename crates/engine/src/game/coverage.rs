@@ -2788,6 +2788,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Explore
         | Effect::Investigate
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn

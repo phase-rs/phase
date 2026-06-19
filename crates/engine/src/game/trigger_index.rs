@@ -727,6 +727,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Tribute
         | EffectKind::TimeTravel
         | EffectKind::BecomeMonarch
+        | EffectKind::NoOp
         | EffectKind::Proliferate
         | EffectKind::ProliferateTarget
         | EffectKind::EndTheTurn
