@@ -573,6 +573,17 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
             }
+            FilterProp::ManaValueParity { parity } => {
+                let label = match parity {
+                    crate::types::ability::ParitySource::Fixed(parity) => {
+                        format!("{parity:?} mana value").to_lowercase()
+                    }
+                    crate::types::ability::ParitySource::LastNamedChoice => {
+                        "chosen odd/even mana value".to_string()
+                    }
+                };
+                parts.push(label);
+            }
             FilterProp::ManaCostIn { costs } => {
                 parts.push(format!("mana cost in {costs:?}"));
             }

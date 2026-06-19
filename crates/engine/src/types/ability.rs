@@ -488,6 +488,17 @@ pub enum Parity {
     Even,
 }
 
+/// Source for odd/even parity predicates over mana value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ParitySource {
+    /// A fixed printed odd/even quality.
+    Fixed(Parity),
+    /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
+    /// the same resolving instruction sequence.
+    LastNamedChoice,
+}
+
 /// A branch in a d20/d6/d4 result table (CR 706.2).
 /// Each branch covers a contiguous range of die results and maps to an effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2310,6 +2321,12 @@ pub enum FilterProp {
     Cmc {
         comparator: Comparator,
         value: QuantityExpr,
+    },
+    /// CR 202.3 + CR 608.2c: Matches objects whose mana value has the selected
+    /// odd/even quality, either fixed or chosen earlier in the same resolving
+    /// instruction sequence.
+    ManaValueParity {
+        parity: ParitySource,
     },
     /// CR 202.1: Matches objects whose printed mana cost is exactly one of `costs`.
     /// Distinct from `Cmc`/mana value (CR 202.3): "{0} or {1}" must not match

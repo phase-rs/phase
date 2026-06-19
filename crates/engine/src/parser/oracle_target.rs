@@ -9,8 +9,8 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, FilterProp, ObjectProperty, ObjectScope, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    ControllerRef, FilterProp, ObjectProperty, ObjectScope, ParitySource, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
     TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
@@ -3589,6 +3589,28 @@ pub(crate) fn parse_mana_value_suffix(
         return Some((prop, text.len() - after.len()));
     }
 
+    if let Ok((after, _)) = (
+        alt((
+            tag::<_, _, OracleError<'_>>("with "),
+            tag::<_, _, OracleError<'_>>("that have "),
+            tag::<_, _, OracleError<'_>>("that each have "),
+        )),
+        tag::<_, _, OracleError<'_>>("mana value of "),
+        alt((
+            tag::<_, _, OracleError<'_>>("the chosen quality"),
+            tag::<_, _, OracleError<'_>>("that quality"),
+        )),
+    )
+        .parse(trimmed)
+    {
+        return Some((
+            FilterProp::ManaValueParity {
+                parity: ParitySource::LastNamedChoice,
+            },
+            text.len() - after.len(),
+        ));
+    }
+
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("with mana value "),
         tag::<_, _, OracleError<'_>>("that have mana value "),
@@ -7154,6 +7176,17 @@ mod tests {
                 }
             ]))
         );
+    }
+
+    #[test]
+    fn mana_value_chosen_quality_suffix_maps_to_parity_choice() {
+        let (filter, rest) = parse_target("creatures with mana value of the chosen quality");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let typed = typed_leg(&filter).expect("expected typed creature filter");
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice,
+        }));
     }
 
     #[test]

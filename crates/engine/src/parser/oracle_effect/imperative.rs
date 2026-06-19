@@ -8897,6 +8897,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::ParitySource;
 
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
         match filter {
@@ -9759,6 +9760,28 @@ mod tests {
             filters[1],
             TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_exile_each_creature_with_mana_value_chosen_quality() {
+        let input = "exile each creature with mana value of the chosen quality";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            origin: None,
+            target: TargetFilter::Typed(filter),
+            all: true,
+            enter_with_counters,
+        }) = result
+        else {
+            panic!("{input}: expected mass exile parity filter, got {result:?}");
+        };
+
+        assert!(enter_with_counters.is_empty());
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.contains(&FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice,
+        }));
     }
 
     #[test]
