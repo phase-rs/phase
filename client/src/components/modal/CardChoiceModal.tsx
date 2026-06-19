@@ -424,7 +424,9 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
-  const countValid = data.up_to
+  const allowsPartialFind =
+    data.up_to === true || (data.constraint != null && data.constraint.type !== "None");
+  const countValid = allowsPartialFind
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
   const subtitle = searchChoiceSubtitle(data, t);

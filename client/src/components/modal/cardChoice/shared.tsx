@@ -68,20 +68,22 @@ export function canAssignDistinctCardTypes(
 
 export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"game">): string {
   const constraint = data.constraint;
+  const allowsPartialFind =
+    data.up_to === true || (constraint != null && constraint.type !== "None");
   const opts = { count: data.count };
 
   if (constraint?.type === "MatchEachFilter") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleMatchUpTo", opts)
       : t("cardChoice.search.subtitleMatchExact", opts);
   }
   if (constraint?.type === "DistinctQualities") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleDistinctUpTo", opts)
       : t("cardChoice.search.subtitleDistinctExact", opts);
   }
   if (constraint?.type === "TotalManaValue") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleManaValueUpTo", opts)
       : t("cardChoice.search.subtitleManaValueExact", opts);
   }
