@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
+use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry};
+use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry, TargetFilter};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
@@ -1280,10 +1281,7 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 514.2: An active "Damage isn't removed from [filter] during cleanup
     // steps" static suppresses removal for the permanents it matches; gather
     // that protected set first.
-    let damage_persists: std::collections::HashSet<ObjectId> = {
-        use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
-        use crate::types::ability::TargetFilter;
-
+    let damage_persists: HashSet<ObjectId> = {
         let sources: Vec<(ObjectId, PlayerId, TargetFilter)> =
             super::functioning_abilities::battlefield_active_statics(state)
                 .filter(|(_, def)| matches!(def.mode, StaticMode::DamageNotRemovedDuringCleanup))
