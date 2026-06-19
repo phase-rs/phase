@@ -249,6 +249,7 @@ fn prompt_resolution_tap_untap_choice(
         // CR 708.2a: tap/untap selection is not a face-down entry.
         face_down_profile: None,
         count_param: 0,
+        library_position: None,
         is_cost_payment: false,
     };
     true

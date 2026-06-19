@@ -3377,6 +3377,11 @@ fn apply_action(
                 ));
             }
             zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
+            // CR 702.66a + CR 607.2a: Delved cards are exiled "with" the spell
+            // being cast (Murktide Regent ETB counters — issue #1322).
+            if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
+                crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
+            }
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
                     crate::types::mana::ManaType::Colorless,
@@ -17984,6 +17989,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
@@ -18054,6 +18060,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -18100,6 +18107,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 

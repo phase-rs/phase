@@ -97,6 +97,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "As ~ is turned face up, [effect]" → TurnFaceUp replacement (megamorph/
+    //     disguise). CR 614.1e + CR 708.11: the effect applies as the permanent is
+    //     turned face up, so it is a replacement, not a stack triggered ability. ---
+    if let Some(def) = parse_turned_face_up_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- The Mimeoplasm: "As ~ enters, you may exile N cards from graveyards. If you do, ..." ---
     // Check before other "as enters" patterns to ensure it matches correctly
     if let Some(def) = parse_as_enters_exile_from_graveyards(&norm_lower, &normalized, &text) {
@@ -4015,7 +4022,7 @@ fn parse_damage_modification_static(
     let (_, (_, after_that)) = nom_primitives::split_once_on(norm_lower, "that ").ok()?;
     let (_, (subject, _)) = nom_primitives::split_once_on(after_that, " would deal").ok()?;
 
-    let source_filter = parse_damage_source_subject(subject.trim());
+    let source_filter = parse_damage_source_subject_filter(subject.trim());
 
     // --- 3. Extract combat scope ---
     let combat_scope = scan_combat_scope(norm_lower);
@@ -4381,13 +4388,22 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         return None;
     }
 
+    if let Some(filter) = parse_damage_source_subject_filter(subject) {
+        return Some(filter);
+    }
+
+    None
+}
+
+fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
     }
 
-    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
-    // counter on it", …) — delegate to the shared type-phrase parser
-    // (Uncivil Unrest, Torbran-adjacent prints).
+    // Typed damage sources ("creature you control with a +1/+1 counter on it",
+    // "creatures you control with counters on them", ...) share the normal
+    // target grammar; damage replacement parsing should not maintain a parallel
+    // counter/property grammar.
     let (filter, rest) = parse_type_phrase(subject);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
@@ -5030,6 +5046,66 @@ fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// other times are unaffected). The alternative effect appears BEFORE "instead"
 /// ("remove all wind counters from it instead", "put two +1/+1 counters on it
 /// instead").
+/// CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+/// is a replacement effect — the alternative action applies AS the permanent is
+/// turned face up (no stack-response window), and the subject is always the
+/// permanent itself. Scoped to effects that resolve against the permanent itself
+/// (`SelfRef`): the self-counter class — Hooded Hydra "put five +1/+1 counters on
+/// it", Bubble Smuggler "put four +1/+1 counters on it". Forms that need an
+/// external target choice during the turn-up (Gift of Doom "you may attach it to
+/// a creature") are gapped by `turn_face_up_effect_is_self_resolving` rather than
+/// mis-resolved. `norm_lower` has self-references normalized to `~`.
+fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+    // Anchored self-referential lead.
+    tag::<_, _, OracleError<'_>>("as ~ is turned face up, ")
+        .parse(norm_lower)
+        .ok()?;
+    // The effect is everything after the lead; pull it from the original line so
+    // `parse_effect_chain` sees the printed casing.
+    let lower = text.to_lowercase();
+    let (_head, effect_text) = split_once_on_lower(text, &lower, " is turned face up, ")?;
+    let effect_text = effect_text.trim().trim_end_matches('.').trim();
+    if effect_text.is_empty() {
+        return None;
+    }
+
+    // CR 708.11: the effect applies AS the permanent is turned face up — there is
+    // no point at which the controller can use the targeting system. Only effects
+    // that resolve against the permanent itself (`SelfRef`, e.g. Hooded Hydra's
+    // "put five +1/+1 counters on it") can be faithfully modeled at this seam.
+    // Effects that need an external target choice (Gift of Doom's "you may attach
+    // it to a creature") would require a turn-up-time choice the apply path does
+    // not provide; gap them rather than silently mis-resolve the host.
+    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    if !turn_face_up_effect_is_self_resolving(&execute) {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(execute)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 708.11: True when every effect in an "As ~ is turned face up" chain resolves
+/// against the permanent itself (`SelfRef`) or needs no target at all, so it can
+/// be applied during the turn-up with no targeting window. An effect whose target
+/// is an external filter (a creature/permanent/player chosen at resolution) needs
+/// a choice the replacement-apply path does not model and must be gapped.
+fn turn_face_up_effect_is_self_resolving(ability: &AbilityDefinition) -> bool {
+    let mut current = Some(ability);
+    while let Some(def) = current {
+        match def.effect.target_filter() {
+            None | Some(TargetFilter::SelfRef) => {}
+            Some(_) => return false,
+        }
+        current = def.sub_ability.as_deref();
+    }
+    true
+}
+
 fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<ReplacementDefinition> {
     if !nom_primitives::scan_contains(lower, "untap step")
         || !nom_primitives::scan_contains(lower, "instead")
@@ -7253,6 +7329,44 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::Untap);
         assert_eq!(def.condition, Some(ReplacementCondition::DuringUntapStep));
         assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn turned_face_up_replacement_megamorph() {
+        // CR 614.1e + CR 708.11: "As ~ is turned face up,
+        // [effect]" is a TurnFaceUp REPLACEMENT (applies as the permanent is
+        // turned up — no stack trigger), bound to the permanent itself.
+        let def = parse_replacement_line(
+            "As this creature is turned face up, put five +1/+1 counters on it.",
+            "Hooded Hydra",
+        )
+        .expect("turn-face-up replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::TurnFaceUp);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.expect("alternative effect must be parsed");
+        assert!(
+            matches!(&*execute.effect, Effect::PutCounter { .. }),
+            "expected PutCounter, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn turned_face_up_replacement_gaps_external_target_choice() {
+        // CR 708.11: an "As ~ is turned face up" effect applies during the
+        // turn-up with no targeting window. Gift of Doom's "you may attach it to a
+        // creature" needs an external host choice that cannot be made there, so it
+        // must NOT be modeled as a TurnFaceUp replacement (gapped honestly rather
+        // than mis-resolving the host) — only the self-resolving `SelfRef` class is.
+        let def = parse_replacement_line(
+            "As this permanent is turned face up, you may attach it to a creature.",
+            "Gift of Doom",
+        );
+        assert!(
+            !def.as_ref()
+                .is_some_and(|d| d.event == ReplacementEvent::TurnFaceUp),
+            "attach-to-external-creature must be gapped, got {def:?}"
+        );
     }
 
     /// CR 614.12a: Karoo artifact — Mox Diamond's "you may discard ..." cost.
@@ -10944,6 +11058,36 @@ mod tests {
             }
             other => panic!("Expected Typed filter with IsChosenCreatureType, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn damage_double_all_typed_subject_with_counters() {
+        let def = parse_replacement_line(
+            "Double all damage that creatures you control with counters on them would deal.",
+            "Raphael, the Muscle",
+        )
+        .expect("typed no-instead damage doubler should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            )),
+            "expected any-counter qualifier, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]

@@ -18091,3 +18091,43 @@ fn granted_quoted_ability_with_internal_period_bypasses_split() {
         "expected a GrantAbility from the quoted ability, got {mods:?}"
     );
 }
+
+/// Issue #1336: Ichormoon Gauntlet grants bracket-loyalty planeswalker abilities.
+#[test]
+fn ichormoon_gauntlet_grants_loyalty_abilities_to_planeswalkers() {
+    let mods = parse_continuous_modifications(
+        "Planeswalkers you control have \"[0]: Proliferate\" and \"[−12]: Take an extra turn after this one.\"",
+    );
+    let grants: Vec<_> = mods
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::GrantAbility { definition } => Some(definition.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        grants.len(),
+        2,
+        "expected two GrantAbility mods, got {mods:?}"
+    );
+    assert!(
+        matches!(grants[0].cost, Some(AbilityCost::Loyalty { amount: 0 })),
+        "first grant should be [0] loyalty proliferate, got {:?}",
+        grants[0].cost
+    );
+    assert!(
+        matches!(*grants[0].effect, Effect::Proliferate),
+        "first grant effect should be Proliferate, got {:?}",
+        grants[0].effect
+    );
+    assert!(
+        matches!(grants[1].cost, Some(AbilityCost::Loyalty { amount: -12 })),
+        "second grant should be [−12] loyalty, got {:?}",
+        grants[1].cost
+    );
+    assert!(
+        matches!(*grants[1].effect, Effect::ExtraTurn { .. }),
+        "second grant effect should be ExtraTurn, got {:?}",
+        grants[1].effect
+    );
+}

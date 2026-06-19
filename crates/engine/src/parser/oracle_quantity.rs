@@ -481,6 +481,13 @@ pub(crate) fn parse_quantity_ref_with_context(
                 });
             }
         }
+        if let Ok((remainder, (relation, action))) = parse_optional_offer_accepted_clause(rest) {
+            if remainder.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PerformedActionThisWay { relation, action },
+                });
+            }
+        }
         // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
         // this way" — count from the tracked set populated by the preceding
         // destroy/sacrifice in the sub_ability chain. Must run BEFORE
@@ -2112,6 +2119,22 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
     .parse(input)
 }
 
+/// "opponent who does" / "players who do" → accepted the optional offer.
+fn parse_optional_offer_accepted_clause(
+    input: &str,
+) -> nom::IResult<&str, (PlayerRelation, PlayerActionKind), OracleError<'_>> {
+    let (input, relation) = alt((
+        value(PlayerRelation::Opponent, tag("opponents ")),
+        value(PlayerRelation::Opponent, tag("opponent ")),
+        value(PlayerRelation::All, tag("players ")),
+        value(PlayerRelation::All, tag("player ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, _) = alt((tag("does"), tag("do"), tag("did"))).parse(input)?;
+    Ok((input, (relation, PlayerActionKind::AcceptedOptionalEffect)))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 /// CR 702.62b: A suspended card is a card in the exile zone with the suspend
 /// keyword and a time counter on it. Counting clauses (`for each suspended card
@@ -2346,6 +2369,14 @@ fn parse_for_each_clause_with_they_controller(
         let (filter, remainder) = parse_type_phrase(after_among);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
+        }
+    }
+
+    if let Ok((rest, (relation, action))) = parse_optional_offer_accepted_clause(clause) {
+        if rest.is_empty() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay { relation, action },
+            });
         }
     }
 
@@ -5117,6 +5148,20 @@ mod tests {
                 filter: PlayerFilter::PerformedActionThisWay {
                     relation: PlayerRelation::Opponent,
                     action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_does_counts_accepted_optional_offer() {
+        let qty = parse_for_each_clause("opponent who does").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::AcceptedOptionalEffect,
                 },
             }
         );

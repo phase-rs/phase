@@ -76,6 +76,7 @@ pub fn resolve(
         // CR 708.2a: Blight places -1/-1 counters; no face-down entry.
         face_down_profile: None,
         count_param: count,
+        library_position: None,
         is_cost_payment: false,
     };
 

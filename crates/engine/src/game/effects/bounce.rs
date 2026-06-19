@@ -233,6 +233,7 @@ pub fn resolve(
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     count_param: 0,
+                    library_position: None,
                     is_cost_payment: false,
                 };
                 return Ok(());
@@ -322,6 +323,7 @@ pub fn resolve(
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     count_param: 0,
+                    library_position: None,
                     is_cost_payment: false,
                 };
                 return Ok(());
@@ -494,6 +496,7 @@ pub fn resolve_all(
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
                 count_param: 0,
+                library_position: None,
                 is_cost_payment: false,
             };
             return Ok(());

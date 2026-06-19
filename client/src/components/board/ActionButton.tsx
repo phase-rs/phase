@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
@@ -25,26 +25,17 @@ type ActionButtonMode =
 function getActionButtonMode(
   waitingFor: WaitingFor | null | undefined,
   stackLength: number,
-  currentPlayerId: number,
+  canAct: boolean,
 ): ActionButtonMode {
-  if (!waitingFor) return "hidden";
+  if (!waitingFor || !canAct) return "hidden";
 
-  if (
-    waitingFor.type === "DeclareAttackers" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "DeclareAttackers") {
     return "combat-attackers";
   }
-  if (
-    waitingFor.type === "DeclareBlockers" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "DeclareBlockers") {
     return "combat-blockers";
   }
-  if (
-    waitingFor.type === "Priority" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "Priority") {
     return stackLength > 0 ? "priority-stack" : "priority-empty";
   }
 
@@ -58,6 +49,7 @@ export function ActionButton() {
   const resolveAllTooltipId = useId();
   const passToEndTooltipId = useId();
   const playerId = usePlayerId();
+  const canActForWaitingState = useCanActForWaitingState();
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
@@ -94,7 +86,7 @@ export function ActionButton() {
 
   const { advanceLabel } = usePhaseInfo();
 
-  const mode = getActionButtonMode(waitingFor, stackLength, playerId);
+  const mode = getActionButtonMode(waitingFor, stackLength, canActForWaitingState);
 
   // Skip-confirm state for No Attacks / No Blocks
   const [skipArmed, setSkipArmed] = useState<"attackers" | "blockers" | null>(null);

@@ -812,8 +812,7 @@ function GamePageContent({
     return orderedPlayers.filter((id) => id !== perspectivePlayerId && !eliminated.has(id));
   }, [eliminatedPlayers, perspectivePlayerId, players, seatOrder]);
   const activeOpponentId =
-    resolveFocusedOpponent(focusedOpponent, opponents)
-    ?? (perspectivePlayerId === 0 ? 1 : 0);
+    resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element
@@ -1201,23 +1200,27 @@ function GamePageContent({
             className="flex shrink-0 items-start gap-1.5 px-1 py-1"
             style={playerZoneRailStyle}
           >
-            <ExilePile
-              playerId={activeOpponentId}
-              size={pileSize}
-              onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
-            />
-            <LibraryPile
-              playerId={activeOpponentId}
-              size={pileSize}
-              onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
-            />
-            <GraveyardPile
-              playerId={activeOpponentId}
-              size={pileSize}
-              onClick={() =>
-                setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-              }
-            />
+            {activeOpponentId != null ? (
+              <>
+                <ExilePile
+                  playerId={activeOpponentId}
+                  size={pileSize}
+                  onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
+                />
+                <LibraryPile
+                  playerId={activeOpponentId}
+                  size={pileSize}
+                  onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
+                />
+                <GraveyardPile
+                  playerId={activeOpponentId}
+                  size={pileSize}
+                  onClick={() =>
+                    setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
+                  }
+                />
+              </>
+            ) : null}
           </DraggableWidget>
         </div>
 

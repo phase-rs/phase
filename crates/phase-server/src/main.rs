@@ -30,6 +30,7 @@ use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
 };
+use rand::Rng;
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
@@ -37,7 +38,7 @@ use server_core::client_message_wire_guard::{
     guard_broker_projection_inbound, guard_client_message_before_dispatch,
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
-use server_core::draft_session::DraftSessionManager;
+use server_core::draft_session::{draft_seats_needing_auto_pick, DraftSessionManager};
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
     guard_reconnect_draft,
@@ -2241,6 +2242,20 @@ async fn broadcast_draft_views(
     }
 }
 
+async fn broadcast_draft_timer_sync(
+    draft_code: &str,
+    remaining_ms: u32,
+    connections: &SharedConnections,
+) {
+    let msg = ServerMessage::DraftTimerSync { remaining_ms };
+    let conns = connections.lock().await;
+    if let Some(players) = conns.get(draft_code) {
+        for sender in players.values() {
+            let _ = sender.send(msg.clone());
+        }
+    }
+}
+
 /// Spawn a pick timer task. When the timer expires, auto-pick a random card
 /// for any seat that hasn't picked yet. Aborts the previous timer if one exists.
 fn spawn_pick_timer(
@@ -2251,10 +2266,39 @@ fn spawn_pick_timer(
 ) {
     let timer_draft_code = draft_code.clone();
     let timer_draft_state = draft_state.clone();
-    let timer_connections = connections;
+    let timer_connections = connections.clone();
+    let pick_ms = pick_seconds.saturating_mul(1000);
 
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(pick_seconds as u64)).await;
+        let deadline = Instant::now() + Duration::from_millis(pick_ms as u64);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(u128::from(u32::MAX)) as u32;
+
+            {
+                let mut mgr = timer_draft_state.lock().await;
+                let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
+                    return;
+                };
+                if session.session.status != draft_core::types::DraftStatus::Drafting {
+                    session.timer_remaining_ms = None;
+                    return;
+                }
+                session.timer_remaining_ms = Some(remaining_ms);
+            }
+
+            broadcast_draft_timer_sync(&timer_draft_code, remaining_ms, &timer_connections).await;
+
+            if remaining_ms == 0 {
+                break;
+            }
+        }
 
         let mut mgr = timer_draft_state.lock().await;
         let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
@@ -2263,17 +2307,19 @@ fn spawn_pick_timer(
 
         // Only auto-pick if still in Drafting status
         if session.session.status != draft_core::types::DraftStatus::Drafting {
+            session.timer_remaining_ms = None;
             return;
         }
 
         info!(draft = %timer_draft_code, "pick timer expired — auto-picking for pending seats");
 
-        // Find seats that still have a current pack (haven't picked yet)
         let pod_size = session.player_tokens.len();
-        for seat_idx in 0..pod_size {
+        let seats = draft_seats_needing_auto_pick(&mut session.session, pod_size);
+        for seat_idx in seats {
             if let Some(pack) = &session.session.current_pack[seat_idx] {
                 if !pack.0.is_empty() {
-                    let card_id = pack.0[0].instance_id.clone();
+                    let card_idx = rand::rng().random_range(0..pack.0.len());
+                    let card_id = pack.0[card_idx].instance_id.clone();
                     let action = draft_core::types::DraftAction::Pick {
                         seat: seat_idx as u8,
                         card_instance_id: card_id,
@@ -2289,6 +2335,8 @@ fn spawn_pick_timer(
                 }
             }
         }
+
+        session.timer_remaining_ms = None;
 
         // Broadcast updated views
         let views: Vec<_> = (0..pod_size).map(|i| session.view_for_seat(i)).collect();
@@ -2307,10 +2355,6 @@ fn spawn_pick_timer(
         }
 
         // Re-arm for the next pick window if the draft is still in progress.
-        // Without this a fully idle pod (every seat disconnected or AFK) would
-        // stall after this single auto-pick: the timer must keep advancing the
-        // draft pick by pick until it completes. Re-arming stops once the draft
-        // leaves the Drafting status.
         let still_drafting = {
             let mgr = timer_draft_state.lock().await;
             let status = mgr
@@ -2337,6 +2381,7 @@ fn spawn_pick_timer(
             if let Some(prev) = session.timer_task.take() {
                 prev.abort();
             }
+            session.timer_remaining_ms = Some(pick_ms);
             session.timer_task = Some(handle);
         }
     });

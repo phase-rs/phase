@@ -480,4 +480,24 @@ describe("OpponentHud", () => {
 
     expect(screen.queryByLabelText(/Curse of Test/i)).toBeNull();
   });
+
+  it("uses the single opponent pill when a 4-player pod has one live rival (#1324)", () => {
+    act(() => {
+      useGameStore.setState({
+        gameState: createGameState({
+          eliminated_players: [1, 2],
+          active_player: 3,
+          priority_player: 3,
+          waiting_for: { type: "Priority", data: { player: 3 } },
+        }),
+      });
+      useUiStore.setState({ focusedOpponent: 1 });
+    });
+
+    render(<OpponentHud />);
+
+    expect(document.querySelector('[data-player-hud="3"]')).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Opp 2/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /OUT/i })).toBeNull();
+  });
 });

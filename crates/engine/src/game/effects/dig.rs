@@ -594,7 +594,9 @@ mod tests {
             );
         }
 
-        // A fresh tracked set must have been inserted with exactly the kept cards.
+        // A fresh tracked set must publish the kept/revealed selection so
+        // downstream TrackedSetFiltered routing (Zimone land/creature split)
+        // resolves against the cards the player chose to keep.
         let tracked_id = TrackedSetId(next_id_before);
         let set = state
             .tracked_object_sets

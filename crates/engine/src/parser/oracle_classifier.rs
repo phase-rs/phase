@@ -622,6 +622,13 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+    // is a replacement effect. The "When ~ is turned face up" form is a trigger
+    // and stays out of this path, so the lead is required to be "As".
+    if lower_starts_with(lower, "as ") && scan_contains(lower, "is turned face up") {
+        return true;
+    }
+
     is_replacement_compound_pattern(lower)
 }
 

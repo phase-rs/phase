@@ -314,10 +314,14 @@ function buildInferredTargetPrompt({
   const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
   const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
+  // CR 601.2d + CR 603.3d: Both spell target selection (`TargetSelection`) and
+  // triggered target selection (`TriggerTargetSelection`) can carry multiple
+  // slots — e.g. Inferno Titan's "divided as you choose among one, two, or three
+  // targets" surfaces three slots. The prompt must reflect that so the controller
+  // knows additional targets remain ("target 2 of 3"), instead of always reading
+  // "one target" and misleading the player into stopping early.
   let prompt: string;
-  if (waitingFor.type === "TriggerTargetSelection") {
-    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
-  } else if (targetSlots.length <= 1) {
+  if (targetSlots.length <= 1) {
     prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
   } else {
     prompt = t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });

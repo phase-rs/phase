@@ -16554,6 +16554,109 @@ mod tests {
     }
 
     #[test]
+    fn etb_token_copier_exile_anaphor_binds_created_token() {
+        // CR 603.7c + CR 608.2c: in an ETB-triggered token-copier, the trigger
+        // sets the effect subject to the *entering* creature, so the bare-"it"
+        // pronoun in "Exile it at the beginning of the next end step" lowers to
+        // `TriggeringSource`. But the antecedent is the newly created TOKEN, so
+        // the delayed-exile must bind `LastCreated`. The `CopyTokenOf` copy
+        // source stays `TriggeringSource` (the token IS a copy of the entering
+        // creature — locked by `necroduality_copies_entering_zombie_not_source`).
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        fn copy_source(effs: &[&Effect]) -> Option<TargetFilter> {
+            effs.iter().find_map(|e| match e {
+                Effect::CopyTokenOf { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+        }
+        fn exile_target(effs: &[&Effect]) -> Option<TargetFilter> {
+            effs.iter().find_map(|e| match e {
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target,
+                    ..
+                } => Some(target.clone()),
+                _ => None,
+            })
+        }
+
+        for (name, text) in [
+            (
+                "Flameshadow Conjuring",
+                "Whenever a nontoken creature you control enters, you may pay {R}. If you do, create a token that's a copy of that creature. That token gains haste. Exile it at the beginning of the next end step.",
+            ),
+            (
+                "Inalla, Archmage Ritualist",
+                "Whenever another nontoken Wizard you control enters, you may pay {1}. If you do, create a token that's a copy of that Wizard. The token gains haste. Exile it at the beginning of the next end step.",
+            ),
+        ] {
+            let def = parse_trigger_line(text, name);
+            let exec = def.execute.as_ref().expect("execute must be Some");
+            let mut effs = Vec::new();
+            collect(exec, &mut effs);
+            assert_eq!(
+                copy_source(&effs),
+                Some(TargetFilter::TriggeringSource),
+                "{name}: CopyTokenOf source must stay TriggeringSource (copy the entering creature)"
+            );
+            assert_eq!(
+                exile_target(&effs),
+                Some(TargetFilter::LastCreated),
+                "{name}: delayed exile must bind the created token (LastCreated), not the entering creature"
+            );
+        }
+    }
+
+    #[test]
+    fn non_token_enters_exile_it_stays_triggering_source() {
+        // No-regression: a non-token ETB trigger "exile it" has NO token creator
+        // in the chain, so the populate-anaphor repair pass is never entered and
+        // "it" correctly stays `TriggeringSource` (the entering creature).
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, exile it at the beginning of the next end step.",
+            "Test Nontoken Exiler",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        fn find_exile(def: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                if let Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target,
+                    ..
+                } = &*inner.effect
+                {
+                    return Some(target.clone());
+                }
+            }
+            if let Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } = &*def.effect
+            {
+                return Some(target.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_exile)
+        }
+        assert_eq!(
+            find_exile(exec),
+            Some(TargetFilter::TriggeringSource),
+            "non-token 'exile it' must stay TriggeringSource (no token creator → pass not entered)"
+        );
+    }
+
+    #[test]
     fn flicker_enters_trigger_keeps_chosen_target_anaphor() {
         // CR 608.2c: "When ~ enters, you may exile another target permanent you
         // control, then return that card …" — "that card" refers to the CHOSEN

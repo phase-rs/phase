@@ -72,8 +72,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   // those two derivations disagreeing after an elimination. The
   // `gameState != null` guard preserves the original null-state default
   // (treat as 1v1) so the pre-game placeholder renders the pill, not an
-  // empty rail.
-  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
+  // empty rail. When only one opponent remains in a multi-seat game
+  // (Commander pod → last rival), collapse back to the single pill so
+  // eliminated tabs don't keep stealing focus/layout (#1324).
+  const isMultiplayer =
+    gameState != null && !isOneOnOne(gameState) && liveOpponents.length > 1;
 
   // The `OpponentTab` row renders with a default-focused opponent even when
   // `focusedOpponent` is null (it falls back to the first live opponent).
@@ -237,7 +240,8 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
 
-  const primaryOpponentId = allOpponents[0] ?? (playerId === 0 ? 1 : 0);
+  const primaryOpponentId =
+    liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
   const primaryOpponentAvatarUrl = useMultiplayerStore(
     (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
   );

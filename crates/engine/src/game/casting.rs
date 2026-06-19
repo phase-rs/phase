@@ -24489,6 +24489,44 @@ mod tests {
     }
 
     #[test]
+    fn delve_records_exiled_with_casting_spell() {
+        use super::super::engine::apply_as_current;
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        let gy = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Old Spell".to_string(),
+            Zone::Graveyard,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        state.waiting_for = result;
+
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::TapForConvoke {
+                object_id: gy,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .expect("delving a graveyard card is legal");
+
+        assert!(
+            state
+                .cards_exiled_with_source_this_turn
+                .get(&obj_id)
+                .is_some_and(|ids| ids.contains(&gy)),
+            "delved card must be tracked as exiled with the casting spell"
+        );
+    }
+
+    #[test]
     fn delve_makes_spell_castable_via_graveyard() {
         // CR 702.66a (#780): {3}{R} is castable with only {R} of mana when the
         // graveyard supplies the {3} generic via delve.

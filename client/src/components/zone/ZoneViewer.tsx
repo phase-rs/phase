@@ -19,7 +19,12 @@ import {
   isLibraryCardRevealedToViewer,
 } from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
+import {
+  collectObjectActions,
+  isManaObjectAction,
+  playOrCastActionsForObject,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile" | "library";
@@ -85,6 +90,13 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   }, [objects, zoneIds, zone, gameState, viewerId, playerId]);
 
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
+
+  const canDelveFromGraveyard =
+    zone === "graveyard"
+    && playerId === viewerId
+    && canActForWaitingState
+    && waitingFor?.type === "ManaPayment"
+    && waitingFor.data.convoke_mode === "Delve";
 
   const currentLegalTargets = useMemo(() => {
     const targets = new Set<number>();
@@ -156,6 +168,11 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               const castActions = hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
+              const delveActions = canDelveFromGraveyard
+                ? collectObjectActions(legalActionsByObject, obj.id).filter((action) =>
+                    isManaObjectAction(action, obj),
+                  )
+                : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
               // CR 406.3 + CR 702.75a + CR 702.143e: a face-down card sitting
               // in the shared exile pile (Hideaway, Foretell) carries its real
@@ -177,6 +194,15 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
                     name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
                   })}
                   hiddenFromViewer={isHiddenFromViewer}
+                  canDelve={delveActions.length > 0}
+                  onDelve={() => {
+                    const auto = resolveSingleActionDispatch(delveActions, obj);
+                    if (auto) {
+                      dispatchAction(auto);
+                    } else {
+                      setPendingAbilityChoice({ objectId: obj.id, actions: delveActions });
+                    }
+                  }}
                   onTarget={() => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })}
                   onCast={() => handleCast(obj, castActions)}
                 />
@@ -193,18 +219,22 @@ function ZoneCard({
   obj,
   isValidTarget,
   canCast,
+  canDelve,
   castTitle,
   hiddenFromViewer,
   onTarget,
   onCast,
+  onDelve,
 }: {
   obj: GameObject;
   isValidTarget: boolean;
   canCast: boolean;
+  canDelve: boolean;
   castTitle: string;
   hiddenFromViewer: boolean;
   onTarget: () => void;
   onCast: () => void;
+  onDelve: () => void;
 }) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -224,14 +254,17 @@ function ZoneCard({
       return;
     }
     if (isValidTarget) { onTarget(); return; }
+    if (canDelve) { onDelve(); return; }
     if (canCast) onCast();
-  }, [obj.id, isValidTarget, canCast, onTarget, onCast, longPressFired]);
+  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast, longPressFired]);
 
   return (
     <div
       className={`group relative inline-flex shrink-0 cursor-pointer rounded-lg transition-transform ${
         isValidTarget
           ? CASTABLE_AFFORDANCE_ACTIVE
+          : canDelve
+            ? "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]"
           : canCast
             ? "hover:scale-[1.03]"
             : "hover:ring-1 hover:ring-white/20"

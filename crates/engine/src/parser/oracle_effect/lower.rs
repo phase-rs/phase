@@ -1463,7 +1463,21 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
         | Effect::ChangeZone { target, .. } => {
-            if matches!(target, TargetFilter::ParentTarget) {
+            // CR 603.7c + CR 608.2c: inside an ETB-triggered token-copier (e.g.
+            // Flameshadow Conjuring / Inalla: "create a token that's a copy of
+            // that creature. … Exile it at the beginning of the next end step"),
+            // the trigger sets the effect's subject to the *entering* creature,
+            // so the bare-"it" pronoun lowers to `TriggeringSource` rather than
+            // `ParentTarget`. In this gated post-token scope the antecedent of
+            // "it"/"that token" is the newly created token, so both fallback
+            // anaphors rewrite to `LastCreated`. (The `CopyTokenOf` copy source
+            // is structurally absent from these arms, so it stays
+            // `TriggeringSource` — the token is still a copy of the entering
+            // creature.)
+            if matches!(
+                target,
+                TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+            ) {
                 *target = TargetFilter::LastCreated;
             }
         }
