@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { isCommanderPreconDeck, useDecks, type DeckEntry } from "../../hooks/useDecks";
 import { preconExists, savePreconDeck } from "../../services/preconDecks";
 import { menuButtonClass } from "./buttonStyles";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 
 interface PreconDeckModalProps {
   open: boolean;
@@ -41,7 +41,7 @@ function coverageTone(pct: number): string {
 
 export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalProps) {
   const { t } = useTranslation("menu");
-  const decks = useDecks();
+  const { decks, status } = useDecks();
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);
   // Multi-select state. Keyed by deck id (filename stem) so it survives the
@@ -90,6 +90,30 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
       .sort(([, a], [, b]) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""))
       .slice(0, MAX_RESULTS);
   }, [decks, query, typeFilter]);
+
+  const typeOptions = useMemo(
+    () =>
+      Array.from(typeCounts.entries())
+        .filter(([, n]) => n > 0)
+        .sort((a, b) => a[0].localeCompare(b[0])),
+    [typeCounts],
+  );
+
+  const typeFilterItems = useMemo(
+    () => [
+      { value: ALL_TYPES, label: t("precon.allTypes", { count: totalMatches }) },
+      ...typeOptions.map(([type, n]) => ({ value: type, label: `${type} (${n})` })),
+    ],
+    [t, totalMatches, typeOptions],
+  );
+
+  const typeFilterLabel = useMemo(() => {
+    if (typeFilter === ALL_TYPES) {
+      return t("precon.allTypes", { count: totalMatches });
+    }
+    const match = typeOptions.find(([type]) => type === typeFilter);
+    return match ? `${match[0]} (${match[1]})` : typeFilter;
+  }, [typeFilter, totalMatches, typeOptions, t]);
 
   if (!open) return null;
 
@@ -163,10 +187,6 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     }
   };
 
-  const typeOptions = Array.from(typeCounts.entries())
-    .filter(([, n]) => n > 0)
-    .sort((a, b) => a[0].localeCompare(b[0]));
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
@@ -211,24 +231,26 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-white/30 focus:outline-none"
             autoFocus
           />
-          <SelectField
-            value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value)}
-            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
-          >
-            <option value={ALL_TYPES}>{t("precon.allTypes", { count: totalMatches })}</option>
-            {typeOptions.map(([type, n]) => (
-              <option key={type} value={type}>
-                {type} ({n})
-              </option>
-            ))}
-          </SelectField>
+          <MenuSelect
+            ariaLabel={t("precon.typeFilter")}
+            label={typeFilterLabel}
+            selectedValue={typeFilter}
+            items={typeFilterItems}
+            onSelect={setTypeFilter}
+            menuLayout="dropdown"
+            wrapperClassName="sm:w-52 shrink-0"
+            fitContainer
+            disabled={status === "loading" || status === "error"}
+            className="rounded-lg border-white/10 bg-black/30 py-2 focus-visible:ring-white/30"
+          />
         </div>
 
 
         <div className="flex-1 overflow-y-auto rounded-lg border border-white/5 bg-black/20">
-          {!decks ? (
+          {status === "loading" ? (
             <div className="p-8 text-center text-sm text-slate-500">{t("precon.loadingCatalog")}</div>
+          ) : status === "error" ? (
+            <div className="p-8 text-center text-sm text-rose-300/90">{t("precon.loadFailed")}</div>
           ) : filtered.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-500">{t("precon.noMatch")}</div>
           ) : (

@@ -157,7 +157,20 @@ pub(crate) fn parse_saga_chapters(
     let mut triggers = Vec::new();
     for (nums, effect_text) in &chapters {
         for &n in nums {
-            let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+            // CR 701.38 (Council's-dilemma / Will-of-the-council vote): a saga
+            // chapter may itself be a vote (Trial of a Time Lord IV: "Starting
+            // with you, each player votes for innocent or guilty. If guilty
+            // gets more votes, ..."). The vote dispatcher recognizes the entire
+            // opener + outcome clauses as one synthesized Vote effect; chain
+            // parsing would mis-split the opener and leave the outcome clauses
+            // Unimplemented. Try it first, mirroring the spell-line dispatch in
+            // `oracle.rs`.
+            let mut execute =
+                match crate::parser::oracle_vote::parse_vote_block(effect_text, AbilityKind::Spell)
+                {
+                    Some(vote_def) => vote_def,
+                    None => parse_effect_chain(effect_text, AbilityKind::Spell),
+                };
             // CR 611.2b + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that
             // persists indefinitely. The general-purpose `try_parse_gain_quoted_ability`

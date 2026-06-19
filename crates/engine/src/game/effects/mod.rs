@@ -113,9 +113,15 @@ pub mod gift_delivery;
 pub mod goad;
 pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
+pub mod heist;
 pub mod hideaway;
 pub mod incubate;
 pub mod intensify;
+// Tests for `heist` live in a sibling file (declared here, not in `heist.rs`,
+// so `heist.rs` stays implementation-only — no inline `#[cfg(test)]` token).
+#[cfg(test)]
+#[path = "heist_tests.rs"]
+mod heist_tests;
 #[cfg(test)]
 #[path = "intensify_tests.rs"]
 mod intensify_tests;
@@ -1958,7 +1964,9 @@ fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
         | QuantityExpr::DivideRounded { inner, .. } => {
             quantity_expr_references_demonstrative(inner)
         }
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_demonstrative),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_demonstrative)
+        }
         QuantityExpr::Difference { left, right } => {
             quantity_expr_references_demonstrative(left)
                 || quantity_expr_references_demonstrative(right)
@@ -2083,7 +2091,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         | QuantityExpr::Power {
             exponent: inner, ..
         } => collect_clause_minimum_refs(inner, out),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for e in exprs {
                 collect_clause_minimum_refs(e, out);
             }
@@ -2511,6 +2519,15 @@ pub fn resolve_effect(
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => time_travel::resolve(state, ability, events),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
+        // CR 101.3 + CR 608.2: An instruction with no game action. Emit
+        // `EffectResolved` so the chain continues, and do nothing else.
+        Effect::NoOp => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::NoOp,
+                source_id: ability.source_id,
+            });
+            Ok(())
+        }
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
@@ -2627,6 +2644,13 @@ pub fn resolve_effect(
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
+        // Heist (Arena digital-only): look step. Raises ChooseFromZoneChoice
+        // over random nonland cards from the targeted opponent's library and
+        // stashes a HeistExile continuation.
+        Effect::Heist { .. } => heist::resolve(state, ability, events),
+        // Heist finalizer continuation: exile the chosen card face down, link
+        // it, and grant a permanent any-color cast-from-exile permission.
+        Effect::HeistExile => heist::resolve_exile(state, ability, events),
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),
@@ -2895,7 +2919,9 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_tracked_set)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_references_tracked_set(exponent),
         QuantityExpr::Difference { left, right } => {

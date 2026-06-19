@@ -83,7 +83,7 @@ vi.mock("../../hooks/useDecks", async () => {
   );
   return {
     ...actual,
-    useDecks: () => null,
+    useDecks: () => ({ decks: null, status: "success" as const }),
   };
 });
 

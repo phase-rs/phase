@@ -1857,6 +1857,15 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
             }
             Some(total)
         }
+        // CR 107.1: the maximum of the computed operand values; empty → 0.
+        QuantityExpr::Max { exprs } => {
+            let mut best: Option<i32> = None;
+            for inner in exprs {
+                let value = resolve_event_replacement_quantity(inner, event_count)?;
+                best = Some(best.map_or(value, |b| b.max(value)));
+            }
+            Some(best.unwrap_or(0))
+        }
         // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice

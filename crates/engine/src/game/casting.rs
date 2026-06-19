@@ -11604,7 +11604,9 @@ fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_is_board_state_relative(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().all(quantity_expr_is_board_state_relative),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().all(quantity_expr_is_board_state_relative)
+        }
         _ => false,
     }
 }

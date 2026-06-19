@@ -851,7 +851,7 @@ fn quantity_expr_uses_filter_prop(
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_filter_prop(inner, pred),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|inner| quantity_expr_uses_filter_prop(inner, pred)),
         QuantityExpr::Fixed { .. } => false,

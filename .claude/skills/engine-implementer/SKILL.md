@@ -77,11 +77,11 @@ cargo fmt --all
 
 After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your diff's errors from concurrent-agent errors per CLAUDE.md's "Defer to other active agents" guidance.
 
-Confirm the executor's two pre-commit gates came back clean (items 4 and 5 of its report): the **discriminating-test gate** (at least one test drives the real pipeline and would fail if the fix were reverted — AST-shape-only coverage does not count) and the **CR-annotation diff gate** (every added/changed `CR <n>` resolves in `docs/MagicCompRules.txt`). If the executor shipped only shape tests, or any CR annotation came back `UNVERIFIED`, loop back to Step 3 with that as a fix constraint — do not commit shape-only coverage or an unverified CR number.
+Confirm the executor's two pre-commit gates came back clean (items 4 and 5 of its report): the **discriminating-test gate** (a complete production-path coverage map for every behavioral claim — changed seam/function, production entry point, test name, revert-failing assertion, and sibling/negative cases) and the **CR-annotation diff gate** (every added/changed `CR <n>` resolves in `docs/MagicCompRules.txt`). Do not accept a generic "discriminating-test gate: pass." If any changed seam is unmapped, the executor shipped only shape tests for runtime semantics or coverage-support claims, parser work accepts Oracle text while dropping semantics without preserving an honest `Unimplemented`/coverage gap, or any CR annotation came back `UNVERIFIED`, loop back to Step 3 with that as a fix constraint — do not commit.
 
 ### Step 5 — Review implementation until clean (unbounded loop)
 
-Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`).
+Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`). The reviewer MUST audit the executor's production-path coverage map and parser coverage-honesty statement; a clean review is invalid unless it explicitly confirms or rejects those artifacts.
 
 **Reviewer spawn inputs:** `git diff` of the in-flight branch against its base; the original task description; the reviewed plan.
 

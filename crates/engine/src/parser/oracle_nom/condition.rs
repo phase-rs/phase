@@ -1536,6 +1536,15 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
 fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
         tag("its "),
+        // CR 201.5: a possessive pronoun in a self-referential ability refers to
+        // the object that has the ability (the source). Legendary creatures with
+        // she/he pronouns use the gendered possessive instead of "its" (e.g. "if
+        // her power is 4 or greater" — Viv Vision; "if her power is 1 or less" —
+        // Stature). Mirrors the "it " source pronoun already accepted by
+        // `parse_subject_has_property`. ("their" is intentionally omitted — it is
+        // ambiguous between a singular-they object and a player possessive.)
+        tag("her "),
+        tag("his "),
         tag("enchanted creature's "),
         tag("equipped creature's "),
     ))
@@ -2046,6 +2055,34 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         {
             return Ok((rest, make_quantity_ge(QuantityRef::LifeAboveStarting, n)));
         }
+    }
+
+    // CR 119: "you have more life than an opponent" — the
+    // controller's life total strictly exceeds at least one opponent's. "an
+    // opponent" is existential, so the predicate is "your life > the minimum
+    // opponent life". This is the mirror of the existing "an opponent has more
+    // life than you" arm in `parse_opponent_comparison_conditions` (which uses
+    // the Max aggregate for its existential). Cards: Glorious Enforcer,
+    // Survival Cache, Feudkiller's Verdict.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more life than an opponent").parse(rest) {
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+            },
+        ));
     }
 
     // "you have N or more [you-only quantity-suffix]"
@@ -5533,6 +5570,30 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     // opponent permanents. Weathered Wayfarer, Land Tax.
     if let Ok((rest2, condition)) = parse_opponent_controls_more_than_you(rest) {
         return Ok((rest2, condition));
+    }
+
+    // CR 402.1 + CR 102.2: "an opponent has no cards in hand" — existential
+    // over opponents (at least one opponent's hand is empty), i.e. the minimum
+    // opponent hand size is 0. Mirrors the Min-aggregate existential the
+    // life-comparison arms use. Cards: Rekindled Flame, Avatar of Will, Guul
+    // Draz Specter. `HandSize` resolves per-player through the same scalar path
+    // as `LifeTotal` (game::quantity::resolve_per_player_scalar), so the
+    // Opponent{Min} scope is already evaluated at runtime.
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has no cards in hand").parse(rest) {
+        return Ok((
+            rest2,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
     }
 
     // "an opponent has more life than you"
@@ -9240,6 +9301,133 @@ mod tests {
         }
     }
 
+    /// Production-path coverage: Guul Draz Specter's real static line reaches
+    /// this condition through `parse_static_line`, and the `Opponent { Min }`
+    /// hand-size gate must survive the static classifier/bridge — not just the
+    /// raw `parse_inner_condition` helper.
+    #[test]
+    fn test_guul_draz_static_gate_survives_production_path() {
+        let def = crate::parser::oracle_static::parse_static_line(
+            "This creature gets +3/+3 as long as an opponent has no cards in hand.",
+        )
+        .expect("Guul Draz static line must parse");
+        match def.condition {
+            Some(StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::HandSize {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => {}
+            other => {
+                panic!("static gate must survive as OpponentHandSize(Min) EQ 0, got {other:?}")
+            }
+        }
+    }
+
+    /// Production-path coverage: Rekindled Flame's intervening-if reaches this
+    /// condition through `parse_trigger_lines`, and the gate must survive the
+    /// StaticCondition→TriggerCondition bridge.
+    #[test]
+    fn test_rekindled_flame_trigger_gate_survives_production_path() {
+        use crate::types::ability::TriggerCondition;
+        let defs = crate::parser::oracle_trigger::parse_trigger_lines(
+            "At the beginning of your upkeep, if an opponent has no cards in hand, \
+             you may return Rekindled Flame from your graveyard to your hand.",
+            "Rekindled Flame",
+        );
+        let def = defs.first().expect("Rekindled Flame trigger must parse");
+        match &def.condition {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::HandSize {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => {}
+            other => {
+                panic!("trigger gate must survive as OpponentHandSize(Min) EQ 0, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_an_opponent_has_no_cards_in_hand() {
+        // CR 402.1 + CR 102.2: existential "an opponent has no cards in hand" →
+        // min opponent hand size == 0. Real cards: Rekindled Flame, Avatar of
+        // Will, Guul Draz Specter. Before this fix the clause returned Err and
+        // the gating condition was silently dropped.
+        let (rest, c) = parse_inner_condition("an opponent has no cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::HandSize {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected OpponentHandSize(Min) EQ 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_have_more_life_than_an_opponent() {
+        // CR 119: mirror of "an opponent has more life than you".
+        // "you have more life than an opponent" → your life > the minimum
+        // opponent life (existential "an opponent"). Real cards: Glorious
+        // Enforcer, Survival Cache, Feudkiller's Verdict. Before this fix the
+        // clause was unmatched and the gating condition was silently dropped.
+        let (rest, c) = parse_inner_condition("you have more life than an opponent").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+            } => {}
+            other => panic!(
+                "expected LifeTotal{{Controller}} GT OpponentLifeTotal{{Min}}, got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     fn test_opponent_has_n_cards_in_graveyard() {
         // CR 404 + CR 603.4: Merfolk Windrobber / See Double intervening-if.
@@ -9505,6 +9693,45 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
             other => panic!("expected SelfPower LE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gendered_possessive_pronoun_power_condition() {
+        // CR 201.5: "her"/"his"/"their power is N" refers to the source creature,
+        // mirroring "its power is N". Real cards: Viv Vision ("if her power is 4
+        // or greater") and Stature, Size Shifter ("if her power is 1 or less").
+        // Before this fix the possessive-pronoun form was unmatched, so the gating
+        // condition was silently dropped and the ability fired unconditionally.
+        for (text, expected) in [
+            ("her power is 4 or greater", (Comparator::GE, 4)),
+            ("his power is 4 or greater", (Comparator::GE, 4)),
+            ("her toughness is 1 or less", (Comparator::LE, 1)),
+        ] {
+            let (rest, c) = parse_inner_condition(text)
+                .unwrap_or_else(|e| panic!("{text:?} must parse, got {e:?}"));
+            assert_eq!(rest, "", "{text:?} left remainder");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                } => {
+                    assert!(
+                        matches!(
+                            qty,
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source
+                            } | QuantityRef::Toughness {
+                                scope: crate::types::ability::ObjectScope::Source
+                            }
+                        ),
+                        "{text:?} wrong qty ref: {qty:?}"
+                    );
+                    assert_eq!((comparator, value), expected, "{text:?}");
+                }
+                other => panic!("{text:?} expected source P/T comparison, got {other:?}"),
+            }
         }
     }
 

@@ -1510,6 +1510,12 @@ pub(crate) fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr
             left: Box::new(rebind_source_object_quantity_expr_to_recipient(*left)),
             right: Box::new(rebind_source_object_quantity_expr_to_recipient(*right)),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_source_object_quantity_expr_to_recipient)
+                .collect(),
+        },
         other => other,
     }
 }
@@ -1603,7 +1609,8 @@ pub(crate) enum CombatTaxSubject {
 pub(crate) fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
     let lowered = input.trim_end_matches('.').to_lowercase();
-    let quantity = parse_for_each_clause(&lowered).ok_or_else(|| {
+    let (_, quantity) = super::oracle_nom::quantity::parse_for_each_clause_ref_complete(&lowered)
+        .map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
     })?;
     Ok(("", quantity))

@@ -56,11 +56,11 @@ mod prelude {
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType};
     pub(super) use crate::types::phase::Phase;
     pub(super) use crate::types::statics::{
-        ActivationExemption, AdditionalCostTaxAction, BlockExceptionKind, CastFreeOrigin,
-        CastFrequency, CastingProhibitionCondition, CombatAloneAction, CombatAloneRequirement,
-        CostModifyMode, CostPaymentProhibition, CrewAction, CrewContributionKind, ExileCardPool,
-        ExileCastCost, ExileCastTiming, HandSizeModification, ProhibitionScope, StaticMode,
-        TriggerCause,
+        ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
+        CastFreeOrigin, CastFrequency, CastingProhibitionCondition, CombatAloneAction,
+        CombatAloneRequirement, CostModifyMode, CostPaymentProhibition, CrewAction,
+        CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming, HandSizeModification,
+        ProhibitionScope, StaticMode, TriggerCause,
     };
     pub(super) use crate::types::zones::Zone;
 }
