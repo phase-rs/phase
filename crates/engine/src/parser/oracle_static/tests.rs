@@ -6294,6 +6294,15 @@ fn static_you_cant_gain_life() {
 }
 
 #[test]
+fn static_enchanted_player_cant_gain_life() {
+    // CR 119.7 + CR 303.4e: Grievous Wound — lifegain prevention scoped to
+    // the enchanted player, not all players.
+    let def = parse_static_line("Enchanted player can't gain life.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantGainLife);
+    assert_eq!(def.affected, Some(TargetFilter::AttachedTo));
+}
+
+#[test]
 fn static_players_cant_gain_life() {
     // CR 119.7: Lifegain prevention — all players
     let def = parse_static_line("Players can't gain life.").unwrap();

@@ -1364,6 +1364,23 @@ pub(crate) fn static_filter_matches(
                 // All players match
                 return true;
             }
+            // CR 303.4e + CR 702.5d: Player Auras scope player-targeted static
+            // checks (e.g. Grievous Wound's "enchanted player can't gain life")
+            // to the attached player only.
+            TargetFilter::AttachedTo => {
+                return state.objects.get(&source_id).is_some_and(|source| {
+                    match source.attached_to {
+                        Some(crate::game::game_object::AttachTarget::Player(pid)) => {
+                            pid == player_id
+                        }
+                        Some(crate::game::game_object::AttachTarget::Object(target_id)) => state
+                            .objects
+                            .get(&target_id)
+                            .is_some_and(|enchanted| enchanted.controller == player_id),
+                        None => false,
+                    }
+                });
+            }
             TargetFilter::Controller => return source_controller == Some(player_id),
             TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 if let Some(ctrl) = controller {

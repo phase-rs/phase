@@ -144,6 +144,12 @@ pub(crate) fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
         || nom_tag_tp(tp, "opponents").is_some()
     {
         TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    } else if nom_tag_tp(tp, "enchanted player").is_some()
+        || nom_primitives::scan_contains(tp.lower, "enchanted player")
+    {
+        // CR 303.4e + CR 702.5d: Player Auras (Curse cycle) scope restrictions
+        // to the player this Aura enchants.
+        TargetFilter::AttachedTo
     } else if nom_tag_tp(tp, "you ").is_some()
         || nom_primitives::scan_contains(tp.lower, "you can't")
     {
