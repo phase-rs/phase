@@ -8295,6 +8295,14 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    // "of the chosen type" variant: "whenever a/an [type] you control of the
+    // chosen type enters". Must precede the bare subtype variant because the
+    // subtype variant's `take_until(" you control enters")` would fail on this
+    // form (the sentinel is interrupted by "of the chosen type").
+    if let Some(result) = try_parse_controlled_chosen_type_enters(lower) {
+        return Some(result);
+    }
+
     // Non-"another" variant: "whenever a/an [subtype] you control enters".
     // Must follow the "another" variant so its stricter match wins first.
     if let Some(result) = try_parse_controlled_subtype_enters(lower) {
@@ -9310,6 +9318,88 @@ fn try_parse_self_or_another_controlled_subtype_enters(
     }
 
     None
+}
+
+/// Parse "whenever a/an/another [type] you control of the chosen type enters
+/// [the battlefield]". Covers Dawn-Blessed Pennant ("permanent you control of
+/// the chosen type"), Molten Echoes ("nontoken creature you control of the
+/// chosen type"), and similar — the `IsChosenCreatureType` filter prop restricts
+/// the trigger to permanents matching the source's chosen creature type.
+///
+/// Composed from nom combinators: prefix `alt` for article/another variants,
+/// `take_until` for the type word extraction, `tag` for the sentinel, and `opt`
+/// for the optional " the battlefield" suffix.
+fn try_parse_controlled_chosen_type_enters(
+    lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Detect "another" prefix to set the Another property.
+    let (after_prefix, another) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("whenever another ")),
+        value(true, tag("when another ")),
+        value(false, tag("whenever a ")),
+        value(false, tag("whenever an ")),
+        value(false, tag("when a ")),
+        value(false, tag("when an ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Extract the type word(s) before " you control of the chosen type enters".
+    let sentinel = " you control of the chosen type enters";
+    let (after_type, type_text) = take_until::<_, _, OracleError<'_>>(sentinel)
+        .parse(after_prefix)
+        .ok()?;
+
+    // Consume the sentinel.
+    let (after_sentinel, ()) = value((), tag::<_, _, OracleError<'_>>(sentinel))
+        .parse(after_type)
+        .ok()?;
+
+    // Accept either bare "enters" (sentinel already consumed it) or
+    // "enters the battlefield".
+    let (tail, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>(" the battlefield")),
+        value((), tag("")),
+    ))
+    .parse(after_sentinel)
+    .ok()?;
+
+    if !tail.is_empty() {
+        return None;
+    }
+
+    // Parse the type word (e.g. "permanent", "creature", "nontoken creature").
+    // Use parse_type_phrase which handles "nontoken" prefixes and type words.
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.is_empty() {
+        return None;
+    }
+
+    // Build the valid_card filter with IsChosenCreatureType + controller + optional Another.
+    let mut props = vec![FilterProp::IsChosenCreatureType];
+    if another {
+        props.push(FilterProp::Another);
+    }
+
+    // Extract the TypedFilter from the parsed filter and augment it.
+    let valid_card = match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = Some(ControllerRef::You);
+            typed.properties.extend(props);
+            TargetFilter::Typed(typed)
+        }
+        _ => {
+            // parse_type_phrase should always return Typed for a type word;
+            // if not, bail.
+            return None;
+        }
+    };
+
+    let mut def = make_base();
+    def.mode = TriggerMode::ChangesZone;
+    def.destination = Some(Zone::Battlefield);
+    def.valid_card = Some(valid_card);
+    Some((TriggerMode::ChangesZone, def))
 }
 
 /// Parse "whenever a/an [subtype] you control enters [the battlefield]" (no
@@ -31830,5 +31920,149 @@ mod slicer_control_handoff_tests {
             }
             other => panic!("expected Or condition, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod controlled_chosen_type_enters_tests {
+    use super::*;
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+
+    /// Dawn-Blessed Pennant: "Whenever a permanent you control of the chosen
+    /// type enters the battlefield, you gain 1 life." The trigger line is the
+    /// first clause before the comma.
+    #[test]
+    fn permanent_you_control_of_chosen_type_enters() {
+        let input = "whenever a permanent you control of the chosen type enters the battlefield";
+        let result = try_parse_controlled_chosen_type_enters(input);
+        assert!(result.is_some(), "should parse: {input}");
+        let (mode, def) = result.unwrap();
+        assert_eq!(mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(typed)) => {
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Permanent),
+                    "expected Permanent type filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(
+                    typed.properties.contains(&FilterProp::IsChosenCreatureType),
+                    "expected IsChosenCreatureType prop, got {:?}",
+                    typed.properties
+                );
+                assert!(
+                    !typed.properties.contains(&FilterProp::Another),
+                    "should not have Another prop"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// Bare "enters" without "the battlefield" suffix.
+    #[test]
+    fn permanent_you_control_of_chosen_type_enters_bare() {
+        let input = "whenever a permanent you control of the chosen type enters";
+        let result = try_parse_controlled_chosen_type_enters(input);
+        assert!(result.is_some(), "should parse bare enters: {input}");
+        let (mode, def) = result.unwrap();
+        assert_eq!(mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+    }
+
+    /// Production dispatch must reach the chosen-type parser before the bare
+    /// controlled-subtype parser.
+    #[test]
+    fn dispatch_routes_chosen_type_enters_before_bare_subtype_parser() {
+        let input = "whenever a permanent you control of the chosen type enters the battlefield";
+        let result = try_parse_special_trigger_pattern(input);
+        assert!(result.is_some(), "dispatch should parse: {input}");
+        let (mode, def) = result.unwrap();
+        assert_eq!(mode, TriggerMode::ChangesZone);
+        match &def.valid_card {
+            Some(TargetFilter::Typed(typed)) => {
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(
+                    typed.properties.contains(&FilterProp::IsChosenCreatureType),
+                    "expected dispatch to preserve IsChosenCreatureType prop, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// Molten Echoes: "Whenever a nontoken creature you control of the chosen
+    /// type enters the battlefield".
+    #[test]
+    fn nontoken_creature_you_control_of_chosen_type_enters() {
+        let input =
+            "whenever a nontoken creature you control of the chosen type enters the battlefield";
+        let result = try_parse_controlled_chosen_type_enters(input);
+        assert!(result.is_some(), "should parse: {input}");
+        let (_, def) = result.unwrap();
+        match &def.valid_card {
+            Some(TargetFilter::Typed(typed)) => {
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(
+                    typed.properties.contains(&FilterProp::IsChosenCreatureType),
+                    "expected IsChosenCreatureType prop"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken prop, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// "Another" variant: "Whenever another creature you control of the chosen
+    /// type enters the battlefield".
+    #[test]
+    fn another_creature_you_control_of_chosen_type_enters() {
+        let input =
+            "whenever another creature you control of the chosen type enters the battlefield";
+        let result = try_parse_controlled_chosen_type_enters(input);
+        assert!(result.is_some(), "should parse: {input}");
+        let (_, def) = result.unwrap();
+        match &def.valid_card {
+            Some(TargetFilter::Typed(typed)) => {
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter"
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(
+                    typed.properties.contains(&FilterProp::IsChosenCreatureType),
+                    "expected IsChosenCreatureType prop"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::Another),
+                    "expected Another prop, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// Reject trailing garbage after "enters the battlefield".
+    #[test]
+    fn rejects_trailing_garbage() {
+        let input =
+            "whenever a permanent you control of the chosen type enters the battlefield foo";
+        let result = try_parse_controlled_chosen_type_enters(input);
+        assert!(result.is_none(), "should reject trailing garbage");
     }
 }
