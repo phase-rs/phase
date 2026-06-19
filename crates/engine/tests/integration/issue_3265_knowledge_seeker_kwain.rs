@@ -62,7 +62,7 @@ fn issue_3265_knowledge_seeker_triggers_on_kwain_second_draw() {
 
     // Sanity: P1 was also offered Kwain's draw; with accept_optional both players draw.
     assert!(
-        runner.state().players[1].hand.len() >= 1,
+        !runner.state().players[1].hand.is_empty(),
         "P1 should have been offered and accepted Kwain's optional draw"
     );
 }
