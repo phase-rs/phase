@@ -950,6 +950,18 @@ pub(crate) fn push_grant_clause_modifications(
         return;
     }
 
+    // CR 702.6a: bare "equip {N}" in a keyword list ("has indestructible and
+    // equip {0}") is the equip activated ability — not an inert AddKeyword.
+    // Mirrors `classify_quoted_inner`'s pre-keyword equip dispatch.
+    if nom_tag_lower(&part_lower, &part_lower, "equip").is_some() {
+        if let Some(ability) = super::oracle::try_parse_equip(part_trimmed) {
+            modifications.push(ContinuousModification::GrantAbility {
+                definition: Box::new(ability),
+            });
+            return;
+        }
+    }
+
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
         return;

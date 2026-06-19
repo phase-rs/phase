@@ -3565,6 +3565,11 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
             | Some(AbilityCondition::PreviousEffectAmount { .. })
             | Some(AbilityCondition::AdditionalCostPaidInstead)
     ) || sub.target_choice_timing == TargetChoiceTiming::Resolution
+        // CR 608.2d + CR 601.2c: "You may" sub-instructions (Nahiri, the
+        // Lithomancer +2 attach) choose whether to perform the action at
+        // resolution; their targets are announced only if the controller
+        // accepts, not when the loyalty ability is activated.
+        || sub.optional
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {

@@ -699,6 +699,24 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                 for static_def in &spec.static_abilities {
                     obj.static_definitions.push(static_def.clone());
                 }
+                // CR 702.6a + CR 111.4: Token-granted activated abilities
+                // ("equip {0}" on Stoneforged Blade) must land on the object
+                // itself, not only as a layer-only static grant.
+                let mut granted = Vec::new();
+                for static_def in &spec.static_abilities {
+                    for modification in &static_def.modifications {
+                        if let crate::types::ability::ContinuousModification::GrantAbility {
+                            definition,
+                        } = modification
+                        {
+                            granted.push(definition.as_ref().clone());
+                        }
+                    }
+                }
+                if !granted.is_empty() {
+                    Arc::make_mut(&mut obj.abilities).extend(granted.iter().cloned());
+                    Arc::make_mut(&mut obj.base_abilities).extend(granted);
+                }
             }
         }
 

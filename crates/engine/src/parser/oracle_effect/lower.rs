@@ -885,6 +885,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
     rewire_cross_sentence_token_counter_attach(&mut result);
+    rewire_token_attach_sibling(&mut result);
+    fold_token_it_has_grants_into_token_statics(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
@@ -1349,6 +1351,93 @@ fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
 
     put_sub.sub_ability = Some(Box::new(attach_sub));
     def.sub_ability = Some(Box::new(put_sub));
+}
+
+/// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
+/// ("create a Kor Soldier token. You may attach an Equipment you control to
+/// it") — the bare-"it" host anaphor must target `LastCreated`, not
+/// `ParentTarget` (the token-creating effect has no parent target slot).
+fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(attach_sub) = def.sub_ability.as_mut() else {
+        return;
+    };
+    // Token → PutCounter → Attach is owned by `rewire_cross_sentence_token_counter_attach`.
+    if matches!(&*attach_sub.effect, Effect::PutCounter { .. }) {
+        return;
+    }
+    let Effect::Attach { target, .. } = attach_sub.effect.as_mut() else {
+        return;
+    };
+    if matches!(
+        target,
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+    ) {
+        *target = TargetFilter::LastCreated;
+    }
+}
+
+/// CR 111.3 + CR 702.6a: "Create a … token. It has …" permanent grants belong
+/// on the token's own `static_abilities` (Urza's Saga Construct pattern), not
+/// as a sibling `GenericEffect` transient. Folds `SequentialSibling`
+/// `GenericEffect { target: LastCreated | ParentTarget | SelfRef, duration:
+/// Permanent }` subs into the preceding `Effect::Token`.
+fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(grant_box) = def.sub_ability.take() else {
+        return;
+    };
+    let grant = *grant_box;
+    if grant.sub_link != SubAbilityLink::SequentialSibling {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    }
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+    } = grant.effect.as_ref()
+    else {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    };
+    let permanent = duration
+        .as_ref()
+        .is_none_or(|d| matches!(d, Duration::Permanent));
+    let token_scoped = target.as_ref().is_none_or(|t| {
+        matches!(
+            t,
+            TargetFilter::LastCreated | TargetFilter::ParentTarget | TargetFilter::SelfRef
+        )
+    });
+    if !permanent || !token_scoped {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    }
+
+    if let Effect::Token {
+        static_abilities: token_statics,
+        ..
+    } = &mut *def.effect
+    {
+        for mut static_def in static_abilities.clone() {
+            if matches!(
+                static_def.affected,
+                Some(
+                    TargetFilter::LastCreated | TargetFilter::ParentTarget | TargetFilter::SelfRef
+                )
+            ) {
+                static_def.affected = Some(TargetFilter::SelfRef);
+            }
+            token_statics.push(static_def);
+        }
+    }
+
+    def.sub_ability = grant.sub_ability;
 }
 
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
@@ -6609,6 +6698,7 @@ mod where_x_tests {
         );
     }
 
+    #[test]
     #[test]
     fn strip_trailing_duration_preserves_tokens_created_this_turn_phrase() {
         use super::strip_trailing_duration;
