@@ -79,7 +79,8 @@ pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option
     let (_, qty_text) = preceded(tag::<_, _, VE<'_>>(", where x is "), nom::combinator::rest)
         .parse(rest)
         .ok()?;
-    let qty = parse_quantity_ref(qty_text.trim())?;
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_quantity_ref_complete(qty_text.trim()).ok()?;
     Some((keyword, Some(qty)))
 }
 
@@ -947,8 +948,8 @@ pub(crate) fn push_grant_clause_modifications(
         .parse(part_lower.as_str())
         {
             if let Some(kind) = crate::types::keywords::DynamicKeywordKind::from_name(kw_name) {
-                if let Some(qty_ref) =
-                    crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
+                if let Ok((_, qty_ref)) =
+                    super::oracle_nom::quantity::parse_quantity_ref_complete(where_expr)
                 {
                     modifications.push(ContinuousModification::AddDynamicKeyword {
                         kind,

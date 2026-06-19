@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{map, opt, value};
+use nom::combinator::{all_consuming, map, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -30,7 +30,7 @@ use crate::types::ability::{
     PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
     ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
@@ -46,6 +46,16 @@ pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
     .parse(input)
+}
+
+pub fn parse_quantity_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
+    let input = input.trim().trim_end_matches('.');
+    all_consuming(parse_quantity_ref).parse(input)
+}
+
+pub fn parse_for_each_clause_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
+    let input = input.trim().trim_end_matches('.');
+    all_consuming(parse_for_each_clause_ref).parse(input)
 }
 
 fn parse_quantity_operand(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -2667,7 +2677,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         // permanent (Gavel of the Righteous: "for each counter on this Equipment").
         // Placed before `parse_for_each_controlled_type` so the bare "counter" token
         // does not commit to a type-phrase fallback.
-        parse_for_each_any_counters_on_source,
+        parse_for_each_counters_on_source,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -2679,22 +2689,32 @@ fn parse_for_each_clause_ref_with_they_controller(
     .parse(input)
 }
 
-/// CR 122.1: Parse "counter(s) on [self-ref]" in a "for each" context —
-/// any counter type, source-scoped. Covers the untyped form found in cards
-/// like Gavel of the Righteous ("gets +1/+1 for each counter on this
-/// Equipment"). The typed form ("[type] counter on ~") is already handled
-/// in the legacy `parse_for_each_clause_with_they_controller` path.
-fn parse_for_each_any_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("counters"), tag("counter"))).parse(input)?;
+/// CR 122.1: Parse "[counter-type] counter(s) on [self-ref]" and
+/// "counter(s) on [self-ref]" in a "for each" context. Covers both typed
+/// source-scoped costs like Tornado ("for each velocity counter on this
+/// enchantment") and untyped source-scoped pumps like Gavel of the Righteous
+/// ("for each counter on this Equipment").
+fn parse_for_each_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = alt((
+        parse_typed_counter_type_for_each_source,
+        value(None, parse_generic_counter_match),
+    ))
+    .parse(input)?;
     let (rest, _) = tag(" on ").parse(rest)?;
     let (rest, _) = parse_source_self_ref(rest)?;
     Ok((
         rest,
         QuantityRef::CountersOn {
             scope: ObjectScope::Source,
-            counter_type: None,
+            counter_type,
         },
     ))
+}
+
+fn parse_typed_counter_type_for_each_source(input: &str) -> OracleResult<'_, Option<CounterType>> {
+    let (rest, counter_type) = parse_counter_type_typed(input)?;
+    let (rest, _) = parse_counter_word(rest)?;
+    Ok((rest, Some(counter_type)))
 }
 
 /// CR 122.1: Match a source self-reference phrase: "~", "it", or any shared
@@ -4879,6 +4899,19 @@ mod tests {
             parse_for_each_clause_ref("kind of counter among creatures you control").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn parse_for_each_typed_counter_on_source() {
+        let (rest, q) = parse_for_each_clause_ref("velocity counter on this enchantment").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(_),
+            }
+        ));
     }
 
     #[test]
