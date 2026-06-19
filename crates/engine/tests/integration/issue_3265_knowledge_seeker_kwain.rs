@@ -5,7 +5,7 @@
 //!
 //! https://github.com/phase-rs/phase/issues/3265
 
-use engine::game::scenario::{GameScenario, GameRunner, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::phase::Phase;
 
