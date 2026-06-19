@@ -318,7 +318,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "traitor's roar",
     "vein drinker",
     "venom blast",
-    "vivien's invocation",
     "vraska's stoneglare",
     "willow geist",
     "wolf strike",
@@ -395,7 +394,6 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "mirkwood elk",
     "narset of the ancient way",
     "niambi, esteemed speaker",
-    "nightmares and daydreams",
     "orchard warden",
     "orim's thunder",
     "overwhelming intellect",
@@ -542,18 +540,20 @@ fn anaphoric_scope_set_is_frozen() {
     // runtime resolves it to the boosted creature, targets[0]) — adding Burrog
     // Barrage and Wolf Strike (+2), while Osseous Sticktwister's "this creature
     // deals damage equal to its power" self-source clause correctly resolves to
-    // Source, not Anaphoric (-1) — taking the count to 172.
+    // Source, not Anaphoric (-1) — taking the count to 172. The nom quantity
+    // call-site migration resolves Vivien's Invocation's "its mana value" out
+    // of the retained anaphoric set, taking the count to 171.
     assert_eq!(
         observed.len(),
-        172,
-        "Expected exactly 172 cards retaining ObjectScope::Anaphoric (pronoun \
+        171,
+        "Expected exactly 171 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        172,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 172 cards."
+        171,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 171 cards."
     );
 }
 
@@ -597,18 +597,20 @@ fn demonstrative_scope_set_is_frozen() {
     // now parses Nightmares and Daydreams' "Until your next turn, whenever you
     // cast an instant or sorcery spell, target player mills cards equal to that
     // spell's mana value." — surfacing its "that spell's mana value" bare
-    // demonstrative (+1) and taking the count to 115.
+    // demonstrative (+1) and taking the count to 115. The nom quantity
+    // call-site migration resolves Nightmares and Daydreams out of the retained
+    // demonstrative set, taking the count to 114.
     assert_eq!(
         observed.len(),
-        115,
-        "Expected exactly 115 cards retaining ObjectScope::Demonstrative. Count \
+        114,
+        "Expected exactly 114 cards retaining ObjectScope::Demonstrative. Count \
          moved to {}.",
         observed.len()
     );
     assert_eq!(
         DEMONSTRATIVE_SCOPE_CARDS.len(),
-        115,
-        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 115 cards."
+        114,
+        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 114 cards."
     );
 }
 

@@ -8023,7 +8023,9 @@ fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<Par
         let qty_text = qty_text.trim().trim_end_matches('.');
         let amount = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             .or_else(|| {
-                crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
+                nom_quantity::parse_quantity_ref_complete(qty_text)
+                    .ok()
+                    .map(|(_, qty)| qty)
                     .map(|qty| QuantityExpr::Ref { qty })
             })?;
         return Some(parsed_clause(Effect::GainEnergy { amount }));
@@ -9311,6 +9313,9 @@ fn try_parse_verb_and_target<'a>(
             parsed_target
         };
         let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
+        if unless_pay.is_none() && scan_contains_phrase(rest_lower, "unless") {
+            return None;
+        }
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
@@ -9346,6 +9351,9 @@ fn try_parse_verb_and_target<'a>(
         };
         // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
         let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
+        if unless_pay.is_none() && scan_contains_phrase(rest_lower, "unless") {
+            return None;
+        }
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
@@ -20175,6 +20183,12 @@ fn parse_unless_mana_or_energy_payment(cost_str: &str) -> Option<AbilityCost> {
         if let Some(quantity) = parse_where_x_is(after_cost) {
             return Some(AbilityCost::ManaDynamic { quantity });
         }
+        if tag::<_, _, OracleError<'_>>("where x is ")
+            .parse(after_cost.trim().trim_start_matches(',').trim())
+            .is_ok()
+        {
+            return None;
+        }
         // CR 107.3a + CR 118.12: bare {X} unless-cost references the announced X
         // of the spell carrying this counter.
         return Some(AbilityCost::ManaDynamic {
@@ -20481,7 +20495,7 @@ pub(crate) fn parse_dynamic_energy_unless_cost(input: &str) -> Option<QuantityEx
         .parse(input.trim_start())
         .ok()?;
     let qty_text = rest.trim().trim_end_matches('.');
-    let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text)?;
+    let (_, qty) = nom_quantity::parse_quantity_ref_complete(qty_text).ok()?;
     Some(QuantityExpr::Ref { qty })
 }
 
@@ -20612,24 +20626,8 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
         .parse(trimmed)
         .ok()?;
     let qty_text = rest.trim_end_matches('.').trim();
-    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-        return Some(QuantityExpr::Ref { qty });
-    }
-    if scan_contains_phrase(rest, "power") {
-        Some(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-        })
-    } else if scan_contains_phrase(rest, "toughness") {
-        Some(QuantityExpr::Ref {
-            qty: QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-        })
-    } else {
-        None
-    }
+    let (_, qty) = nom_quantity::parse_quantity_ref_complete(qty_text).ok()?;
+    Some(QuantityExpr::Ref { qty })
 }
 
 /// CR 608.2c: Parse the destination of a trailing "[and] the rest into <zone>"
@@ -21982,6 +21980,17 @@ mod tests {
     }
 
     #[test]
+    fn counter_suffix_body_dynamic_count_rejects_partial_quantity_tail() {
+        assert!(
+            parse_counter_suffix_body_combinator(
+                "a number of time counters on it equal to its mana value plus one",
+            )
+            .is_err(),
+            "partial quantity tail must not parse as bare ObjectManaValue"
+        );
+    }
+
+    #[test]
     fn dynamic_energy_unless_cost_parses_its_mana_value() {
         // CR 107.14 + CR 202.3: "an amount of {e} equal to its mana value" →
         // a `Recipient`-scoped object-mana-value reference.
@@ -21993,6 +22002,14 @@ mod tests {
                     scope: ObjectScope::Recipient,
                 },
             }),
+        );
+    }
+
+    #[test]
+    fn dynamic_energy_unless_cost_rejects_partial_quantity_tail() {
+        assert_eq!(
+            parse_dynamic_energy_unless_cost("an amount of {e} equal to its mana value plus one"),
+            None
         );
     }
 
@@ -25483,6 +25500,47 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_x_where_x_is_source_stat() {
+        for (text, expected) in [
+            (
+                "Counter target spell unless its controller pays {X}, where X is its power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            ),
+            (
+                "Counter target spell unless its controller pays {X}, where X is its toughness",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let unless_pay = def.unless_pay.expect("should attach unless_pay");
+            assert_eq!(
+                unless_pay.cost,
+                AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Ref { qty: expected },
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_x_where_x_partial_tail_stays_unimplemented() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {X}, where X is its power plus one",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "malformed where-X suffix must not silently parse as bare X, got {:?}",
+            def.effect
+        );
+        assert!(def.unless_pay.is_none());
     }
 
     /// CR 107.3a + CR 118.12: bare {X} unless-cost on a counter references the
@@ -43534,6 +43592,36 @@ mod tests {
                 }
             ),
             "expected dynamic GainEnergy triggering-spell spent-mana ref, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_equal_to_its_mana_value() {
+        let e = parse_effect("you get an amount of {e} equal to its mana value");
+        assert_eq!(
+            e,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_equal_to_dynamic_quantity_rejects_partial_tail() {
+        let e = parse_effect(
+            "you get an amount of {e} equal to the number of cards in your hand and draw a card",
+        );
+        assert!(
+            !matches!(e, Effect::GainEnergy { .. }),
+            "partial quantity tail must not silently parse as GainEnergy, got {e:?}"
+        );
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "partial quantity tail should stay visible as Unimplemented, got {e:?}"
         );
     }
 

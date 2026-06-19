@@ -6139,8 +6139,16 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     // "number of <type>" as the counter-type token. The dynamic arm gates on the
     // longer, more specific `tag("a number of ")`. A future `alt()` refactor
     // MUST keep dynamic before fixed for the same reason.
-    if let Ok((rest, body)) = parse_dynamic_counter_suffix_body(input) {
-        return Ok((rest, body));
+    match parse_dynamic_counter_suffix_body(input) {
+        Ok((rest, body)) => return Ok((rest, body)),
+        Err(err) => {
+            if tag::<_, _, OracleError<'_>>("a number of ")
+                .parse(input)
+                .is_ok()
+            {
+                return Err(err);
+            }
+        }
     }
 
     // Count: digits, English word, or article ("a"/"an").
@@ -6226,10 +6234,7 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
     let (rest, _) = tag(" on it equal to ").parse(rest)?;
     // Quantity: delegate to the shared quantity-ref combinator. Consume the
     // full clause (including any trailing period) so callers see it consumed.
-    let qty_text = rest.trim_end_matches('.').trim_end();
-    let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text).ok_or(
-        nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Verify)),
-    )?;
+    let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
     Ok(("", (counter_type, QuantityExpr::Ref { qty })))
 }
 

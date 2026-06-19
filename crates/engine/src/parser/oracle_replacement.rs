@@ -19,6 +19,7 @@ use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::{parse_attached_subject_target_filter, parse_inner_condition};
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::parse_type_phrase;
@@ -2501,6 +2502,8 @@ fn parse_enters_with_counters(
     }
     if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
         count_expr = qty;
+    } else if nom_primitives::split_once_on(work_text, ", where x is ").is_ok() {
+        return None;
     }
     // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
     // overrides above refers to the X paid on the *entering* object's cost, not
@@ -2657,7 +2660,7 @@ fn has_enters_tapped_phrase(text: &str) -> bool {
 fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
     let (_, (_, qty_text)) = nom_primitives::split_once_on(text, ", where x is ").ok()?;
     let trimmed = qty_text.trim().trim_end_matches('.');
-    if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+    if let Ok((_, qty_ref)) = nom_quantity::parse_quantity_ref_complete(trimmed) {
         return Some(QuantityExpr::Ref { qty: qty_ref });
     }
     if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
@@ -9665,6 +9668,51 @@ mod tests {
                     ),
                     "count should use LifeLostThisTurn, got {count:?}"
                 );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enters_with_x_counters_where_x_partial_quantity_tail_stays_unimplemented() {
+        assert!(
+            parse_replacement_line(
+                "This creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn and draw a card.",
+                "Test Creature",
+            )
+            .is_none(),
+            "malformed where-X suffix must not silently parse as CostXPaid"
+        );
+    }
+
+    #[test]
+    fn enters_with_x_counters_where_x_keeps_supported_arithmetic_quantity() {
+        let def = parse_replacement_line(
+            "This creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn plus one.",
+            "Test Creature",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter { count, .. } => {
+                assert!(
+                    matches!(count, QuantityExpr::Offset { .. }),
+                    "supported arithmetic where-X suffix should parse as Offset, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enters_with_fixed_counters_remains_unchanged() {
+        let def = parse_replacement_line(
+            "This creature enters with three +1/+1 counters on it.",
+            "Test Creature",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter { count, .. } => {
+                assert_eq!(count, &QuantityExpr::Fixed { value: 3 });
             }
             other => panic!("Expected PutCounter, got {other:?}"),
         }
