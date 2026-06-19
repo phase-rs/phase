@@ -109,6 +109,7 @@ const CLUSTER_SCHEMA = {
         properties: {
           mechanic: { type: 'string', description: 'the shared missing primitive, e.g. "Suspend"' },
           cards: { type: 'array', items: { type: 'string' }, description: 'cards unlocked by this mechanic' },
+          heterogeneous: { type: 'boolean', description: 'true if these cards share only a card-TYPE (e.g. several Sagas, or several "companion" creatures) with NO single reusable mechanic — each card has a DIFFERENT effect. Such a cluster is built as per-card dispatch onto EXISTING handlers in one PR, not one new primitive. Omit/false for a true shared-mechanic cluster.' },
           note: { type: 'string' },
         },
       },
@@ -277,8 +278,16 @@ function clusterPrompt(unsupported) {
     `- mechanicClusters: cards that share the SAME missing reusable mechanic ` +
     `(2+ cards, or a single card whose gap is clearly a reusable mechanic worth a ` +
     `dedicated PR). One entry per mechanic with all its cards.\n` +
+    `  HETEROGENEOUS TYPE-CLUSTERS: if 2+ cards share only a card-TYPE (e.g. several ` +
+    `Sagas, or several "companion" legendary creatures) but each has a DIFFERENT ` +
+    `effect — i.e. there is NO single reusable mechanic — still emit them as ONE ` +
+    `mechanicCluster with heterogeneous:true and a mechanic label like ` +
+    `"Saga chapter bodies". One PR built as per-card dispatch onto EXISTING handlers ` +
+    `is more efficient than N one-off PRs and the class-level planner would otherwise ` +
+    `fail hunting for a unifying variant that does not exist. Set heterogeneous:false ` +
+    `(or omit) for a true shared-mechanic cluster.\n` +
     `- oneOffs: unsupported cards whose gap is card-specific (no reusable mechanic ` +
-    `shared with others) — these become one-card-per-PR.\n` +
+    `shared with others AND no sibling cards of the same type to batch) — one-card-per-PR.\n` +
     `- skipped: before emitting a mechanic, check \`gh pr list --repo ` +
     `phase-rs/phase --state open --search "<mechanic>"\`; if a PR already builds ` +
     `that mechanic, move it to skipped with the reason (avoid duplicate work).\n` +
@@ -312,7 +321,21 @@ function clusterBranchPrompt(mechanic) {
   )
 }
 
-function clusterPlanPrompt(mechanic, cards) {
+function clusterPlanPrompt(mechanic, cards, heterogeneous) {
+  if (heterogeneous) {
+    return (
+      `Use the \`engine-planner\` skill to produce an architecturally idiomatic plan ` +
+      `for the "${mechanic}" cluster. These cards share only a card-TYPE, NOT a ` +
+      `reusable mechanic — each has a DIFFERENT effect. Do NOT hunt for one unifying ` +
+      `variant that does not exist. "Build for the class" here means: dispatch EACH ` +
+      `card's composed effect onto EXISTING handlers (ChangeZone, CreateToken, ` +
+      `AddCounter, Destroy, Investigate, Goad, etc.). Plan each card INDEPENDENTLY as ` +
+      `parser-dispatch-onto-existing-primitives; if a card genuinely needs a NEW ` +
+      `primitive, plan the rest and DEFER that one (note it). A review-clean plan ` +
+      `covers every card this way. Cards:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
+      `Return the full plan text.`
+    )
+  }
   return (
     `Use the \`engine-planner\` skill to produce an architecturally idiomatic plan ` +
     `to implement the "${mechanic}" mechanic in the Phase engine, FOR THE CLASS ` +
@@ -341,11 +364,14 @@ function replanPrompt(label, plan, findings) {
   )
 }
 
-function clusterImplementPrompt(mechanic, cards, plan) {
+function clusterImplementPrompt(mechanic, cards, plan, heterogeneous) {
+  const classLine = heterogeneous
+    ? `This is a HETEROGENEOUS TYPE-CLUSTER: the cards share only a card-type, not a mechanic. "Build for the class" means dispatch EACH card's effect onto EXISTING handlers (defer any card needing a genuinely NEW primitive, noting it in scopeExpansion) — do NOT force one new variant. `
+    : `build for the class not the card, `
   return (
-    `Implement the "${mechanic}" mechanic in the Phase engine FOR THE CLASS. ` +
-    `Follow CLAUDE.md and AGENTS.md without exception: build for the class not the ` +
-    `card, nom combinators on first pass, CR annotations verified against ` +
+    `Implement the "${mechanic}" ${heterogeneous ? 'cluster' : 'mechanic'} in the Phase engine. ` +
+    classLine +
+    `Follow CLAUDE.md and AGENTS.md without exception: nom combinators on first pass, CR annotations verified against ` +
     `docs/MagicCompRules.txt (cite the AUTHORIZING rule, not just the layering ` +
     `rule), idiomatic Rust, engine owns all logic, frontend display-only, reuse ` +
     `existing building blocks. The change must make ALL of these cards fully ` +
@@ -450,7 +476,7 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
 
 // ---- mechanic-cluster pipeline ----
 
-async function implementMechanicCluster(mechanic, cards) {
+async function implementMechanicCluster(mechanic, cards, heterogeneous) {
   const branch = await agent(clusterBranchPrompt(mechanic), {
     label: `branch:${mechanic}`,
     phase: 'Implement',
@@ -459,7 +485,7 @@ async function implementMechanicCluster(mechanic, cards) {
   const label = `the "${mechanic}" mechanic`
 
   // Step 1-2: /engine-planner -> /review-engine-plan, looped until a full round is clean.
-  let plan = await agent(clusterPlanPrompt(mechanic, cards), { label: `plan:${mechanic}`, phase: 'Implement' })
+  let plan = await agent(clusterPlanPrompt(mechanic, cards, heterogeneous), { label: `plan:${mechanic}`, phase: 'Implement' })
   let planReviewClean = false
   for (let r = 1; r <= MAX_PLAN_REVIEW_ROUNDS && !planReviewClean; r++) {
     const review = await agent(reviewPlanPrompt(label, plan), { label: `review-plan:${mechanic}#${r}`, phase: 'Implement', schema: REVIEW_SCHEMA })
@@ -468,7 +494,7 @@ async function implementMechanicCluster(mechanic, cards) {
   }
 
   // Step 3: engine-implementation-executor agent performs the surgical edits.
-  const impl = await agent(clusterImplementPrompt(mechanic, cards, plan), { label: `implement:${mechanic}`, phase: 'Implement', schema: IMPL_SCHEMA, agentType: 'engine-implementation-executor' })
+  const impl = await agent(clusterImplementPrompt(mechanic, cards, plan, heterogeneous), { label: `implement:${mechanic}`, phase: 'Implement', schema: IMPL_SCHEMA, agentType: 'engine-implementation-executor' })
 
   // Step 5: /review-impl, looped until clean; fixes applied by a fresh engine-implementation-executor.
   let implReviewClean = false
@@ -549,7 +575,7 @@ if (unsupported.length) {
   skipped = clusters.skipped || []
 }
 log(`mechanic-clusters=${mechanicClusters.length}  unsupported-one-offs=${oneOffs.length}  supported-fixes=${supportedFixes.length}  skipped=${skipped.length}`)
-mechanicClusters.forEach((c) => log(`  [mechanic] ${c.mechanic}: ${c.cards.length} card(s) — ${c.cards.join(', ')}`))
+mechanicClusters.forEach((c) => log(`  [mechanic${c.heterogeneous ? '·hetero' : ''}] ${c.mechanic}: ${c.cards.length} card(s) — ${c.cards.join(', ')}`))
 oneOffs.forEach((c) => log(`  [one-off] ${c}`))
 supportedFixes.forEach((f) => log(`  [fix] ${f.card} (${f.reason})`))
 skipped.forEach((s) => log(`  [skipped] ${s.mechanic} — ${s.reason}`))
@@ -557,7 +583,7 @@ skipped.forEach((s) => log(`  [skipped] ${s.mechanic} — ${s.reason}`))
 // Ordered work units: mechanic clusters first (foundational, unlock the most),
 // then unsupported one-offs, then supported per-card fixes.
 const units = [
-  ...mechanicClusters.map((c) => ({ kind: 'mechanic', mechanic: c.mechanic, cards: c.cards })),
+  ...mechanicClusters.map((c) => ({ kind: 'mechanic', mechanic: c.mechanic, cards: c.cards, heterogeneous: !!c.heterogeneous })),
   ...oneOffs.map((card) => ({ kind: 'card', card, reason: 'unsupported one-off' })),
   ...supportedFixes.map((f) => ({ kind: 'card', card: f.card, reason: f.reason })),
 ]
@@ -585,7 +611,7 @@ for (const unit of toRun) {
   try {
     await agent(resetPrompt(baseBranch), { label: `reset:${name}`, phase: 'Implement' })
     if (unit.kind === 'mechanic') {
-      const r = await implementMechanicCluster(unit.mechanic, unit.cards)
+      const r = await implementMechanicCluster(unit.mechanic, unit.cards, unit.heterogeneous)
       results.push(r)
       log(`${name}: ${r.status}${r.prUrl ? ' -> ' + r.prUrl : ''}`)
     } else {
