@@ -5083,6 +5083,66 @@ mod tests {
         );
     }
 
+    /// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus' ETB trigger uses
+    /// one comma-list continuous effect: affected creatures lose abilities,
+    /// gain a subtype, and get fixed base P/T indefinitely.
+    #[test]
+    fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
+        let r = parse(
+            "When this creature enters, each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1.",
+            "Curious Colossus",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1, "{r:#?}");
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("ETB trigger should have an execute body");
+        assert!(
+            !has_unimplemented(execute),
+            "ETB trigger body must not contain Unimplemented effects: {execute:#?}"
+        );
+        match &*execute.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, None);
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities: {mods:?}"
+                );
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == "Coward"
+                    )),
+                    "must contain AddSubtype(Coward): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected GenericEffect execute body, got {other:?}"),
+        }
+    }
+
     /// Issue #69 (Triad of Fates): "Exile target creature that has a fate counter
     /// on it, then return it to the battlefield…" — the exile target ChangeZone
     /// filter must carry the fate-counter restriction, and the "then return it"

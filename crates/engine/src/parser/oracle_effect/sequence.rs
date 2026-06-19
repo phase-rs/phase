@@ -1051,6 +1051,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return None;
         }
+        // CR 613.1d + CR 613.4b: comma-list continuous modifiers such as
+        // "loses all abilities, becomes a Coward ..., and has base power and
+        // toughness 1/1" keep the base-P/T conjunct attached to the same
+        // subject. It is a layer-7b modification, not an independent clause.
+        if starts_have_base_power_toughness(after_and) {
+            return None;
+        }
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
@@ -5445,6 +5452,23 @@ mod tests {
             chunks,
             vec![
                 "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn"
+            ]
+        );
+    }
+
+    /// CR 613.1d + CR 613.4b: Curious Colossus — a comma-separated chain with
+    /// additive type change and trailing "and has base power and toughness N/N"
+    /// must stay one continuous-modification clause so the target/affected
+    /// subject applies to every layer-4/6/7b modification.
+    #[test]
+    fn comma_and_does_not_split_type_change_and_has_base_pt() {
+        let chunks = clause_texts(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1"
             ]
         );
     }

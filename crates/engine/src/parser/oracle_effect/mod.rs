@@ -29616,6 +29616,61 @@ mod tests {
         }
     }
 
+    /// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus — a comma-list
+    /// continuous effect may combine lose-abilities (layer 6), additive type
+    /// change (layer 4), and fixed base P/T (layer 7b) with no printed duration.
+    /// The trailing "and has base power and toughness N/N" is a modifier
+    /// conjunct on the same subject, not a standalone imperative effect.
+    #[test]
+    fn comma_list_type_change_and_has_base_pt_parses_as_single_generic_effect() {
+        let def = parse_effect_chain(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "must parse as a single clause, not split into sub_ability: {:?}",
+            def.sub_ability
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, None);
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities: {mods:?}"
+                );
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == "Coward"
+                    )),
+                    "must contain AddSubtype(Coward): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected single GenericEffect, got {other:?}"),
+        }
+    }
+
     /// Regression: a gain-keyword clause with no combat-requirement conjunct
     /// still parses as one `GenericEffect` with the duration recovered.
     #[test]
