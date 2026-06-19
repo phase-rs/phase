@@ -592,7 +592,15 @@ fn redundancy_delta(
         // kind already present — adding counters is virtually always beneficial,
         // so there is no "does nothing" static-redundancy signal here.
         | Effect::ProliferateTarget { .. }
-        | Effect::ProcessRadCounters => None,
+        | Effect::ProcessRadCounters
+        // Heist (MTG Arena digital-only) draws random nonland cards from the
+        // opponent's library and exiles the controller's chosen one face down
+        // with a permanent any-color cast-from-exile permission. The randomness
+        // and the face-down / any-mana dimension make it state-dependent with
+        // no static redundancy signal; the AI scores Heist via the generic
+        // effect-rating path, not the redundancy-avoidance table.
+        | Effect::Heist { .. }
+        | Effect::HeistExile => None,
     }
 }
 

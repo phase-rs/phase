@@ -869,7 +869,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // event arms (ExchangeLifeWithStat). No-op here.
         | EffectKind::CastCopyOfCard
         | EffectKind::ExchangeLifeWithStat
-        | EffectKind::ExchangeLifeTotals => {}
+        | EffectKind::ExchangeLifeTotals
+        // Heist/HeistExile have no production EffectResolved-dispatching matcher.
+        | EffectKind::Heist
+        | EffectKind::HeistExile => {}
     }
 }
 

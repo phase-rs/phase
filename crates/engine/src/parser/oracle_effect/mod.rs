@@ -5017,6 +5017,43 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // Heist (MTG Arena digital-only keyword action — NOT in the Comp Rules):
+    // "heist target opponent's library". The targeted opponent becomes the
+    // spell/ability target; "'s library" is the consumed object phrase. The look
+    // count is fixed at 3 by the Arena reminder text.
+    //
+    // Full-consumption contract: the library phrase ("'s library") is REQUIRED
+    // (not optional) — Heist is specifically a library-only keyword action, and
+    // accepting "heist target opponent" with no library phrase would silently
+    // misparse a different clause as Heist. The trailing period and any further
+    // text are rejected via `all_consuming` so a malformed or extended clause
+    // ("heist target opponent's library. Then scry 1.", or
+    // "heist target opponent's graveyard") falls through to `Unimplemented`
+    // instead of being marked as plain Heist while losing semantics.
+    if let Some((target, _rest)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (rest, _) = tag("heist ").parse(i)?;
+        let (rest, _) = tag("target ").parse(rest)?;
+        let (rest, _) = tag("opponent").parse(rest)?;
+        let (rest, _) = tag("'s library").parse(rest)?;
+        // An optional trailing period is the only permitted suffix — it is the
+        // common sentence terminator in oracle text and not "extra content".
+        let (rest, _) = opt(tag(".")).parse(rest)?;
+        // Reject any remaining suffix: "heist target opponent's library. Then
+        // scry 1." fails here, dropping to `Unimplemented` so the rider is not
+        // lost. Whitespace is permitted between the library phrase and end so
+        // the terminator check is robust against trailing spaces.
+        let (rest, _) = all_consuming(opt(multispace0)).parse(rest)?;
+        Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        ))
+    }) {
+        return parsed_clause(Effect::Heist {
+            target,
+            look_count: 3,
+        });
+    }
+
     // CR 701.57a: "discover N" / "discover X" — effect variant.
     let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
     if let Some((limit, rest_orig)) =
@@ -49631,6 +49668,83 @@ mod tests {
                 }
             ),
             "expected dynamic Discover limit, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn heist_target_opponents_library_parses_to_heist_effect() {
+        let def = parse_effect_chain("heist target opponent's library.", AbilityKind::Spell);
+
+        assert!(
+            matches!(*def.effect, Effect::Heist { look_count: 3, .. }),
+            "expected Heist {{ look_count: 3 }}, got {:?}",
+            def.effect
+        );
+    }
+
+    /// Heist without the trailing period must still parse (oracle text varies
+    /// by clause boundary — sometimes the period is the sentence terminator,
+    /// sometimes the clause continues inline). The library phrase is the load-
+    /// bearing discriminator; the period is cosmetic.
+    #[test]
+    fn heist_target_opponents_library_parses_without_trailing_period() {
+        let def = parse_effect_chain("heist target opponent's library", AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::Heist { look_count: 3, .. }),
+            "Heist must parse without the trailing period; got {:?}",
+            def.effect
+        );
+    }
+
+    /// Negative test: the library phrase ("'s library") is REQUIRED. "heist
+    /// target opponent" without the library phrase must NOT parse as Heist —
+    /// it would silently mis-bucket a different effect as a library heist.
+    /// The maintainer flagged the previous `opt(tag("'s library"))` as the
+    /// root cause: a non-library target phrase ("heist target opponent's
+    /// graveyard") parsed as Heist with the suffix dropped.
+    #[test]
+    fn heist_without_library_phrase_does_not_parse_as_heist() {
+        let def = parse_effect_chain("heist target opponent", AbilityKind::Spell);
+        assert!(
+            !matches!(*def.effect, Effect::Heist { .. }),
+            "Heist must NOT parse without the required \"'s library\" phrase; got {:?}",
+            def.effect
+        );
+
+        // A wrong target phrase ("graveyard") must also NOT parse as Heist.
+        let def = parse_effect_chain("heist target opponent's graveyard", AbilityKind::Spell);
+        assert!(
+            !matches!(*def.effect, Effect::Heist { .. }),
+            "Heist must NOT parse for a non-library target phrase; got {:?}",
+            def.effect
+        );
+    }
+
+    /// Negative test: a Heist clause with trailing junk INSIDE THE SAME CLAUSE
+    /// (no period/comma/" and imperative" separator that the clause splitter
+    /// would break on) must NOT parse as plain Heist. The maintainer flagged
+    /// the previous suffix-dropping behavior as silently losing semantics: a
+    /// future rider glued onto the Heist clause without a clause boundary
+    /// would be marked supported as plain Heist while losing the rider. With
+    /// `all_consuming` enforcing full consumption, the trailing junk forces a
+    /// fall-through to `Unimplemented` so the rider is not lost.
+    /// (Cross-clause riders joined by ". " or " and <imperative>" are handled
+    /// correctly by the chain splitter and become a `sub_ability`, so they
+    /// are not at risk.)
+    #[test]
+    fn heist_with_inline_rider_does_not_parse_as_plain_heist() {
+        // " forever" is a single trailing word that the clause splitter does
+        // not break on — without full-consumption the previous parser silently
+        // dropped " forever" and returned plain Heist.
+        let def = parse_effect_chain(
+            "heist target opponent's library forever",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !matches!(*def.effect, Effect::Heist { .. }),
+            "a Heist clause with an inline rider must NOT parse as plain Heist \
+             (would lose the rider); got {:?}",
             def.effect
         );
     }

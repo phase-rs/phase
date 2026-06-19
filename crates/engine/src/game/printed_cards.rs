@@ -777,6 +777,9 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
 fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
     match effect {
         Effect::Intensify { .. } => {}
+        // Heist exiles a card from an opponent's library at random; it does not
+        // name a conjure card, so there is no static face to preload.
+        Effect::Heist { .. } | Effect::HeistExile => {}
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
             // registry. Duplicate-conjure copies a card already in play (its face

@@ -113,9 +113,15 @@ pub mod gift_delivery;
 pub mod goad;
 pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
+pub mod heist;
 pub mod hideaway;
 pub mod incubate;
 pub mod intensify;
+// Tests for `heist` live in a sibling file (declared here, not in `heist.rs`,
+// so `heist.rs` stays implementation-only — no inline `#[cfg(test)]` token).
+#[cfg(test)]
+#[path = "heist_tests.rs"]
+mod heist_tests;
 #[cfg(test)]
 #[path = "intensify_tests.rs"]
 mod intensify_tests;
@@ -2638,6 +2644,13 @@ pub fn resolve_effect(
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
+        // Heist (Arena digital-only): look step. Raises ChooseFromZoneChoice
+        // over random nonland cards from the targeted opponent's library and
+        // stashes a HeistExile continuation.
+        Effect::Heist { .. } => heist::resolve(state, ability, events),
+        // Heist finalizer continuation: exile the chosen card face down, link
+        // it, and grant a permanent any-color cast-from-exile permission.
+        Effect::HeistExile => heist::resolve_exile(state, ability, events),
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),

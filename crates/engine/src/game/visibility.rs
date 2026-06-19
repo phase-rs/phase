@@ -107,6 +107,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             HashSet::new()
         };
 
+    // Heist (Arena digital-only keyword action) and any future
+    // `ChooseFromZoneChoice` that operates over a hidden zone (library,
+    // opponent's hand) parks candidate object ids on the prompt. The loop
+    // below hides every library object by default; the prompt player is
+    // supposed to *look at* the candidates (Heist reminder: "Look at three
+    // random nonland cards"), so the underlying object identities must be
+    // visible to that player. Opponents and spectators keep seeing redacted
+    // placeholders — `can_view_private_for_player(player)` is the same gate
+    // the manifest/dig/private-look/search prompts use. The cards ARRAY is
+    // also redacted for non-prompt viewers at the bottom of this function
+    // (the `ChooseFromZoneChoice` redact block); the two protections
+    // compose: prompt player sees both the array and the object contents,
+    // everyone else sees neither.
+    let choose_from_zone_hidden_visible: HashSet<ObjectId> =
+        if let WaitingFor::ChooseFromZoneChoice {
+            player, ref cards, ..
+        } = filtered.waiting_for
+        {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
     // Sandbox debug exposure: a viewer who holds debug permission in a sandbox
     // game (CR is silent; this is an out-of-game capability) sees the names of
     // cards in their *own* library, so the debug "move card from library to
@@ -129,6 +156,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || dig_visible.contains(&obj_id)
             || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
+            // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
+            // `choose_from_zone_hidden_visible` above.
+            || choose_from_zone_hidden_visible.contains(&obj_id)
             // CR 701.20b: Revealed cards are visible to all players. For reveal-digs
             // ("reveal the top N"), dig cards are also in revealed_cards and must remain
             // public during DigChoice. For private digs ("look at"), revealed_cards won't
@@ -1710,6 +1740,86 @@ mod tests {
                 assert_eq!(cards, vec![ObjectId(0)])
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// Heist (and any `ChooseFromZoneChoice` over a hidden zone like a
+    /// library) must reveal the candidate card identities to the prompt
+    /// player — the look step's reminder text is "Look at three random
+    /// nonland cards", so without this the controller would be forced into
+    /// a blind pick. A regression in the library-hiding loop (e.g. dropping
+    /// the `choose_from_zone_hidden_visible` membership check) redacts the
+    /// underlying object even though the cards ARRAY is still visible, so
+    /// the UI/client reads "Hidden Card" for every candidate. This test
+    /// pins both layers: the prompt-player view sees the real card name,
+    /// and a non-prompt opponent still sees "Hidden Card" (proving the
+    /// reveal is prompt-player-scoped, not a global leak).
+    #[test]
+    fn choose_from_zone_choice_library_cards_visible_to_prompt_player_only() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // P0 will be the heisting controller; P1 owns the library heisted.
+        // Put a named nonland in P1's library and surface it via a
+        // ChooseFromZoneChoice whose prompt player is P0.
+        let card_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Heisted Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .library
+            .push_back(card_id);
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+            player: PlayerId(0),
+            cards: vec![card_id],
+            count: 1,
+            up_to: false,
+            constraint: None,
+            source_id: ObjectId(99),
+        };
+
+        // The prompt player must see the real card identity.
+        let p0_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            p0_view.objects[&card_id].name, "Heisted Bear",
+            "the prompt player must see the Heist candidate's real identity"
+        );
+        // The cards ARRAY is also intact for the prompt player (not redacted
+        // to ObjectId(0) placeholders).
+        match p0_view.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    vec![card_id],
+                    "the prompt player must see the real candidate ids"
+                );
+            }
+            other => panic!("expected ChooseFromZoneChoice for P0, got {other:?}"),
+        }
+
+        // A non-prompt opponent still sees a redacted identity — the reveal
+        // is prompt-player-scoped, not a global leak.
+        let p1_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(
+            p1_view.objects[&card_id].name, "Hidden Card",
+            "the non-prompt opponent must NOT see the Heist candidate identity"
+        );
+        match p1_view.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    vec![ObjectId(0)],
+                    "the non-prompt opponent must see redacted placeholder ids"
+                );
+            }
+            other => panic!("expected ChooseFromZoneChoice for P1, got {other:?}"),
         }
     }
 

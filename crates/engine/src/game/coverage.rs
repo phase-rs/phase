@@ -2601,6 +2601,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Discover { mana_value_limit } => {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
         }
+        // Heist (Arena digital-only): look step records the look count.
+        Effect::Heist { look_count, .. } => {
+            d.push(("look".into(), look_count.to_string()));
+        }
+        // Heist finalizer continuation — no displayable parameter.
+        Effect::HeistExile => {}
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
