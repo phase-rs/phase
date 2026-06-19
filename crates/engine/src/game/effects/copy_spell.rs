@@ -92,11 +92,11 @@ pub fn resolve(
     //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
     //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
     //     copy — the copy is placed on the stack, not cast.
-    //   - Update internal source_id references throughout the ability chain to
-    //     copy_id. A copy is a new object — every `SelfRef` in its chain
-    //     (including a nested `CopySpell` sub-ability, as in the Chain cycle)
-    //     must resolve to the copy, not the original spell, or a
-    //     second-generation copy would fail to find its source.
+    //   - Spell copies are new spell objects, so update internal source_id
+    //     references throughout the spell ability chain to copy_id. Ability
+    //     copies keep the original ability source (CR 707.10b), so their
+    //     `SelfRef` effects still refer to the permanent/source that produced
+    //     the copied ability.
     //   - Re-controller the resolved ability chain so opponent-controlled copies
     //     (Twincast, Gogo) resolve under the copying player.
     let copy_kind = {
@@ -113,19 +113,25 @@ pub fn resolve(
                 a.context.additional_cost_payment_count = 0;
                 a.context.kickers_paid.clear();
             }
+            StackEntryKind::Spell { ability: None, .. } => {}
             StackEntryKind::ActivatedAbility { ability, .. } => {
-                set_resolved_source_recursive(ability, copy_id);
+                preserve_ability_copy_source_recursive(ability);
             }
-            _ => {}
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                preserve_ability_copy_source_recursive(ability);
+            }
+            StackEntryKind::KeywordAction { .. } => {}
         }
         set_copied_kind_controller(&mut kind, copy_controller);
         kind
     };
 
-    // CR 707.10: The copy's source_id is its own id (not the original's).
+    // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
+    // have the same source as the original ability.
+    let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
     let copy_entry = StackEntry {
         id: copy_id,
-        source_id: copy_id,
+        source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
@@ -697,6 +703,19 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
+    let source_id = ability.source_id;
+    set_resolved_source_recursive(ability, source_id);
+}
+
+fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
+    match kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::KeywordAction { .. } => copy_id,
+        StackEntryKind::ActivatedAbility { source_id, .. }
+        | StackEntryKind::TriggeredAbility { source_id, .. } => *source_id,
+    }
+}
+
 /// CR 707.10: Spell copies are not cast, so strip cast-origin metadata from
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
@@ -714,8 +733,8 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef,
+        ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
+        TapStateChange, TargetFilter, TargetRef,
     };
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -1893,6 +1912,85 @@ mod tests {
                 .any(|event| matches!(event, GameEvent::StackPushed { .. })),
             "copying an activated ability must push a stack entry"
         );
+    }
+
+    #[test]
+    fn copied_activated_ability_keeps_original_source_for_self_ref_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let basalt = ObjectId(10);
+        let rings = ObjectId(20);
+        state.objects.insert(
+            basalt,
+            GameObject::new(
+                basalt,
+                CardId(10),
+                PlayerId(0),
+                "Basalt Monolith".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.objects.get_mut(&basalt).unwrap().tapped = true;
+
+        let untap_basalt = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![],
+            basalt,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(100),
+            source_id: basalt,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: basalt,
+                ability: untap_basalt,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: basalt,
+        });
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            rings,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_effect, &mut events).unwrap();
+
+        let copy_entry = state.stack.back().expect("copy entry");
+        assert_eq!(
+            copy_entry.source_id, basalt,
+            "CR 707.10b: copied activated abilities keep the original source"
+        );
+        assert_eq!(
+            copy_entry.ability().map(|ability| ability.source_id),
+            Some(basalt),
+            "SelfRef on the copied ability must still refer to Basalt Monolith"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert!(
+            !state.objects.get(&basalt).unwrap().tapped,
+            "the copied untap ability must untap Basalt Monolith"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == basalt)
+        ));
     }
 
     #[test]
