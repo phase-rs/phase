@@ -927,6 +927,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Tribute { .. }
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -2697,6 +2698,7 @@ mod tests {
             per_choice_effect: vec![Box::new(conjure_ability("vote", Zone::Hand))],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
+            tally_mode: crate::types::ability::VoteTally::PerVote,
         };
         walk_effect(&vote, &mut names);
 

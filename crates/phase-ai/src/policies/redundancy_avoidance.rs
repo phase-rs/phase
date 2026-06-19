@@ -396,6 +396,7 @@ fn redundancy_delta(
         | Effect::Investigate
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::EndTheTurn
         | Effect::EndCombatPhase

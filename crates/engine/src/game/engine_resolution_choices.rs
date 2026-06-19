@@ -1132,6 +1132,7 @@ pub(super) fn handle_resolution_choice(
                 controller,
                 source_id,
                 actor,
+                tally_mode,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -1173,6 +1174,7 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     actor,
+                    tally_mode,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
@@ -1192,6 +1194,7 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     actor,
+                    tally_mode,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
@@ -1214,6 +1217,7 @@ pub(super) fn handle_resolution_choice(
                     &per_choice_effect,
                     &new_tallies,
                     &new_ballots,
+                    tally_mode,
                     events,
                 );
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(

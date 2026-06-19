@@ -516,18 +516,34 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // in a later same-turn extra combat (CR 500.8) after the prepared copy was cast
     // and the creature unprepared (CR 722.3c) — rare, and not separately gated
     // because the engine has no per-combat delayed-trigger purge primitive.
-    let (before, after) = DELAYED_TRIGGER_WINDOWS.iter().fold(
-        None::<(TextPair, TextPair)>,
-        |best, window| match (best, tp.rsplit_around(window)) {
-            (Some((b, _)), Some((nb, na))) if nb.lower.len() > b.lower.len() => Some((nb, na)),
-            (None, Some((nb, na))) => Some((nb, na)),
-            (best, _) => best,
-        },
-    )?;
+    let window_split =
+        DELAYED_TRIGGER_WINDOWS
+            .iter()
+            .fold(None::<(TextPair, TextPair)>, |best, window| {
+                match (best, tp.rsplit_around(window)) {
+                    (Some((b, _)), Some((nb, na))) if nb.lower.len() > b.lower.len() => {
+                        Some((nb, na))
+                    }
+                    (None, Some((nb, na))) => Some((nb, na)),
+                    (best, _) => best,
+                }
+            });
 
-    // Condition is between "whenever " and " this turn"
+    // CR 603.7b + CR 603.7c: When no "this turn" / "this combat" infix window is
+    // present, the duration was supplied as a consumed PREFIX ("Until end of
+    // turn, whenever <trigger>, <effect>" — The Sea Devils III). The clause then
+    // reaches here as a bare "whenever <trigger>, <effect>" with the duration
+    // already applied to the surrounding clause. Split the trigger condition from
+    // the effect on the FIRST top-level comma — the comma that terminates the
+    // trigger clause.
+    let (before, after) = match window_split {
+        Some(split) => split,
+        None => tp.split_around(", ")?,
+    };
+
+    // Condition is between "whenever " and the split boundary.
     let condition_text = &before.lower[9..];
-    // Effect is after " this turn, "
+    // Effect is the remainder after the split boundary.
     let effect_text = after.original;
 
     // Parse the condition as a trigger using the trigger parser.
@@ -542,7 +558,17 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
         });
     trigger_def.execute = None; // Effect lives in DelayedTrigger.ability, not here
 
-    let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+    // CR 109.4 + CR 115.1 + CR 506.2 + CR 603.7c: The trigger condition may
+    // introduce a relative player ("...deals combat damage to a player ...")
+    // that the effect body's `"that player controls"` reference must bind to.
+    // Derive the same scope the in-line trigger body parser would (single
+    // authority `relative_player_scope_for_condition`) and thread it through the
+    // effect chain so `"target creature that player controls"` resolves to the
+    // triggering player, not the controller (The Sea Devils III). `condition_text`
+    // is already lowercase (`before.lower`).
+    inner_ctx.relative_player_scope =
+        crate::parser::oracle_trigger::relative_player_scope_for_condition(condition_text);
+    let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
@@ -6411,16 +6437,100 @@ fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), Orac
 }
 
 fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((
-        terminated(take_until(" card"), (tag(" card"), opt(tag(".")))),
-        terminated(take_until("."), tag(".")),
-        rest,
-    )))
+    // Each arm is individually `all_consuming` so that when the leading
+    // `take_until(" card")` arm leaves a remainder (the filter is a disjunctive
+    // list with MORE THAN ONE `" card"`, e.g. An Unearthly Child's "doctor card,
+    // a card with doctor's companion, or a vehicle card."), `alt` backtracks to
+    // the period-terminated arm that captures the whole phrase. Wrapping the
+    // *whole* alt in one `all_consuming` would NOT backtrack: `alt` commits to
+    // the first matching arm before `all_consuming` checks the remainder.
+    alt((
+        all_consuming(terminated(
+            take_until(" card"),
+            (tag(" card"), opt(tag("."))),
+        )),
+        all_consuming(terminated(take_until("."), tag("."))),
+        all_consuming(rest),
+    ))
     .parse(input)
 }
 
 fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
     all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+}
+
+/// Match a disjunction separator at the head of `input`: `", or "` / `", "` /
+/// `" or "` (longest first so `", or "` wins over `", "` and `" or "`).
+fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+}
+
+/// Split a comma-and-`or` disjunctive reveal-until filter phrase into its
+/// individual disjunct fragments.
+///
+/// A phrase such as `"doctor card, a card with doctor's companion, or a vehicle
+/// card"` is a disjunctive list of *distinct* filters that `parse_target` does
+/// not split on its own (it returns only the first disjunct and leaves the rest
+/// unconsumed). The separators are `", or "` / `", "` / `" or "`. We scan a nom
+/// separator combinator at each byte boundary so each fragment can be parsed by
+/// `parse_target` in isolation, then assembled into a [`TargetFilter::Or`].
+///
+/// Returns `None` when no disjunction separator is present (single filter).
+fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
+    let mut disjuncts = Vec::new();
+    let mut remaining = filter_text;
+    loop {
+        // Scan to the next separator (or end of input) via the nom combinator.
+        let mut split_at = None;
+        for (idx, _) in remaining.char_indices() {
+            if reveal_filter_separator(&remaining[idx..]).is_ok() {
+                split_at = Some(idx);
+                break;
+            }
+        }
+        match split_at {
+            Some(idx) => {
+                let frag = &remaining[..idx];
+                if frag.is_empty() {
+                    return None; // malformed: empty disjunct
+                }
+                disjuncts.push(frag);
+                let (after_sep, _) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                remaining = after_sep;
+            }
+            None => {
+                if !remaining.is_empty() {
+                    disjuncts.push(remaining);
+                }
+                break;
+            }
+        }
+    }
+    (disjuncts.len() >= 2).then_some(disjuncts)
+}
+
+/// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
+/// filter list. Strips the optional leading article and the optional trailing
+/// `" card"` head-noun suffix (each disjunct carries its own), then delegates
+/// to `parse_target`.
+fn build_reveal_until_disjunct_filter(fragment: &str) -> TargetFilter {
+    // Strip a leading article ("a "/"an "); the first disjunct in the active
+    // path already had its article consumed upstream, the rest carry their own.
+    let after_article = nom_primitives::parse_article(fragment)
+        .map(|(rest, ())| rest)
+        .unwrap_or(fragment);
+    // Strip a trailing " card" head-noun suffix when present, but NOT for a
+    // fragment whose noun IS "card" (e.g. "a card with doctor's companion"),
+    // which must reach parse_target intact.
+    fn strip_trailing_card(input: &str) -> OracleResult<'_, &str> {
+        terminated(take_until(" card"), (tag(" card"), eof)).parse(input)
+    }
+    let trimmed = match strip_trailing_card(after_article) {
+        Ok((_, head)) if !head.is_empty() => head,
+        _ => after_article,
+    };
+    let (parsed, _) = parse_target(trimmed);
+    parsed
 }
 
 /// Build a [`TargetFilter`] from the bare filter phrase extracted from a `RevealUntil`
@@ -6441,6 +6551,17 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     }
     if let Some(filter) = try_parse_chosen_kind_filter(filter_text) {
         return filter;
+    }
+    // CR 701.20a: disjunctive filter list ("X card, a Y, or a Z card", e.g. An
+    // Unearthly Child). parse_target only splits a 2-element shared-suffix shape
+    // ("a creature or land card"); a comma+or list of distinct filters must be
+    // split per-disjunct and assembled into an Or.
+    if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
+        let filters: Vec<TargetFilter> = disjuncts
+            .iter()
+            .map(|frag| build_reveal_until_disjunct_filter(frag.trim()))
+            .collect();
+        return TargetFilter::Or { filters };
     }
     let (parsed, _) = parse_target(filter_text);
     parsed
@@ -15576,6 +15697,31 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     if matches!(def.player_scope, Some(PlayerFilter::All)) {
         each_target_filter_mut(&mut def.effect, &mut rewrite_filter_controller_to_scoped);
     }
+    // CR 406.2 + CR 610.3: Under the `OwnersOfCardsExiledBySource` scope ("the
+    // owner of each card exiled with ~ puts that card on the bottom of their
+    // library", Trial of a Time Lord IV), the "that card" anaphor (parsed as the
+    // generic `ParentTarget` back-reference) binds to the source-linked exile
+    // pool. Rebind the bottom-of-library move's target to `ExiledBySource` so it
+    // moves the exiled cards, not the trigger source. Scoped narrowly to the
+    // PutAtLibraryPosition / ChangeZoneAll shapes this clause produces — NOT via
+    // the shared `each_target_filter_mut` walker, so unrelated rewrites that
+    // walk targets are unaffected.
+    if matches!(
+        def.player_scope,
+        Some(PlayerFilter::OwnersOfCardsExiledBySource)
+    ) {
+        let target_slot = match &mut *def.effect {
+            Effect::PutAtLibraryPosition { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+                Some(target)
+            }
+            _ => None,
+        };
+        if let Some(target) = target_slot {
+            if matches!(target, TargetFilter::ParentTarget) {
+                *target = TargetFilter::ExiledBySource;
+            }
+        }
+    }
     if let Some(condition) = def.condition.as_mut() {
         rewrite_condition(condition);
     }
@@ -20699,6 +20845,112 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    // CR 701.20a: a comma+or disjunctive reveal-until filter list ("X card, a Y,
+    // or a Z card") must split into an Or of three distinct filters. Building
+    // block exercised with a non-WHO 3-element list; An Unearthly Child is the
+    // motivating card.
+    #[test]
+    fn reveal_until_three_way_disjunctive_filter_splits() {
+        let effect = parse_effect(
+            "reveal cards from the top of your library until you reveal a creature card, an artifact card, or a land card",
+        );
+        let Effect::RevealUntil { filter, .. } = effect else {
+            panic!("expected RevealUntil, got {effect:?}");
+        };
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3, "three disjuncts expected: {filters:?}");
+    }
+
+    // CR 701.20a: the existing 2-element shared-suffix shape ("a creature or land
+    // card") stays a 2-way Or — control that the new comma+or splitter does not
+    // disturb the established path.
+    #[test]
+    fn reveal_until_two_element_shared_suffix_still_or() {
+        let effect = parse_effect(
+            "reveal cards from the top of your library until you reveal a creature or land card",
+        );
+        let Effect::RevealUntil { filter, .. } = effect else {
+            panic!("expected RevealUntil, got {effect:?}");
+        };
+        assert!(
+            matches!(filter, TargetFilter::Or { ref filters } if filters.len() == 2),
+            "expected 2-way Or, got {filter:?}"
+        );
+    }
+
+    // CR 701.20a: the middle disjunct "a card with doctor's companion" must lower
+    // to a keyword-PRESENCE filter (FilterProp::WithKeyword) and NOT collapse
+    // into a Doctor subtype via the keyword→Doctor kind mapping (An Unearthly
+    // Child).
+    #[test]
+    fn reveal_until_doctors_companion_disjunct_is_keyword_presence() {
+        use crate::types::keywords::{Keyword, PartnerType};
+        let effect = parse_effect(
+            "reveal cards from the top of your library until you reveal a doctor card, a card with doctor's companion, or a vehicle card",
+        );
+        let Effect::RevealUntil { filter, .. } = effect else {
+            panic!("expected RevealUntil, got {effect:?}");
+        };
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        let middle = &filters[1];
+        let TargetFilter::Typed(tf) = middle else {
+            panic!("expected Typed middle disjunct, got {middle:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::WithKeyword {
+                    value: Keyword::Partner(PartnerType::DoctorsCompanion)
+                }
+            )),
+            "middle disjunct must be keyword-presence, got {tf:?}"
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Doctor")),
+            "middle disjunct must NOT collapse into Doctor subtype, got {tf:?}"
+        );
+    }
+
+    // CR 603.7b + CR 603.7c: a "whenever <trigger>, <effect>" delayed trigger
+    // with NO "this turn"/"this combat" infix window (the duration was a consumed
+    // prefix) must still split on the trigger-clause comma and produce a
+    // CreateDelayedTrigger. Building block for The Sea Devils III.
+    #[test]
+    fn delayed_trigger_no_infix_window_splits_on_comma() {
+        let effect = parse_effect(
+            "whenever a Salamander deals combat damage to a player, it deals that much damage to target creature that player controls",
+        );
+        let Effect::CreateDelayedTrigger { effect: inner, .. } = &effect else {
+            panic!("expected CreateDelayedTrigger, got {effect:?}");
+        };
+
+        // CR 603.7c: the trigger condition introduces the damaged player as
+        // TriggeringPlayer; the inner effect's "target creature that player
+        // controls" must bind its controller to that player — NOT the controller
+        // (ControllerRef::You). This is the rules-correctness assertion for The
+        // Sea Devils III: the engine must choose a creature the *damaged* player
+        // controls, not one the controller controls.
+        let Effect::DealDamage { target, .. } = inner.effect.as_ref() else {
+            panic!("expected inner DealDamage, got {:?}", inner.effect.as_ref());
+        };
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    ..
+                })
+            ),
+            "inner DealDamage target must bind 'that player controls' to TriggeringPlayer, got {target:?}"
+        );
+    }
 
     /// Stensian Sanguinist (SOC, prepare mechanic): the second sentence is an
     /// inline delayed trigger scoped to "this combat" (not "this turn"). It must
