@@ -2549,6 +2549,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             left: Box::new(substitute_another_in_expr(left)),
             right: Box::new(substitute_another_in_expr(right)),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs.iter().map(substitute_another_in_expr).collect(),
+        },
         other => other.clone(),
     }
 }

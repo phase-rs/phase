@@ -918,6 +918,10 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
             let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
             format!("({})", parts.join(" + "))
         }
+        QuantityExpr::Max { exprs } => {
+            let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
+            format!("max({})", parts.join(", "))
+        }
         QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
         QuantityExpr::Power { base, exponent } => {
             format!("{}^{}", base, fmt_quantity(exponent))
@@ -5519,7 +5523,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 extract_quantity_features(inner, features);
             }

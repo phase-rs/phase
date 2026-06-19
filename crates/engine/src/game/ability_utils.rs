@@ -2015,7 +2015,7 @@ fn quantity_expr_has_unresolved_variable(
         | QuantityExpr::Power {
             exponent: inner, ..
         } => quantity_expr_has_unresolved_variable(state, ability, inner),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),
         QuantityExpr::Difference { left, right } => {
@@ -2595,7 +2595,9 @@ fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<TargetFilter>
         | QuantityExpr::Power {
             exponent: inner, ..
         } => quantity_expr_target_slot_filter(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().find_map(quantity_expr_target_slot_filter),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().find_map(quantity_expr_target_slot_filter)
+        }
         QuantityExpr::Difference { left, right } => quantity_expr_target_slot_filter(left)
             .or_else(|| quantity_expr_target_slot_filter(right)),
         QuantityExpr::Fixed { .. } => None,

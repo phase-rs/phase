@@ -1958,7 +1958,9 @@ fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
         | QuantityExpr::DivideRounded { inner, .. } => {
             quantity_expr_references_demonstrative(inner)
         }
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_demonstrative),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_demonstrative)
+        }
         QuantityExpr::Difference { left, right } => {
             quantity_expr_references_demonstrative(left)
                 || quantity_expr_references_demonstrative(right)
@@ -2083,7 +2085,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         | QuantityExpr::Power {
             exponent: inner, ..
         } => collect_clause_minimum_refs(inner, out),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for e in exprs {
                 collect_clause_minimum_refs(e, out);
             }
@@ -2895,7 +2897,9 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_tracked_set)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_references_tracked_set(exponent),
         QuantityExpr::Difference { left, right } => {

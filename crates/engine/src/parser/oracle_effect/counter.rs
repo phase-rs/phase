@@ -605,6 +605,12 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
                 .map(|expr| rebind_counter_quantity_scope(expr, scope))
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| rebind_counter_quantity_scope(expr, scope))
+                .collect(),
+        },
         QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
             max: Box::new(rebind_counter_quantity_scope(*max, scope)),
         },

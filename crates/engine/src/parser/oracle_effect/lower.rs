@@ -5662,7 +5662,7 @@ fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
         } => {
             rebind_cost_paid_object_pt_to_target(inner);
         }
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rebind_cost_paid_object_pt_to_target(inner);
             }
