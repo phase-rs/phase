@@ -812,6 +812,43 @@ pub type LegalActionsFull = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<GameAction>> {
+    let (target_slots, current_slot, current_legal_targets) = match &state.waiting_for {
+        WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        }
+        | WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => (
+            target_slots,
+            selection.current_slot,
+            selection.current_legal_targets.as_slice(),
+        ),
+        _ => return None,
+    };
+
+    let mut actions: Vec<GameAction> = current_legal_targets
+        .iter()
+        .cloned()
+        .map(|target| GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .collect();
+
+    if target_slots
+        .get(current_slot)
+        .is_some_and(|slot| slot.optional)
+    {
+        actions.push(GameAction::ChooseTarget { target: None });
+    }
+
+    Some(actions)
+}
+
 /// Returns legal actions, spell costs, AND a per-permanent action grouping.
 ///
 /// `legal_actions_by_object` maps each permanent (or hand-zone card) to the
@@ -820,11 +857,16 @@ pub type LegalActionsFull = (
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
-    let actions: Vec<GameAction> = validated_candidate_actions(state)
-        .into_iter()
-        .map(|candidate| candidate.action)
-        .filter(|action| !action.is_mana_ability())
-        .collect();
+    let actions: Vec<GameAction> =
+        if let Some(actions) = target_selection_actions_without_simulation(state) {
+            actions
+        } else {
+            validated_candidate_actions(state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .filter(|action| !action.is_mana_ability())
+                .collect()
+        };
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -1095,7 +1137,7 @@ mod tests {
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
         ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
         ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-        TypedFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -2896,6 +2938,97 @@ mod tests {
             stuck_decision_diagnostic(&state).is_none(),
             "a normal TargetSelection decision must not be flagged stuck"
         );
+    }
+
+    #[test]
+    fn target_selection_legal_actions_do_not_simulate_each_target() {
+        let mut state = setup_priority();
+        let targets: Vec<TargetRef> = (0..25)
+            .map(|i| {
+                let creature = create_object(
+                    &mut state,
+                    CardId(100 + i),
+                    PlayerId(0),
+                    format!("Target {i}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&creature)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                TargetRef::Object(creature)
+            })
+            .collect();
+
+        set_dummy_pending_cast(&mut state);
+        let pending_cast = state.pending_cast.clone().unwrap();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast,
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: targets.clone(),
+                optional: true,
+            }],
+            mode_labels: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: targets,
+            },
+        };
+
+        crate::game::perf_counters::reset();
+        let (actions, spell_costs, grouped) = legal_actions_full(&state);
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+
+        assert_eq!(clones, 0);
+        assert_eq!(actions.len(), 26);
+        assert!(spell_costs.is_empty());
+        assert!(grouped.is_empty());
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, GameAction::ChooseTarget { target: None })));
+    }
+
+    #[test]
+    fn target_selection_legal_actions_do_not_fall_back_to_stale_slot_targets() {
+        let mut state = setup_priority();
+        let target = TargetRef::Object(create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Stale Target".to_string(),
+            Zone::Battlefield,
+        ));
+
+        set_dummy_pending_cast(&mut state);
+        let pending_cast = state.pending_cast.clone().unwrap();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast,
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![target],
+                optional: true,
+            }],
+            mode_labels: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: Vec::new(),
+            },
+        };
+
+        crate::game::perf_counters::reset();
+        let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
+
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            0
+        );
+        assert_eq!(actions, vec![GameAction::ChooseTarget { target: None }]);
     }
 
     /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous
