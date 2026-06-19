@@ -4194,6 +4194,42 @@ mod tests {
     }
 
     #[test]
+    fn cda_quantity_max_of_two_whichever_greater() {
+        // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" — the
+        // max-of-two-quantities combinator powering Triumphant Chomp. Composes
+        // a `Fixed` constant with the existing "greatest power among <filter>"
+        // aggregate under `QuantityExpr::Max`.
+        let qty = parse_cda_quantity(
+            "2 or the greatest power among Dinosaurs you control, whichever is greater",
+        )
+        .expect("max-of-two quantity should parse");
+        let QuantityExpr::Max { exprs } = qty else {
+            panic!("expected QuantityExpr::Max, got {qty:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        assert!(matches!(exprs[0], QuantityExpr::Fixed { value: 2 }));
+        assert!(matches!(
+            exprs[1],
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn cda_quantity_max_falls_through_without_suffix() {
+        // The arm must fire ONLY when "whichever is greater" is present, so a
+        // bare " or " disjunction does not get mis-read as a max.
+        assert!(
+            parse_cda_quantity("2 or the greatest power among Dinosaurs you control").is_none()
+        );
+    }
+
+    #[test]
     fn cda_quantity_greatest_toughness() {
         let qty = parse_cda_quantity("the greatest toughness among creatures you control").unwrap();
         assert!(matches!(
