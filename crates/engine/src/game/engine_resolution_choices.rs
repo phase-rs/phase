@@ -1716,17 +1716,16 @@ pub(super) fn handle_resolution_choice(
                 count,
                 reveal,
                 up_to,
+                allows_partial_find,
                 constraint,
                 split,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 701.23b/d: "up to N" OR a stated-quality constraint accepts a
-            // short/empty pick (fail-to-find); a pure quantity search needs
-            // exactly `count`. The subsequent `selection_satisfies_constraint`
-            // re-check validates the distinct-slot consistency of whatever was
-            // chosen, so widening the count bound here is safe.
-            let lower_bounded = up_to || constraint.permits_partial_find();
+            // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, or
+            // explicit stated-quality selection constraints accept a short/empty
+            // pick. A pure quantity search needs exactly `count`.
+            let lower_bounded = up_to || allows_partial_find || constraint.permits_partial_find();
             let valid = if lower_bounded {
                 chosen.len() <= count
             } else {

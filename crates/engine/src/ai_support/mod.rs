@@ -398,17 +398,18 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 cards,
                 count,
                 up_to,
+                allows_partial_find,
                 constraint,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 701.23b vs CR 701.23d: a stated-quality search (MatchEachFilter,
-            // etc.) may legally find fewer cards than requested — including none.
-            // Mirror the submission guard / candidate generation lower bound so
-            // the validated legal-action path does not drop the legal short/empty
-            // fail-to-find candidate and freeze the AI.
-            let lower_bounded = *up_to || constraint.permits_partial_find();
+            // CR 701.23b vs CR 701.23d: hidden-zone stated-quality searches,
+            // explicit stated-quality constraints, and "up to" searches may
+            // legally find fewer cards than requested — including none. Mirror
+            // the submission guard / candidate generation lower bound so the
+            // validated legal-action path does not drop legal short picks.
+            let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
             let exact = if lower_bounded { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (lower_bounded && chosen.len() > *count)
         }
@@ -2055,6 +2056,7 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: true,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
             split: None,
         };
@@ -2093,6 +2095,7 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
             split: None,
         };
@@ -2122,6 +2125,7 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::MatchEachFilter {
                 filters: vec![TargetFilter::Any, TargetFilter::Any],
             },

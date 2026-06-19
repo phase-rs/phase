@@ -276,22 +276,11 @@ fn search_filter_has_stated_quality(filter: &TargetFilter) -> bool {
     }
 }
 
-fn effective_selection_constraint(
-    filter: &TargetFilter,
-    count: usize,
-    source_zones: &[Zone],
-    selection_constraint: SearchSelectionConstraint,
-) -> SearchSelectionConstraint {
-    if !matches!(selection_constraint, SearchSelectionConstraint::None)
-        || source_zones != [Zone::Library]
-        || !search_filter_has_stated_quality(filter)
-    {
-        return selection_constraint;
-    }
-
-    SearchSelectionConstraint::MatchEachFilter {
-        filters: vec![filter.clone(); count],
-    }
+// CR 701.23b: Hidden-zone searches with a stated quality can fail to find
+// some or all matching cards without converting the search filter into a
+// selection-time constraint.
+fn allows_hidden_zone_partial_find(filter: &TargetFilter, source_zones: &[Zone]) -> bool {
+    source_zones == [Zone::Library] && search_filter_has_stated_quality(filter)
 }
 
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
@@ -439,8 +428,7 @@ pub fn resolve(
     }
 
     let pick_count = count.min(matching.len());
-    let selection_constraint =
-        effective_selection_constraint(&filter, pick_count, &effective_zones, selection_constraint);
+    let allows_partial_find = allows_hidden_zone_partial_find(&filter, &effective_zones);
 
     // CR 608.2c: Propagate the printed-text selection restriction (e.g.,
     // "with different names") into the choice state so the Select handler
@@ -451,6 +439,7 @@ pub fn resolve(
         count: pick_count,
         reveal,
         up_to,
+        allows_partial_find,
         constraint: selection_constraint,
         // CR 701.23a + CR 608.2c: Carry the cultivate-class split metadata so the
         // SearchChoice-completion handler can partition the found set.
@@ -757,19 +746,20 @@ mod tests {
                 cards,
                 count,
                 up_to,
+                allows_partial_find,
                 constraint,
                 ..
             } => {
                 assert_eq!(*count, 1);
                 assert!(!*up_to, "printed text is not an up-to search");
+                assert!(
+                    *allows_partial_find,
+                    "hidden-zone stated-quality search permits fail-to-find"
+                );
                 assert!(cards.contains(&forest));
                 assert!(cards.contains(&island));
                 assert!(!cards.contains(&swamp));
-                assert!(matches!(
-                    constraint,
-                    SearchSelectionConstraint::MatchEachFilter { filters }
-                        if filters.len() == 1
-                ));
+                assert!(matches!(constraint, SearchSelectionConstraint::None));
             }
             other => panic!("Expected SearchChoice, got {:?}", other),
         }

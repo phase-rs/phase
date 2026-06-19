@@ -68,8 +68,7 @@ export function canAssignDistinctCardTypes(
 
 export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"game">): string {
   const constraint = data.constraint;
-  const allowsPartialFind =
-    data.up_to === true || (constraint != null && constraint.type !== "None");
+  const allowsPartialFind = searchChoiceAllowsPartialFind(data);
   const opts = { count: data.count };
 
   if (constraint?.type === "MatchEachFilter") {
@@ -91,6 +90,14 @@ export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"g
   return data.up_to
     ? t("cardChoice.search.subtitleUpTo", opts)
     : t("cardChoice.search.subtitleExact", opts);
+}
+
+export function searchChoiceAllowsPartialFind(data: SearchChoice["data"]): boolean {
+  return (
+    data.up_to === true ||
+    data.allows_partial_find === true ||
+    (data.constraint != null && data.constraint.type !== "None")
+  );
 }
 
 export type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield" | "Untap" | "Tap";
