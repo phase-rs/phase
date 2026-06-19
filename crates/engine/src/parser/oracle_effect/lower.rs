@@ -90,14 +90,16 @@ pub(super) fn is_linked_exile_cast_bottom_cleanup(
     let Effect::CastFromZone { target, .. } = cast_effect else {
         return false;
     };
-    target.references_exiled_by_source()
-        && matches!(
-            cleanup_effect,
-            Effect::PutAtLibraryPosition {
-                position: LibraryPosition::Bottom,
-                ..
-            }
-        )
+    let Effect::PutAtLibraryPosition {
+        target: cleanup_target,
+        position,
+        ..
+    } = cleanup_effect
+    else {
+        return false;
+    };
+    matches!(position, LibraryPosition::Bottom)
+        && (target.references_exiled_by_source() || cleanup_target.references_exiled_by_source())
 }
 
 #[cfg(test)]
@@ -126,16 +128,23 @@ mod linked_exile_cleanup_tests {
     }
 
     #[test]
-    fn linked_exile_cleanup_requires_cast_target_to_reference_exiled_by_source() {
-        let cleanup = bottom_cleanup();
+    fn linked_exile_cleanup_accepts_cast_target_or_cleanup_target_exile_link() {
+        let mut cleanup = bottom_cleanup();
 
         assert!(is_linked_exile_cast_bottom_cleanup(
             &cast_from_zone(TargetFilter::ExiledBySource),
             &cleanup
         ));
+        if let Effect::PutAtLibraryPosition { ref mut target, .. } = cleanup {
+            *target = TargetFilter::ExiledBySource;
+        }
+        assert!(is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::ParentTarget),
+            &cleanup
+        ));
         assert!(!is_linked_exile_cast_bottom_cleanup(
             &cast_from_zone(TargetFilter::Any),
-            &cleanup
+            &bottom_cleanup()
         ));
     }
 }
