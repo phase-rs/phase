@@ -5094,6 +5094,15 @@ fn resolve_chain_body(
                         cost: ManaCost::generic(amount.max(0) as u32),
                     }
                 }
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                } => AbilityCost::Mana {
+                    cost: state
+                        .objects
+                        .get(&ability.source_id)
+                        .map(|obj| obj.mana_cost.clone())
+                        .unwrap_or(ManaCost::NoCost),
+                },
                 other => other.clone(),
             };
             // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
@@ -8554,6 +8563,57 @@ mod tests {
                     *cost,
                     AbilityCost::Mana {
                         cost: ManaCost::generic(3),
+                    }
+                );
+            }
+            other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unless_pay_self_mana_cost_resolves_source_printed_cost() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pendrell Flux".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source object exists")
+            .mana_cost = ManaCost::generic(2);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::SelfManaCost,
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *cost,
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2),
                     }
                 );
             }

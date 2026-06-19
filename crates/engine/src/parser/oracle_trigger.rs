@@ -1646,6 +1646,29 @@ fn extract_unless_pay_modifier(
         );
     }
 
+    // "unless you pay its mana cost" uses the source object's printed mana cost,
+    // resolved by the unless-payment interceptor before prompting the payer.
+    let self_mana_cost_result: Result<(&str, _), _> =
+        tag::<_, _, OracleError<'_>>("its mana cost").parse(cost_str);
+    if let Ok((rest, _)) = self_mana_cost_result {
+        let tail = rest.trim_start();
+        if tail.is_empty()
+            || tag::<_, _, OracleError<'_>>(".").parse(tail).is_ok()
+            || tag::<_, _, OracleError<'_>>(",").parse(tail).is_ok()
+        {
+            let cleaned = text[..unless_pos].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: AbilityCost::Mana {
+                        cost: crate::types::mana::ManaCost::SelfManaCost,
+                    },
+                    payer,
+                }),
+            );
+        }
+    }
+
     // Extract cost symbols
     let cost_end = cost_str
         .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
@@ -20066,6 +20089,28 @@ mod tests {
             unless_pay.cost
         );
         // The effect text should be stripped of the unless clause
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_its_mana_cost() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you pay its mana cost.",
+            "Pendrell Flux",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::Mana {
+                cost: ManaCost::SelfManaCost,
+            }
+        );
         let execute = def.execute.as_ref().expect("should have execute");
         assert!(
             matches!(*execute.effect, Effect::Sacrifice { .. }),
