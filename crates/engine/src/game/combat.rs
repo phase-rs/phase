@@ -3458,6 +3458,66 @@ mod tests {
         assert!(validate_attackers(&state, &[id]).is_err());
     }
 
+    #[test]
+    fn walking_bulwark_grants_defender_creature_attack_permission() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        // CR 702.3b + CR 611.2c: The resolved ability grants a targeted
+        // defender an until-end-of-turn rule exception that lets it attack.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bulwark = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Walking Bulwark",
+                0,
+                3,
+                "Defender\n{2}: Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power. Activate only as a sorcery.",
+            )
+            .id();
+        let wall = scenario
+            .add_creature(PlayerId(0), "Target Wall", 0, 4)
+            .defender()
+            .with_summoning_sickness()
+            .id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        runner.activate(bulwark, 0).target_object(wall).resolve();
+
+        assert!(
+            runner
+                .state()
+                .objects
+                .get(&wall)
+                .unwrap()
+                .has_keyword(&Keyword::Haste),
+            "Walking Bulwark must grant haste to the targeted defender"
+        );
+        assert!(
+            validate_attackers(runner.state(), &[wall]).is_ok(),
+            "Walking Bulwark's transient CanAttackWithDefender grant must let the targeted defender attack"
+        );
+
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        runner
+            .declare_attackers(&[(wall, AttackTarget::Player(PlayerId(1)))])
+            .expect("targeted defender should be legal to declare as an attacker");
+    }
+
     /// CR 702.3b + CR 122.1: Demon Wall — "as long as this creature has a
     /// counter on it, it can attack as though it didn't have defender".
     /// Exercises the `CanAttackWithDefender` static gated on
