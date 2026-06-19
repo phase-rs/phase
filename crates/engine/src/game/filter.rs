@@ -2915,8 +2915,8 @@ fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Op
 
 fn mana_value_matches_parity(mana_value: u32, parity: Parity) -> bool {
     match parity {
-        Parity::Odd => mana_value % 2 == 1,
-        Parity::Even => mana_value % 2 == 0,
+        Parity::Odd => !mana_value.is_multiple_of(2),
+        Parity::Even => mana_value.is_multiple_of(2),
     }
 }
 
