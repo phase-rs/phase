@@ -1362,9 +1362,57 @@ fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
 /// - "spend this mana only to activate abilities" -> `ActivateOnly`
 ///
 /// Returns `(restriction, grants)` where grants are properties conferred to the spell.
+/// Capitalize the first ASCII letter (e.g. "artifact" -> "Artifact"), matching
+/// the casing of the core-type strings stored in `SpellMeta` (the spend-grant
+/// matcher compares case-insensitively, so this is for convention/consistency).
+fn capitalize_first_ascii(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn parse_mana_spend_restriction(
     lower: &str,
 ) -> Option<(ManaSpendRestriction, Vec<ManaSpellGrant>)> {
+    // CR 106.6: negative form — "[this] mana can't be spent to cast non<TYPE>
+    // spells" (Karn, Legacy Reforged: "This mana can't be spent to cast
+    // nonartifact spells"). The mana may pay for <TYPE> spells, any ability, and
+    // any non-spell cost; only non-<TYPE> SPELLS are blocked — the same effective
+    // spend gate as "spend only to cast <TYPE> spells or activate any ability",
+    // so it maps to `SpellTypeOrAbilityActivation { <TYPE>, Any }`.
+    if let Some((_, after_non)) = nom_on_lower(lower, lower, |i| {
+        value(
+            (),
+            (
+                opt(alt((tag("this "), tag("that ")))),
+                alt((
+                    tag("mana can't be spent to cast non"),
+                    tag("mana cannot be spent to cast non"),
+                )),
+            ),
+        )
+        .parse(i)
+    }) {
+        let after_non = after_non.trim().trim_end_matches(['.', '"']).trim();
+        if let Some((type_word, _)) = nom_on_lower(after_non, after_non, |i| {
+            terminated(take_until(" spells"), tag(" spells"))
+                .map(|s: &str| s.trim().to_string())
+                .parse(i)
+        }) {
+            if !type_word.is_empty() {
+                return Some((
+                    ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                        spell_type: capitalize_first_ascii(&type_word),
+                        ability: AbilityActivationScope::Any,
+                    },
+                    vec![],
+                ));
+            }
+        }
+    }
+
     let (_, base) = nom_on_lower(lower, lower, |i| {
         value((), tag("spend this mana only ")).parse(i)
     })?;

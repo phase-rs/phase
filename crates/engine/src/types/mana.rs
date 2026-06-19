@@ -1563,6 +1563,47 @@ mod tests {
         assert!(!restriction.allows_activation(&["Creature".to_string()], &["Goblin".to_string()]));
     }
 
+    // CR 106.6: Karn, Legacy Reforged — "can't be spent to cast nonartifact
+    // spells" maps to `OnlyForTypeSpellsOrAbilities { Artifact, Any }`: an
+    // artifact spell is payable, a nonartifact spell is not, and ANY ability
+    // activation is payable.
+    #[test]
+    fn nonartifact_restriction_blocks_nonartifact_spells_allows_abilities() {
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::Any,
+        };
+        let artifact_spell = SpellMeta {
+            types: vec!["Artifact".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let nonartifact_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        assert!(
+            restriction.allows_spell(&artifact_spell),
+            "an artifact spell must be castable with the restricted mana"
+        );
+        assert!(
+            !restriction.allows_spell(&nonartifact_spell),
+            "a nonartifact spell must NOT be castable with the restricted mana"
+        );
+        // `Any` permits activating an ability of any source.
+        assert!(
+            restriction.allows_activation(&["Creature".to_string()], &[]),
+            "any ability activation must be payable with the restricted mana"
+        );
+    }
+
     // CR 106.6: "Spend this mana only to cast Ninja spells" (Turtle Lair, issue
     // #3661) names a creature subtype. The restriction must match against
     // `SpellMeta.subtypes`, not only core types.

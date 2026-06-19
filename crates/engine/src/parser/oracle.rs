@@ -14389,6 +14389,68 @@ mod tests {
         );
     }
 
+    /// CR 106.6: negative spend form — "this mana can't be spent to cast
+    /// nonartifact spells" (Karn, Legacy Reforged). The mana may pay for artifact
+    /// spells, any ability, and any non-spell cost; only nonartifact SPELLS are
+    /// blocked — the same effective gate as "only to cast artifact spells or
+    /// activate any ability".
+    #[test]
+    fn mana_spend_restriction_cant_cast_nontype_spells() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "this mana can't be spent to cast nonartifact spells",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+        // Generic over the type word (e.g. "noncreature") and tolerates the
+        // bare lead without "this".
+        let creature = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "mana cannot be spent to cast noncreature spells.",
+        );
+        assert_eq!(
+            creature.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Creature".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    /// CR 106.6: Karn, Legacy Reforged end-to-end — the upkeep mana clause and
+    /// its negative spend restriction parse with no Unimplemented, and the
+    /// produced mana carries the artifact-spells-or-any-ability restriction.
+    #[test]
+    fn karn_legacy_reforged_nonartifact_mana_restriction_parses() {
+        let karn = "At the beginning of your upkeep, add {C} for each artifact you control. \
+                    This mana can't be spent to cast nonartifact spells. Until end of turn, \
+                    you don't lose this mana as steps and phases end.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            karn,
+            "Karn, Legacy Reforged",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            !json.contains("Unimplemented"),
+            "Karn's mana restriction clause must parse, got Unimplemented: {json}"
+        );
+        assert!(
+            json.contains("OnlyForTypeSpellsOrAbilities")
+                || json.contains("SpellTypeOrAbilityActivation"),
+            "the produced mana must carry the artifact-spells-or-ability restriction: {json}"
+        );
+        assert!(
+            json.contains("Artifact"),
+            "the restriction must name the Artifact spell type: {json}"
+        );
+    }
+
     /// CR 106.6: a bare "… or (to) activate an ability" suffix (no type qualifier)
     /// permits casting the named spell type OR activating *any* ability — the
     /// generic `AbilityActivationScope::Any` form (Sage of the Unknowable, Purple
