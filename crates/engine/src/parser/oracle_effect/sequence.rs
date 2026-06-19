@@ -2537,7 +2537,9 @@ pub(super) fn apply_clause_continuation(
                                     caused_by: None,
                                 },
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -2571,7 +2573,9 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
