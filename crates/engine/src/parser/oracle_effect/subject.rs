@@ -706,11 +706,12 @@ fn try_parse_can_block_additional(
         parse_subject_application(subject_text.trim(), ctx)?
     };
 
-    let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
+    let (_rest, (_, _, _, _, _, count, duration, _)) = all_consuming((
         tag("can"),
         tag(" "),
         tag("block"),
         tag(" "),
+        opt(tag("up to ")),
         parse_extra_blockers_count,
         parse_block_grant_duration,
         opt(tag(".")),
@@ -748,6 +749,7 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
         tag(" "),
         tag("block"),
         tag(" "),
+        opt(tag("up to ")),
         parse_extra_blockers_count,
         parse_block_grant_duration,
         opt(tag(".")),
@@ -1730,6 +1732,21 @@ fn strip_possessive_subject_suffix(subject: &str) -> &str {
 fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
+    }
+    // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after body "its
+    // controller may … if they do, they draw" refers to that creature's
+    // controller, not the damaged opponent from the trigger condition.
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::ParentTargetController)
+    ) {
+        return TargetFilter::ParentTargetController;
+    }
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::ParentTargetOwner)
+    ) {
+        return TargetFilter::ParentTargetOwner;
     }
     // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
     // "attacks a player" trigger introduces the damaged/attacked player as the
@@ -5200,6 +5217,38 @@ mod tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// Yare — "That creature can block up to two additional creatures this turn."
+    /// The optional "up to" prefix must not swallow the extra-block grant.
+    #[test]
+    fn yare_spell_extra_blockers_up_to_two_this_turn() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Target creature defending player controls gets +3/+0 until end of turn. That creature can block up to two additional creatures this turn.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Yare extra-block clause must be a sub-ability");
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "Yare extra-block clause must parse, got {:?}",
+            sub.effect
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", sub.effect);
+        };
+        assert_eq!(duration, &Some(Duration::UntilEndOfTurn));
+        assert_eq!(
+            static_abilities[0].mode,
+            StaticMode::ExtraBlockers { count: Some(2) }
+        );
     }
 
     /// CR 509.1b + CR 611.2: A granted "can't be blocked [this turn] except by

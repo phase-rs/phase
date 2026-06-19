@@ -1,7 +1,8 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{map, opt, success, value};
+use nom::multi::fold_many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -157,6 +158,11 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
     None
 }
 
+/// CR 700.2i: a run of one or more "{P}" pawprint symbols → weight as u8.
+fn parse_pawprint_run(input: &str) -> OracleResult<'_, u8> {
+    fold_many1(tag("{P}"), || 0u8, |acc, _| acc + 1).parse(input)
+}
+
 pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
     let mut modes = Vec::new();
 
@@ -175,10 +181,21 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
                     label: None,
                     body: body.to_string(),
                     mode_cost: Some(cost),
+                    mode_pawprint: None,
                 });
             } else {
                 break; // Cost parse failure → stop collecting modes
             }
+        } else if let Ok((rest, weight)) = parse_pawprint_run(line.as_str()) {
+            // CR 700.2i: pawprint mode line "{P}{P} — effect"
+            let body = strip_mode_separator(rest);
+            modes.push(ModeAst {
+                raw: body.to_string(),
+                label: None,
+                body: body.to_string(),
+                mode_cost: None,
+                mode_pawprint: Some(weight),
+            });
         } else {
             break;
         }
@@ -196,6 +213,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
                 label: Some(label.to_string()),
                 body: body.to_string(),
                 mode_cost: Some(cost),
+                mode_pawprint: None,
             };
         }
 
@@ -204,6 +222,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
             label: Some(label.to_string()),
             body: body.to_string(),
             mode_cost: None,
+            mode_pawprint: None,
         };
     }
 
@@ -212,6 +231,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         label: None,
         body: text.to_string(),
         mode_cost: None,
+        mode_pawprint: None,
     }
 }
 
@@ -995,14 +1015,24 @@ fn header_is_opponent_chooser_with_additional_cost(
 
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
     let mode_count = modes.len();
+    let mode_pawprints: Vec<u8> = modes.iter().filter_map(|m| m.mode_pawprint).collect();
+    // CR 700.2i: for a pawprint points-budget modal, `header.max_choices` is the
+    // POINT BUDGET (Σ of chosen weights), NOT a mode count — do NOT clamp it to
+    // `mode_count`. Bullet/Spree modals keep the existing count-cap behavior.
+    let max_choices = if mode_pawprints.is_empty() {
+        header.max_choices.min(mode_count)
+    } else {
+        header.max_choices
+    };
     ModalChoice {
         min_choices: header.min_choices,
-        max_choices: header.max_choices.min(mode_count),
+        max_choices,
         mode_count,
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
         constraints: cap_modal_constraints(&header.constraints, mode_count),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
+        mode_pawprints,
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
         chooser: header.chooser.clone(),
@@ -1129,6 +1159,7 @@ pub(crate) fn try_parse_inline_modal(
                 label: None,
                 body: body.to_string(),
                 mode_cost: None,
+                mode_pawprint: None,
             }
         })
         .collect();
@@ -1574,6 +1605,54 @@ mod tests {
         ];
         let modes = collect_mode_asts(&lines, 1);
         assert!(modes.is_empty());
+    }
+
+    #[test]
+    fn parse_pawprint_run_counts_symbols() {
+        // CR 700.2i: one or more "{P}" → weight.
+        assert_eq!(parse_pawprint_run("{P}").unwrap().1, 1);
+        assert_eq!(parse_pawprint_run("{P}{P}").unwrap().1, 2);
+        assert_eq!(parse_pawprint_run("{P}{P}{P}").unwrap().1, 3);
+        // A non-pawprint line (bullet) must NOT match.
+        assert!(parse_pawprint_run("•").is_err());
+        assert!(parse_pawprint_run("Draw a card.").is_err());
+    }
+
+    #[test]
+    fn collect_mode_asts_pawprint_lines_extract_weight_and_body() {
+        let lines = vec![
+            "Choose up to five {P} worth of modes. You may choose the same mode more than once.",
+            "{P} — Draw a card.",
+            "{P}{P} — Gain 3 life.",
+            "{P}{P}{P} — Deal 3 damage to any target.",
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        assert_eq!(modes.len(), 3);
+        assert_eq!(modes[0].mode_pawprint, Some(1));
+        assert_eq!(modes[0].body, "Draw a card.");
+        assert_eq!(modes[1].mode_pawprint, Some(2));
+        assert_eq!(modes[2].mode_pawprint, Some(3));
+        // Pawprint modes never carry a Spree mode cost.
+        assert!(modes.iter().all(|m| m.mode_cost.is_none()));
+    }
+
+    #[test]
+    fn build_modal_choice_leaves_pawprint_budget_unclamped() {
+        // CR 700.2i: `max_choices` is the 5-point budget, NOT clamped to the
+        // mode_count of 3. This is the cap-bug regression guard at the parser
+        // level (the bug clamped 5 → 3 via `header.max_choices.min(mode_count)`).
+        let lines = vec![
+            "Choose up to five {P} worth of modes. You may choose the same mode more than once.",
+            "{P} — Draw a card.",
+            "{P}{P} — Gain 3 life.",
+            "{P}{P}{P} — Deal 3 damage to any target.",
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        let header = parse_modal_header_ast(lines[0]).expect("header should parse");
+        let modal = build_modal_choice(&header, &modes);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_pawprints, vec![1u8, 2, 3]);
+        assert_eq!(modal.max_choices, 5, "budget is uncapped, not clamped to 3");
     }
 
     // ---- Ao, the Dawn Sky (SOC) — modal dies trigger integration ----

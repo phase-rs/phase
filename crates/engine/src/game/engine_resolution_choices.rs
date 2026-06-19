@@ -135,6 +135,28 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     )
 }
 
+/// CR 608.2c: Expressive Iteration-style dig tails chain a
+/// `PutAtLibraryPosition { TrackedSet }` step before exiling from the same
+/// looked-at pile. Those continuations publish and route via the **unkept**
+/// looked-at cards; generic reveal/keep continuations (Zimone land split)
+/// bind only the kept/revealed subset.
+fn dig_continuation_needs_full_looked_at_tracked_set(ability: &ResolvedAbility) -> bool {
+    let mut current = Some(ability);
+    while let Some(sub) = current {
+        if matches!(
+            &sub.effect,
+            Effect::PutAtLibraryPosition {
+                target: crate::types::ability::TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ) {
+            return true;
+        }
+        current = sub.sub_ability.as_deref();
+    }
+    false
+}
+
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
 /// interactive selection (Dig's unkept cards, a search-split's non-primary
 /// cards) to a concrete destination zone. `Library` routes to the bottom of the
@@ -1523,24 +1545,40 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
-            // CR 701.20b + CR 608.2c: Publish the kept (revealed) cards as a
-            // tracked set so downstream sub_abilities can route them by type
-            // via `TargetFilter::TrackedSetFiltered`. Used by Zimone's
-            // Experiment — "Put all land cards revealed this way onto the
-            // battlefield tapped and put all creature cards revealed this way
-            // into your hand" consume this set. Use a fresh tracked set so a
-            // parent effect's empty pre-choice publish cannot keep the chain
-            // sentinel bound to the wrong set.
-            effects::publish_fresh_tracked_set(state, kept.clone());
+            // CR 701.20b + CR 608.2c: Publish a tracked set for downstream
+            // sub_abilities. Reveal/keep continuations (Zimone land split) bind
+            // the kept subset; Expressive Iteration's bottom/exile tail binds the
+            // unkept looked-at pile when its continuation chains
+            // `PutAtLibraryPosition { TrackedSet }`.
+            let publish_set =
+                if kept.is_empty() {
+                    Vec::new()
+                } else if state.pending_continuation.as_ref().is_some_and(|cont| {
+                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                }) {
+                    // Expressive Iteration-style bottom/exile tail: downstream
+                    // `TrackedSet` steps address the unkept looked-at pile only.
+                    unkept.clone()
+                } else {
+                    kept.clone()
+                };
+            effects::publish_fresh_tracked_set(state, publish_set);
             // None => Graveyard; map to a concrete zone so the rest mover
             // (shared with the search-split partition) has a single Zone.
-            route_rest_partition(
-                state,
-                &unkept,
-                rest_destination.unwrap_or(Zone::Graveyard),
-                events,
-            );
+            // When a continuation owns the unkept pile (Expressive Iteration
+            // bottom/exile tail), do not pre-route here.
+            if state.pending_continuation.is_none() {
+                route_rest_partition(
+                    state,
+                    &unkept,
+                    rest_destination.unwrap_or(Zone::Graveyard),
+                    events,
+                );
+            }
             if let Some(cont) = state.pending_continuation.as_mut() {
+                // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
+                // conditionals on the kept card) bind to the kept selection.
+                // Hand/bottom/exile tails route via TrackedSetFiltered instead.
                 cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
                 cont.chain.context.optional_effect_performed = !kept.is_empty();
             }
@@ -2441,6 +2479,7 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_profile,
                 count_param,
+                library_position,
                 is_cost_payment,
             },
             GameAction::SelectCards { cards: chosen },
@@ -2718,12 +2757,27 @@ pub(super) fn handle_resolution_choice(
                 // CR 115.1: Resolution-time selection for PutAtLibraryPosition
                 // from a private zone (e.g. Brainstorm's "put two cards from
                 // your hand on top of your library"). Cards are placed in
-                // selection order (first chosen = top).
-                EffectKind::PutAtLibraryPosition => {
-                    for &card_id in chosen.iter().rev() {
-                        super::zones::move_to_library_at_index(state, card_id, Some(0), events);
+                // selection order (first chosen = top). Expressive Iteration's
+                // tracked-set bottom step chains an exile `ParentTarget` tail —
+                // detect that continuation shape to honor bottom placement.
+                EffectKind::PutAtLibraryPosition => match library_position {
+                    Some(LibraryPosition::Bottom) => {
+                        for &card_id in &chosen {
+                            super::zones::move_to_library_position(state, card_id, false, events);
+                        }
                     }
-                }
+                    Some(LibraryPosition::NthFromTop { n }) => {
+                        let index = Some(n.saturating_sub(1) as usize);
+                        for &card_id in &chosen {
+                            super::zones::move_to_library_at_index(state, card_id, index, events);
+                        }
+                    }
+                    _ => {
+                        for &card_id in chosen.iter().rev() {
+                            super::zones::move_to_library_at_index(state, card_id, Some(0), events);
+                        }
+                    }
+                },
                 // CR 601.2c + CR 115.1: Resolution-time hand pick for
                 // `CastFromZone` (Electrodominance, Baral's Expertise).
                 EffectKind::CastFromZone => {
@@ -2953,6 +3007,26 @@ pub(super) fn handle_resolution_choice(
                         .filter_map(|event| match event {
                             GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
                             _ => None,
+                        })
+                        .collect()
+                } else if matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                    && matches!(library_position, Some(LibraryPosition::Bottom))
+                    && state.pending_continuation.is_some()
+                {
+                    // CR 608.2c: Expressive Iteration's bottom pick narrows the
+                    // tracked set to the remaining looked-at library cards so the
+                    // chained exile step cannot re-select the bottomed card.
+                    state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|id| !chosen.contains(id))
+                        .filter(|id| {
+                            state
+                                .objects
+                                .get(id)
+                                .is_some_and(|obj| obj.zone == Zone::Library)
                         })
                         .collect()
                 } else {

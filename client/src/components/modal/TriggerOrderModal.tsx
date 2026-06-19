@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { PendingTriggerSummary } from "../../adapter/types.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { RichLabel } from "../mana/RichLabel.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 const EMPTY_TRIGGER_SUMMARIES: PendingTriggerSummary[] = [];
@@ -90,7 +91,7 @@ export function TriggerOrderModal() {
                   </div>
                   {trigger.description && (
                     <div className="text-sm text-white/70">
-                      {trigger.description}
+                      <RichLabel text={trigger.description} size="xs" />
                     </div>
                   )}
                 </div>

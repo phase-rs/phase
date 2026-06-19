@@ -4,6 +4,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_quantity::parse_cda_quantity;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
@@ -498,6 +499,16 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some(rest_lower) = lower.strip_prefix('x') {
         let rest = &text[1..];
         if rest_lower.is_empty() || rest_lower.starts_with(|c: char| !c.is_alphanumeric()) {
+            // CR 107.3a + CR 701.47a: "X, where X is <description>" binds the
+            // variable to a defined quantity (e.g. amass's "where X is that
+            // spell's mana value") rather than a paid cost. Without this, X
+            // falls through to a bare `Variable` ref that always resolves to 0
+            // outside an actually-paid-X cost — a silent no-op (issue #720).
+            if let Some(description) = strip_where_x_is_clause(rest_lower) {
+                if let Some(expr) = parse_cda_quantity(description) {
+                    return Some((expr, ""));
+                }
+            }
             return Some((
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -574,6 +585,21 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
+/// (already-lowercased) text following a bare `X`, returning the lowercase
+/// description that defines the variable. Shared by every count-position
+/// keyword that uses this binding shape (amass, mobilize, firebending).
+pub(crate) fn strip_where_x_is_clause(rest_lower: &str) -> Option<&str> {
+    let trimmed = rest_lower.trim_start();
+    let (description, _) = alt((
+        tag::<_, _, OracleError<'_>>(", where x is "),
+        tag("where x is "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    Some(description.trim_end_matches('.').trim())
 }
 
 /// Parse an English ordinal number word at the start of text.
@@ -1178,6 +1204,7 @@ const SUBTYPES: &[&str] = &[
     "Survivor",
     "Suspect",
     "Symbiote",
+    "Synth",
     "Tentacle",
     "Tetravite",
     "Thalakos",
@@ -1466,7 +1493,52 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
         }
     }
 
+    // Try regular "-es" plural: subtypes ending in a sibilant (s, x, z, ch, sh)
+    // or in consonant+o pluralize with "-es" rather than "-s" (e.g. "Hero" →
+    // "Heroes", "Sphinx" → "Sphinxes"). Without this, such plurals fall through
+    // to a naive trailing-'s' strip at call sites, corrupting the subtype name
+    // (e.g. "Heroes" → "Heroe"). Irregular forms still take priority via
+    // SUBTYPE_PLURALS above.
+    if takes_es_plural(subtype) {
+        let es_plural_len = subtype.len() + 2;
+        if text.len() >= es_plural_len
+            && text.is_char_boundary(subtype.len())
+            && text[..subtype.len()].eq_ignore_ascii_case(subtype)
+            && text[subtype.len()..es_plural_len].eq_ignore_ascii_case("es")
+        {
+            let after = &text[es_plural_len..];
+            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Some((subtype.to_string(), es_plural_len));
+            }
+        }
+    }
+
     None
+}
+
+/// Whether an English noun forms its plural by appending "-es" rather than
+/// "-s": nouns ending in a sibilant (s, x, z, ch, sh) or in consonant + "o"
+/// (e.g. "Hero" → "Heroes"). Words ending in vowel + "o" take a plain "-s"
+/// ("Radio" → "Radios") and are excluded.
+fn takes_es_plural(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if lower.ends_with('s') || lower.ends_with('x') || lower.ends_with('z') {
+        return true;
+    }
+    let bytes = lower.as_bytes();
+    if matches!(
+        bytes.get(bytes.len().saturating_sub(2)..),
+        Some(b"ch" | b"sh")
+    ) {
+        return true;
+    }
+    if matches!(bytes.last(), Some(b'o')) {
+        return !matches!(
+            bytes.get(bytes.len().saturating_sub(2)),
+            Some(b'a' | b'e' | b'i' | b'o' | b'u')
+        );
+    }
+    false
 }
 
 /// Infer the core type for a known subtype name.
@@ -3017,6 +3089,26 @@ mod tests {
     fn parse_subtype_regular_plural() {
         assert_eq!(parse_subtype("zombies"), Some(("Zombie".to_string(), 7)));
         assert_eq!(parse_subtype("vampires"), Some(("Vampire".to_string(), 8)));
+    }
+
+    #[test]
+    fn parse_subtype_es_plural() {
+        // Regression: "-es" plurals for sibilant-ending and consonant+o subtypes
+        // must resolve to the canonical singular rather than falling through to a
+        // naive trailing-'s' strip (which produced "Heroe" from "Heroes").
+        assert_eq!(parse_subtype("Heroes"), Some(("Hero".to_string(), 6)));
+        assert_eq!(parse_subtype("heroes"), Some(("Hero".to_string(), 6)));
+        assert_eq!(parse_subtype("sphinxes"), Some(("Sphinx".to_string(), 8)));
+        assert_eq!(
+            parse_subtype("Heroes you control"),
+            Some(("Hero".to_string(), 6))
+        );
+        // The singular still parses, and an unrelated word does not.
+        assert_eq!(parse_subtype("Hero"), Some(("Hero".to_string(), 4)));
+        // "Synth" is now registered (real artifact-creature subtype, Fallout set).
+        assert_eq!(parse_subtype("Synth"), Some(("Synth".to_string(), 5)));
+        assert_eq!(parse_subtype("Synths"), Some(("Synth".to_string(), 6)));
+        assert_eq!(parse_subtype("Villains"), Some(("Villain".to_string(), 8)));
     }
 
     #[test]

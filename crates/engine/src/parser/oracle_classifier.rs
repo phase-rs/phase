@@ -500,6 +500,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     ) {
         return true;
     }
+    // CR 117.1c + CR 113.6b: Evendo-class compact persistent exile-play
+    // permission. Like the Matrix form above, this may be preceded by timing
+    // and condition qualifiers.
+    if scan_contains(lower, "you may play cards exiled with")
+        || scan_contains(lower, "you may play the cards exiled with")
+    {
+        return true;
+    }
     // CR 601.3f + CR 406.6: The "look-at" variant leads with "you may look at
     // cards exiled with ~, and you may play lands and cast spells from among
     // those cards." — the play/cast clause uses "those cards" (a back-reference

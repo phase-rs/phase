@@ -2606,7 +2606,9 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
             if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
                 && filters
                     .iter()
-                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None }))
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None,
+        kind: None,
+        }))
     )));
     let stack_targets_filter = filters
         .iter()
@@ -7434,6 +7436,41 @@ fn graveyard_keyword_grant_clause_escape() {
 }
 
 #[test]
+fn graveyard_keyword_grant_clause_non_lesson_instant_sorcery() {
+    let (filter, kind) = try_parse_graveyard_keyword_grant_clause(
+        "Each non-Lesson instant and sorcery card in your graveyard has flashback.",
+    )
+    .expect("non-Lesson instant/sorcery graveyard flashback");
+    assert_eq!(kind, GraveyardGrantedKeywordKind::Flashback);
+    let has_non_lesson = |tf: &TypedFilter| {
+        tf.type_filters.iter().any(|f| {
+            matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )
+        })
+    };
+    match filter {
+        TargetFilter::Or { ref filters } => {
+            assert_eq!(filters.len(), 2);
+            assert!(
+                filters.iter().all(|branch| {
+                    let TargetFilter::Typed(tf) = branch else {
+                        return false;
+                    };
+                    has_non_lesson(tf)
+                        && tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        })
+                }),
+                "each branch should be non-Lesson instant/sorcery in graveyard: {filter:?}"
+            );
+        }
+        other => panic!("expected Or filter, got {other:?}"),
+    }
+}
+
+#[test]
 fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
     let clause = try_parse_graveyard_keyword_grant_clause(
         "Each nonland card in their graveyard has escape.",
@@ -7442,6 +7479,61 @@ fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
         clause.is_none(),
         "only your graveyard scope is currently supported"
     );
+}
+
+#[test]
+fn iroh_non_lesson_graveyard_flashback_self_mana_cost() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::keywords::{FlashbackCost, Keyword};
+
+    let parsed = parse_oracle_text(
+        "During your turn, each non-Lesson instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.",
+        "Iroh, Grand Lotus",
+        &[],
+        &["Creature".to_string(), "Planeswalker".to_string()],
+        &[],
+    );
+    let non_lesson = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            def.condition == Some(StaticCondition::DuringYourTurn)
+                && matches!(
+                    def.modifications.first(),
+                    Some(ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    })
+                )
+        })
+        .expect("non-Lesson graveyard flashback static");
+    assert_eq!(non_lesson.condition, Some(StaticCondition::DuringYourTurn));
+    let TargetFilter::Or { filters } = non_lesson.affected.as_ref().expect("affected filter")
+    else {
+        panic!("expected Or filter for instant/sorcery");
+    };
+    assert_eq!(filters.len(), 2);
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected typed branch");
+        };
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )),
+            "missing Non(Lesson): {:?}",
+            tf.type_filters
+        );
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+    }
+    match &non_lesson.modifications[0] {
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+        } => {}
+        other => panic!("expected SelfManaCost flashback, got {other:?}"),
+    }
 }
 
 // --- Graveyard play permission tests (Crucible of Worlds / Icetill Explorer) ---
@@ -7742,6 +7834,82 @@ fn persistent_exile_play_permission_matrix_form() {
         def.affected,
         Some(TargetFilter::Any),
         "the persistent pool is the scope; affected must be Any"
+    );
+}
+
+/// Issue #717 — Evendo Brushrazer's condition-gated persistent exile-play
+/// permission uses the compact "you may play cards exiled with ~" wording,
+/// rather than the Matrix-style "play lands and cast spells from among ..."
+/// wording. It must still lower to the same persistent Play permission, with
+/// the sacrificed-permanent condition attached to the static.
+#[test]
+fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
+    let text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with ~.";
+    let def = parse_static_line(text).expect("Evendo static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+
+    let condition = def
+        .condition
+        .as_ref()
+        .expect("Evendo permission must keep its sacrificed-permanent gate");
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SacrificedThisTurn {
+                            player: PlayerScope::Controller,
+                            filter:
+                                TargetFilter::Typed(TypedFilter {
+                                    type_filters,
+                                    properties,
+                                    ..
+                                }),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } => {
+            assert_eq!(type_filters, &vec![TypeFilter::Permanent]);
+            assert!(
+                properties.contains(&FilterProp::NonToken),
+                "condition filter must preserve nontoken permanent qualifier: {properties:?}"
+            );
+        }
+        other => panic!("expected SacrificedThisTurn permanent gate, got {other:?}"),
+    }
+
+    let card_text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with Evendo Brushrazer.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Evendo Brushrazer",
+        &[],
+        &["Creature".to_string()],
+        &["Brushwagg".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode && parsed_def.condition == def.condition),
+        "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
+        parsed.statics
     );
 }
 
@@ -9568,6 +9736,74 @@ fn static_enchanted_creature_cant_be_blocked() {
         def.affected,
         Some(TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ))
+    );
+}
+
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked() {
+    // CR 509.1b: Tetsuko Umezawa, Fugitive — evasion applies to the typed
+    // subject, not SelfRef (~).
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can't be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
+        ))
+    );
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked_typographic_apostrophe() {
+    // CR 509.1b: reprints may use U+2019 RIGHT SINGLE QUOTATION MARK.
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can\u{2019}t be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked with typographic apostrophe");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
         ))
     );
 }
@@ -17800,6 +18036,45 @@ fn multi_keyword_flying_and_protection_unchanged() {
         }),
         "missing Protection(Color(Red)), got {mods:?}"
     );
+}
+
+/// CR 205.3m: A subtype anthem whose subject uses the "-es" plural of a
+/// sibilant/consonant+o creature subtype must resolve the canonical singular
+/// subtype in the affected filter. Zarda, the Power Princess: "Other Heroes you
+/// control have exalted." Regression — previously the naive trailing-'s' strip
+/// produced the bogus subtype "Heroe", matching no creature, so the anthem was
+/// silently inert. The assertion below flips (Subtype("Heroe")) if the
+/// parse_subtype "-es" plural arm is reverted.
+#[test]
+fn subtype_anthem_es_plural_resolves_canonical_singular() {
+    let defs = parse_static_line_multi("Other Heroes you control have exalted.");
+    let def = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Exalted,
+                })
+        })
+        .expect("expected an exalted anthem StaticDefinition");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Hero".to_string())),
+                "expected canonical Subtype(\"Hero\"), got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .contains(&TypeFilter::Subtype("Heroe".to_string())),
+                "must not emit the de-pluralization artifact Subtype(\"Heroe\"), got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("affected must be Typed(Heroes you control), got {other:?}"),
+    }
 }
 
 /// CR 604.1 / 613.1f: a granted QUOTED activated ability whose body contains an

@@ -773,6 +773,7 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
                     TargetFilter::StackAbility {
                         controller: None,
                         tag: None,
+                        kind: None,
                     },
                 ],
             },
@@ -786,6 +787,7 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
+                kind: None,
             },
             alt((
                 tag::<_, _, OracleError<'_>>("an activated or triggered ability"),

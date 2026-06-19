@@ -526,6 +526,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         track_exiled_by_source,
         ref face_down_profile,
         count_param,
+        library_position: None,
         is_cost_payment: _,
     } = state.waiting_for
     {
@@ -550,6 +551,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
                 count_param,
+                library_position: None,
                 is_cost_payment: false,
             };
         }

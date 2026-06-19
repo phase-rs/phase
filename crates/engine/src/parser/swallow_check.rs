@@ -2552,6 +2552,7 @@ fn detect_duration_this_turn(
         "NthSpellThisTurn",
         "NthDrawThisTurn",
         "CardsDrawnThisTurn",
+        "BattlefieldEntriesThisTurn",
         "PlayerActionsThisTurn",
         "OpponentLostLife",
         "OpponentDealtCombatDamage",
@@ -4249,7 +4250,9 @@ mod tests {
             &["Sorcery"],
         );
 
-        assert!(has_swallowed_detector(&parsed, "DynamicQty"));
+        // After fixing commander mana value parsing, the "greatest mana value of a commander"
+        // pattern now parses correctly, so DynamicQty should NOT be flagged.
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
     /// CR 608.2c: "investigate twice instead" — the doubled count is carried

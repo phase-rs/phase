@@ -630,7 +630,10 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
         | ClientMessage::Emote { .. }
-        | ClientMessage::SpectatorJoin { .. } => match mode {
+        | ClientMessage::SpectatorJoin { .. }
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => match mode {
             ServerMode::Full => None,
             ServerMode::LobbyOnly => Some(LOBBY_ONLY_REJECTION),
         },
@@ -2505,6 +2508,89 @@ async fn draft_pack_generator_for_start(
         .ok_or_else(|| format!("No draft pool data for set: {set_code}"))
 }
 
+/// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
+/// carrying the rolled-back state to every seat, filtered per-player exactly
+/// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
+/// `resolved_by` is the player whose response concluded the request, or
+/// `None` when it resolved naturally (e.g. the requester was the sole human).
+async fn broadcast_takeback_approved(
+    connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    player_count: u8,
+    snapshot: server_core::BroadcastSnapshot,
+    resolved_by: Option<PlayerId>,
+) {
+    let (raw_state, legal_actions, auto_pass, spell_costs, by_object) = snapshot;
+    let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
+        .map(|i| {
+            let pid = PlayerId(i);
+            (pid, server_core::filter_state_for_player(&raw_state, pid))
+        })
+        .collect();
+
+    let conns = connections.lock().await;
+    if let Some(players) = conns.get(game_code) {
+        let actors = raw_state.waiting_for.acting_players();
+        for (pid, pstate) in &filtered_states {
+            if let Some(s) = players.get(pid) {
+                let is_actor = actors.contains(pid);
+                let player_legals = if is_actor {
+                    legal_actions.clone()
+                } else {
+                    vec![]
+                };
+                let p_auto_pass = if is_actor { auto_pass } else { false };
+                let p_spell_costs = if is_actor {
+                    spell_costs.clone()
+                } else {
+                    HashMap::new()
+                };
+                let p_by_object = if is_actor {
+                    by_object.clone()
+                } else {
+                    HashMap::new()
+                };
+                let _ = s.send(ServerMessage::StateUpdate {
+                    state: pstate.clone(),
+                    events: vec![],
+                    legal_actions: player_legals,
+                    auto_pass_recommended: p_auto_pass,
+                    eliminated_players: raw_state.eliminated_players.clone(),
+                    log_entries: vec![],
+                    spell_costs: p_spell_costs,
+                    legal_actions_by_object: p_by_object,
+                    derived: derive_views(pstate, Some(*pid)),
+                });
+            }
+        }
+
+        let resolved_msg = ServerMessage::TakebackResolved {
+            approved: true,
+            resolved_by,
+        };
+        for sender in players.values() {
+            let _ = sender.send(resolved_msg.clone());
+        }
+    }
+    drop(conns);
+
+    // Spectators are read-only viewers of `StateUpdate` only (mirroring the
+    // normal action-broadcast path) — they never receive player-facing
+    // notifications like `TakebackResolved`, just like they never receive
+    // `Conceded`/`GameOver`. Without this, a spectator would stay frozen on
+    // the pre-rollback state until some later action produced a new update.
+    if let Ok(spectator_msg) = build_spectator_state_update_message(&raw_state, &[], &[]) {
+        let mut specs = game_spectators.lock().await;
+        if let Some(spectators) = specs.get_mut(game_code) {
+            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+            if spectators.is_empty() {
+                specs.remove(game_code);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
@@ -3110,6 +3196,10 @@ async fn handle_client_message(
                     player: PlayerId,
                     game_started_msg: Box<ServerMessage>,
                     ai_result: Option<Box<ActionResult>>,
+                    /// GH #1507: present when a takeback vote is in flight,
+                    /// so the reconnecting socket gets the same prompt it
+                    /// would have received had it stayed connected.
+                    pending_takeback_msg: Option<Box<ServerMessage>>,
                 },
                 Err(String),
             }
@@ -3158,10 +3248,13 @@ async fn handle_client_message(
                             // re-see the first-player roll).
                             let game_started_msg =
                                 build_game_started_message(session, player, None, Vec::new());
+                            let pending_takeback_msg =
+                                session.pending_takeback_message().map(Box::new);
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
                                 ai_result,
+                                pending_takeback_msg,
                             }
                         }
                         Err(e) => ReconnectOutcome::Err(e),
@@ -3200,6 +3293,7 @@ async fn handle_client_message(
                     player,
                     game_started_msg,
                     ai_result,
+                    pending_takeback_msg,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token);
@@ -3226,6 +3320,15 @@ async fn handle_client_message(
 
                     if let Ok(json) = serde_json::to_string(&game_started_msg) {
                         let _ = socket.send(Message::text(json)).await;
+                    }
+
+                    // GH #1507: replay the pending takeback prompt, if any,
+                    // so this socket isn't left with no way to approve or
+                    // decline a vote that started while it was disconnected.
+                    if let Some(msg) = pending_takeback_msg {
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
                     }
 
                     if let Some(result) = ai_result {
@@ -4420,6 +4523,198 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             mgr.remove_game(&game_code);
             delete_session_async(game_db, &game_code);
+        }
+
+        // GH #1507: multiplayer-safe "request takeback" — see
+        // `server_core::takeback` for the unanimous-approval rules this
+        // delegates to. None of these three arms touch `session.state`
+        // directly; they only call into `GameSession` methods that own the
+        // takeback/rollback invariants.
+        ClientMessage::RequestTakeback => {
+            let (game_code, player_id) = match (&identity.game_code, identity.player_id) {
+                (Some(c), Some(p)) => (c.clone(), p),
+                _ => {
+                    let msg = ServerMessage::Error {
+                        message: "Not in a game".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            let mut mgr = state.lock().await;
+            let Some(session) = mgr.sessions.get_mut(&game_code) else {
+                drop(mgr);
+                return;
+            };
+            let outcome = session.request_takeback(player_id);
+            // `pending_takeback_message` reads `session.pending_takeback`,
+            // which `request_takeback` already cleared on an Approved
+            // outcome — so this is `Some` exactly when we need it (the
+            // Pending arm below) and `None` otherwise.
+            let requested_msg = session.pending_takeback_message();
+            let player_count = session.player_count;
+            let approved_snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
+                .then(|| session.current_broadcast_snapshot());
+            // GH #1507: persist the rolled-back state immediately, in the
+            // same lock as the rollback itself — otherwise SQLite still
+            // holds the pre-rollback `GameState` until some later action
+            // happens to persist, and a crash/restart in that window
+            // resurrects the branch the table just agreed to undo.
+            if approved_snapshot.is_some() {
+                persist_session_async(game_db, &game_code, session);
+            }
+            drop(mgr);
+
+            match outcome {
+                Err(reason) => {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Ok(server_core::TakebackOutcome::Pending) => {
+                    info!(game = %game_code, player = ?player_id, "takeback requested");
+                    if let Some(msg) = requested_msg {
+                        let conns = connections.lock().await;
+                        if let Some(players) = conns.get(&game_code) {
+                            for sender in players.values() {
+                                let _ = sender.send(msg.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(server_core::TakebackOutcome::Approved) => {
+                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
+                    broadcast_takeback_approved(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        approved_snapshot.expect("Approved outcome always computes a snapshot"),
+                        None,
+                    )
+                    .await;
+                }
+                Ok(server_core::TakebackOutcome::Rejected) => {
+                    // request_takeback never returns Rejected — only respond_takeback does.
+                }
+            }
+        }
+
+        ClientMessage::RespondTakeback { approve } => {
+            let (game_code, player_id) = match (&identity.game_code, identity.player_id) {
+                (Some(c), Some(p)) => (c.clone(), p),
+                _ => {
+                    let msg = ServerMessage::Error {
+                        message: "Not in a game".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            let mut mgr = state.lock().await;
+            let Some(session) = mgr.sessions.get_mut(&game_code) else {
+                drop(mgr);
+                return;
+            };
+            let outcome = session.respond_takeback(player_id, approve);
+            let player_count = session.player_count;
+            let approved_snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
+                .then(|| session.current_broadcast_snapshot());
+            // GH #1507: persist the rolled-back state immediately — see the
+            // matching comment in the `RequestTakeback` arm above.
+            if approved_snapshot.is_some() {
+                persist_session_async(game_db, &game_code, session);
+            }
+            drop(mgr);
+
+            match outcome {
+                Err(reason) => {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Ok(server_core::TakebackOutcome::Pending) => {
+                    info!(game = %game_code, player = ?player_id, approve, "takeback approval recorded");
+                }
+                Ok(server_core::TakebackOutcome::Approved) => {
+                    info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
+                    broadcast_takeback_approved(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        approved_snapshot.expect("Approved outcome always computes a snapshot"),
+                        Some(player_id),
+                    )
+                    .await;
+                }
+                Ok(server_core::TakebackOutcome::Rejected) => {
+                    info!(game = %game_code, player = ?player_id, "takeback declined");
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        let msg = ServerMessage::TakebackResolved {
+                            approved: false,
+                            resolved_by: Some(player_id),
+                        };
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        ClientMessage::CancelTakeback => {
+            let (game_code, player_id) = match (&identity.game_code, identity.player_id) {
+                (Some(c), Some(p)) => (c.clone(), p),
+                _ => {
+                    let msg = ServerMessage::Error {
+                        message: "Not in a game".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            let mut mgr = state.lock().await;
+            let Some(session) = mgr.sessions.get_mut(&game_code) else {
+                drop(mgr);
+                return;
+            };
+            let result = session.cancel_takeback(player_id);
+            drop(mgr);
+
+            match result {
+                Err(reason) => {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Ok(()) => {
+                    info!(game = %game_code, player = ?player_id, "takeback request cancelled");
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        let msg = ServerMessage::TakebackResolved {
+                            approved: false,
+                            resolved_by: Some(player_id),
+                        };
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
+                        }
+                    }
+                }
+            }
         }
 
         ClientMessage::SpectatorJoin { game_code } => {
@@ -5739,6 +6034,9 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 player_token: "t".into(),
             },
+            ClientMessage::RequestTakeback,
+            ClientMessage::RespondTakeback { approve: true },
+            ClientMessage::CancelTakeback,
         ];
         for msg in disabled {
             assert!(
@@ -5822,6 +6120,9 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 action: draft_core::types::DraftAction::StartDraft,
             },
+            ClientMessage::RequestTakeback,
+            ClientMessage::RespondTakeback { approve: true },
+            ClientMessage::CancelTakeback,
         ];
         for m in msgs {
             assert!(reject_if_disabled(&m, ServerMode::Full).is_none());

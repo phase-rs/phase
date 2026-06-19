@@ -133,7 +133,8 @@ pub fn resolve(
         for resolved_target in replacement_targets(state, ability, target) {
             match resolved_target {
                 TargetRef::Object(obj_id) => {
-                    let replacement = replacement_with_ability_expiry(replacement, ability);
+                    let mut replacement = replacement_with_ability_expiry(replacement, ability);
+                    replacement.fix_legacy_parse_time_consumed_flag();
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         obj.replacement_definitions.push(replacement);
                         attached += 1;
@@ -174,8 +175,8 @@ mod tests {
     use crate::game::replacement::{replace_event, ReplacementResult};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        DamageModification, DamageTargetPlayerScope, Duration, ReplacementDefinition,
-        RestrictionExpiry, TargetFilter,
+        AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
+        ReplacementDefinition, RestrictionExpiry, TargetFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -191,6 +192,81 @@ mod tests {
             is_combat: false,
             applied: Default::default(),
         }
+    }
+
+    #[test]
+    fn die_exile_rider_with_legacy_is_consumed_applies_exile_redirect() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ));
+        repl.is_consumed = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
+        repl.fix_legacy_parse_time_consumed_flag();
+
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            target,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        );
+        let result = crate::game::replacement::replace_event(&mut state, proposed, &mut events);
+        match result {
+            crate::game::replacement::ReplacementResult::Execute(
+                crate::types::proposed_event::ProposedEvent::ZoneChange { to, .. },
+            ) => assert_eq!(to, Zone::Exile),
+            other => panic!("expected exile redirect, got {other:?}"),
+        }
+        assert!(
+            state.objects.get(&target).unwrap().replacement_definitions[0].is_consumed,
+            "one-shot rider must consume after applying"
+        );
     }
 
     #[test]

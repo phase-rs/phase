@@ -448,6 +448,8 @@ mod tests {
             target: TargetFilter::Any,
             retarget: engine::types::ability::CopyRetargetPermission::KeepOriginalTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         }
     }
 

@@ -44,6 +44,8 @@ pub enum FeatureKind {
     Reanimator,
     Equipment,
     Blink,
+    Mill,
+    Energy,
 }
 
 impl FeatureKind {
@@ -64,6 +66,8 @@ impl FeatureKind {
         FeatureKind::Reanimator,
         FeatureKind::Equipment,
         FeatureKind::Blink,
+        FeatureKind::Mill,
+        FeatureKind::Energy,
     ];
 }
 

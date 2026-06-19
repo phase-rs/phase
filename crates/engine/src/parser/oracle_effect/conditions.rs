@@ -539,6 +539,18 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
     }
 }
 
+/// Strip optional punctuation/space between a parsed reflexive clause and its body.
+fn strip_reflexive_conditional_body_separator(input: &str) -> &str {
+    opt(alt((
+        tag::<_, _, OracleError<'_>>(", "),
+        tag(". "),
+        tag(" "),
+    )))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input)
+}
+
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -562,22 +574,35 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     // the multi-word "put onto the battlefield" verb, with subtype filters
     // (Aura/Equipment/...) via `parse_type_phrase`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower.as_str()) {
+    if let Ok((rest, prefix)) = alt((
+        value("if ", tag::<_, _, OracleError<'_>>("if ")),
+        value("when ", tag("when ")),
+    ))
+    .parse(lower.as_str())
+    {
         if let Ok((after_clause, (filter, _negated))) =
             crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(rest)
         {
-            // Strip leading punctuation/space between "this way" and the body.
-            // Possible separators: ", ", ". ", " ".
-            let body_lower = after_clause
-                .strip_prefix(", ") // allow-noncombinator: structural separator after parsed clause
-                .or_else(|| after_clause.strip_prefix(". ")) // allow-noncombinator: structural separator after parsed clause
-                .or_else(|| after_clause.strip_prefix(' ')) // allow-noncombinator: structural separator after parsed clause
-                .unwrap_or(after_clause);
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
                 Some(AbilityCondition::ZoneChangedThisWay { filter }),
                 text[offset..].to_string(),
             );
+        }
+        if prefix == "when " {
+            if let Ok((after_clause, (filter, _negated))) =
+                crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
+                    rest,
+                )
+            {
+                let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+                let offset = text.len() - body_lower.len();
+                return (
+                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    text[offset..].to_string(),
+                );
+            }
         }
     }
     (None, text.to_string())
@@ -4683,6 +4708,25 @@ mod tests {
                 );
             }
             other => panic!("expected Typed Angel filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_if_you_do_conditional_gilgamesh_you_put_equipment_this_way() {
+        let (condition, body) = strip_if_you_do_conditional(
+            "when you put one or more equipment onto the battlefield this way, you may attach one of them to a samurai you control",
+        );
+        assert_eq!(body, "you may attach one of them to a samurai you control");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ));
+            }
+            other => panic!("expected Typed Equipment filter, got {other:?}"),
         }
     }
 

@@ -810,6 +810,12 @@ export interface GameObject {
     color: ManaColor[];
     printed_ref?: PrintedRef | null;
   } | null;
+  /**
+   * CR 702.143c-d: Whether this card in exile is foretold. Its owner may look
+   * at it (and cast it on a later turn) even though `face_down` is true.
+   * Cleared when the card leaves exile (a zone change creates a new object).
+   */
+  foretold?: boolean;
 }
 
 export interface PrintedRef {
@@ -1063,6 +1069,12 @@ export interface ModalChoice {
   allow_repeat_modes: boolean;
   /** Per-mode additional mana costs (Spree). Empty/absent for standard modal spells. */
   mode_costs?: ManaCost[];
+  /**
+   * CR 700.2i: Per-mode pawprint weights for points-budget modals ("up to N {P}
+   * worth of modes"). Empty/absent for non-pawprint modals. When present,
+   * `max_choices` is the point budget (Σ of chosen weights ≤ budget), not a count.
+   */
+  mode_pawprints?: number[];
   constraints?: Array<{ type: string }>;
 }
 
@@ -1221,7 +1233,7 @@ export type WaitingFor =
   // "unless they X or Y" punisher class.
   | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
-  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
+  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
@@ -1860,6 +1872,23 @@ export interface EpicEffect {
 /** CR 731: the day/night designation, absent when neither is in effect. */
 export type DayNight = "Day" | "Night";
 
+/**
+ * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
+ * Unit variants serialize as bare strings; the two struct variants serialize
+ * as a single-key object under serde's default external tagging. Only
+ * `HideawayLookable` is currently read on the client (the exile-visibility
+ * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
+ * round-trips the full wire shape rather than widening it to `unknown`.
+ */
+export type ExileLinkKind =
+  | "TrackedBySource"
+  | "Cipher"
+  | "Haunt"
+  | "HideawayLookable"
+  | "CraftMaterial"
+  | { UntilSourceLeaves: { return_zone: Zone } }
+  | { ParadigmSource: { player: PlayerId } };
+
 export interface GameState {
   turn_number: number;
   active_player: PlayerId;
@@ -1932,7 +1961,7 @@ export interface GameState {
   ring_level?: Record<string, number>;
   ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
-  exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
+  exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId; kind?: ExileLinkKind }>;
   match_config?: MatchConfig;
   match_phase?: MatchPhase;
   match_score?: MatchScore;

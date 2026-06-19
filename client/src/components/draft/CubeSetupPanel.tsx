@@ -5,10 +5,10 @@
  * (DraftPodPage) flows can mount it.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 
 import type { CubeDraftSettings } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -100,8 +100,20 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
   const busy = loading || disabled === true;
   const canStart = cubeText.trim().length > 0 && !busy;
 
+  const addablesPolicyItems = useMemo(
+    () => [
+      { value: "StandardBasics", label: t("cubeSetup.addablesStandardBasics") },
+      { value: "StandardBasicsPlusCustom", label: t("cubeSetup.addablesBasicsPlusCustom") },
+      { value: "CustomOnly", label: t("cubeSetup.addablesCustomOnly") },
+    ],
+    [t],
+  );
+  const addablesPolicyLabel =
+    addablesPolicyItems.find((item) => item.value === settings.addable_cards.policy)?.label ??
+    t("cubeSetup.addablesStandardBasics");
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_220px]">
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.cubeName")}</span>
@@ -137,27 +149,28 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
         </button>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-[260px_1fr]">
-        <label className="flex flex-col gap-1">
+      <div className="grid min-w-0 gap-3 md:grid-cols-[260px_1fr]">
+        <label className="flex min-w-0 flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.deckAddables")}</span>
-          <SelectField
-            wrapperClassName="w-full"
-            value={settings.addable_cards.policy}
-            onChange={(e) =>
+          <MenuSelect
+            ariaLabel={t("cubeSetup.deckAddables")}
+            label={addablesPolicyLabel}
+            selectedValue={settings.addable_cards.policy}
+            items={addablesPolicyItems}
+            onSelect={(value) =>
               setSettings((prev) => ({
                 ...prev,
                 addable_cards: {
                   ...prev.addable_cards,
-                  policy: e.target.value as CubeDraftSettings["addable_cards"]["policy"],
+                  policy: value as CubeDraftSettings["addable_cards"]["policy"],
                 },
               }))
             }
-            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
-          >
-            <option value="StandardBasics">{t("cubeSetup.addablesStandardBasics")}</option>
-            <option value="StandardBasicsPlusCustom">{t("cubeSetup.addablesBasicsPlusCustom")}</option>
-            <option value="CustomOnly">{t("cubeSetup.addablesCustomOnly")}</option>
-          </SelectField>
+            fitContainer
+            menuLayout="dropdown"
+            wrapperClassName="w-full min-w-0"
+            className="min-h-[44px] !rounded-lg border border-white/10 !bg-black/30 px-3 !py-2 text-sm text-white shadow-none !hover:bg-black/30 !focus-visible:ring-emerald-400/50"
+          />
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.customAddableCards")}</span>

@@ -3013,6 +3013,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");
@@ -3041,6 +3042,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");
@@ -3069,6 +3071,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");

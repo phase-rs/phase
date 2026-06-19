@@ -177,6 +177,7 @@ fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
             TargetFilter::StackAbility {
                 controller: Some(controller),
                 tag: None,
+                kind: None,
             },
         ],
     }
@@ -7389,6 +7390,7 @@ fn try_parse_event(
                 def.valid_source = Some(TargetFilter::StackAbility {
                     controller: None,
                     tag: Some(AbilityTag::Backup),
+                    kind: None,
                 });
             }
             SimpleEvent::DealtCombatDamage => {
@@ -9187,6 +9189,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
         def.damage_kind = DamageKindFilter::CombatOnly;
         def.valid_source = Some(filter);
         def.valid_target = Some(TargetFilter::Player);
+        def.batched = true;
         return Some((TriggerMode::DamageDoneOnceByController, def));
     }
 
@@ -13799,6 +13802,20 @@ mod tests {
             ))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(
+            def.batched,
+            "one-or-more combat damage triggers are batched"
+        );
+    }
+
+    #[test]
+    fn grim_hireling_combat_damage_trigger_is_batched() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, create two Treasure tokens.",
+            "Grim Hireling",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert!(def.batched);
     }
 
     #[test]
@@ -16493,6 +16510,109 @@ mod tests {
             }
             other => panic!("expected Effect::CopyTokenOf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn etb_token_copier_exile_anaphor_binds_created_token() {
+        // CR 603.7c + CR 608.2c: in an ETB-triggered token-copier, the trigger
+        // sets the effect subject to the *entering* creature, so the bare-"it"
+        // pronoun in "Exile it at the beginning of the next end step" lowers to
+        // `TriggeringSource`. But the antecedent is the newly created TOKEN, so
+        // the delayed-exile must bind `LastCreated`. The `CopyTokenOf` copy
+        // source stays `TriggeringSource` (the token IS a copy of the entering
+        // creature — locked by `necroduality_copies_entering_zombie_not_source`).
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        fn copy_source(effs: &[&Effect]) -> Option<TargetFilter> {
+            effs.iter().find_map(|e| match e {
+                Effect::CopyTokenOf { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+        }
+        fn exile_target(effs: &[&Effect]) -> Option<TargetFilter> {
+            effs.iter().find_map(|e| match e {
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target,
+                    ..
+                } => Some(target.clone()),
+                _ => None,
+            })
+        }
+
+        for (name, text) in [
+            (
+                "Flameshadow Conjuring",
+                "Whenever a nontoken creature you control enters, you may pay {R}. If you do, create a token that's a copy of that creature. That token gains haste. Exile it at the beginning of the next end step.",
+            ),
+            (
+                "Inalla, Archmage Ritualist",
+                "Whenever another nontoken Wizard you control enters, you may pay {1}. If you do, create a token that's a copy of that Wizard. The token gains haste. Exile it at the beginning of the next end step.",
+            ),
+        ] {
+            let def = parse_trigger_line(text, name);
+            let exec = def.execute.as_ref().expect("execute must be Some");
+            let mut effs = Vec::new();
+            collect(exec, &mut effs);
+            assert_eq!(
+                copy_source(&effs),
+                Some(TargetFilter::TriggeringSource),
+                "{name}: CopyTokenOf source must stay TriggeringSource (copy the entering creature)"
+            );
+            assert_eq!(
+                exile_target(&effs),
+                Some(TargetFilter::LastCreated),
+                "{name}: delayed exile must bind the created token (LastCreated), not the entering creature"
+            );
+        }
+    }
+
+    #[test]
+    fn non_token_enters_exile_it_stays_triggering_source() {
+        // No-regression: a non-token ETB trigger "exile it" has NO token creator
+        // in the chain, so the populate-anaphor repair pass is never entered and
+        // "it" correctly stays `TriggeringSource` (the entering creature).
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, exile it at the beginning of the next end step.",
+            "Test Nontoken Exiler",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        fn find_exile(def: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                if let Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target,
+                    ..
+                } = &*inner.effect
+                {
+                    return Some(target.clone());
+                }
+            }
+            if let Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } = &*def.effect
+            {
+                return Some(target.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_exile)
+        }
+        assert_eq!(
+            find_exile(exec),
+            Some(TargetFilter::TriggeringSource),
+            "non-token 'exile it' must stay TriggeringSource (no token creator → pass not entered)"
+        );
     }
 
     #[test]
@@ -21701,6 +21821,7 @@ mod tests {
             Some(TargetFilter::StackAbility {
                 controller: None,
                 tag: Some(AbilityTag::Backup),
+                kind: None,
             })
         );
         // Subject: "another creature you control" → Typed creature / You / Another.
@@ -29792,6 +29913,69 @@ mod tests {
             node = d.sub_ability.as_deref();
         }
         out
+    }
+
+    /// Issue #3659 — Gix, Yawgmoth Praetor: damage trigger with "its controller may
+    /// pay … if they do, they draw" must route the draw to the creature's
+    /// controller (ParentTargetController), not the damaged opponent
+    /// (TriggeringPlayer from the damage condition scope).
+    #[test]
+    fn gix_optional_draw_binds_creature_controller_not_damaged_player() {
+        let def = parse_trigger_line(
+            "Whenever a creature deals combat damage to one of your opponents, its controller may pay 1 life. If they do, they draw a card.",
+            "Gix, Yawgmoth Praetor",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        let chain = ability_chain(execute);
+        let draw_node = chain
+            .iter()
+            .find(|d| matches!(d.effect.as_ref(), Effect::Draw { .. }))
+            .expect("chain must contain a Draw node");
+        match draw_node.effect.as_ref() {
+            Effect::Draw { target, count, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetController,
+                    "Gix draw must go to the creature's controller who paid, not the damaged opponent"
+                );
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected Draw, got {other:?}"),
+        }
+        assert_eq!(
+            draw_node.condition,
+            Some(AbilityCondition::effect_performed()),
+            "draw must be gated on optional cost payment"
+        );
+    }
+
+    /// Issue #3659 (leak guard) — Gix's "its controller may pay … if they do,
+    /// they draw" antecedent must not leak into a later independent "that
+    /// player" clause, which must bind to the damaged opponent (TriggeringPlayer).
+    #[test]
+    fn gix_its_controller_antecedent_does_not_leak_to_later_that_player() {
+        let def = parse_trigger_line(
+            "Whenever a creature deals combat damage to one of your opponents, \
+             its controller may pay 1 life. If they do, they draw a card. That player discards a card.",
+            "Gix, Yawgmoth Praetor",
+        );
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        let chain = ability_chain(execute);
+        let discard_node = chain
+            .iter()
+            .find(|d| matches!(d.effect.as_ref(), Effect::Discard { .. }))
+            .expect("chain must contain a Discard node");
+        match discard_node.effect.as_ref() {
+            Effect::Discard { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringPlayer,
+                    "later 'that player' must be the damaged opponent, not the creature's controller"
+                );
+            }
+            other => panic!("expected Discard, got {other:?}"),
+        }
     }
 
     /// Issue #1670 — Star Athlete: "Whenever this creature attacks, choose up to

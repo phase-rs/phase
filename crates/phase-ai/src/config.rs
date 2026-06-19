@@ -357,6 +357,17 @@ pub struct PolicyPenalties {
     /// value because the deck can flicker it. Consumed by `BlinkPayoffPolicy`.
     #[serde(default = "default_etb_payoff_cast_bonus")]
     pub etb_payoff_cast_bonus: f64,
+    /// Bonus for casting an opponent-mill spell in a mill-committed deck.
+    /// Scales with library-size urgency (×2 below 15 cards, ×3 below 5 cards).
+    /// Consumed by `MillPayoffPolicy`.
+    #[serde(default = "default_mill_cast_bonus")]
+    pub mill_cast_bonus: f64,
+    /// Bonus for casting an energy-relevant spell (producer or sink body) in an
+    /// energy-committed deck. Scales with the casting player's reserve momentum
+    /// (×2 at 2–4 {E}, ×3 at ≥5 {E}).
+    /// Consumed by `EnergyPayoffPolicy`.
+    #[serde(default = "default_energy_cast_bonus")]
+    pub energy_cast_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -408,6 +419,8 @@ impl Default for PolicyPenalties {
             equipment_payoff_cast_bonus: default_equipment_payoff_cast_bonus(),
             deploy_flicker_engine_bonus: default_deploy_flicker_engine_bonus(),
             etb_payoff_cast_bonus: default_etb_payoff_cast_bonus(),
+            mill_cast_bonus: default_mill_cast_bonus(),
+            energy_cast_bonus: default_energy_cast_bonus(),
         }
     }
 }
@@ -502,6 +515,12 @@ fn default_deploy_flicker_engine_bonus() -> f64 {
 fn default_etb_payoff_cast_bonus() -> f64 {
     0.3
 }
+fn default_mill_cast_bonus() -> f64 {
+    0.5
+}
+fn default_energy_cast_bonus() -> f64 {
+    0.5
+}
 
 /// Policy penalty fields present in the active CMA-ES `--group penalties`
 /// vector. Adding a `PolicyPenalties` field requires listing it here or in
@@ -587,6 +606,14 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "etb_payoff_cast_bonus",
         "new BlinkPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "mill_cast_bonus",
+        "new MillPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "energy_cast_bonus",
+        "new EnergyPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
 ];
 

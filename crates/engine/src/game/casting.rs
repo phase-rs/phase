@@ -5440,6 +5440,40 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
     }
 }
 
+/// CR 709.3 / CR 709.3a-b: Split cards whose two faces are both spells
+/// (Life // Death, etc.) require a cast-time face choice — the same player
+/// decision as spell//spell MDFCs. Fuse split cards (Breaking // Entering) keep
+/// the existing `CastingVariant::Fuse` prompt instead.
+fn split_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card_type::CoreType;
+    let Some(back) = obj.back_face.as_ref() else {
+        return false;
+    };
+    if back.layout_kind != Some(LayoutKind::Split) {
+        return false;
+    }
+    if obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, crate::types::keywords::Keyword::Fuse))
+    {
+        return false;
+    }
+    let face_is_castable_spell = |types: &crate::types::card_type::CardType| {
+        types
+            .core_types
+            .iter()
+            .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery))
+    };
+    face_is_castable_spell(&obj.card_types) && face_is_castable_spell(&back.card_types)
+}
+
+/// CR 712.11b + CR 709.3: Cast-time face choice for spell//spell MDFCs and
+/// spell//spell split cards.
+fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    modal_spell_face_choice_available(obj) || split_spell_face_choice_available(obj)
+}
+
 /// CR 712.11b: Returns true if `obj` is a Modal double-faced card whose two
 /// faces present a real *cast*-time face choice — i.e. both faces are spells
 /// (neither is a land). This is the spell//spell MDFC class (Esika, God of the
@@ -7436,8 +7470,7 @@ pub fn handle_cast_spell_with_payment_mode(
     // re-enters this function; the swap clears the back face's Modal
     // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj)
-        {
+        if cast_face_choice_offered_from_zone(state, obj) && cast_spell_face_choice_available(obj) {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
@@ -8485,7 +8518,7 @@ fn continue_with_prepared(
                     events,
                 );
             }
-            // Cap max_choices to actual mode count
+            // Cap max_choices to actual mode count for count-capped modals.
             let mut capped = modal_choice_for_player(
                 state,
                 player,
@@ -8493,7 +8526,14 @@ fn continue_with_prepared(
                 modal_choice,
                 &crate::types::ability::SpellContext::default(),
             );
-            capped.max_choices = capped.max_choices.min(capped.mode_count);
+            // CR 700.2i: for a pawprint points-budget modal, `max_choices` is the
+            // POINT BUDGET (Σ of chosen weights), NOT a mode count — do NOT clamp
+            // it to `mode_count`. Mirrors the same discriminant branch in
+            // `build_modal_choice` (parser) so the runtime prompt carries the full
+            // budget (e.g. 5) rather than a count cap (3).
+            if capped.mode_pawprints.is_empty() {
+                capped.max_choices = capped.max_choices.min(capped.mode_count);
+            }
             let target_constraints = target_constraints_from_modal(&capped);
 
             // Build a placeholder resolved ability -- will be replaced after mode selection
@@ -9646,7 +9686,7 @@ fn can_cast_prepared_now(
     // recursion: swap to the back face and re-test. `swap_to_alternative_spell_face`
     // clears the back face's `layout_kind`, so the recursive call does not
     // re-enter this branch (no infinite recursion).
-    if modal_spell_face_choice_available(obj) {
+    if cast_spell_face_choice_available(obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
@@ -11859,6 +11899,7 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_sac.activation_cost = Some(cost.clone());
             pending_sac.activation_ability_index = Some(ability_index);
+            pending_sac.deferred_target_selection = true;
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Sacrifice,
@@ -12336,15 +12377,20 @@ pub fn handle_cancel_cast(
         }
     }
 
-    if pending
+    let restore_swapped_cast_face = pending
         .casting_variant
         .restores_front_face_after_stack_exit()
-    {
-        // CR 601.2i + CR 712.11a: backing out of a cast with an alternative
-        // spell face before it completes restores the card's normal front face
-        // in its origin zone.
+        || state
+            .objects
+            .get(&pending.object_id)
+            .is_some_and(|obj| obj.modal_back_face);
+    if restore_swapped_cast_face {
+        // CR 601.2i + CR 712.11a / CR 709.3: backing out of a cast with an
+        // alternative spell face before it completes restores the card's normal
+        // front face in its origin zone.
+        super::stack::restore_alternative_spell_normal_face(state, pending.object_id);
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-            swap_to_alternative_spell_face(obj);
+            obj.modal_back_face = false;
         }
     }
 
@@ -17466,9 +17512,12 @@ mod tests {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
                         tag: None,
+                        kind: None,
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
+                    additional_modifications: Vec::new(),
+                    starting_loyalty_from_casualty_sacrifice: false,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -20120,6 +20169,7 @@ mod tests {
                             TargetFilter::StackAbility {
                                 controller: None,
                                 tag: None,
+                                kind: None,
                             },
                         ],
                     },
@@ -20265,6 +20315,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: None,
             },
@@ -24434,6 +24485,44 @@ mod tests {
             state.objects.get(&gy).unwrap().zone,
             Zone::Exile,
             "the delved card should move to exile"
+        );
+    }
+
+    #[test]
+    fn delve_records_exiled_with_casting_spell() {
+        use super::super::engine::apply_as_current;
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        let gy = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Old Spell".to_string(),
+            Zone::Graveyard,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        state.waiting_for = result;
+
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::TapForConvoke {
+                object_id: gy,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .expect("delving a graveyard card is legal");
+
+        assert!(
+            state
+                .cards_exiled_with_source_this_turn
+                .get(&obj_id)
+                .is_some_and(|ids| ids.contains(&gy)),
+            "delved card must be tracked as exiled with the casting spell"
         );
     }
 

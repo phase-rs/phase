@@ -215,13 +215,13 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
               >
                 ✦
               </span>
-              <p
+              <RichLabel
+                text={group.description}
+                size="xs"
                 className={`relative z-10 px-1 text-center leading-tight text-amber-50/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] ${
                   isCompactHeight ? "line-clamp-2 text-[6px]" : "line-clamp-3 text-[7px]"
                 }`}
-              >
-                {group.description}
-              </p>
+              />
             </div>
           )}
 

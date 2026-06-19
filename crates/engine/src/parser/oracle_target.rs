@@ -1962,6 +1962,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 let combined = distribute_shared_properties(combined, &properties);
                 let combined = distribute_controller_to_or(combined);
                 let combined = distribute_core_type_to_or(combined);
+                let combined = distribute_neg_type_filters_to_or(combined);
                 return (distribute_properties_to_or(combined), final_rest);
             }
         }
@@ -3037,6 +3038,50 @@ pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
             }
         }
     }
+    TargetFilter::Or { filters }
+}
+
+/// CR 205.4b: When a leading `non-` negation scopes a type disjunction
+/// ("non-Lesson instant and sorcery card"), the negated type must bind to
+/// every disjunct — not only the first leg parsed before the `and`/`or`
+/// connector. Without this, "non-Lesson instant and sorcery" would match
+/// any sorcery, including Lessons (issue #1163, Iroh, Grand Lotus).
+pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+
+    let neg_filters: Vec<TypeFilter> = filters
+        .first()
+        .and_then(|f| {
+            if let TargetFilter::Typed(TypedFilter { type_filters, .. }) = f {
+                Some(
+                    type_filters
+                        .iter()
+                        .filter(|tf| matches!(tf, TypeFilter::Non(_)))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    if neg_filters.is_empty() {
+        return TargetFilter::Or { filters };
+    }
+
+    for f in filters.iter_mut().skip(1) {
+        if let TargetFilter::Typed(ref mut typed) = f {
+            for neg in &neg_filters {
+                if !typed.type_filters.iter().any(|existing| existing == neg) {
+                    typed.type_filters.push(neg.clone());
+                }
+            }
+        }
+    }
+
     TargetFilter::Or { filters }
 }
 
@@ -5690,45 +5735,126 @@ fn parse_zone_suffix_nom(
         )));
     }
 
-    let out = match qual {
-        ZoneQual::Opponent => (
-            vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::Opponent,
-                },
-                FilterProp::InZone { zone },
-            ],
-            None,
-        ),
-        ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
-        // CR 108.3 + CR 109.4 + CR 115.1: Non-battlefield zone membership is
-        // owner-keyed. "target player's graveyard" constrains selected cards
-        // by ownership relative to the chosen target player, not by controller.
-        ZoneQual::TargetPlayer => (
-            vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::TargetPlayer,
-                },
-                FilterProp::InZone { zone },
-            ],
-            None,
-        ),
-        // CR 110.1 + CR 108.3: a graveyard/hand/library card is not a permanent
-        // and has no controller — membership is keyed by owner. CR 109.5:
-        // "their" in an each-player iteration binds to the iterated player
-        // (ControllerRef::ScopedPlayer), distinct from "your" (the controller).
-        // Emit FilterProp::Owned, not a controller match.
-        ZoneQual::Their => (
-            vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::ScopedPlayer,
-                },
-                FilterProp::InZone { zone },
-            ],
-            None,
-        ),
-        ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
+    // Check for zone disjunction: "or in <zone>" or "or on <zone>" or "or from <zone>"
+    let (i, zones) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(i) {
+        // Parse additional zone phrases
+        let mut zones = vec![zone];
+        let mut rest = rest;
+
+        loop {
+            let (next_rest, next_prep) = alt((
+                value(ZonePrep::From, tag("from ")),
+                value(ZonePrep::In, tag("in ")),
+                value(ZonePrep::On, tag("on ")),
+            ))
+            .parse(rest)?;
+
+            let (next_rest, next_qual) = parse_zone_qual(next_rest)?;
+            let (next_rest, next_zone) = parse_zone_word(next_rest)?;
+            let (next_rest, _) = peek_zone_boundary(next_rest)?;
+
+            // CR 400.1: only the battlefield is referred to with "on"
+            if next_prep == ZonePrep::On && next_zone != Zone::Battlefield {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    next_rest,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+
+            // Qualifier consistency check: all zones in a disjunction should use the same qualifier
+            if qual != next_qual {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    next_rest,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+
+            zones.push(next_zone);
+            rest = next_rest;
+
+            // Check for another "or" separator
+            if tag::<_, _, OracleError<'_>>(" or ").parse(rest).is_err() {
+                break;
+            }
+        }
+
+        (rest, zones)
+    } else {
+        (i, vec![zone])
     };
+
+    let out = if zones.len() > 1 {
+        // Multi-zone disjunction: use InAnyZone
+        match qual {
+            ZoneQual::Opponent => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                None,
+            ),
+            ZoneQual::You => (
+                vec![FilterProp::InAnyZone { zones }],
+                Some(ControllerRef::You),
+            ),
+            ZoneQual::TargetPlayer => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                None,
+            ),
+            ZoneQual::Their => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::ScopedPlayer,
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                None,
+            ),
+            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InAnyZone { zones }], None),
+        }
+    } else {
+        // Single zone: use InZone
+        let zone = zones[0];
+        match qual {
+            ZoneQual::Opponent => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone { zone },
+                ],
+                None,
+            ),
+            ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+            ZoneQual::TargetPlayer => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::InZone { zone },
+                ],
+                None,
+            ),
+            ZoneQual::Their => (
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::ScopedPlayer,
+                    },
+                    FilterProp::InZone { zone },
+                ],
+                None,
+            ),
+            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
+        }
+    };
+
     Ok((i, out))
 }
 
@@ -12739,5 +12865,65 @@ mod tests {
         };
         assert!(tf2.properties.contains(&FilterProp::Token));
         assert!(rest2.is_empty(), "expected empty remainder, got {rest2:?}");
+    }
+
+    #[test]
+    fn parse_non_lesson_instant_and_sorcery_distributes_negation() {
+        let (filter, rest) =
+            parse_type_phrase("non-Lesson instant and sorcery card in your graveyard");
+        assert!(rest.trim().is_empty(), "unexpected remainder: {rest:?}");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for branch in filters {
+            let TargetFilter::Typed(tf) = branch else {
+                panic!("expected typed branch");
+            };
+            assert!(
+                tf.type_filters.iter().any(|f| matches!(
+                    f,
+                    TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+                )),
+                "each branch must exclude Lesson: {:?}",
+                tf.type_filters
+            );
+        }
+    }
+
+    #[test]
+    fn parse_artifact_or_noncreature_permanent_keeps_negation_on_second_branch() {
+        let (filter, rest) = parse_type_phrase("artifact or noncreature permanent");
+        assert!(rest.trim().is_empty(), "unexpected remainder: {rest:?}");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+
+        let has_artifact = |filter: &TargetFilter| {
+            let TargetFilter::Typed(tf) = filter else {
+                return false;
+            };
+            tf.type_filters.contains(&TypeFilter::Artifact)
+        };
+        let has_noncreature = |filter: &TargetFilter| {
+            let TargetFilter::Typed(tf) = filter else {
+                return false;
+            };
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+        };
+
+        let artifact_branch = filters
+            .iter()
+            .find(|branch| has_artifact(branch))
+            .expect("artifact branch");
+        assert!(
+            !has_noncreature(artifact_branch),
+            "noncreature must not distribute back onto artifact branch: {artifact_branch:?}"
+        );
+        assert!(
+            filters.iter().any(has_noncreature),
+            "expected a noncreature branch in {filters:?}"
+        );
     }
 }

@@ -1423,6 +1423,37 @@ mod tests {
         );
     }
 
+    /// Issue #823 — Jace, Mirror Mage: the copy token exception includes both
+    /// "not legendary" and a starting-loyalty override. Both are non-keyword
+    /// copy exceptions and must reach `CopyTokenOf.additional_modifications`.
+    #[test]
+    fn jace_copy_token_routes_starting_loyalty_override() {
+        let effect = try_parse_token(
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetStartingLoyalty { value: 1 })));
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
     /// that card, except it's an enchantment and loses all other card types."
     /// CR 205.1a + CR 707.9d: the "loses all other card types" suffix is the

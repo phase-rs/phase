@@ -284,6 +284,18 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     .parse(lower)
     {
         let qty_text = qty_tail.trim_end_matches('.').trim();
+        // CR 107.1a + CR 121.1: "cards equal to half the number of cards in
+        // their library" — fraction-led dynamic draw count, rounded per CR
+        // 107.1a. `qty_text` is already lowercase + trimmed, so call
+        // `parse_fraction_rounded` directly (no `nom_on_lower` bridge), and
+        // require full consumption before accepting the fraction expression.
+        if let Ok((rest, expr)) =
+            crate::parser::oracle_nom::quantity::parse_fraction_rounded(qty_text)
+        {
+            if rest.trim().is_empty() {
+                return Some(expr);
+            }
+        }
         if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
             return Some(QuantityExpr::Ref { qty });
         }
@@ -3675,6 +3687,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
+                kind: None,
             },
             rem,
         ));
@@ -3688,6 +3701,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
+                kind: None,
             },
             input,
         ));
@@ -3709,6 +3723,7 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     TargetFilter::StackAbility {
         controller,
         tag: None,
+        kind: None,
     }
 }
 
@@ -3793,6 +3808,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             target,
             retarget,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
@@ -8905,6 +8922,55 @@ mod tests {
         tf.properties.iter().any(|candidate| candidate == &prop)
     }
 
+    /// CR 107.1a + CR 121.1: Change B — `parse_dynamic_count_phrase` routes a
+    /// fraction-led draw count ("cards equal to half the number of cards in
+    /// their library") through `parse_fraction_rounded` FIRST, yielding a
+    /// `DivideRounded` over the target's library count (Peer into the Abyss).
+    #[test]
+    fn dynamic_count_phrase_fraction_routes_to_divide_rounded() {
+        let qty =
+            parse_dynamic_count_phrase("cards equal to half the number of cards in their library")
+                .expect("fraction-led draw count must parse");
+        match qty {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
+                // Rounding defaults to Down here; the trailing "Round up each
+                // time." post-pass flips it to Up at the card level.
+                assert_eq!(rounding, crate::types::ability::RoundingMode::Down);
+                assert!(
+                    matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: crate::types::ability::ZoneRef::Library
+                            }
+                        }
+                    ),
+                    "expected TargetZoneCardCount{{Library}} inner, got {inner:?}"
+                );
+            }
+            other => panic!("expected DivideRounded, got {other:?}"),
+        }
+    }
+
+    /// Change B fallback guard: a NON-fraction "cards equal to <ref>" draw
+    /// count still parses to its prior `QuantityExpr::Ref` via the unchanged
+    /// semantic `parse_quantity_ref` call — `parse_fraction_rounded` misses on
+    /// the non-fraction lead and falls through (no regression).
+    #[test]
+    fn dynamic_count_phrase_nonfraction_falls_through_to_ref() {
+        let qty = parse_dynamic_count_phrase("cards equal to the number of creatures you control")
+            .expect("non-fraction draw count must still parse");
+        assert!(
+            matches!(qty, QuantityExpr::Ref { .. }),
+            "non-fraction draw count must remain a plain Ref, got {qty:?}"
+        );
+    }
+
     /// CR 122.1: `counter_placement_is_mass` recognizes "on each"/"on all"
     /// mass placements and rejects targeted ("on target") or anaphoric
     /// ("on it") single-object placements.
@@ -8942,7 +9008,8 @@ mod tests {
                 f,
                 TargetFilter::StackAbility {
                     controller: None,
-                    tag: None
+                    tag: None,
+                    kind: None,
                 }
             )),
             "missing the activated/triggered ability disjunct: {target:?}"
@@ -8988,7 +9055,8 @@ mod tests {
                 f,
                 TargetFilter::StackAbility {
                     controller: None,
-                    tag: None
+                    tag: None,
+                    kind: Some(crate::types::ability::StackAbilityKind::Triggered),
                 }
             )),
             "missing the triggered-ability disjunct: {target:?}"
@@ -9040,7 +9108,8 @@ mod tests {
                 f,
                 TargetFilter::StackAbility {
                     controller: None,
-                    tag: None
+                    tag: None,
+                    kind: None,
                 }
             )),
             "missing the activated/triggered ability disjunct: {target:?}"
@@ -9543,6 +9612,37 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
         );
         assert!(matches!(target, TargetFilter::ParentTarget));
+    }
+
+    /// CR 608.2c + CR 301.5b: Gilgamesh attach body — moved Equipment binds on
+    /// the attachment side; the Samurai recipient stays explicitly typed.
+    #[test]
+    fn parse_attach_one_of_them_to_samurai_you_control() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let input = "attach one of them to a Samurai you control";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert!(
+            matches!(attachment, TargetFilter::ParentTarget),
+            "attachment should bind to a chosen moved Equipment, got {attachment:?}"
+        );
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    ref type_filters,
+                    ..
+                }) if type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Samurai"))
+                )
+            ),
+            "expected Samurai you control attach target, got {target:?}"
+        );
     }
 
     /// CR 608.2k regression — issue #319 sibling.
@@ -10870,6 +10970,36 @@ mod tests {
                         qty: QuantityRef::Variable { .. }
                     }
                 ));
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
+    /// Issue #720: "amass Orcs X, where X is that spell's mana value" (Saruman,
+    /// the White Hand) must bind X to the triggering spell's mana value, not
+    /// fall through to a bare `Variable` ref — which always resolves to 0
+    /// outside an actually-paid-X cost, silently amassing nothing.
+    #[test]
+    fn parse_amass_orcs_x_where_x_is_spell_mana_value() {
+        let result = try_parse_amass(
+            "amass Orcs X, where X is that spell's mana value",
+            "amass orcs x, where x is that spell's mana value",
+        );
+        assert!(
+            result.is_some(),
+            "Should parse 'amass Orcs X, where X is ...'"
+        );
+        match result.unwrap() {
+            Effect::Amass { subtype, count } => {
+                assert_eq!(subtype, "Orc");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
+                    }
+                );
             }
             other => panic!("Expected Amass, got {other:?}"),
         }
@@ -12616,6 +12746,7 @@ mod tests {
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
+                kind: None,
             }
         ));
 
@@ -12626,7 +12757,8 @@ mod tests {
             unscoped.0,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         ));
 

@@ -3,10 +3,11 @@ import { motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { WaitingFor } from "../../adapter/types.ts";
+import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
@@ -58,10 +59,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
 // cost kinds surface a modal in `CardChoiceModal` and must stay host-wrapped.
 export function isClickThroughWaitingFor(
   waitingFor: WaitingFor | null | undefined,
+  objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
-  return waitingFor.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
+  return getBoardChoiceView(waitingFor, objects) != null;
 }
 
 function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean {
@@ -69,9 +71,12 @@ function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean 
   return !NON_DIALOG_WAITING_FOR_TYPES.has(waitingFor.type);
 }
 
-function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolean {
+function isClickThroughDialog(
+  waitingFor: WaitingFor | null | undefined,
+  objects?: Record<ObjectId, GameObject | undefined>,
+): boolean {
   if (!waitingFor) return false;
-  if (isClickThroughWaitingFor(waitingFor)) return true;
+  if (isClickThroughWaitingFor(waitingFor, objects)) return true;
   // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
   // these tap-payment modes let the caster tap creatures/artifacts on the
   // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel
@@ -87,6 +92,7 @@ function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolea
 
 export function DialogHost({ children }: { children: ReactNode }) {
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
   // Only treat a `WaitingFor` as a host-anchored dialog when the local
   // player can actually act on it. Otherwise (opponent searching their
   // library, scrying, etc.) the engine's WaitingFor is on the opponent and
@@ -124,7 +130,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // `pointer-events: none`, so its buttons are dead and clicks fall through to the
   // board/hand behind it. While such a modal is up the player interacts with it,
   // not the board, so suppress click-through to restore pointer events.
-  const clickThrough = isClickThroughDialog(waitingFor) && !hasUiDialog;
+  const clickThrough = isClickThroughDialog(waitingFor, objects) && !hasUiDialog;
   // BASE INVARIANT: every visible prompt is anchored in this viewport-level
   // `fixed inset-0 z-40` stacking context, so no prompt can ever be trapped
   // beneath the board. The board grid is its own `relative z-10` stacking

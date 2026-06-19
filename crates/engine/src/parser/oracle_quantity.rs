@@ -1120,6 +1120,31 @@ fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), Oracle
     .map(|(rest, _)| (rest, ()))
 }
 
+/// CR 109.5: "opponent who [scalar predicate]" → `PlayerCount` over opponents
+/// matching the per-candidate attribute threshold.
+fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<QuantityRef> {
+    let ((relation, attr, count), rest) = nom_on_lower(clause, clause, |input| {
+        let (input, relation) = parse_player_population(input)?;
+        let (input, (attr, count)) = alt((
+            parse_cards_drawn_attr_clause,
+            parse_battlefield_entries_attr_clause,
+        ))
+        .parse(input)?;
+        Ok((input, (relation, attr, count)))
+    })?;
+    if !rest.is_empty() || relation != PlayerRelation::Opponent {
+        return None;
+    }
+    Some(QuantityRef::PlayerCount {
+        filter: PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: count }),
+        },
+    })
+}
+
 /// CR 402.1 / 119.1 / 122.1f / 404.1: Parse a player population whose scalar
 /// attribute crosses a threshold, into `PlayerFilter::PlayerAttribute`. Reached
 /// after `"the number of "` has been stripped.
@@ -1142,6 +1167,8 @@ fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilte
     let (input, (attr, count)) = alt((
         parse_player_counter_attr_clause,
         parse_hand_size_attr_clause,
+        parse_cards_drawn_attr_clause,
+        parse_battlefield_entries_attr_clause,
     ))
     .parse(input)?;
     Ok((
@@ -1203,6 +1230,50 @@ fn parse_hand_size_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i3
         (
             QuantityRef::HandSize {
                 player: PlayerScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 121.1: "who drew N or more cards this turn" → the candidate's draw count.
+fn parse_cards_drawn_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("who drew ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more cards this turn").parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 403.3: "who had N or more [type] enter the battlefield under their control
+/// this turn" → battlefield-entry count for the candidate.
+fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("who had ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) =
+        take_until(" enter the battlefield under their control this turn").parse(input)?;
+    let (input, _) = tag(" enter the battlefield under their control this turn").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        (
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::ScopedPlayer,
+                filter,
             },
             n as i32,
         ),
@@ -2360,6 +2431,13 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
+    // CR 121.1 / CR 403.3: "opponent who drew N or more cards this turn" and
+    // "opponent who had N or more [type] enter the battlefield under their
+    // control this turn" (Smuggler's Share class).
+    if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
+        return Some(qty);
+    }
+
     // "opponent who gained life this turn"
     if clause.contains("opponent") && clause.contains("gained life") {
         return Some(QuantityRef::PlayerCount {
@@ -3050,6 +3128,57 @@ mod tests {
     /// and the Storage Counter cycle depend on this dispatch — without it, the
     /// generic `TrackedSetSize` fallback returns the count of *objects* affected
     /// (always 1 for a self-counter-removal), which is wrong.
+    #[test]
+    fn for_each_opponent_drew_two_or_more_cards_this_turn() {
+        let qty = parse_for_each_clause("opponent who drew two or more cards this turn").unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::CardsDrawnThisTurn { .. }
+                ));
+            }
+            other => panic!("expected PlayerCount PlayerAttribute draw filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_had_two_lands_enter_this_turn() {
+        let qty = parse_for_each_clause(
+            "opponent who had two or more lands enter the battlefield under their control this turn",
+        )
+        .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::BattlefieldEntriesThisTurn { .. }
+                ));
+            }
+            other => {
+                panic!("expected PlayerCount PlayerAttribute land-entry filter, got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
         let qty = parse_for_each_clause("charge counter removed this way").unwrap();
@@ -4283,6 +4412,42 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 }),
                 offset: -1,
+            })
+        );
+    }
+
+    /// CR 107.x + CR 506.2: Mr. Foxglove's binary-minus draw count composes
+    /// `Sum[left, Multiply{-1, right}]` over two dynamic hand-size quantities,
+    /// the right one negated. This is the arithmetic-aware shape the draw
+    /// effect-construction fallback (`try_parse_equal_to_quantity_effect`)
+    /// reaches via `parse_cda_quantity`.
+    #[test]
+    fn parse_cda_quantity_defending_minus_your_hand() {
+        let result = parse_cda_quantity(
+            "the number of cards in defending player's hand minus the number of cards in your hand",
+        );
+        assert_eq!(
+            result,
+            Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::DefendingPlayer,
+                        },
+                    },
+                    // CR 402: "the number of cards in your hand" inside
+                    // `parse_cda_quantity` routes through the "the number of"
+                    // arm to the typed `HandSize { Controller }` ref (not the
+                    // bare-suffix `ZoneCardCount` form).
+                    QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
+                        }),
+                    },
+                ],
             })
         );
     }

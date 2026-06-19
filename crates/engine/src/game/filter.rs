@@ -749,11 +749,28 @@ pub(crate) fn matches_stack_target_filter(
     match filter {
         TargetFilter::Any => true,
         TargetFilter::StackSpell => matches!(&entry.kind, StackEntryKind::Spell { .. }),
-        TargetFilter::StackAbility { controller, tag } => {
+        TargetFilter::StackAbility {
+            controller,
+            tag,
+            kind,
+        } => {
+            let ability_kind_ok = kind.as_ref().is_none_or(|kind| {
+                matches!(
+                    (kind, &entry.kind),
+                    (
+                        crate::types::ability::StackAbilityKind::Activated,
+                        StackEntryKind::ActivatedAbility { .. }
+                    ) | (
+                        crate::types::ability::StackAbilityKind::Triggered,
+                        StackEntryKind::TriggeredAbility { .. }
+                    )
+                )
+            });
             matches!(
                 &entry.kind,
                 StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-            ) && stack_entry_controller_matches(state, controller.as_ref(), entry.controller, ctx)
+            ) && ability_kind_ok
+                && stack_entry_controller_matches(state, controller.as_ref(), entry.controller, ctx)
                 // CR 113.7a: keyword-origin tag (e.g. `AbilityTag::Backup`) must
                 // match the ability on the stack when the filter requires one.
                 && tag.as_ref().is_none_or(|tag| {
@@ -4759,6 +4776,7 @@ mod tests {
         let ability_leg = TargetFilter::StackAbility {
             controller: None,
             tag: None,
+            kind: None,
         };
         assert!(
             matches_stack_target_filter(&state, ability_entry_id, &ability_leg, &ctx),

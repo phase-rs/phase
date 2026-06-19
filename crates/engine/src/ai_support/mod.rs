@@ -43,6 +43,67 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     pipeline.apply(state, candidate_actions(state))
 }
 
+/// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
+/// valid `TapForConvoke` candidate is accepted by `apply_as_current` — skip the
+/// full-state clone in `SimulationFilter` (issue #3663 Treasure Cruise / Delve).
+pub(crate) fn structurally_valid_tap_for_convoke_payment(
+    state: &GameState,
+    action: &GameAction,
+) -> bool {
+    use crate::types::game_state::ConvokeMode;
+    use crate::types::mana::ManaType;
+    use crate::types::zones::Zone;
+
+    let (
+        WaitingFor::ManaPayment {
+            player,
+            convoke_mode: Some(mode),
+        },
+        GameAction::TapForConvoke {
+            object_id,
+            mana_type,
+        },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    let Some(obj) = state.objects.get(object_id) else {
+        return false;
+    };
+
+    match mode {
+        ConvokeMode::Delve => {
+            obj.zone == Zone::Graveyard && obj.owner == *player && *mana_type == ManaType::Colorless
+        }
+        ConvokeMode::Convoke => {
+            if !obj.is_convoke_eligible(*player) {
+                return false;
+            }
+            if let Some(color) = mana_sources::mana_type_to_color(*mana_type) {
+                if !obj.color.contains(&color) {
+                    return false;
+                }
+                if let Some(shards) = state.pending_cast.as_ref().and_then(|pc| match &pc.cost {
+                    crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
+                    _ => None,
+                }) {
+                    return shards.iter().any(|shard| shard.contributes_to(color));
+                }
+                true
+            } else {
+                *mana_type == ManaType::Colorless
+            }
+        }
+        ConvokeMode::Waterbend => {
+            obj.is_waterbend_eligible(*player) && *mana_type == ManaType::Colorless
+        }
+        ConvokeMode::Improvise => {
+            obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
+        }
+    }
+}
+
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     // CR 103.5 / TL:R 906.6a: For simultaneous-decision states
     // `acting_player()` is None when multiple players are pending. The
@@ -1038,8 +1099,8 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        CastingVariant, GameState, MulliganDecisionEntry, PendingCast, StackEntry, StackEntryKind,
-        WaitingFor,
+        CastingVariant, ConvokeMode, GameState, MulliganDecisionEntry, PendingCast, StackEntry,
+        StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -2883,5 +2944,42 @@ mod tests {
                 state.waiting_for.variant_name()
             );
         }
+    }
+
+    /// Issue #3663 — Delve payment must not clone the full state once per
+    /// graveyard card when validating legal actions.
+    #[test]
+    fn delve_payment_skips_state_clone_per_graveyard_candidate() {
+        let mut state = setup_priority();
+        for i in 0..25 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Graveyard Card {i}"),
+                Zone::Graveyard,
+            );
+        }
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: Some(ConvokeMode::Delve),
+        };
+
+        crate::game::perf_counters::reset();
+        let candidates = validated_candidate_actions(&state);
+        let delve_taps = candidates
+            .iter()
+            .filter(|c| matches!(c.action, GameAction::TapForConvoke { .. }))
+            .count();
+        assert!(
+            delve_taps >= 25,
+            "expected delve tap candidates for each graveyard card, got {delve_taps}"
+        );
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert!(
+            clones < 5,
+            "delve validation should not clone state per graveyard card (got {clones} clones)"
+        );
     }
 }

@@ -390,7 +390,7 @@ fn entry_color_matches(record: &BattlefieldEntryRecord, color: &ManaColor) -> bo
     record.colors.iter().any(|entry_color| entry_color == color)
 }
 
-fn battlefield_entry_matches_filter(
+pub(crate) fn battlefield_entry_matches_filter(
     record: &BattlefieldEntryRecord,
     filter: &TargetFilter,
     player: PlayerId,

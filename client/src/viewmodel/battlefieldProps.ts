@@ -2,8 +2,11 @@ import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "
 import { publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
-function canGroup(obj: GameObject): boolean {
-  return obj.attachments.length === 0;
+function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolean {
+  // Ring-bearers (CR 701.54) must never be hidden behind a same-named
+  // non-bearer representative in a collapsed/stacked group display — render
+  // them solo so the ring-bearer badge in PermanentCard is always visible.
+  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id);
 }
 
 function groupKey(obj: GameObject): string {
@@ -82,12 +85,17 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   return { creatures, lands, support, planeswalkers, other };
 }
 
-export function groupByName(objects: GameObject[]): GroupedPermanent[] {
+const NO_RING_BEARERS: ReadonlySet<ObjectId> = new Set();
+
+export function groupByName(
+  objects: GameObject[],
+  ringBearerIds: ReadonlySet<ObjectId> = NO_RING_BEARERS,
+): GroupedPermanent[] {
   const groups = new Map<string, GameObject[]>();
 
   for (const obj of objects) {
-    if (!canGroup(obj)) {
-      // Ungroupable objects (attachments, counters) get their own entry
+    if (!canGroup(obj, ringBearerIds)) {
+      // Ungroupable objects (attachments, ring-bearers) get their own entry
       groups.set(`__solo_${obj.id}`, [obj]);
       continue;
     }

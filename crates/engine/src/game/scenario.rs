@@ -1683,6 +1683,7 @@ pub struct SpellCast<'a> {
     convoke_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
+    modal_back_face: Option<bool>,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1698,6 +1699,7 @@ impl<'a> SpellCast<'a> {
             convoke_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
+            modal_back_face: None,
         }
     }
 
@@ -1768,6 +1770,14 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Choose which face of a spell//spell MDFC or split card to cast (CR
+    /// 712.11b / CR 709.3). Required when the engine surfaces
+    /// `WaitingFor::ModalFaceChoice`.
+    pub fn modal_back_face(mut self, back: bool) -> Self {
+        self.modal_back_face = Some(back);
+        self
+    }
+
     /// Tap these creatures to pay the cost via Convoke (CR 702.51a). Each is
     /// tapped during the `ManaPayment { convoke_mode }` window with mana of the
     /// creature's first declared color (falling back to colorless for the
@@ -1792,6 +1802,7 @@ impl<'a> SpellCast<'a> {
             convoke_with,
             optional,
             search_pick,
+            modal_back_face,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1828,7 +1839,17 @@ impl<'a> SpellCast<'a> {
 
         for _ in 0..64 {
             match &runner.state.waiting_for {
-                // CR 601.2b: choose a legal cast variant the engine authored.
+                WaitingFor::ModalFaceChoice { .. } => {
+                    let back = modal_back_face.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::ModalFaceChoice but no \
+                             .modal_back_face(..) was declared — declare which face to cast"
+                        )
+                    });
+                    runner
+                        .act(GameAction::ChooseModalFace { back_face: back })
+                        .expect("ChooseModalFace must be accepted");
+                }
                 WaitingFor::CastingVariantChoice { options, .. } => {
                     let variant = casting_variant.unwrap_or_else(|| {
                         panic!(

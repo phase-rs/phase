@@ -302,6 +302,7 @@ pub fn attach_to(
     }
 
     crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     old_target
 }
 
@@ -522,6 +523,7 @@ pub fn attach_to_player(
     }
 
     crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     old_target
 }
 
@@ -545,6 +547,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
         attachment.attached_to = None;
     }
     crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     Some(old_target)
 }
 

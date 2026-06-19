@@ -18,20 +18,20 @@
 // logic, the host language is a serialization boundary with zero game logic.
 
 import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
-import { initSync, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import { initSync, protocol_version, WasmBroker } from "./broker-wasm-pkg/broker.js";
 import {
   classifyHelloGate,
   helloGateErrorMessage,
   type ConnAttachment,
 } from "./hello-gate";
 import { moderationErrorForLobbyFrame } from "./name-filter";
-import { PROTOCOL_VERSION } from "./protocol";
 
 // Instantiate the broker WASM once per isolate, at top level (CF imports `.wasm`
 // as a WebAssembly.Module; `initSync` wires the wasm-bindgen imports
 // synchronously). Doing this here — not per request — avoids re-instantiation.
 initSync({ module: wasmModule });
 
+const PROTOCOL_VERSION = protocol_version();
 const SERVER_VERSION = "lobby-rs";
 // build_commit is cosmetic for a LobbyOnly broker — the gameplay-relevant gate
 // is each room's host_build_commit (enforced inside the Rust core), not the
@@ -139,7 +139,7 @@ export class LobbyDO {
     }
 
     const attachment = conn as ConnAttachment;
-    const gate = classifyHelloGate(attachment.client_hello != null, frame);
+    const gate = classifyHelloGate(attachment.client_hello != null, frame, PROTOCOL_VERSION);
     const gateError = helloGateErrorMessage(gate);
     if (gateError) {
       ws.send(JSON.stringify({ type: "Error", data: { message: gateError } }));

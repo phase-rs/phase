@@ -1320,11 +1320,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     modal.max_choices,
                 )
             };
-            // CR 702.172b: For Spree spells, filter out mode combinations the player
-            // cannot afford. Each mode has an additional cost that sums with the base cost.
-            if modal.mode_costs.is_empty() {
+            // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
+            // mode sequences (Σ weight ≤ budget). Index the UNFILTERED `modal`
+            // (real indices 0..mode_count). Mutually exclusive with Spree.
+            if !modal.mode_pawprints.is_empty() {
+                actions
+                    .into_iter()
+                    .filter(|ca| match &ca.action {
+                        GameAction::SelectModes { indices } => {
+                            crate::game::ability_utils::pawprint_budget_satisfied(modal, indices)
+                        }
+                        _ => true,
+                    })
+                    .collect()
+            } else if modal.mode_costs.is_empty() {
                 actions
             } else {
+                // CR 702.172b: For Spree spells, filter out mode combinations the player
+                // cannot afford. Each mode has an additional cost that sums with the base cost.
                 actions
                     .into_iter()
                     .filter(|ca| {
@@ -1364,7 +1377,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             let available: Vec<usize> = (0..modal.mode_count)
                 .filter(|i| !unavailable_modes.contains(i))
                 .collect();
-            if modal.allow_repeat_modes {
+            let actions = if modal.allow_repeat_modes {
                 // Build a filtered ModalChoice for sequence generation with repeats.
                 let filtered = crate::types::ability::ModalChoice {
                     mode_count: available.len(),
@@ -1392,6 +1405,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     modal.min_choices,
                     modal.max_choices,
                 )
+            };
+            // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
+            // mode sequences. Index the UNFILTERED `modal` (real indices
+            // 0..mode_count). No-op for non-pawprint modals.
+            if modal.mode_pawprints.is_empty() {
+                actions
+            } else {
+                actions
+                    .into_iter()
+                    .filter(|ca| match &ca.action {
+                        GameAction::SelectModes { indices } => {
+                            crate::game::ability_utils::pawprint_budget_satisfied(modal, indices)
+                        }
+                        _ => true,
+                    })
+                    .collect()
             }
         }
         WaitingFor::ConniveDiscard {
@@ -3875,10 +3904,9 @@ fn mana_payment_actions(
                 crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
                 _ => None,
             });
-        for (obj_id, obj) in &state.objects {
-            match mode {
-                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
-                    // Waterbend: always colorless
+        if mode == ConvokeMode::Delve {
+            if let Some(p) = state.players.iter().find(|p| p.id == player) {
+                for obj_id in &p.graveyard {
                     actions.push(candidate(
                         GameAction::TapForConvoke {
                             object_id: *obj_id,
@@ -3888,62 +3916,65 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
-                    // CR 702.126a: Improvise pays generic mana — always colorless.
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-                ConvokeMode::Delve
-                    if obj.zone == crate::types::zones::Zone::Graveyard && obj.owner == player =>
-                {
-                    // CR 702.66a: exile a graveyard card to pay one generic mana.
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
-                    // CR 702.51a: Colorless (for generic) always available
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                    // CR 702.51a: one colored tap per color the creature has — but only
-                    // colors the cost can actually use. A colored convoke marker pays only a
-                    // matching colored pip, so a color absent from the cost is a wasted tap.
-                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
-                    // unavailable, offer every color rather than risk pruning a useful option.
-                    for color in &obj.color {
-                        if let Some(shards) = convoke_cost_shards {
-                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
-                                continue;
-                            }
-                        }
+            }
+        } else {
+            for (obj_id, obj) in &state.objects {
+                match mode {
+                    ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                        // Waterbend: always colorless
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,
-                                mana_type: mana_sources::mana_color_to_type(color),
+                                mana_type: crate::types::mana::ManaType::Colorless,
                             },
                             TacticalClass::Mana,
                             Some(player),
                         ));
                     }
+                    ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                        // CR 702.126a: Improvise pays generic mana — always colorless.
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
+                    ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                        // CR 702.51a: Colorless (for generic) always available
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                        // CR 702.51a: one colored tap per color the creature has — but only
+                        // colors the cost can actually use. A colored convoke marker pays only a
+                        // matching colored pip, so a color absent from the cost is a wasted tap.
+                        // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                        // unavailable, offer every color rather than risk pruning a useful option.
+                        for color in &obj.color {
+                            if let Some(shards) = convoke_cost_shards {
+                                if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                    continue;
+                                }
+                            }
+                            actions.push(candidate(
+                                GameAction::TapForConvoke {
+                                    object_id: *obj_id,
+                                    mana_type: mana_sources::mana_color_to_type(color),
+                                },
+                                TacticalClass::Mana,
+                                Some(player),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -4937,6 +4968,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 

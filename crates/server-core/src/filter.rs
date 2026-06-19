@@ -344,6 +344,7 @@ mod tests {
             face_down_profile: None,
             count_param: 0,
             is_cost_payment: false,
+            library_position: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
@@ -437,6 +438,7 @@ mod tests {
             allow_repeat_modes: false,
             constraints: Vec::new(),
             mode_costs: Vec::new(),
+            mode_pawprints: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             selection: engine::types::ability::TargetSelectionMode::Chosen,

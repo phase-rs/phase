@@ -11,12 +11,14 @@ const REPO_ROOT = path.resolve(
 );
 
 function makeLocalDataMap(
-  cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string }>,
+  cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string; oracle_id?: string }>,
 ): Response {
   const map: Record<string, unknown> = {};
   for (const [key, card] of Object.entries(cards)) {
     map[key.toLowerCase()] = {
       name: card.name,
+      oracle_id: card.oracle_id ?? key,
+      face_names: [card.name.toLowerCase()],
       mana_cost: card.mana_cost ?? "{1}",
       cmc: card.cmc ?? 1,
       type_line: card.type_line ?? "Instant",
@@ -156,6 +158,19 @@ describe("fetchCardData", () => {
     const card = await fetchCardData("Abrade <retro>");
 
     expect(card.name).toBe("Abrade");
+  });
+
+  it("resolves ASCII names to diacritic local data keys (issue #1497)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeLocalDataMap({
+        "éomer of the riddermark": { name: "Éomer of the Riddermark", oracle_id: "eomer-oracle" },
+      }),
+    );
+
+    const { resolveOracleIdSync, fetchCardImageUrl, loadScryfallData } = await loadScryfallModule();
+    await loadScryfallData();
+    expect(resolveOracleIdSync("Eomer of the Riddermark")).toBe("eomer-oracle");
+    await expect(fetchCardImageUrl("Eomer of the Riddermark", 0)).resolves.toMatch(/^https?:\/\//);
   });
 });
 

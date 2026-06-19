@@ -1447,6 +1447,8 @@ pub(crate) struct ModeAst {
     pub(crate) body: String,
     /// Per-mode additional cost (Spree). None for standard `\u{2022}` modes.
     pub(crate) mode_cost: Option<crate::types::mana::ManaCost>,
+    /// CR 700.2i: pawprint weight for this mode ("{P}" runs). None for bullet/Spree modes.
+    pub(crate) mode_pawprint: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

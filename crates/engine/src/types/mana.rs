@@ -383,9 +383,13 @@ impl ManaRestriction {
     pub fn allows_spell(&self, meta: &SpellMeta) -> bool {
         match self {
             ManaRestriction::OnlyForSpell => true,
-            ManaRestriction::OnlyForSpellType(required_type) => {
-                Self::matches_required_quality(required_type, meta.types.iter())
-            }
+            // CR 106.6: Oracle type phrases in spend restrictions name both core
+            // types (Creature, Instant, …) and subtypes (Ninja, Turtle, …). Consult
+            // both buckets uniformly, same as `OnlyForTypeSpellsOrAbilities`.
+            ManaRestriction::OnlyForSpellType(required_type) => Self::matches_required_quality(
+                required_type,
+                meta.types.iter().chain(meta.subtypes.iter()),
+            ),
             ManaRestriction::OnlyForCreatureType(required_subtype) => {
                 // Must be a creature spell AND have the required subtype
                 let is_creature = meta
@@ -1488,6 +1492,41 @@ mod tests {
         let legendary_restriction = ManaRestriction::OnlyForSpellType("Legendary".to_string());
         assert!(legendary_restriction.allows_spell(&legendary_spell));
         assert!(!legendary_restriction.allows_spell(&creature_spell));
+    }
+
+    // CR 106.6: "Spend this mana only to cast Ninja spells" (Turtle Lair, issue
+    // #3661) names a creature subtype. The restriction must match against
+    // `SpellMeta.subtypes`, not only core types.
+    #[test]
+    fn restriction_spell_type_allows_subtype_spell() {
+        let restriction = ManaRestriction::OnlyForSpellType("Ninja".to_string());
+        let ninja_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Ninja".to_string(), "Turtle".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let turtle_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Turtle".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let goblin_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        assert!(restriction.allows_spell(&ninja_creature));
+        assert!(!restriction.allows_spell(&turtle_creature));
+        assert!(!restriction.allows_spell(&goblin_creature));
     }
 
     #[test]

@@ -31,7 +31,7 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -83,7 +83,9 @@ export type WsAdapterEvent =
   | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
-  | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number };
+  | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
+  | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
+  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -401,6 +403,22 @@ export class WebSocketAdapter implements EngineAdapter {
 
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
+  }
+
+  /** GH #1507: ask every other human player to approve rolling the game
+   * back to the state immediately before this player's last action. */
+  sendRequestTakeback(): void {
+    this.send({ type: "RequestTakeback" });
+  }
+
+  /** Approve or decline a pending takeback request. */
+  sendRespondTakeback(approve: boolean): void {
+    this.send({ type: "RespondTakeback", data: { approve } });
+  }
+
+  /** Withdraw a takeback request this player made themselves. */
+  sendCancelTakeback(): void {
+    this.send({ type: "CancelTakeback" });
   }
 
   sendReadyToggle(): void {
@@ -730,6 +748,26 @@ export class WebSocketAdapter implements EngineAdapter {
           type: "timerUpdate",
           player: data.player,
           remainingSeconds: data.remaining_seconds,
+        });
+        break;
+      }
+
+      case "TakebackRequested": {
+        const data = msg.data as { requester: PlayerId; requester_name: string };
+        this.emit({
+          type: "takebackRequested",
+          requester: data.requester,
+          requesterName: data.requester_name,
+        });
+        break;
+      }
+
+      case "TakebackResolved": {
+        const data = msg.data as { approved: boolean; resolved_by?: PlayerId | null };
+        this.emit({
+          type: "takebackResolved",
+          approved: data.approved,
+          resolvedBy: data.resolved_by ?? null,
         });
         break;
       }

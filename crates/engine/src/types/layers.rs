@@ -124,6 +124,14 @@ impl ContinuousModification {
                 "AddCounterOnEnter is consumed at resolution; never layered. \
                  Verify resolver dispatch in token_copy.rs / become_copy.rs."
             ),
+            // CR 707.9b + CR 306.5b/c: Starting loyalty exceptions are folded
+            // into copied values before a copy is installed or a copy token's
+            // loyalty counters are seeded, so they never become standalone
+            // continuous-effect layer entries.
+            ContinuousModification::SetStartingLoyalty { .. } => unreachable!(
+                "SetStartingLoyalty is consumed at copy resolution; never layered. \
+                 Verify resolver dispatch in token_copy.rs / become_copy.rs."
+            ),
             // CR 707.9 + CR 202.1b: The "has no mana cost" copy exception is
             // consumed at copy resolution (token_copy.rs bakes it into the token;
             // become_copy.rs strips it from the copied values), exactly like

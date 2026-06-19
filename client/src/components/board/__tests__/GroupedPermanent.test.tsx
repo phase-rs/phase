@@ -86,6 +86,7 @@ function makeGroup(): GroupedPermanentType {
 }
 
 function renderGroup(options: {
+  boardChoiceObjectIds?: Set<number>;
   validAttackerIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
@@ -94,9 +95,11 @@ function renderGroup(options: {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set(),
+        selectableSacrificeObjectIds: new Set(),
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds: new Set(),
         validAttackerIds: options.validAttackerIds ?? new Set(),
@@ -118,9 +121,11 @@ function renderCreatureRow() {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        boardChoiceObjectIds: new Set(),
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set(),
+        selectableSacrificeObjectIds: new Set(),
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds: new Set(),
         validAttackerIds: new Set(),
@@ -250,6 +255,30 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "Equip",
       data: { equipment_id: 42, target_id: 2 },
+    });
+  });
+
+  it("dispatches an immediate board choice from a collapsed group picker", () => {
+    const waitingFor: WaitingFor = {
+      type: "StationTarget",
+      data: {
+        player: 0,
+        spacecraft_id: 42,
+        eligible_creatures: [1, 2, 3],
+      },
+    };
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+    fireEvent.click(screen.getByRole("button", { name: "#2" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ActivateStation",
+      data: { spacecraft_id: 42, creature_id: 2 },
     });
   });
 
