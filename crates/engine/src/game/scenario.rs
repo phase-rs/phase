@@ -4137,7 +4137,7 @@ mod tests {
 
         // (a) CR 613.1f: all abilities/keywords removed.
         assert!(
-            !obj.keywords.contains(&Keyword::Flying),
+            !crate::game::keywords::has_keyword(obj, &Keyword::Flying),
             "RemoveAllAbilities must strip flying, keywords={:?}",
             obj.keywords
         );
