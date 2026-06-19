@@ -31,7 +31,7 @@ use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, PlayerFilter, ResolvedAbility,
-    TargetFilter, VoterScope,
+    TargetFilter, VoteTally, VoterScope,
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
@@ -124,6 +124,29 @@ fn make_master_of_ceremonies_vote(controller: PlayerId, source_id: ObjectId) -> 
             ],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::EachOpponent,
+            tally_mode: VoteTally::PerVote,
+        },
+    );
+    build_resolved_from_def(&vote_def, source_id, controller)
+}
+
+fn make_threshold_vote(controller: PlayerId, source_id: ObjectId) -> ResolvedAbility {
+    let vote_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Vote {
+            choices: vec!["innocent".to_string(), "guilty".to_string()],
+            per_choice_effect: vec![
+                Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeMonarch,
+                )),
+            ],
+            starting_with: ControllerRef::You,
+            voter_scope: VoterScope::AllPlayers,
+            tally_mode: VoteTally::Threshold {
+                tie_breaker_index: 0,
+            },
         },
     );
     build_resolved_from_def(&vote_def, source_id, controller)
@@ -171,6 +194,53 @@ fn moc_per_choice_bodies_parse_into_distributed_chain() {
             "[{label}] second half must target ScopedPlayer"
         );
     }
+}
+
+/// CR 701.38a + CR 608.2c: Threshold vote mode must survive the real
+/// `WaitingFor::VoteChoice` → `GameAction::ChooseOption` continuation path. The
+/// 1-1 tie routes to index 0 (NoOp), so the controller must NOT become the
+/// monarch. If `tally_mode` is dropped in `engine_resolution_choices`, this
+/// regresses to per-vote fan-out and the guilty vote executes BecomeMonarch.
+#[test]
+fn threshold_vote_tie_breaker_survives_choose_option_path() {
+    let mut state = GameState::new_two_player(77);
+    let controller = state.players[0].id;
+    let ability = make_threshold_vote(controller, ObjectId(9100));
+    let mut events = Vec::new();
+
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    let first_voter = match &state.waiting_for {
+        WaitingFor::VoteChoice { player, .. } => *player,
+        other => panic!("expected VoteChoice for first voter, got {other:?}"),
+    };
+    apply(
+        &mut state,
+        first_voter,
+        GameAction::ChooseOption {
+            choice: "innocent".to_string(),
+        },
+    )
+    .expect("first ChooseOption must resolve");
+
+    let second_voter = match &state.waiting_for {
+        WaitingFor::VoteChoice { player, .. } => *player,
+        other => panic!("expected VoteChoice for second voter, got {other:?}"),
+    };
+    apply(
+        &mut state,
+        second_voter,
+        GameAction::ChooseOption {
+            choice: "guilty".to_string(),
+        },
+    )
+    .expect("second ChooseOption must resolve");
+
+    assert!(!matches!(state.waiting_for, WaitingFor::VoteChoice { .. }));
+    assert!(
+        state.monarch.is_none(),
+        "threshold tie-breaker NoOp must win; per-vote fan-out would make the controller monarch"
+    );
 }
 
 /// CR 800.4g: In a 2-player game, the controller does NOT vote. The
@@ -516,6 +586,7 @@ fn tivit_evidence_bribery_still_resolves_via_default_voter_scope() {
             starting_with: ControllerRef::You,
             // Default — this is the Tivit/classic-council shape.
             voter_scope: VoterScope::AllPlayers,
+            tally_mode: VoteTally::PerVote,
         },
     );
     let ability = build_resolved_from_def(&vote_def, ObjectId(9001), controller);

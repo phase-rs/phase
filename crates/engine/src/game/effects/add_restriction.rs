@@ -13,7 +13,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     if let Effect::AddRestriction { restriction } = &ability.effect {
         let mut restriction = restriction.clone();
-        fill_runtime_fields(&mut restriction, ability);
+        fill_runtime_fields(state, &mut restriction, ability);
         state.restrictions.push(restriction);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::AddRestriction,
@@ -28,7 +28,11 @@ pub fn resolve(
 }
 
 /// Fill runtime-bound fields of a restriction using the resolving ability context.
-fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbility) {
+fn fill_runtime_fields(
+    state: &GameState,
+    restriction: &mut GameRestriction,
+    ability: &ResolvedAbility,
+) {
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
         | GameRestriction::ProhibitActivity { source, .. } => {
@@ -42,14 +46,34 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
         GameRestriction::ProhibitActivity {
             affected_players, ..
         } => {
-            if matches!(
-                affected_players,
-                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
-                    | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
-            ) {
-                *affected_players = crate::types::ability::RestrictionPlayerScope::SpecificPlayer(
-                    resolved_target_player,
-                );
+            use crate::types::ability::RestrictionPlayerScope;
+            match affected_players {
+                RestrictionPlayerScope::TargetedPlayer
+                | RestrictionPlayerScope::ParentTargetedPlayer => {
+                    *affected_players =
+                        RestrictionPlayerScope::SpecificPlayer(resolved_target_player);
+                }
+                // CR 508.5 / CR 508.5a: capture the defending player as the
+                // restriction is created — they are fixed once attackers are
+                // declared (Xantid Swarm's "defending player can't cast spells").
+                // If the source has left combat before the trigger resolves,
+                // read the trigger event per CR 508.5.
+                RestrictionPlayerScope::DefendingPlayer => {
+                    if let Some(defender) =
+                        crate::game::combat::defending_player_for_attacker(state, ability.source_id)
+                            .or_else(|| {
+                                super::myriad::defending_player_from_attack_event(
+                                    state.current_trigger_event.as_ref(),
+                                    ability.source_id,
+                                )
+                            })
+                    {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(defender);
+                    }
+                }
+                RestrictionPlayerScope::AllPlayers
+                | RestrictionPlayerScope::SpecificPlayer(_)
+                | RestrictionPlayerScope::OpponentsOfSourceController => {}
             }
         }
         GameRestriction::DamagePreventionDisabled { .. } => {}

@@ -395,6 +395,7 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "mirkwood elk",
     "narset of the ancient way",
     "niambi, esteemed speaker",
+    "nightmares and daydreams",
     "orchard warden",
     "orim's thunder",
     "overwhelming intellect",
@@ -592,17 +593,22 @@ fn demonstrative_scope_set_is_frozen() {
     // grammar so the category-4 bare demonstrative ("that spell's / that card's
     // mana value") now parses on three more cards — Daredevil (Fearless Fighter),
     // The Frightful Four, and Thor (God of Thunder) — taking the count to 114.
+    // The no-infix-window delayed-trigger split (Saga chapter bodies, cluster-33)
+    // now parses Nightmares and Daydreams' "Until your next turn, whenever you
+    // cast an instant or sorcery spell, target player mills cards equal to that
+    // spell's mana value." — surfacing its "that spell's mana value" bare
+    // demonstrative (+1) and taking the count to 115.
     assert_eq!(
         observed.len(),
-        114,
-        "Expected exactly 114 cards retaining ObjectScope::Demonstrative. Count \
+        115,
+        "Expected exactly 115 cards retaining ObjectScope::Demonstrative. Count \
          moved to {}.",
         observed.len()
     );
     assert_eq!(
         DEMONSTRATIVE_SCOPE_CARDS.len(),
-        114,
-        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 114 cards."
+        115,
+        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 115 cards."
     );
 }
 

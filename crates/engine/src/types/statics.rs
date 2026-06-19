@@ -606,6 +606,19 @@ pub enum CombatAloneRequirement {
     MustBeSole,
 }
 
+/// CR 508.5 + CR 802.1: Which defending player a `MaxAttackersEachCombat` cap
+/// restricts. `MaxAttackersEachCombat { defender: None }` is a global cap;
+/// `Some(_)` narrows the cap to attacks declared against a specific defending
+/// player, leaving attacks against other players unrestricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AttackDefenderScope {
+    /// CR 109.5: "you" — the controller of the permanent carrying this static
+    /// (Judoon Enforcers: "No more than one creature can attack you each
+    /// combat"). Resolved against the static source's controller at the
+    /// declare-attackers step.
+    Controller,
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,10 +634,18 @@ pub enum StaticMode {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
-    /// CR 508.1d: No more than `max` creatures can be declared as attackers
-    /// each combat.
+    /// CR 508.1c: No more than `max` creatures can be declared as attackers
+    /// each combat. `defender` scopes *which declarations* the cap restricts:
+    /// `None` is a global per-combat cap (no more than `max` creatures can
+    /// attack at all); `Some(AttackDefenderScope::Controller)` is a
+    /// defending-player cap ("no more than `max` creatures can attack *you*
+    /// each combat" — Judoon Enforcers), restricting only attackers whose
+    /// defending player (CR 508.5) is this static's controller, so opponents
+    /// may still be attacked freely (CR 802.1 multiplayer range of influence).
     MaxAttackersEachCombat {
         max: u32,
+        #[serde(default)]
+        defender: Option<AttackDefenderScope>,
     },
     /// CR 509.1c: No more than `max` creatures can be declared as blockers
     /// each combat.
@@ -1493,8 +1514,11 @@ impl Hash for StaticMode {
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
             StaticMode::MustAttackPlayer { player } => player.hash(state),
-            StaticMode::MaxAttackersEachCombat { max }
-            | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
+            StaticMode::MaxAttackersEachCombat { max, defender } => {
+                max.hash(state);
+                defender.hash(state);
+            }
+            StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             // CR 502.3: filter is a non-Hash TargetFilter; hash the enum
             // discriminant alongside the cap so creature/artifact/land caps
             // with the same max don't collide.
@@ -1716,9 +1740,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
-            StaticMode::MaxAttackersEachCombat { max } => {
-                write!(f, "MaxAttackersEachCombat({max})")
-            }
+            StaticMode::MaxAttackersEachCombat { max, defender } => match defender {
+                None => write!(f, "MaxAttackersEachCombat({max})"),
+                Some(AttackDefenderScope::Controller) => {
+                    write!(f, "MaxAttackersEachCombat({max},Controller)")
+                }
+            },
             StaticMode::MaxBlockersEachCombat { max } => {
                 write!(f, "MaxBlockersEachCombat({max})")
             }
@@ -2031,10 +2058,9 @@ impl FromStr for StaticMode {
             "LinkedCollectionCounterPlayPermission" => {
                 StaticMode::LinkedCollectionCounterPlayPermission
             }
-            s if parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").is_some() => {
-                StaticMode::MaxAttackersEachCombat {
-                    max: parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").unwrap(),
-                }
+            s if parse_max_attackers_each_combat_args(s).is_some() => {
+                let (max, defender) = parse_max_attackers_each_combat_args(s).unwrap();
+                StaticMode::MaxAttackersEachCombat { max, defender }
             }
             s if parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").is_some() => {
                 StaticMode::MaxBlockersEachCombat {
@@ -2551,6 +2577,22 @@ fn parse_static_mode_u32_arg(s: &str, prefix: &str) -> Option<u32> {
         .ok()
 }
 
+/// Round-trip the `MaxAttackersEachCombat(max[,Controller])` Display form back
+/// to its `(max, defender)` arguments. Mirrors the two `fmt::Display` branches.
+fn parse_max_attackers_each_combat_args(s: &str) -> Option<(u32, Option<AttackDefenderScope>)> {
+    let args = s
+        .strip_prefix("MaxAttackersEachCombat")?
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    match args.split_once(',') {
+        None => Some((args.parse().ok()?, None)),
+        Some((max, "Controller")) => {
+            Some((max.parse().ok()?, Some(AttackDefenderScope::Controller)))
+        }
+        Some(_) => None,
+    }
+}
+
 /// CR 509.1b: Canonical attacker filter for "can block only creatures with flying."
 pub fn block_only_creatures_with_flying_filter() -> TargetFilter {
     use super::ability::{FilterProp, TypedFilter};
@@ -2783,7 +2825,14 @@ mod tests {
             StaticMode::CantAttack,
             StaticMode::ExtraBlockers { count: None },
             StaticMode::ExtraBlockers { count: Some(1) },
-            StaticMode::MaxAttackersEachCombat { max: 2 },
+            StaticMode::MaxAttackersEachCombat {
+                max: 2,
+                defender: None,
+            },
+            StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: Some(AttackDefenderScope::Controller),
+            },
             StaticMode::MaxBlockersEachCombat { max: 3 },
             StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },

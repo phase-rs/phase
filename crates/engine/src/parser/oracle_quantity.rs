@@ -835,6 +835,15 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // CR 107.1 + CR 120.4a/120.10: "A or B, whichever is greater" lives in the
+    // nom quantity grammar; this legacy entry point only delegates so dynamic
+    // quantity recognition has one authority.
+    if let Ok((rest, expr)) = nom_quantity::parse_max_quantity(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // CR 107.x: Binary arithmetic over two dynamic quantities, e.g. "the number
     // of Caves you control plus the number of Cave cards in your graveyard"
     // (Calamitous Cave-In) or "the number of cards in their hand minus 4"
@@ -1546,7 +1555,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 
     // Fall back to parse_quantity_ref for named quantity patterns
     // (e.g., "the life you've lost this turn" → LifeLostThisTurn).
-    // Strip leading "the " article before matching.
+    // Strip leading "the " article before matching. If that fails, try the full
+    // phrase only for CommanderManaValue — that grammar requires the leading
+    // article (Stinging Study's "where X is the mana value of a commander…").
+    // Keep broader object-count phrases on the stripped path so context-aware
+    // callers can still bind "they control" through parse_cda_quantity_with_context.
     // Exclude target-referent variants (TargetPower, TargetLifeTotal) — these
     // reference a targeting selection, not an event-context source object.
     let stripped = tag::<_, _, OracleError<'_>>("the ")
@@ -1563,6 +1576,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         ) {
             return Some(QuantityExpr::Ref { qty });
         }
+    }
+    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) = parse_quantity_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     None
@@ -4620,6 +4636,32 @@ mod tests {
                     scope: ObjectScope::Demonstrative
                 }
             })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_commander_mana_value() {
+        // CR 903.3d: Stinging Study's "where X is the mana value of a commander
+        // you own on the battlefield or in the command zone" must bind X via
+        // CommanderManaValue — the fallback must try the full "the …" phrase
+        // before stripping the article.
+        assert_eq!(
+            parse_event_context_quantity(
+                "the mana value of a commander you own on the battlefield or in the command zone"
+            ),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CommanderManaValue {
+                    owner: ControllerRef::You,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_does_not_consume_context_scoped_object_count() {
+        assert_eq!(
+            parse_event_context_quantity("the number of artifacts they control"),
+            None
         );
     }
 

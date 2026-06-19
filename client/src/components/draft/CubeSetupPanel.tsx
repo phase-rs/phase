@@ -108,7 +108,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     ],
     [t],
   );
-  const addablesPolicyLabel =
+  const selectedAddablesLabel =
     addablesPolicyItems.find((item) => item.value === settings.addable_cards.policy)?.label ??
     t("cubeSetup.addablesStandardBasics");
 
@@ -149,12 +149,12 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
         </button>
       </div>
 
-      <div className="grid min-w-0 gap-3 md:grid-cols-[260px_1fr]">
-        <label className="flex min-w-0 flex-col gap-1">
+      <div className="grid gap-3 md:grid-cols-[260px_1fr]">
+        <div className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.deckAddables")}</span>
           <MenuSelect
             ariaLabel={t("cubeSetup.deckAddables")}
-            label={addablesPolicyLabel}
+            label={selectedAddablesLabel}
             selectedValue={settings.addable_cards.policy}
             items={addablesPolicyItems}
             onSelect={(value) =>
@@ -166,12 +166,12 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
                 },
               }))
             }
-            fitContainer
             menuLayout="dropdown"
+            fitContainer
             wrapperClassName="w-full min-w-0"
-            className="min-h-[44px] !rounded-lg border border-white/10 !bg-black/30 px-3 !py-2 text-sm text-white shadow-none !hover:bg-black/30 !focus-visible:ring-emerald-400/50"
+            className="min-h-[44px] rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50 sm:min-h-0"
           />
-        </label>
+        </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.customAddableCards")}</span>
           <textarea

@@ -2967,6 +2967,7 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::Delegated(controller),
+            tally_mode: engine::types::ability::VoteTally::PerVote,
         }
     }
 
@@ -3106,6 +3107,7 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::SubjectActs,
+            tally_mode: engine::types::ability::VoteTally::PerVote,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(

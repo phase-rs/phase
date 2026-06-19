@@ -20,7 +20,7 @@
 
 use crate::types::ability::{
     AbilityDefinition, ControllerRef, Effect, EffectError, EffectKind, QuantityExpr,
-    ResolvedAbility, VoterScope,
+    ResolvedAbility, VoteTally, VoterScope,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -45,6 +45,7 @@ pub fn resolve(
         per_choice_effect,
         starting_with,
         voter_scope,
+        tally_mode,
     } = &ability.effect
     else {
         return Err(EffectError::InvalidParam(
@@ -70,6 +71,7 @@ pub fn resolve(
     let controller = ability.controller;
     let starting_player = resolve_starting_voter(state, controller, starting_with.clone());
     let scope = *voter_scope;
+    let tally_mode = *tally_mode;
 
     // CR 101.4 + CR 701.38a: Build APNAP voter order from the starting player.
     // CR 800.4g: For `EachOpponent`, the controller is excluded from the
@@ -146,6 +148,7 @@ pub fn resolve(
         controller,
         source_id: ability.source_id,
         actor,
+        tally_mode,
     };
 
     // Stash the parent's sub_ability tail so it resumes after the tally fans
@@ -181,10 +184,30 @@ pub fn resolve_tally(
     per_choice_effect: &[Box<AbilityDefinition>],
     tallies: &[u32],
     ballots: &crate::im::Vector<(PlayerId, u8)>,
+    tally_mode: VoteTally,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     debug_assert_eq!(options.len(), per_choice_effect.len());
     debug_assert_eq!(options.len(), tallies.len());
+
+    // CR 701.38a: Will-of-the-council threshold votes resolve exactly ONE
+    // outcome — the choice with strictly more votes, or `tie_breaker_index`
+    // on a tie ("...or the vote is tied"). The strict-majority/tie rule is
+    // card-defined, not a CR subrule. The winning effect resolves once, not
+    // per ballot, so route to a dedicated single-effect path rather than the
+    // per-choice fan-out below.
+    if let VoteTally::Threshold { tie_breaker_index } = tally_mode {
+        return resolve_threshold_tally(
+            state,
+            source_id,
+            controller,
+            per_choice_effect,
+            tallies,
+            ballots,
+            tie_breaker_index,
+            events,
+        );
+    }
 
     // CR 608.2c + CR 701.38: Publish the ballot ledger so per-choice
     // sub-effects with `player_scope = PlayerFilter::VotedFor { ... }`
@@ -368,6 +391,66 @@ pub fn resolve_tally(
             }
         }
     }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Vote,
+        source_id,
+    });
+    Ok(())
+}
+
+/// CR 701.38a: Resolve a Will-of-the-council threshold vote. Exactly one
+/// outcome resolves — the choice with strictly the most votes. Two-way ties
+/// (and, for symmetry, any non-strict winner) resolve to `tie_breaker_index`,
+/// the choice whose Oracle clause reads "...or the vote is tied". The
+/// strict-majority/tie resolution is card-defined, not a CR subrule.
+///
+/// The winning sub-effect is controller-performed (it runs once, not per
+/// ballot or per voter), so it is resolved as a single chain with the spell's
+/// controller. The ballot ledger is still published to `state.last_vote_ballots`
+/// for parity with `resolve_tally` (some bodies — e.g. Trial of a Time Lord IV's
+/// "the owner of each card exiled with ~" — read source-linked exile pools, not
+/// the ballots, but publishing is harmless and keeps the seam uniform).
+#[allow(clippy::too_many_arguments)]
+fn resolve_threshold_tally(
+    state: &mut GameState,
+    source_id: crate::types::identifiers::ObjectId,
+    controller: PlayerId,
+    per_choice_effect: &[Box<AbilityDefinition>],
+    tallies: &[u32],
+    ballots: &crate::im::Vector<(PlayerId, u8)>,
+    tie_breaker_index: u8,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    state.last_vote_ballots = ballots.clone();
+
+    // CR 701.38a: Determine the strict winner. The strict-majority/tie rule is
+    // card-defined, not a CR subrule. `max()` over the tally yields the
+    // top count; a unique holder of that count wins outright, otherwise the
+    // tie-breaker choice ("...or the vote is tied") wins. An empty voter set
+    // (every player passed / eliminated) also routes to the tie-breaker, which
+    // matches the "or the vote is tied" branch of every printed card.
+    let winner = match tallies.iter().copied().max() {
+        Some(top) if tallies.iter().filter(|&&t| t == top).count() == 1 => tallies
+            .iter()
+            .position(|&t| t == top)
+            .map(|i| i as u8)
+            .unwrap_or(tie_breaker_index),
+        _ => tie_breaker_index,
+    };
+
+    let Some(winning_effect) = per_choice_effect.get(winner as usize) else {
+        // Defensive: a tie_breaker_index out of range is a parser bug. Emit
+        // EffectResolved rather than panicking so the chain continues.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Vote,
+            source_id,
+        });
+        return Ok(());
+    };
+
+    let chain = resolved_from_def(winning_effect, source_id, controller);
+    resolve_ability_chain(state, &chain, events, 1)?;
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Vote,
@@ -601,6 +684,7 @@ mod tests {
                 per_choice_effect: vec![Box::new(inv_def), Box::new(token_def)],
                 starting_with: ControllerRef::You,
                 voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
             },
             targets: vec![],
             source_id: ObjectId(1),
@@ -696,6 +780,7 @@ mod tests {
                 per_choice_effect,
                 starting_with: ControllerRef::You,
                 voter_scope,
+                tally_mode: VoteTally::PerVote,
             },
             targets: vec![],
             source_id: ObjectId(1),
@@ -860,6 +945,7 @@ mod tests {
             &per_choice_effect,
             &tallies,
             &ballots,
+            VoteTally::PerVote,
             &mut events,
         )
         .expect("tally resolves");
@@ -1144,6 +1230,7 @@ mod tests {
                 per_choice_effect,
                 starting_with: ControllerRef::You,
                 voter_scope: VoterScope::ControllerLabels,
+                tally_mode: VoteTally::PerVote,
             },
             targets: vec![],
             source_id,
@@ -1258,6 +1345,7 @@ mod tests {
             controller,
             source_id: crate::types::identifiers::ObjectId(1),
             actor: VoteActor::Delegated(controller),
+            tally_mode: VoteTally::PerVote,
         };
         let err = apply(
             &mut state,
@@ -1297,6 +1385,7 @@ mod tests {
             controller,
             source_id: crate::types::identifiers::ObjectId(1),
             actor: VoteActor::Delegated(controller),
+            tally_mode: VoteTally::PerVote,
         };
         assert_eq!(state.waiting_for.acting_player(), Some(controller));
     }
@@ -1404,6 +1493,7 @@ mod tests {
             &per_choice_effect,
             &tallies,
             &ballots,
+            VoteTally::PerVote,
             &mut events,
         )
         .expect("resolve_tally succeeds");
@@ -1469,6 +1559,104 @@ mod tests {
                 }
             )),
             "EffectResolved(Vote) must NOT be emitted while ballots remain"
+        );
+    }
+
+    /// CR 701.38a: Threshold tally — the choice with strictly more votes
+    /// resolves its single outcome once (strict-majority rule is card-defined,
+    /// not a CR subrule). Index 1 ("BecomeMonarch") beats index
+    /// 0 ("NoOp") 2-to-0, so the controller becomes the monarch and the NoOp
+    /// does nothing.
+    #[test]
+    fn threshold_tally_resolves_strict_winner_once() {
+        let mut state = GameState::new_two_player(7);
+        let controller = state.players[0].id;
+        assert!(state.monarch.is_none(), "no monarch at game start");
+
+        let per_choice: Vec<Box<AbilityDefinition>> = vec![
+            Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeMonarch,
+            )),
+        ];
+        let options = vec!["innocent".to_string(), "guilty".to_string()];
+        let tallies = vec![0u32, 2];
+        let ballots = crate::im::Vector::new();
+        let mut events = Vec::new();
+
+        resolve_tally(
+            &mut state,
+            ObjectId(1),
+            controller,
+            &options,
+            &per_choice,
+            &tallies,
+            &ballots,
+            VoteTally::Threshold {
+                tie_breaker_index: 0,
+            },
+            &mut events,
+        )
+        .expect("threshold tally resolves");
+
+        assert_eq!(
+            state.monarch,
+            Some(controller),
+            "the winning BecomeMonarch outcome must resolve once"
+        );
+    }
+
+    /// CR 701.38a: On a tie, the `tie_breaker_index` outcome resolves (tie
+    /// behavior is card-defined, not a CR subrule). With a
+    /// 1-1 tie and tie_breaker pointing at the NoOp (index 0), nothing happens
+    /// — the BecomeMonarch (index 1) must NOT resolve.
+    #[test]
+    fn threshold_tally_routes_tie_to_tie_breaker() {
+        let mut state = GameState::new_two_player(11);
+        let controller = state.players[0].id;
+        assert!(state.monarch.is_none(), "no monarch at game start");
+
+        let per_choice: Vec<Box<AbilityDefinition>> = vec![
+            Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeMonarch,
+            )),
+        ];
+        let options = vec!["innocent".to_string(), "guilty".to_string()];
+        let tallies = vec![1u32, 1];
+        let ballots = crate::im::Vector::new();
+        let mut events = Vec::new();
+
+        resolve_tally(
+            &mut state,
+            ObjectId(1),
+            controller,
+            &options,
+            &per_choice,
+            &tallies,
+            &ballots,
+            VoteTally::Threshold {
+                tie_breaker_index: 0,
+            },
+            &mut events,
+        )
+        .expect("threshold tally resolves");
+
+        assert!(
+            state.monarch.is_none(),
+            "a tie routed to the NoOp tie-breaker must not crown a monarch"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Vote,
+                    ..
+                }
+            )),
+            "threshold tally must still emit EffectResolved(Vote)"
         );
     }
 }

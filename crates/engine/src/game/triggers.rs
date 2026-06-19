@@ -14,7 +14,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::WardCost;
@@ -730,6 +730,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .players
             .iter()
             .flat_map(|player| player.graveyard.iter().copied())
+            .filter(|id| source_has_trigger_in_zone(state, *id, zone))
             .collect(),
         Zone::Exile => state.exile.iter().copied().collect(),
         Zone::Stack => state
@@ -766,6 +767,31 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             })
             .collect(),
         Zone::Hand | Zone::Library => Vec::new(),
+    }
+}
+
+fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone) -> bool {
+    state.objects.get(&source_id).is_some_and(|obj| {
+        super::functioning_abilities::active_trigger_definitions(state, obj)
+            .any(|(_, def)| trigger_definition_functions_in_zone(def, zone))
+            || (zone != Zone::Battlefield
+                && synthesize_granted_keyword_triggers(
+                    obj,
+                    crate::game::off_zone_characteristics::effective_off_zone_keywords(
+                        state, source_id,
+                    )
+                    .iter(),
+                )
+                .into_iter()
+                .any(|(_, def)| trigger_definition_functions_in_zone(&def, zone)))
+    })
+}
+
+fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+    if def.trigger_zones.is_empty() {
+        zone == Zone::Battlefield
+    } else {
+        def.trigger_zones.contains(&zone)
     }
 }
 
@@ -3303,6 +3329,73 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time
+/// player choice that pauses on another prompt before the action settles.
+/// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
+/// `deferred_triggers` for dispatch once the outer action reaches Priority.
+///
+/// Used by handlers that return `ActionResult` directly (e.g. `OpponentMayChoice`)
+/// and therefore bypass `run_post_action_pipeline`. Do not call from
+/// `OptionalEffectChoice` — those handlers return through `apply_action`, and
+/// copy-sensitive events such as `SpellCopied` are already collected by their
+/// dedicated resolution owners (`copy_spell.rs`).
+pub(crate) fn park_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &[GameEvent],
+    slice_start: usize,
+) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| {
+            // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+            // announcement and drains them after CopyRetarget finalization.
+            // Re-parking the same event duplicates Magecraft (issue #2866).
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+}
+
+/// CR 603.2 + CR 603.3b: For choice handlers that return `ActionResult` directly
+/// and bypass `run_post_action_pipeline`. When the action settles to Priority,
+/// collect this action's observer triggers and drain the deferred queue; when
+/// still paused on another prompt, park only (B2).
+pub(crate) fn collect_and_drain_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        park_observer_triggers_if_paused(state, events, slice_start);
+        return;
+    }
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| {
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+    if !state.deferred_triggers.is_empty() {
+        let _ = drain_deferred_trigger_queue(state, events);
+    }
+}
+
 /// CR 106.6 + CR 603.3b: Queue a synthetic cost-payment trigger for the same
 /// post-announcement stack-placement path as event-collected cost triggers.
 pub(crate) fn defer_pending_trigger(state: &mut GameState, trigger: PendingTrigger) {
@@ -5380,12 +5473,25 @@ fn attackers_declared_count(
 ) -> usize {
     match subject {
         crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            // Determine the triggering player from the first attacker in the
+            // event (attack declarations are per-attacking-player in the
+            // matcher/synthesis phase). Fall back to None if unavailable.
+            let triggering_player = attacker_ids
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|o| o.controller));
+
             attacker_ids
                 .iter()
                 .filter(|id| {
-                    let scope_ok = state.objects.get(id).is_some_and(|obj| {
-                        controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
+                        crate::types::ability::ControllerRef::TriggeringPlayer => {
+                            triggering_player.is_some_and(|tp| obj.controller == tp)
+                        }
+                        _ => {
+                            controller_ref_matches_player(obj.controller, trigger_controller, scope)
+                        }
                     });
+
                     // CR 508.1: only attackers matching the filtered class count
                     // toward the typed minimum, preventing "attack with two or
                     // more Dinosaurs" from over-firing on mixed attacker batches.
@@ -14660,6 +14766,107 @@ pub mod tests {
         assert!(
             check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
             "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
+    }
+
+    // CR 508.1 + CR 603.2c: any-player "a player attacks with N or more creatures"
+    // (Aurelia, the Law Above) counts only the attacking player's declaration
+    // batch via `ControllerRef::TriggeringPlayer`, not the trigger controller's
+    // opponents or self.
+    #[test]
+    fn a_player_attacks_with_three_or_more_counts_triggering_attacking_player() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut make_attacker = |card_id: u64, controller: PlayerId, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let a1 = make_attacker(1, opponent, "A1");
+        let a2 = make_attacker(2, opponent, "A2");
+        let a3 = make_attacker(3, opponent, "A3");
+        let self_a1 = make_attacker(4, trigger_controller, "SelfA1");
+        let self_a2 = make_attacker(5, trigger_controller, "SelfA2");
+        let self_a3 = make_attacker(6, trigger_controller, "SelfA3");
+
+        let cond = TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::TriggeringPlayer,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 3,
+        };
+
+        let opponent_two = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&opponent_two)),
+            "opponent attacking with 2 creatures must NOT satisfy minimum=3"
+        );
+
+        let opponent_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2, a3],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    a1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    a3,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &cond,
+                trigger_controller,
+                None,
+                Some(&opponent_three)
+            ),
+            "opponent attacking with 3 creatures must satisfy minimum=3"
+        );
+
+        let self_three = GameEvent::AttackersDeclared {
+            attacker_ids: vec![self_a1, self_a2, self_a3],
+            defending_player: opponent,
+            attacks: vec![
+                (self_a1, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a2, crate::game::combat::AttackTarget::Player(opponent)),
+                (self_a3, crate::game::combat::AttackTarget::Player(opponent)),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&self_three)),
+            "controller attacking with 3 creatures must satisfy minimum=3"
         );
     }
 

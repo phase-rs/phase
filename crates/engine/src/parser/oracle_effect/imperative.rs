@@ -6509,8 +6509,9 @@ pub(super) fn parse_imperative_family_ast(
                 Some(ImperativeFamilyAst::Connive)
             }
         }
-        // CR 702.136: "investigate"
-        "investigate" => Some(ImperativeFamilyAst::Investigate),
+        // CR 701.16: "investigate" / third-person "investigates" (e.g. Blink's
+        // "Its owner shuffles it into their library, then investigates.").
+        "investigate" | "investigates" => Some(ImperativeFamilyAst::Investigate),
         // CR 701.48a: "learn"
         "learn" => Some(ImperativeFamilyAst::Learn),
         // CR 701.62a: "manifest dread" / CR 701.40a: "manifest the top card of your library"
@@ -8298,6 +8299,12 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
             rounding,
         },
         QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_costpaid_scope_to_recipient)
+                .collect(),
+        },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
             exprs: exprs
                 .into_iter()
                 .map(rebind_costpaid_scope_to_recipient)

@@ -79,7 +79,8 @@ pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option
     let (_, qty_text) = preceded(tag::<_, _, VE<'_>>(", where x is "), nom::combinator::rest)
         .parse(rest)
         .ok()?;
-    let qty = parse_quantity_ref(qty_text.trim())?;
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_quantity_ref_complete(qty_text.trim()).ok()?;
     Some((keyword, Some(qty)))
 }
 
@@ -629,6 +630,30 @@ fn parse_grant_all_activated_abilities_source(
     .map(|(_, source)| source)
 }
 
+/// CR 613.1d: Parse a layer-4 type-removal predicate `"isn't a/an <core type>"`
+/// (e.g. `"isn't a creature"`). Scans at word boundaries so the predicate can
+/// appear anywhere in the modification text (the subject and any trailing
+/// duration are stripped by the caller). Returns the removed [`CoreType`], or
+/// `None` when no such predicate is present.
+fn parse_isnt_a_core_type(lower: &str) -> Option<CoreType> {
+    fn core_type_word(input: &str) -> OracleResult<'_, CoreType> {
+        alt((
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Battle, tag("battle")),
+            value(CoreType::Creature, tag("creature")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(input)
+    }
+    fn predicate(input: &str) -> OracleResult<'_, CoreType> {
+        preceded(alt((tag("isn't an "), tag("isn't a "))), core_type_word).parse(input)
+    }
+    nom_primitives::scan_split_at_phrase(lower, |i| predicate(i))
+        .and_then(|(_, clause)| predicate(clause).ok().map(|(_, ct)| ct))
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -696,6 +721,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::AddSupertype {
             supertype: Supertype::Legendary,
         });
+    }
+
+    // CR 613.1d: Layer 4 type removal — "isn't a/an <core type>" (e.g. Blink's
+    // Alien Angel token: "this token isn't a creature until end of turn"). The
+    // duration is already stripped by the caller. This is the building-block
+    // analogue of the static-dispatch "~ isn't a <type> as long as <cond>" arm,
+    // so the same removal works as a one-shot continuous effect on a token.
+    if let Some(core_type) = parse_isnt_a_core_type(unquoted_tp.lower) {
+        modifications.push(ContinuousModification::RemoveType { core_type });
     }
 
     // CR 510.1c: Aura/Equipment-style compound statics can attach the
@@ -914,8 +948,8 @@ pub(crate) fn push_grant_clause_modifications(
         .parse(part_lower.as_str())
         {
             if let Some(kind) = crate::types::keywords::DynamicKeywordKind::from_name(kw_name) {
-                if let Some(qty_ref) =
-                    crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
+                if let Ok((_, qty_ref)) =
+                    super::oracle_nom::quantity::parse_quantity_ref_complete(where_expr)
                 {
                     modifications.push(ContinuousModification::AddDynamicKeyword {
                         kind,

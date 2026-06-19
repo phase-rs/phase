@@ -7132,7 +7132,9 @@ pub(super) fn apply_committed_assist(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
-        state.layers_dirty.mark_full();
+        if mana_payment::has_unspent_mana_continuous_effects(state) {
+            state.layers_dirty.mark_full();
+        }
     }
     Ok(())
 }

@@ -907,9 +907,9 @@ pub fn resolve_all(
     // in a mass zone-change reference a *player*, not a set of objects. Such
     // filters arise from phrases like "shuffle your hand into your library"
     // (Controller) or "that/target player puts all cards from their graveyard
-    // into their library" (Player / ParentTarget). Translate them here to "all
-    // cards owned by that player in the origin zone" — the object-level matcher
-    // would otherwise reject them outright.
+    // into their library" (Player / ParentTarget / ParentTargetController).
+    // Translate them here to "all cards owned by that player in the origin zone"
+    // — the object-level matcher would otherwise reject them outright.
     let player_scope: Option<crate::types::player::PlayerId> = match &target_filter {
         TargetFilter::Controller => Some(ability.controller),
         TargetFilter::Player => ability
@@ -924,6 +924,17 @@ pub fn resolve_all(
             crate::types::ability::TargetRef::Player(p) => Some(*p),
             _ => None,
         }),
+        // CR 608.2c + CR 109.4: "that player shuffles their hand into their
+        // library" (Jace, the Mind Sculptor −12) binds the mass move to the
+        // parent instruction's chosen player via `ParentTargetController`.
+        TargetFilter::ParentTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state)
+        }
+        // CR 108.3 + CR 608.2c: "its owner shuffles their graveyard into their
+        // library" mass moves key off owner, not controller.
+        TargetFilter::ParentTargetOwner => {
+            crate::game::ability_utils::parent_target_owner(ability, state)
+        }
         _ => None,
     };
 

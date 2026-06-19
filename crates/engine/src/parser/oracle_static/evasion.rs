@@ -223,9 +223,23 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
     let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
     let (rest, mode) = alt((
+        // CR 508.5 + CR 802.1: "...can attack you each combat" is a
+        // defending-player-scoped cap (Judoon Enforcers) — only attacks
+        // declared against this static's controller are limited. Must precede
+        // the bare " can attack each combat" arm (longest match first).
         value(
-            StaticMode::MaxAttackersEachCombat { max },
-            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: Some(AttackDefenderScope::Controller),
+            },
+            tag::<_, _, OracleError<'_>>(" can attack you each combat"),
+        ),
+        value(
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: None,
+            },
+            tag(" can attack each combat"),
         ),
         value(
             StaticMode::MaxBlockersEachCombat { max },

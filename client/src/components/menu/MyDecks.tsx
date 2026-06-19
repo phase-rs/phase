@@ -43,7 +43,6 @@ import {
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
 import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
-import { SelectField } from "../ui/SelectField";
 import { MenuSelect } from "../ui/MenuSelect";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
@@ -571,6 +570,18 @@ export function MyDecks({
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
   );
+  const sortMenuItems = useMemo(() => {
+    const items = [
+      { value: "alpha", label: t("myDecks.sortName") },
+      { value: "recent", label: t("myDecks.sortDateAdded") },
+    ];
+    if (selectedFormat) {
+      items.push({ value: "format", label: t("myDecks.sortFormat") });
+    }
+    return items;
+  }, [t, selectedFormat]);
+  const sortMenuLabel =
+    sortMenuItems.find((item) => item.value === activeSort)?.label ?? t("myDecks.sortName");
   const [sortAsc, setSortAsc] = useState(mode !== "select");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -1175,21 +1186,20 @@ export function MyDecks({
           </button>
         )}
         <div className="flex w-full items-center justify-end gap-1 sm:ml-auto sm:w-auto">
-          <SelectField
-            chevronSize="sm"
-            iconWrapperClassName="text-slate-400"
-            value={activeSort}
-            onChange={(e) => {
-              const next = e.target.value as DeckSort;
+          <MenuSelect
+            ariaLabel={t("myDecks.sortName")}
+            label={sortMenuLabel}
+            selectedValue={activeSort}
+            items={sortMenuItems}
+            menuLayout="dropdown"
+            onSelect={(value) => {
+              const next = value as DeckSort;
               setActiveSort(next);
               setSortAsc(next === "alpha");
             }}
-            className="rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20"
-          >
-            <option value="alpha">{t("myDecks.sortName")}</option>
-            <option value="recent">{t("myDecks.sortDateAdded")}</option>
-            {selectedFormat && <option value="format">{t("myDecks.sortFormat")}</option>}
-          </SelectField>
+            wrapperClassName="min-w-0"
+            className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+          />
           <button
             onClick={() => setSortAsc((prev) => !prev)}
             className="rounded p-1 text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"

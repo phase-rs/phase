@@ -343,6 +343,16 @@ fn restriction_scope_matches_player(
             );
             false
         }
+        RestrictionPlayerScope::DefendingPlayer => {
+            // CR 508.5a: resolved to `SpecificPlayer` by `add_restriction` when
+            // the restriction is created. An unresolved scope here means the
+            // source was not attacking, so it restricts no one.
+            debug_assert!(
+                false,
+                "DefendingPlayer should be resolved by add_restriction"
+            );
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
@@ -10517,7 +10527,7 @@ pub(super) fn pay_effect_mana_cost(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 
@@ -10625,7 +10635,7 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 
@@ -11604,7 +11614,9 @@ fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_is_board_state_relative(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().all(quantity_expr_is_board_state_relative),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().all(quantity_expr_is_board_state_relative)
+        }
         _ => false,
     }
 }

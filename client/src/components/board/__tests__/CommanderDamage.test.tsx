@@ -166,7 +166,7 @@ describe("CommanderDamage", () => {
     expect(root.textContent).toContain("11");
   });
 
-  it("labels opposing commander damage by player name with that player's seat color", () => {
+  it("keeps opposing player identity in the tooltip and seat-color rail", () => {
     const oppCmd = commanderObject({ id: 202, owner: 1, controller: 1, name: "Opp Commander" });
     useMultiplayerStore.setState({ playerNames: new Map([[1, "Atraxa"]]) });
     useGameStore.setState({
@@ -184,9 +184,37 @@ describe("CommanderDamage", () => {
 
     render(<CommanderDamage playerId={0} />);
 
-    const attackerLabel = screen.getByText("Atraxa");
-    expect(attackerLabel).toHaveStyle({ color: "#F43F5E" });
+    const attackerRail = screen.getByTitle("Commander damage from Atraxa: 11/21");
+    expect(attackerRail).toHaveStyle({ borderLeftColor: "#F43F5E" });
+    expect(screen.queryByText("Atraxa")).not.toBeInTheDocument();
     expect(screen.queryByText("Opp 1")).not.toBeInTheDocument();
+  });
+
+  it("shows the player label once when multiple commanders from that player dealt damage", () => {
+    const firstCmd = commanderObject({ id: 202, owner: 1, controller: 1, name: "First Partner" });
+    const secondCmd = commanderObject({ id: 303, owner: 1, controller: 1, name: "Second Partner" });
+    useMultiplayerStore.setState({ playerNames: new Map([[1, "Partner Player"]]) });
+    useGameStore.setState({
+      gameState: baseGameState({
+        seat_order: [0, 1],
+        objects: { [firstCmd.id]: firstCmd, [secondCmd.id]: secondCmd },
+        command_zone: [firstCmd.id, secondCmd.id],
+        derived: {
+          commander_damage_by_attacker: {
+            "1": [
+              { victim: 0, commander: firstCmd.id, damage: 4 },
+              { victim: 0, commander: secondCmd.id, damage: 6 },
+            ],
+          },
+        },
+      }),
+    });
+
+    render(<CommanderDamage playerId={0} />);
+
+    expect(screen.getByText("Partner Player")).toBeInTheDocument();
+    expect(screen.getByText("First Partner")).toBeInTheDocument();
+    expect(screen.getByText("Second Partner")).toBeInTheDocument();
   });
 
   /**

@@ -16,9 +16,10 @@ use crate::game::filter::{
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter, ZoneRef,
+    CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -193,7 +194,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_recipient)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_uses_recipient(exponent),
         QuantityExpr::Difference { left, right } => {
@@ -226,12 +229,267 @@ pub(crate) fn quantity_expr_uses_object_count(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_object_count(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_object_count),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_object_count)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_uses_object_count(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_uses_object_count(exponent),
         QuantityExpr::Difference { left, right } => {
             quantity_expr_uses_object_count(left) || quantity_expr_uses_object_count(right)
         }
+    }
+}
+
+/// True when the QuantityExpr's magnitude depends on floating mana in a mana
+/// pool. Mana production only needs a layer pass for continuous effects whose
+/// dynamic quantity reads this value (Omnath-style "unspent mana" effects).
+///
+/// Mirrors the structural recursion of `quantity_expr_uses_object_count` so
+/// composite expressions are classified through the same expression tree.
+pub(crate) fn quantity_expr_uses_unspent_mana(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_uses_unspent_mana(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_unspent_mana(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_unspent_mana)
+        }
+        QuantityExpr::UpTo { max } => quantity_expr_uses_unspent_mana(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_unspent_mana(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_unspent_mana(left) || quantity_expr_uses_unspent_mana(right)
+        }
+    }
+}
+
+/// CR 106.4: Leaf classification for `quantity_expr_uses_unspent_mana`.
+/// EXHAUSTIVE and wildcard-free so any future quantity reference that reads
+/// floating mana must be classified intentionally.
+fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::UnspentMana { .. } => true,
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::Aggregate { .. }
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+    }
+}
+
+/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by
+/// a `ContinuousModification`, if any. Layer application, incremental-flush
+/// escalation, and mana-production dirty marking all use this helper so there
+/// is one place that decides which modifications carry a runtime-resolved
+/// magnitude.
+///
+/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
+/// variant that carries a `QuantityExpr` must be classified here at compile
+/// time. `AddCounterOnEnter` also carries a `QuantityExpr` but is
+/// resolution-time-consumed by the BecomeCopy / CopyTokenOf resolvers and never
+/// reaches active continuous-effect application, so it is excluded.
+/// CR 613.1: Dynamic continuous modifications are evaluated while applying
+/// continuous effects through the layer system.
+pub(crate) fn continuous_modification_dynamic_quantity(
+    m: &ContinuousModification,
+) -> Option<&QuantityExpr> {
+    match m {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
+        // Resolution-time-consumed; never an active continuous effect.
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => None,
+        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
+        // magnitude. Enumerated explicitly (no wildcard) so a future
+        // QuantityExpr-carrying variant forces a decision here.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => None,
+    }
+}
+
+pub(crate) fn continuous_modification_uses_unspent_mana(
+    modification: &ContinuousModification,
+) -> bool {
+    continuous_modification_dynamic_quantity(modification)
+        .is_some_and(quantity_expr_uses_unspent_mana)
+}
+
+pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_uses_unspent_mana(lhs) || quantity_expr_uses_unspent_mana(rhs)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_uses_unspent_mana)
+        }
+        StaticCondition::Not { condition } => static_condition_uses_unspent_mana(condition),
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::None => false,
     }
 }
 
@@ -367,7 +625,7 @@ pub(crate) fn entered_object_perturbs_quantity_expr(
         | QuantityExpr::Multiply { inner, .. } => {
             entered_object_perturbs_quantity_expr(state, entered, ctx, inner)
         }
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|e| entered_object_perturbs_quantity_expr(state, entered, ctx, e)),
         QuantityExpr::UpTo { max } => {
@@ -580,7 +838,7 @@ pub fn resolve_quantity_with_ctx(
 
 /// Compose recursively-resolved inner values for the non-leaf
 /// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`,
-/// `Power`, `UpTo`, `Difference`). All resolver entry points share this
+/// `Power`, `UpTo`, `Difference`, `Max`). All resolver entry points share this
 /// logic; only the leaf arms (`Fixed`, `Ref`) differ in context handling.
 /// `recurse` is a closure the caller supplies that re-enters its own
 /// resolver with the inner expression.
@@ -630,6 +888,12 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // same operation as an absolute value; it confirms only that the
         // resulting amount is non-negative.)
         QuantityExpr::Difference { left, right } => (recurse(left) - recurse(right)).abs(),
+        // CR 107.1: the maximum of the computed integer operands. CR 120.4a /
+        // CR 120.10 establish the in-rules "the greatest of the calculated
+        // amounts" precedent for taking a maximum over multiple computed
+        // values; "whichever is greater" itself has no dedicated CR number.
+        // CR 107.2: an empty operand list (undeterminable) resolves to 0.
+        QuantityExpr::Max { exprs } => exprs.iter().map(&recurse).max().unwrap_or(0),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
             unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }

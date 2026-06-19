@@ -2437,6 +2437,73 @@ fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
     );
 }
 
+/// CR 601.2f: a self-spell cost reduction written with a LEADING condition —
+/// "If [condition], this spell costs {N} less to cast." — must attach the
+/// gate. Before the leading-`if` extraction fix the condition was silently
+/// dropped (the trailing-only `rfind(" if ")` scan never saw the front-of-line
+/// "if"), so every Avatar in the cycle reduced unconditionally.
+#[test]
+fn self_cost_reduction_leading_if_you_have_n_or_less_life() {
+    // Avatar of Hope.
+    let def = parse_static_line("If you have 3 or less life, this spell costs {6} less to cast.")
+        .expect("Avatar of Hope cost reduction must parse");
+    match def.condition {
+        Some(StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) => {}
+        other => panic!("leading-if gate must be LifeTotal{{Controller}} LE 3, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_cost_reduction_leading_if_opponent_controls_threshold() {
+    // Avatar of Fury — exercises the "an opponent controls N or more [type]"
+    // condition family through the leading-`if` cost-mod path.
+    let def = parse_static_line(
+        "If an opponent controls seven or more lands, this spell costs {6} less to cast.",
+    )
+    .expect("Avatar of Fury cost reduction must parse");
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+                ..
+            })
+        ),
+        "leading-if gate must survive as an opponent-controls >= 7 comparison, got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn self_cost_reduction_leading_if_extracts_across_condition_forms() {
+    // The leading-`if` extraction is condition-agnostic: it routes the clause
+    // through `parse_inner_condition`, so every already-supported condition form
+    // gates the reduction. Avatar of Might ("an opponent controls at least four
+    // more creatures than you") and "you weren't the starting player"
+    // (Phantasmal Extraction / Unforgiving Overtake / Unnatural Summons).
+    for line in [
+        "If an opponent controls at least four more creatures than you, this spell costs {6} less to cast.",
+        "If you weren't the starting player, this spell costs {1} less to cast.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line:?} must parse"));
+        assert!(
+            def.condition.is_some(),
+            "leading-if condition must be attached for {line:?}, got None"
+        );
+    }
+}
+
 #[test]
 fn self_cost_reduction_if_night_uses_day_night_condition() {
     let def = parse_static_line("This spell costs {2} less to cast if it's night.").unwrap();
@@ -6294,6 +6361,15 @@ fn static_you_cant_gain_life() {
 }
 
 #[test]
+fn static_enchanted_player_cant_gain_life() {
+    // CR 119.7 + CR 303.4e: Grievous Wound — lifegain prevention scoped to
+    // the enchanted player, not all players.
+    let def = parse_static_line("Enchanted player can't gain life.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantGainLife);
+    assert_eq!(def.affected, Some(TargetFilter::AttachedTo));
+}
+
+#[test]
 fn static_players_cant_gain_life() {
     // CR 119.7: Lifegain prevention — all players
     let def = parse_static_line("Players can't gain life.").unwrap();
@@ -7630,6 +7706,152 @@ fn graveyard_cast_permission_muldrotha_legacy_and() {
             ..
         }
     ));
+}
+
+#[test]
+fn graveyard_cast_permission_disjunctive_rejects_unmodeled_granted_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+    assert!(
+        parse_static_line(text).is_none(),
+        "unmodeled granted leave-battlefield replacement must remain an honest coverage gap"
+    );
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Tail-zone disjunctive permission —
+/// "Once during each of your turns, you may play a historic land or cast a
+/// historic permanent spell from your graveyard." — lowers to a single
+/// `GraveyardCastPermission { frequency: OncePerTurn, play_mode: Play,
+/// graveyard_destination_replacement: None }`. The two branches resolve to
+/// distinct typed filters (historic land vs. historic permanent), so the merged
+/// `affected` is a `TargetFilter::Or` over both — each branch carries the
+/// `Historic` property (CR 700.6).
+#[test]
+fn graveyard_cast_permission_disjunctive_tail_zone_without_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard.";
+    let def = parse_static_line(text).expect("should parse The Eighth Doctor disjunctive line");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
+            }
+        ),
+        "expected OncePerTurn + Play + no stack-exit redirect, got {:?}",
+        def.mode
+    );
+    let filter = def.affected.expect("should have affected filter");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over the historic land / historic permanent branches, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected two branch filters, got {filters:?}"
+    );
+    // Land branch: historic land.
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Land)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected first branch to be a historic Land filter, got {:?}",
+        filters[0]
+    );
+    // Spell branch: historic permanent.
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Permanent)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected second branch to be a historic Permanent filter, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 305.1 + CR 601.2a: Serra Paragon's per-branch-zone form — "play a land
+/// from your graveyard or cast a permanent spell with mana value 3 or less from
+/// your graveyard" — proves the disjunctive parser's filter axis is general: the
+/// two branches differ (bare land vs. permanent with a mana-value bound), so the
+/// merged `affected` is a `TargetFilter::Or` over both branch filters, NOT a
+/// hard-coded "historic" assumption. This tests the building block (any two
+/// graveyard branch filters), not the Doctor string.
+#[test]
+fn graveyard_cast_permission_disjunctive_serra_paragon_per_branch_zone() {
+    let text = "Once during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard.";
+    let def = parse_static_line(text).expect("should parse Serra Paragon disjunctive line");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
+            }
+        ),
+        "expected OncePerTurn + Play, got {:?}",
+        def.mode
+    );
+    let filter = def.affected.expect("should have affected filter");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected divergent branches to produce Or, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected two branch filters, got {filters:?}"
+    );
+    // Land branch: bare Land filter (no properties).
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Land) && tf.properties.is_empty()
+        ),
+        "expected first branch to be a bare Land filter, got {:?}",
+        filters[0]
+    );
+    // Spell branch: Permanent with a mana-value (Cmc) bound.
+    let TargetFilter::Typed(spell_tf) = &filters[1] else {
+        panic!("expected second branch Typed, got {:?}", filters[1]);
+    };
+    assert!(
+        spell_tf.type_filters.contains(&TypeFilter::Permanent),
+        "expected Permanent type filter on spell branch, got {:?}",
+        spell_tf.type_filters
+    );
+    assert!(
+        spell_tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                ..
+            }
+        )),
+        "expected CmcLE bound on spell branch, got {:?}",
+        spell_tf.properties
+    );
+}
+
+/// CR 604.2 + CR 614.1a: the disjunctive once-per-turn permission line carries
+/// the granted rider's "would leave the battlefield" text, which would otherwise
+/// classify the whole line as a replacement (`would ` is the first replacement
+/// contains-pattern). The frequency-prefixed permission anchor must make
+/// `is_static_pattern` win so the line routes to static dispatch (Priority 7)
+/// ahead of the Priority 8 replacement gate. Guards the dispatch ordering for
+/// the whole once-per-turn play/cast-from-zone permission class.
+#[test]
+fn disjunctive_graveyard_permission_classifies_static_not_replacement() {
+    let lower = "once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. if you do, it gains \"if ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+    assert!(
+        crate::parser::oracle_classifier::is_static_pattern(lower),
+        "disjunctive once-per-turn permission must classify as static"
+    );
 }
 
 // --- Alt-cost rider tests (Ninja Teen et al., CR 118.9 / CR 702.190a) ---
@@ -9820,13 +10042,38 @@ fn static_must_attack_each_combat_if_able() {
 #[test]
 fn static_no_more_than_one_creature_can_attack_each_combat() {
     let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
-    assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 1,
+            defender: None
+        }
+    );
 }
 
 #[test]
 fn static_no_more_than_two_creatures_can_attack_each_combat() {
     let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
-    assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 2,
+            defender: None
+        }
+    );
+}
+
+#[test]
+fn static_no_more_than_one_creature_can_attack_you_each_combat() {
+    // CR 508.5 + CR 802.1: Judoon Enforcers — defender-scoped attacker cap.
+    let def = parse_static_line("No more than one creature can attack you each combat.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 1,
+            defender: Some(AttackDefenderScope::Controller),
+        }
+    );
 }
 
 #[test]
