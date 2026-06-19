@@ -6699,7 +6699,6 @@ mod where_x_tests {
     }
 
     #[test]
-    #[test]
     fn strip_trailing_duration_preserves_tokens_created_this_turn_phrase() {
         use super::strip_trailing_duration;
 
