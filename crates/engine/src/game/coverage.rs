@@ -11059,8 +11059,11 @@ mod tests {
                 .to_string(),
         );
         face.static_abilities.push(
-            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
-                .description("No more than one creature can attack each combat.".to_string()),
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: None,
+            })
+            .description("No more than one creature can attack each combat.".to_string()),
         );
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })

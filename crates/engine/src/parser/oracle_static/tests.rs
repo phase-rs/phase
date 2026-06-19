@@ -9966,13 +9966,38 @@ fn static_must_attack_each_combat_if_able() {
 #[test]
 fn static_no_more_than_one_creature_can_attack_each_combat() {
     let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
-    assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 1,
+            defender: None
+        }
+    );
 }
 
 #[test]
 fn static_no_more_than_two_creatures_can_attack_each_combat() {
     let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
-    assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 2,
+            defender: None
+        }
+    );
+}
+
+#[test]
+fn static_no_more_than_one_creature_can_attack_you_each_combat() {
+    // CR 508.5 + CR 802.1: Judoon Enforcers — defender-scoped attacker cap.
+    let def = parse_static_line("No more than one creature can attack you each combat.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxAttackersEachCombat {
+            max: 1,
+            defender: Some(AttackDefenderScope::Controller),
+        }
+    );
 }
 
 #[test]
