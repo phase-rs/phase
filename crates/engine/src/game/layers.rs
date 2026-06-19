@@ -12716,4 +12716,179 @@ mod tests {
             );
         }
     }
+
+    /// CR 611.3a + CR 613: End-to-end runtime confirmation that Shield of the
+    /// Oversoul's color-conditional grants apply correctly on multicolored
+    /// creatures. A green/white creature must receive BOTH clauses (+2/+2,
+    /// flying, indestructible), a mono-green creature only the green clause
+    /// (+1/+1, indestructible), and a mono-red creature neither. Regression
+    /// test for issue #2674.
+    #[test]
+    fn shield_of_the_oversoul_color_conditional_on_multicolor_creature() {
+        let mut state = setup();
+
+        // Parse Shield of the Oversoul's two static lines via the production parser.
+        let white_def = crate::parser::oracle_static::parse_static_line(
+            "As long as enchanted creature is white, it gets +1/+1 and has flying.",
+        )
+        .expect("white clause must parse");
+        let green_def = crate::parser::oracle_static::parse_static_line(
+            "As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+        )
+        .expect("green clause must parse");
+
+        // --- Multicolored (green/white) creature ---
+        let gw_creature = make_creature(&mut state, "Wilt-Leaf Liege", 4, 4, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&gw_creature).unwrap();
+            obj.color = vec![ManaColor::Green, ManaColor::White];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_gw = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (GW)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_gw).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(gw_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def.clone());
+            obj.static_definitions.push(green_def.clone());
+        }
+        state
+            .objects
+            .get_mut(&gw_creature)
+            .unwrap()
+            .attachments
+            .push(aura_gw);
+
+        // --- Mono-green creature ---
+        let g_creature = make_creature(&mut state, "Llanowar Elves", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&g_creature).unwrap();
+            obj.color = vec![ManaColor::Green];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_g = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (G)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_g).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(g_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def.clone());
+            obj.static_definitions.push(green_def.clone());
+        }
+        state
+            .objects
+            .get_mut(&g_creature)
+            .unwrap()
+            .attachments
+            .push(aura_g);
+
+        // --- Mono-red creature (no match) ---
+        let r_creature = make_creature(&mut state, "Goblin Guide", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&r_creature).unwrap();
+            obj.color = vec![ManaColor::Red];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_r = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (R)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_r).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(r_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def);
+            obj.static_definitions.push(green_def);
+        }
+        state
+            .objects
+            .get_mut(&r_creature)
+            .unwrap()
+            .attachments
+            .push(aura_r);
+
+        // Run the full layer pipeline.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Assert: multicolored (GW) creature gets both clauses.
+        let gw = state.objects.get(&gw_creature).unwrap();
+        assert_eq!(
+            gw.power,
+            Some(6),
+            "GW creature: 4 base + 1 (white) + 1 (green) = 6"
+        );
+        assert_eq!(
+            gw.toughness,
+            Some(6),
+            "GW creature: 4 base + 1 (white) + 1 (green) = 6"
+        );
+        assert!(
+            gw.has_keyword(&Keyword::Flying),
+            "GW creature must gain flying from white clause"
+        );
+        assert!(
+            gw.has_keyword(&Keyword::Indestructible),
+            "GW creature must gain indestructible from green clause"
+        );
+
+        // Assert: mono-green creature gets only the green clause.
+        let g = state.objects.get(&g_creature).unwrap();
+        assert_eq!(g.power, Some(2), "Mono-G creature: 1 base + 1 (green) = 2");
+        assert_eq!(
+            g.toughness,
+            Some(2),
+            "Mono-G creature: 1 base + 1 (green) = 2"
+        );
+        assert!(
+            !g.has_keyword(&Keyword::Flying),
+            "Mono-G creature must NOT gain flying (not white)"
+        );
+        assert!(
+            g.has_keyword(&Keyword::Indestructible),
+            "Mono-G creature must gain indestructible from green clause"
+        );
+
+        // Assert: mono-red creature gets nothing.
+        let r = state.objects.get(&r_creature).unwrap();
+        assert_eq!(r.power, Some(2), "Mono-R creature: 2 base, no bonus");
+        assert_eq!(r.toughness, Some(2), "Mono-R creature: 2 base, no bonus");
+        assert!(
+            !r.has_keyword(&Keyword::Flying),
+            "Mono-R creature must NOT gain flying"
+        );
+        assert!(
+            !r.has_keyword(&Keyword::Indestructible),
+            "Mono-R creature must NOT gain indestructible"
+        );
+    }
 }

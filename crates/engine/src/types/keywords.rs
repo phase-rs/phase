@@ -2387,6 +2387,13 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         "red" => ProtectionTarget::Color(ManaColor::Red),
         "green" => ProtectionTarget::Color(ManaColor::Green),
         "multicolored" => ProtectionTarget::Multicolored,
+        // CR 702.16a + CR 105.2a: "protection from monocolored" is a color-count
+        // quality (exactly one color), NOT a card type. Route to the runtime
+        // `source_matches_quality` arm (game/keywords.rs) which already evaluates
+        // `source.color.len() == 1`. Multicolored keeps its dedicated variant;
+        // monocolored reuses the existing Quality variant (no new variant / no game
+        // change). Mirrors parse_hexproof_filter's monocolored→Quality handling.
+        "monocolored" => ProtectionTarget::Quality("monocolored".into()),
         // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
         "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
@@ -3383,6 +3390,48 @@ mod tests {
         assert_eq!(
             Keyword::from_str("Protection:chosen color").unwrap(),
             Keyword::Protection(ProtectionTarget::ChosenColor)
+        );
+    }
+
+    /// CR 702.16a + CR 105.2a: "protection from monocolored" (Guardian of the
+    /// Guildpact, Providence of Night) is a color-count quality routed to the
+    /// runtime `source_matches_quality` arm (`source.color.len() == 1`), NOT a
+    /// card type. Misrouting to `CardType("monocolored")` is inert because
+    /// `source_matches_card_type` only matches core types + subtypes, so the
+    /// grant would do nothing. This test fails if the fix is reverted.
+    #[test]
+    fn parse_protection_target_monocolored_is_quality_not_card_type() {
+        // Fix-discriminating: monocolored must be a Quality, never a CardType.
+        assert_eq!(
+            parse_protection_target("monocolored"),
+            ProtectionTarget::Quality("monocolored".to_string())
+        );
+        assert_ne!(
+            parse_protection_target("monocolored"),
+            ProtectionTarget::CardType("monocolored".to_string())
+        );
+        // End-to-end through Keyword::from_str (the parser dispatch path).
+        assert_eq!(
+            Keyword::from_str("Protection:monocolored").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("monocolored".to_string()))
+        );
+        // No-regression: multicolored keeps its dedicated typed variant.
+        assert_eq!(
+            parse_protection_target("multicolored"),
+            ProtectionTarget::Multicolored
+        );
+        // No-regression: colors and chosen-color/card-type arms are unchanged.
+        assert_eq!(
+            parse_protection_target("red"),
+            ProtectionTarget::Color(ManaColor::Red)
+        );
+        assert_eq!(
+            parse_protection_target("the chosen color"),
+            ProtectionTarget::ChosenColor
+        );
+        assert_eq!(
+            parse_protection_target("artifacts"),
+            ProtectionTarget::CardType("artifacts".to_string())
         );
     }
 

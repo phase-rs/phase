@@ -24151,14 +24151,87 @@ mod tests {
                     Effect::GenericEffect { static_abilities, .. }
                         if static_abilities
                             .iter()
-                            .any(|s| s.mode == StaticMode::CanAttackWithDefender)
+                            .any(|s| s.mode == StaticMode::CanAttackWithDefender
+                                && s.modifications.contains(
+                                    &ContinuousModification::AddStaticMode {
+                                        mode: StaticMode::CanAttackWithDefender,
+                                    },
+                                ))
                 )
             });
             assert!(
                 has_can_attack,
-                "{text:?}: expected a CanAttackWithDefender grant; chain effects: {effects:?}"
+                "{text:?}: expected a CanAttackWithDefender grant with AddStaticMode carrier; chain effects: {effects:?}"
             );
         }
+    }
+
+    #[test]
+    fn walking_bulwark_compound_grants_target_haste_and_defender_attack_permission() {
+        let def = parse_effect_chain(
+            "Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power",
+            AbilityKind::Activated,
+        );
+
+        let mut effects: Vec<&Effect> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(&d.effect);
+            node = d.sub_ability.as_deref();
+        }
+
+        let has_haste = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste,
+                            },
+                        ))
+            )
+        });
+        assert!(
+            has_haste,
+            "expected target haste grant; chain effects: {effects:?}"
+        );
+
+        let has_can_attack = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s.mode == StaticMode::CanAttackWithDefender
+                            && s.modifications.contains(
+                                &ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CanAttackWithDefender,
+                                },
+                            ))
+            )
+        });
+        assert!(
+            has_can_attack,
+            "expected CanAttackWithDefender grant; chain effects: {effects:?}"
+        );
+
+        let has_assign_toughness = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s
+                            .modifications
+                            .contains(&ContinuousModification::AssignDamageFromToughness))
+            )
+        });
+        assert!(
+            has_assign_toughness,
+            "expected combat damage assignment grant; chain effects: {effects:?}"
+        );
     }
 
     #[test]

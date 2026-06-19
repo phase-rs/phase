@@ -1605,6 +1605,9 @@ pub(super) fn resolve_optional_effect_decision(
     match choice {
         AutoMayChoice::Accept => {
             ability.context.optional_effect_performed = true;
+            state
+                .player_actions_this_way
+                .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
             resolve_ability_chain(state, &ability, events, depth)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
@@ -2024,8 +2027,14 @@ fn detach_after_player_scope_local_chain(
     if next_is_co_scoped_anaphoric_consumer {
         next.player_scope = None;
     }
+    // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
+    // optional for that opponent. Keep the continuation inside the scoped
+    // template so accepting the offer performs both instructions.
+    let next_is_optional_clause_continuation =
+        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
     if next_is_performed_gated
         || next_is_co_scoped_anaphoric_consumer
+        || next_is_optional_clause_continuation
         || is_player_scope_local_continuation(&node.effect, &next.effect)
     {
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
@@ -5340,6 +5349,8 @@ fn resolve_chain_body(
 
             let initial_waiting_for = state.waiting_for.clone();
             let mut iteration = 0usize;
+            let repeated_full_chain =
+                ability.repeat_for.is_some() && effective.sub_ability.is_some();
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -5392,7 +5403,13 @@ fn resolve_chain_body(
                 // `resolve_effect` does not check `optional`, which is correct
                 // because non-per-iteration loops apply their `optional` once up
                 // front in `resolve_chain_body`.
-                if (kind_driven || member_driven) && iter_effective.optional {
+                if repeated_full_chain {
+                    let mut full_chain_iteration = iter_effective.clone();
+                    full_chain_iteration.repeat_for = None;
+                    full_chain_iteration.copy_count_status =
+                        crate::types::ability::CopyCountStatus::Finalized;
+                    resolve_ability_chain(state, &full_chain_iteration, events, depth.max(1))?;
+                } else if (kind_driven || member_driven) && iter_effective.optional {
                     // CR 608.2c: pass a non-zero depth so the depth==0 prelude
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
@@ -5451,6 +5468,9 @@ fn resolve_chain_body(
                     break;
                 }
                 iteration += 1;
+            }
+            if repeated_full_chain {
+                return Ok(());
             }
         } // end shares_quality_failed else
     }

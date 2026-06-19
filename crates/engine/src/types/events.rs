@@ -79,6 +79,8 @@ pub enum BendingType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
+    /// A player accepted a resolution-time optional effect.
+    AcceptedOptionalEffect,
     SearchedLibrary,
     Scry,
     Surveil,
