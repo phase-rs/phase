@@ -13,7 +13,9 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
+use super::ability_utils::{
+    build_target_slots, flatten_targets_in_chain, validate_targets_in_chain,
+};
 use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
@@ -62,6 +64,34 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
+fn has_missing_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if !flatten_targets_in_chain(ability).is_empty() {
+        return false;
+    }
+
+    match build_target_slots(state, ability) {
+        Ok(slots) => slots.iter().any(|slot| !slot.optional),
+        Err(_) => true,
+    }
+}
+
+fn top_pending_trigger_has_no_legal_required_targets(
+    state: &GameState,
+    pending_id: ObjectId,
+) -> bool {
+    let Some(entry) = state.stack.back().filter(|entry| entry.id == pending_id) else {
+        return false;
+    };
+    let Some(ability) = entry.ability() else {
+        return false;
+    };
+    if !flatten_targets_in_chain(ability).is_empty() {
+        return false;
+    }
+
+    build_target_slots(state, ability).is_err()
+}
+
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
 /// exile-instead marker for Rod of Absorption's resolving-spell rider.
 fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
@@ -102,7 +132,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // permitted.
     if let Some(pending_id) = state.pending_trigger_entry {
         if state.stack.back().map(|e| e.id) == Some(pending_id) {
-            return;
+            if !top_pending_trigger_has_no_legal_required_targets(state, pending_id) {
+                return;
+            }
+            // CR 603.3d: A stale construction cursor on a malformed trigger
+            // with no legal required targets cannot keep a triggered ability
+            // suspended forever.
+            state.pending_trigger_entry = None;
+            state.pending_trigger = None;
+            state.pending_trigger_event_batch.clear();
         }
     }
 
@@ -239,6 +277,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 ability.set_scoped_player_recursive(pid);
             }
         }
+    }
+
+    if ability
+        .as_ref()
+        .is_some_and(|ability| has_missing_required_stack_targets(state, ability))
+    {
+        // CR 603.3d: If a triggered ability needs a stack-time target choice and
+        // no legal choice was made, remove it from the stack.
+        // CR 608.2b: A resolving spell or ability with no legal targets does not
+        // resolve.
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        state.current_trigger_match_count = None;
+        state.die_result_this_resolution = None;
+        return;
     }
 
     // Capture targets for Aura attachment after resolution
@@ -2175,13 +2231,14 @@ pub(crate) fn create_warp_delayed_trigger(
 mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
-    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CastingPermission, CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility,
-        TargetFilter, TargetRef, TypedFilter,
+        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{MayTriggerOrigin, WaitingFor};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -2264,6 +2321,115 @@ mod tests {
         });
 
         aura_id
+    }
+
+    #[test]
+    fn targetless_damage_trigger_with_stale_pending_entry_is_removed() {
+        let mut state = setup();
+        let predator = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Trygon Predator".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&predator)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Artifact)
+                        .controller(ControllerRef::TargetPlayer),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Enchantment)
+                        .controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target,
+                cant_regenerate: false,
+            },
+            vec![],
+            predator,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+            .set_source_incarnation_recursive(state.objects.get(&predator).map(|o| o.incarnation));
+
+        let trigger_event = GameEvent::DamageDealt {
+            source_id: predator,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let description =
+            "Whenever this creature deals combat damage to a player, you may destroy target artifact or enchantment that player controls."
+                .to_string();
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id: predator,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: predator,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(trigger_event.clone()),
+                description: Some(description.clone()),
+                source_name: "Trygon Predator".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        state.pending_trigger_entry = Some(entry_id);
+        state.pending_trigger_event_batch = vec![trigger_event.clone()];
+        state.pending_trigger = Some(PendingTrigger {
+            source_id: predator,
+            controller: PlayerId(0),
+            condition: None,
+            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            timestamp: state.turn_number,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(trigger_event),
+            modal: None,
+            mode_abilities: Vec::new(),
+            description: Some(description),
+            may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
+            subject_match_count: None,
+            die_result: None,
+        });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert!(state.stack.is_empty());
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger.is_none());
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == entry_id)));
     }
 
     #[test]

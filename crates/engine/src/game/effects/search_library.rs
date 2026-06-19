@@ -262,6 +262,27 @@ fn distinct_string_sets(
     })
 }
 
+fn search_filter_has_stated_quality(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::None => false,
+        TargetFilter::Typed(typed) => {
+            typed.has_meaningful_type_constraint() || typed.controller.is_some()
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(search_filter_has_stated_quality)
+        }
+        TargetFilter::Not { filter } => search_filter_has_stated_quality(filter),
+        _ => true,
+    }
+}
+
+// CR 701.23b: Hidden-zone searches with a stated quality can fail to find
+// some or all matching cards without converting the search filter into a
+// selection-time constraint.
+fn allows_hidden_zone_partial_find(filter: &TargetFilter, source_zones: &[Zone]) -> bool {
+    source_zones == [Zone::Library] && search_filter_has_stated_quality(filter)
+}
+
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
 /// CR 401.2: Libraries are normally face-down; searching is an exception that lets a player look through cards.
 pub fn resolve(
@@ -407,6 +428,7 @@ pub fn resolve(
     }
 
     let pick_count = count.min(matching.len());
+    let allows_partial_find = allows_hidden_zone_partial_find(&filter, &effective_zones);
 
     // CR 608.2c: Propagate the printed-text selection restriction (e.g.,
     // "with different names") into the choice state so the Select handler
@@ -417,6 +439,7 @@ pub fn resolve(
         count: pick_count,
         reveal,
         up_to,
+        allows_partial_find,
         constraint: selection_constraint,
         // CR 701.23a + CR 608.2c: Carry the cultivate-class split metadata so the
         // SearchChoice-completion handler can partition the found set.
@@ -699,6 +722,62 @@ mod tests {
     }
 
     #[test]
+    fn stated_quality_library_search_can_fail_to_find_with_matches_present() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let forest = add_library_land_with_subtype(&mut state, 1, PlayerId(0), "Forest", "Forest");
+        let island = add_library_land_with_subtype(&mut state, 2, PlayerId(0), "Island", "Island");
+        let swamp = add_library_land_with_subtype(&mut state, 3, PlayerId(0), "Swamp", "Swamp");
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::land().subtype("Forest".to_string())),
+                TargetFilter::Typed(TypedFilter::land().subtype("Island".to_string())),
+            ],
+        };
+        let ability = make_search_ability(filter, 1);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                count,
+                up_to,
+                allows_partial_find,
+                constraint,
+                ..
+            } => {
+                assert_eq!(*count, 1);
+                assert!(!*up_to, "printed text is not an up-to search");
+                assert!(
+                    *allows_partial_find,
+                    "hidden-zone stated-quality search permits fail-to-find"
+                );
+                assert!(cards.contains(&forest));
+                assert!(cards.contains(&island));
+                assert!(!cards.contains(&swamp));
+                assert!(matches!(constraint, SearchSelectionConstraint::None));
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![] },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.players[0].library.contains(&forest));
+        assert!(state.players[0].library.contains(&island));
+        assert!(state.players[0].library.contains(&swamp));
+    }
+
+    #[test]
     fn search_up_to_propagates_flag_and_floors_sentinel_to_matching_len() {
         // CR 107.1c: Sarkhan -7 pattern — "any number of Dragon creature cards".
         // Parser emits count=i32::MAX + up_to=true; resolver must floor pick_count
@@ -738,10 +817,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::SearchChoice { cards, .. } => {
+            WaitingFor::SearchChoice {
+                cards, constraint, ..
+            } => {
                 assert_eq!(cards.len(), 2);
                 assert!(cards.contains(&card1));
                 assert!(cards.contains(&card2));
+                assert!(matches!(constraint, SearchSelectionConstraint::None));
             }
             other => panic!("Expected SearchChoice, got {:?}", other),
         }

@@ -5900,6 +5900,34 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     Ok((rest, (filter, negated)))
 }
 
+/// CR 603.12 + CR 608.2c: Parse "you put [quantifier] [type] onto the battlefield
+/// this way" — the active-voice reflexive gate (Gilgamesh, Master-at-Arms:
+/// "When you put one or more Equipment onto the battlefield this way, you may
+/// attach one of them to a Samurai you control."). Semantically identical to the
+/// passive `parse_zone_changed_this_way_clause` existential check against
+/// `state.last_zone_changed_ids`.
+pub fn parse_you_put_onto_battlefield_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("onto the battlefield this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
@@ -11585,16 +11613,34 @@ mod tests {
         .unwrap();
         assert_eq!(rest, ", you may attach it to a creature you control");
         assert!(!negated);
-        // Subtype Equipment must round-trip (parse_type_phrase canonicalizes
-        // "equipment" → Subtype::Equipment via the oracle subtype dictionary).
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
-                assert!(
-                    type_filters
-                        .iter()
-                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))),
-                    "expected Subtype Equipment, got {type_filters:?}"
-                );
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ));
+            }
+            other => panic!("expected Typed Equipment, got {other:?}"),
+        }
+    }
+
+    /// CR 603.12: Gilgamesh active-voice reflexive gate — "you put one or more
+    /// [type] onto the battlefield this way".
+    #[test]
+    fn test_you_put_onto_battlefield_this_way_equipment() {
+        let (rest, (filter, negated)) = parse_you_put_onto_battlefield_this_way_clause(
+            "you put one or more equipment onto the battlefield this way, you may attach one of them to a samurai you control",
+        )
+        .unwrap();
+        assert_eq!(
+            rest,
+            ", you may attach one of them to a samurai you control"
+        );
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ));
             }
             other => panic!("expected Typed Equipment, got {other:?}"),
         }

@@ -1683,6 +1683,7 @@ pub struct SpellCast<'a> {
     convoke_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
+    modal_back_face: Option<bool>,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1698,6 +1699,7 @@ impl<'a> SpellCast<'a> {
             convoke_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
+            modal_back_face: None,
         }
     }
 
@@ -1768,6 +1770,14 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Choose which face of a spell//spell MDFC or split card to cast (CR
+    /// 712.11b / CR 709.3). Required when the engine surfaces
+    /// `WaitingFor::ModalFaceChoice`.
+    pub fn modal_back_face(mut self, back: bool) -> Self {
+        self.modal_back_face = Some(back);
+        self
+    }
+
     /// Tap these creatures to pay the cost via Convoke (CR 702.51a). Each is
     /// tapped during the `ManaPayment { convoke_mode }` window with mana of the
     /// creature's first declared color (falling back to colorless for the
@@ -1792,6 +1802,7 @@ impl<'a> SpellCast<'a> {
             convoke_with,
             optional,
             search_pick,
+            modal_back_face,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1828,7 +1839,17 @@ impl<'a> SpellCast<'a> {
 
         for _ in 0..64 {
             match &runner.state.waiting_for {
-                // CR 601.2b: choose a legal cast variant the engine authored.
+                WaitingFor::ModalFaceChoice { .. } => {
+                    let back = modal_back_face.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::ModalFaceChoice but no \
+                             .modal_back_face(..) was declared — declare which face to cast"
+                        )
+                    });
+                    runner
+                        .act(GameAction::ChooseModalFace { back_face: back })
+                        .expect("ChooseModalFace must be accepted");
+                }
                 WaitingFor::CastingVariantChoice { options, .. } => {
                     let variant = casting_variant.unwrap_or_else(|| {
                         panic!(
@@ -4049,6 +4070,108 @@ mod tests {
             outcome.state().objects[&victim].damage_marked,
             0,
             "CR 701.19a: regeneration removes all marked damage"
+        );
+    }
+
+    /// CR 613.1f + CR 613.4b + CR 205.1b: Curious Colossus end-to-end. Its ETB
+    /// targets an opponent; each creature that opponent controls "loses all
+    /// abilities, becomes a Coward in addition to its other types, and has base
+    /// power and toughness 1/1". After casting through the real pipeline and
+    /// evaluating layers, the affected creature must (a) have no abilities/
+    /// keywords (layer 6 RemoveAllAbilities), (b) gain the Coward subtype while
+    /// KEEPING its prior subtype (CR 205.1b additive), and (c) have effective
+    /// power/toughness 1/1 (layer 7b set). The comma-split guards are what keep
+    /// the trailing base-P/T conjunct in the GenericEffect; if reverted, the base
+    /// P/T conjunct orphans to Unimplemented and the creature stays 3/4.
+    #[test]
+    fn curious_colossus_etb_strips_abilities_adds_subtype_sets_base_pt() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // The opponent's victim: a 3/4 Bird with flying.
+        let victim = scenario
+            .add_creature(P1, "Victim Bird", 3, 4)
+            .with_subtypes(vec!["Bird"])
+            .flying()
+            .id();
+
+        // Curious Colossus in P0's hand, parsed from its real Oracle text.
+        let colossus = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Curious Colossus",
+                7,
+                7,
+                "When this creature enters, each creature target opponent controls \
+                 loses all abilities, becomes a Coward in addition to its other types, \
+                 and has base power and toughness 1/1.",
+            )
+            .id();
+
+        // Fund {5}{W}{W} from the pool (2 White + 5 Colorless).
+        let mut mana = vec![ManaUnit::new(ManaType::White, ObjectId(9_999), false, vec![]); 2];
+        mana.extend(vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![]
+            );
+            5
+        ]);
+        scenario.with_mana_pool(P0, mana);
+
+        let mut runner = scenario.build();
+
+        // Cast Curious Colossus; its ETB targets opponent P1.
+        let outcome = runner.cast(colossus).target_player(P1).resolve();
+
+        // Evaluate layers on the resolved state and inspect the affected creature.
+        let mut state = outcome.state().clone();
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let obj = state
+            .objects
+            .get(&victim)
+            .expect("victim still on battlefield");
+
+        // (a) CR 613.1f: all abilities/keywords removed.
+        assert!(
+            !crate::game::keywords::has_keyword(obj, &Keyword::Flying),
+            "RemoveAllAbilities must strip flying, keywords={:?}",
+            obj.keywords
+        );
+        assert!(
+            obj.abilities.is_empty(),
+            "RemoveAllAbilities must clear printed abilities, got {:?}",
+            obj.abilities
+        );
+
+        // (b) CR 205.1b: Coward added "in addition to its other types" — prior
+        // Bird subtype is KEPT.
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Coward"),
+            "must gain the Coward subtype, subtypes={:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Bird"),
+            "must KEEP the prior Bird subtype (additive), subtypes={:?}",
+            obj.card_types.subtypes
+        );
+
+        // (c) CR 613.4b: base power and toughness set to 1/1.
+        assert_eq!(
+            obj.power,
+            Some(1),
+            "effective power must be 1, got {:?}",
+            obj.power
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(1),
+            "effective toughness must be 1, got {:?}",
+            obj.toughness
         );
     }
 }

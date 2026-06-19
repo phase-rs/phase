@@ -688,6 +688,7 @@ fn pay_ability_cost_inner(
                     track_exiled_by_source: true,
                     face_down_profile: None,
                     count_param: 0,
+                    library_position: None,
                     is_cost_payment: true,
                 };
                 return Ok(PaymentOutcome::Paused {

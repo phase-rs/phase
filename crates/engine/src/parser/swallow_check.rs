@@ -2552,6 +2552,7 @@ fn detect_duration_this_turn(
         "NthSpellThisTurn",
         "NthDrawThisTurn",
         "CardsDrawnThisTurn",
+        "BattlefieldEntriesThisTurn",
         "PlayerActionsThisTurn",
         "OpponentLostLife",
         "OpponentDealtCombatDamage",

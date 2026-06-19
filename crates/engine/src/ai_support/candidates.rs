@@ -953,19 +953,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             cards,
             count,
             up_to,
+            allows_partial_find,
             constraint,
             ..
         } => {
-            // CR 701.23b/d: constrained (stated-quality) searches enumerate 0..=count
-            // so the legal-action set always contains the empty fail-to-find plus
-            // valid partials; pure-quantity exact-count searches enumerate only
-            // `count`. `combinations(_, 0)` returns `vec![vec![]]`, so the empty
-            // decline survives the constraint filter below.
-            let sizes: Vec<usize> = if *up_to || constraint.permits_partial_find() {
-                (0..=*count).collect()
-            } else {
-                vec![*count]
-            };
+            // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, or
+            // explicit stated-quality selection constraints enumerate 0..=count
+            // so the legal-action set contains fail-to-find plus valid partials.
+            // Pure-quantity exact-count searches enumerate only `count`.
+            let sizes: Vec<usize> =
+                if *up_to || *allows_partial_find || constraint.permits_partial_find() {
+                    (0..=*count).collect()
+                } else {
+                    vec![*count]
+                };
             // Engine-side beam cap. Required (not optional) because every candidate
             // returned here flows into `PlannerServices::validate_candidates`, which
             // clones state + applies the action per candidate. Without a cap, a
@@ -3904,10 +3905,9 @@ fn mana_payment_actions(
                 crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
                 _ => None,
             });
-        for (obj_id, obj) in &state.objects {
-            match mode {
-                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
-                    // Waterbend: always colorless
+        if mode == ConvokeMode::Delve {
+            if let Some(p) = state.players.iter().find(|p| p.id == player) {
+                for obj_id in &p.graveyard {
                     actions.push(candidate(
                         GameAction::TapForConvoke {
                             object_id: *obj_id,
@@ -3917,62 +3917,65 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
-                    // CR 702.126a: Improvise pays generic mana — always colorless.
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-                ConvokeMode::Delve
-                    if obj.zone == crate::types::zones::Zone::Graveyard && obj.owner == player =>
-                {
-                    // CR 702.66a: exile a graveyard card to pay one generic mana.
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
-                    // CR 702.51a: Colorless (for generic) always available
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: *obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                    // CR 702.51a: one colored tap per color the creature has — but only
-                    // colors the cost can actually use. A colored convoke marker pays only a
-                    // matching colored pip, so a color absent from the cost is a wasted tap.
-                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
-                    // unavailable, offer every color rather than risk pruning a useful option.
-                    for color in &obj.color {
-                        if let Some(shards) = convoke_cost_shards {
-                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
-                                continue;
-                            }
-                        }
+            }
+        } else {
+            for (obj_id, obj) in &state.objects {
+                match mode {
+                    ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                        // Waterbend: always colorless
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,
-                                mana_type: mana_sources::mana_color_to_type(color),
+                                mana_type: crate::types::mana::ManaType::Colorless,
                             },
                             TacticalClass::Mana,
                             Some(player),
                         ));
                     }
+                    ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                        // CR 702.126a: Improvise pays generic mana — always colorless.
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
+                    ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                        // CR 702.51a: Colorless (for generic) always available
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                        // CR 702.51a: one colored tap per color the creature has — but only
+                        // colors the cost can actually use. A colored convoke marker pays only a
+                        // matching colored pip, so a color absent from the cost is a wasted tap.
+                        // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                        // unavailable, offer every color rather than risk pruning a useful option.
+                        for color in &obj.color {
+                            if let Some(shards) = convoke_cost_shards {
+                                if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                    continue;
+                                }
+                            }
+                            actions.push(candidate(
+                                GameAction::TapForConvoke {
+                                    object_id: *obj_id,
+                                    mana_type: mana_sources::mana_color_to_type(color),
+                                },
+                                TacticalClass::Mana,
+                                Some(player),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -4966,6 +4969,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -5674,6 +5678,7 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
             split: None,
         };
@@ -5695,6 +5700,7 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
@@ -5755,6 +5761,7 @@ mod tests {
             count: 4,
             reveal: false,
             up_to: true,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },

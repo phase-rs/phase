@@ -7,6 +7,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
 /// Place target card at a specific position in its owner's library. Unlike
@@ -43,8 +44,13 @@ pub fn resolve(
     // This is the post-#323 SelfRef short-circuit applied uniformly.
     let effective_targets =
         crate::game::targeting::resolved_targets(ability, &target_filter, state);
-    let mut collected_targets =
-        crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
+    // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
+    // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
+    // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
+    let mut collected_targets = match &target_filter {
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => Vec::new(),
+        _ => crate::game::effects::effect_object_targets(&target_filter, &effective_targets),
+    };
     if collected_targets.is_empty() && matches!(target_filter, TargetFilter::ExiledBySource) {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
         collected_targets = state
@@ -57,6 +63,45 @@ pub fn resolve(
             .map(|(id, _)| *id)
             .collect();
     }
+    if collected_targets.is_empty()
+        && matches!(
+            target_filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    {
+        // CR 608.2c + CR 401.2: Tracked-set continuations after a dig keep may
+        // still reference cards left in the library (Expressive Iteration's
+        // "put one on the bottom" step). Only those library members are legal
+        // picks — cards already routed to hand must not re-enter this choice.
+        // Resolve sentinel/explicit tracked-set identity first, then apply the
+        // filter predicate instead of blindly reading `chain_tracked_set_id`.
+        let effective_filter =
+            crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        let candidate_ids: Vec<ObjectId> = match &effective_filter {
+            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => state
+                .tracked_object_sets
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+            _ => state.objects.keys().copied().collect(),
+        };
+        collected_targets = candidate_ids
+            .into_iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Library)
+                    && crate::game::filter::matches_target_filter(
+                        state,
+                        *id,
+                        &effective_filter,
+                        &ctx,
+                    )
+            })
+            .collect();
+    }
 
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
@@ -64,6 +109,24 @@ pub fn resolve(
     // This covers Brainstorm ("put two cards from your hand on top of your library")
     // and similar cards where the player chooses during resolution.
     let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    let expected = if expected == 0
+        && matches!(
+            position,
+            LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. }
+        )
+        && matches!(
+            target_filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+        && !collected_targets.is_empty()
+    {
+        // Parser placeholder `count: 0` on dig-tail bottom steps means "one of
+        // the tracked looked-at cards", not "all of them".
+        1
+    } else {
+        expected
+    };
+
     if collected_targets.is_empty() {
         if expected == 0 {
             events.push(GameEvent::EffectResolved {
@@ -114,6 +177,7 @@ pub fn resolve(
                     // CR 708.2a: library-position selection is not a face-down entry.
                     face_down_profile: None,
                     count_param: 0,
+                    library_position: Some(position.clone()),
                     is_cost_payment: false,
                 };
                 return Ok(());
@@ -136,6 +200,33 @@ pub fn resolve(
         return Err(EffectError::InvalidParam(
             "PutAtLibraryPosition requires a target".to_string(),
         ));
+    }
+
+    // CR 115.1 + CR 608.2c: When more tracked-set library candidates exist
+    // than the placement count allows, prompt before auto-picking the first.
+    if collected_targets.len() > expected && expected > 0 {
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: ability.controller,
+            cards: collected_targets,
+            count: expected,
+            min_count: 0,
+            up_to: false,
+            source_id: ability.source_id,
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            zone: Zone::Library,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            count_param: 0,
+            library_position: Some(position.clone()),
+            is_cost_payment: false,
+        };
+        return Ok(());
     }
 
     // `count` carries the cardinality of the placement. For multi-card
@@ -706,6 +797,99 @@ mod tests {
                 assert!(cards.contains(&h3));
             }
             other => panic!("Expected EffectZoneChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c (issue #1162): filtered tracked-set library-position
+    /// continuations must honor `TrackedSetFiltered`, not every library member
+    /// in the chain set.
+    #[test]
+    fn tracked_set_filtered_library_bottom_honors_inner_filter() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        let instant_a = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Bolt A".to_string(),
+            Zone::Library,
+        );
+        let instant_b = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Bolt B".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state
+            .objects
+            .get_mut(&instant_a)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Instant];
+        state
+            .objects
+            .get_mut(&instant_b)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Instant];
+        state.players[0].library = vec![creature, instant_a, instant_b].into();
+
+        let set_id = TrackedSetId(7);
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![creature, instant_a, instant_b]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::TrackedSetFiltered {
+                    id: set_id,
+                    filter: Box::new(TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::new(TypeFilter::Instant),
+                    )),
+                    caused_by: None,
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    &vec![instant_a, instant_b],
+                    "only instant members of the tracked set may be offered"
+                );
+                assert!(
+                    !cards.contains(&creature),
+                    "creature must not be offered for instant-only filter"
+                );
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
     }
 }

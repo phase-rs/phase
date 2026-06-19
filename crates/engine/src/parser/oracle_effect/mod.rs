@@ -38,33 +38,33 @@ use lower::{
     absorb_trailing_rounding_suffix, apply_where_x_ability_expression,
     apply_where_x_quantity_expression, compute_sentence_where_x, consolidate_die_and_coin_defs,
     extract_deal_damage_multi_target, extract_double_counter_multi_target,
-    extract_put_counter_multi_target, extract_switch_pt_multi_target, is_token_creating_effect,
-    parse_damage_player_scope, parse_for_each_opponent_target_fanout_clause,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
-    rebind_subject_only_body_recipient, split_difference_repeat_suffix,
-    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
-    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
-    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_repeat_count_suffix, strip_return_destination_ext,
-    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    extract_put_counter_multi_target, extract_remove_counter_multi_target,
+    extract_switch_pt_multi_target, is_token_creating_effect, parse_damage_player_scope,
+    parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
+    rebind_decline_body_recipient, rebind_subject_only_body_recipient,
+    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
+    strip_each_scope_who_cant_subject, strip_each_scope_who_doesnt_subject,
+    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
+    strip_leading_duration, strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
+    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
+    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{anychar, multispace1, space1};
+use nom::character::complete::{anychar, multispace0, multispace1, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
@@ -91,8 +91,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
-    ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, DamageModification,
+    DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
     GameRestriction, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
     ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, OriginConstraint,
     PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
@@ -758,13 +758,75 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 603.7: nom body for "copy the next [type] spell you cast this turn when
+/// you cast it[, optionally with copy retarget permission]".
+fn parse_copy_next_spell_when_cast_body(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, CopyRetargetPermission)> {
+    let (rest, spell_part) = preceded(
+        tag("copy the next "),
+        take_until(" you cast this turn when you cast it"),
+    )
+    .parse(input)?;
+    let (rest, _) = tag(" you cast this turn when you cast it").parse(rest)?;
+
+    let filter =
+        extract_when_next_spell_filter(spell_part.trim()).ok_or_else(|| oracle_err(spell_part))?;
+
+    let (rest, retarget) = alt((
+        map(
+            preceded(
+                pair(multispace0, opt(preceded(multispace0, tag(".")))),
+                all_consuming(sequence::parse_copy_retarget_clause),
+            ),
+            |_| CopyRetargetPermission::MayChooseNewTargets,
+        ),
+        value(
+            CopyRetargetPermission::KeepOriginalTargets,
+            all_consuming(eof),
+        ),
+    ))
+    .parse(rest)?;
+
+    Ok((rest, (filter, retarget)))
+}
+
+/// CR 603.7: Parse "copy the next [type] spell you cast this turn when you cast it"
+/// — a one-shot delayed trigger that copies the next matching spell at cast time.
+/// Tzaangor Shaman (issue #1191) uses this wording instead of "when you next cast …".
+fn try_parse_copy_next_spell_when_cast(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (_, (combined_filter, retarget)) = all_consuming(parse_copy_next_spell_when_cast_body)
+        .parse(tp.lower)
+        .ok()?;
+
+    let inner = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::TriggeringSource,
+            retarget,
+            copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
+        },
+    );
+
+    Some(build_when_next_delayed_trigger(
+        TriggerMode::SpellCast,
+        combined_filter,
+        inner,
+        None,
+    ))
+}
+
 pub(crate) fn try_parse_temporal_delayed_trigger_ability(
     text: &str,
     kind: AbilityKind,
 ) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let clause = try_parse_whenever_this_turn(tp).or_else(|| try_parse_when_next_event(tp))?;
+    let clause = try_parse_whenever_this_turn(tp)
+        .or_else(|| try_parse_when_next_event(tp))
+        .or_else(|| try_parse_copy_next_spell_when_cast(tp))?;
     Some(ability_definition_from_clause(kind, clause))
 }
 
@@ -848,7 +910,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         .valid_card(TargetFilter::SelfRef)
         .destination_zone(Zone::Graveyard)
         .execute(exile_effect);
-    repl.is_consumed = true;
+    repl.consume_on_apply = true;
     repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Some(AbilityDefinition::new(
@@ -1411,7 +1473,7 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
         return None;
     }
 
-    replacement.is_consumed = true;
+    replacement.consume_on_apply = true;
     replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Some(Effect::AddTargetReplacement {
@@ -4694,6 +4756,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 603.7: "When you next cast a [type] spell this turn, ..." — one-shot delayed trigger.
     if let Some(clause) = try_parse_when_next_event(tp) {
+        return clause;
+    }
+
+    // CR 603.7: "Copy the next [type] spell you cast this turn when you cast it."
+    if let Some(clause) = try_parse_copy_next_spell_when_cast(tp) {
         return clause;
     }
 
@@ -8703,6 +8770,9 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // imperative parser strips "any number of" / "each of" to keep `parse_target`
     // bare, so the MultiTargetSpec is rebuilt from the original text here
     // (parallel to the DealDamage / Double counter fixups above).
+    if matches!(clause.effect, Effect::RemoveCounter { .. }) && clause.multi_target.is_none() {
+        clause.multi_target = extract_remove_counter_multi_target(text);
+    }
     if matches!(clause.effect, Effect::SwitchPT { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_switch_pt_multi_target(text);
     }
@@ -9090,8 +9160,16 @@ fn try_parse_verb_and_target<'a>(
     // CR 701.6: Counter a spell or ability on the stack.
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("counter ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        let stack_phrase = tag::<_, _, OracleError<'_>>("target ")
+            .parse(rest_lower)
+            .map(|(phrase, _)| phrase)
+            .unwrap_or(rest_lower);
         let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
-        let target = if scan_contains_phrase(rest_lower, "activated or triggered ability") {
+        let target = if let Ok((_, stack_target)) =
+            crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
+        {
+            stack_target
+        } else if scan_contains_phrase(rest_lower, "activated or triggered ability") {
             // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
             // preserve the compound-detection contract.
@@ -10929,6 +11007,23 @@ fn replace_definition_targets_with_parent(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 115.10a: True when an `Attach` effect names an explicit typed
+/// recipient ("attach … to a Samurai you control" — Gilgamesh; "attach it to a
+/// creature you control" — Stonehewer Giant). The chunk-loop anaphor rewriter
+/// must not collapse such recipients to `ParentTarget` just because the
+/// attachment side uses a set anaphor ("one of them").
+fn attach_recipient_is_explicitly_typed(target: &TargetFilter) -> bool {
+    match target {
+        TargetFilter::Typed(tf) => {
+            !tf.type_filters.is_empty() || tf.controller.is_some() || !tf.properties.is_empty()
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(attach_recipient_is_explicitly_typed)
+        }
+        _ => false,
+    }
+}
+
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
@@ -10986,7 +11081,10 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        Effect::Attach { target, .. }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !attach_recipient_is_explicitly_typed(target) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
@@ -11072,6 +11170,30 @@ fn replace_target_with_self(effect: &mut Effect) {
         }
         Effect::Transform { target, .. } => {
             *target = TargetFilter::SelfRef;
+        }
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            if target.as_ref().is_some_and(|target| {
+                matches!(
+                    target,
+                    TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                )
+            }) {
+                *target = Some(TargetFilter::SelfRef);
+            }
+            for static_def in static_abilities {
+                if static_def.affected.as_ref().is_some_and(|affected| {
+                    matches!(
+                        affected,
+                        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                    )
+                }) {
+                    static_def.affected = Some(TargetFilter::SelfRef);
+                }
+            }
         }
         _ => {
             // Effects without a target field, or outside this anaphor class,
@@ -18120,7 +18242,14 @@ pub(crate) fn parse_effect_chain_ir(
         // chunk (both higher-precedence rungs are None). Independent of the
         // lazy `.or_else` chain — pure Option inspection.
         let seeded_parent_target_controller_this_chunk = chain_chosen_player_scope.is_none()
-            && ctx.relative_player_scope.is_none()
+            && matches!(
+                chain_chosen_player_scope
+                    .clone()
+                    .or_else(|| chain_parent_target_controller_scope.clone())
+                    .or_else(|| ctx.relative_player_scope.clone())
+                    .as_ref(),
+                Some(ControllerRef::ParentTargetController)
+            )
             && chain_parent_target_controller_scope.is_some();
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
@@ -18142,16 +18271,13 @@ pub(crate) fn parse_effect_chain_ir(
             // player controls" anaphor binds to the most recent choice.
             relative_player_scope: chain_chosen_player_scope
                 .clone()
-                .or_else(|| ctx.relative_player_scope.clone())
                 // CR 608.2c (issue #1670): body "its controller may" antecedent
-                // (Star Athlete). Placed BELOW ctx.relative_player_scope so a
-                // trigger-CONDITION-derived scope keeps precedence — conservative
-                // non-regressive ordering. No card today has BOTH a
-                // condition-scoped player AND an independent body "its controller"
-                // antecedent; this only supplies a scope when the condition set
-                // none (e.g. "Whenever ~ attacks", where ctx.relative_player_scope
-                // is None).
+                // (Star Athlete; issue #3659 Gix — "its controller may pay … if
+                // they do, they draw" must bind "they" to the creature's
+                // controller, not the damaged player from the trigger
+                // condition's TriggeringPlayer scope).
                 .or_else(|| chain_parent_target_controller_scope.clone())
+                .or_else(|| ctx.relative_player_scope.clone())
                 .or_else(|| {
                     player_scope
                         .is_some()
@@ -20566,6 +20692,7 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
                 TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
             ],
         }
@@ -20575,6 +20702,7 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         TargetFilter::StackAbility {
             controller: None,
             tag: None,
+            kind: None,
         }
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
@@ -24047,14 +24175,87 @@ mod tests {
                     Effect::GenericEffect { static_abilities, .. }
                         if static_abilities
                             .iter()
-                            .any(|s| s.mode == StaticMode::CanAttackWithDefender)
+                            .any(|s| s.mode == StaticMode::CanAttackWithDefender
+                                && s.modifications.contains(
+                                    &ContinuousModification::AddStaticMode {
+                                        mode: StaticMode::CanAttackWithDefender,
+                                    },
+                                ))
                 )
             });
             assert!(
                 has_can_attack,
-                "{text:?}: expected a CanAttackWithDefender grant; chain effects: {effects:?}"
+                "{text:?}: expected a CanAttackWithDefender grant with AddStaticMode carrier; chain effects: {effects:?}"
             );
         }
+    }
+
+    #[test]
+    fn walking_bulwark_compound_grants_target_haste_and_defender_attack_permission() {
+        let def = parse_effect_chain(
+            "Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power",
+            AbilityKind::Activated,
+        );
+
+        let mut effects: Vec<&Effect> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(&d.effect);
+            node = d.sub_ability.as_deref();
+        }
+
+        let has_haste = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste,
+                            },
+                        ))
+            )
+        });
+        assert!(
+            has_haste,
+            "expected target haste grant; chain effects: {effects:?}"
+        );
+
+        let has_can_attack = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s.mode == StaticMode::CanAttackWithDefender
+                            && s.modifications.contains(
+                                &ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CanAttackWithDefender,
+                                },
+                            ))
+            )
+        });
+        assert!(
+            has_can_attack,
+            "expected CanAttackWithDefender grant; chain effects: {effects:?}"
+        );
+
+        let has_assign_toughness = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| s
+                            .modifications
+                            .contains(&ContinuousModification::AssignDamageFromToughness))
+            )
+        });
+        assert!(
+            has_assign_toughness,
+            "expected combat damage assignment grant; chain effects: {effects:?}"
+        );
     }
 
     #[test]
@@ -26514,6 +26715,7 @@ mod tests {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::Opponent),
                         tag: None,
+                        kind: None,
                     },
                 }
             ),
@@ -26554,12 +26756,36 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::StackAbility {
                         controller: None,
-                        tag: None
+                        tag: None,
+                        kind: None,
                     },
                     ..
                 }
             ),
             "single-target ability counter must stay Counter {{ StackAbility }}, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_counter_consign_to_memory_disjunction() {
+        let e = parse_effect("Counter target triggered ability or colorless spell");
+        assert!(
+            matches!(
+                e,
+                Effect::Counter {
+                    target: TargetFilter::Or { ref filters },
+                    ..
+                } if filters.len() == 2
+                    && filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::StackAbility {
+                            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+                            ..
+                        }
+                    ))
+                    && filters.iter().any(|f| matches!(f, TargetFilter::Typed(_)))
+            ),
+            "Consign to Memory must parse triggered-or-colorless disjunction, got {e:?}"
         );
     }
 
@@ -27391,6 +27617,7 @@ mod tests {
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
+                kind: None,
             }
         ));
     }
@@ -27671,6 +27898,42 @@ mod tests {
                 }
             ),
             "expected inner CopySpell with MayChooseNewTargets, got {:?}",
+            inner.effect
+        );
+    }
+
+    /// CR 603.7 (issue #1191): Tzaangor Shaman — "copy the next instant or
+    /// sorcery spell you cast this turn when you cast it" must install a
+    /// one-shot delayed trigger, not a combat-damage CopySpell.
+    #[test]
+    fn effect_tzaangor_copy_next_spell_when_cast() {
+        let def = parse_effect_chain(
+            "Copy the next instant or sorcery spell you cast this turn when you cast it. \
+             You may choose new targets for the copy.",
+            AbilityKind::Spell,
+        );
+        let Effect::CreateDelayedTrigger {
+            condition,
+            effect: inner,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        let DelayedTriggerCondition::WhenNextEvent { trigger, .. } = condition else {
+            panic!("expected WhenNextEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, crate::types::triggers::TriggerMode::SpellCast);
+        assert!(
+            matches!(
+                *inner.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected inner CopySpell on triggering spell, got {:?}",
             inner.effect
         );
     }
@@ -29434,6 +29697,61 @@ mod tests {
                         }
                     )),
                     "must contain CantBeBlocked: {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected single GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus — a comma-list
+    /// continuous effect may combine lose-abilities (layer 6), additive type
+    /// change (layer 4), and fixed base P/T (layer 7b) with no printed duration.
+    /// The trailing "and has base power and toughness N/N" is a modifier
+    /// conjunct on the same subject, not a standalone imperative effect.
+    #[test]
+    fn comma_list_type_change_and_has_base_pt_parses_as_single_generic_effect() {
+        let def = parse_effect_chain(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "must parse as a single clause, not split into sub_ability: {:?}",
+            def.sub_ability
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, None);
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities: {mods:?}"
+                );
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == "Coward"
+                    )),
+                    "must contain AddSubtype(Coward): {mods:?}"
                 );
                 assert!(
                     mods.iter()
@@ -37444,7 +37762,8 @@ mod tests {
             filters[1],
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         ));
     }
@@ -42830,7 +43149,8 @@ mod tests {
             replacement.combat_scope,
             Some(CombatDamageScope::CombatOnly)
         );
-        assert!(replacement.is_consumed);
+        assert!(replacement.consume_on_apply);
+        assert!(!replacement.is_consumed);
         assert_eq!(
             replacement.expiry,
             Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
@@ -42882,7 +43202,8 @@ mod tests {
             replacement.combat_scope,
             Some(CombatDamageScope::CombatOnly)
         );
-        assert!(replacement.is_consumed);
+        assert!(replacement.consume_on_apply);
+        assert!(!replacement.is_consumed);
         assert_eq!(
             replacement.expiry,
             Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
@@ -49779,6 +50100,94 @@ mod tests {
             },
             other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
         }
+    }
+
+    /// Gilgamesh, Master-at-Arms (issue #3286): any-number Equipment dig-from-among
+    /// plus CR 603.12 active-voice reflexive attach to Samurai.
+    #[test]
+    fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let def = parse_effect_chain(
+            "Look at the top six cards of your library. You may put any number of Equipment cards from among them onto the battlefield. Put the rest on the bottom of your library in a random order. When you put one or more Equipment onto the battlefield this way, you may attach one of them to a Samurai you control.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected outer Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+        assert_eq!(*destination, Some(Zone::Battlefield));
+        assert_eq!(*keep_count, Some(u32::MAX), "any number → unbounded keep");
+        assert!(*up_to);
+        assert!(
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                    if type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                    )
+            ),
+            "expected Equipment filter on Dig, got {filter:?}"
+        );
+        assert_eq!(*rest_destination, Some(Zone::Library));
+        assert!(
+            def.forward_result,
+            "Dig parent must forward the just-moved Equipment to the Attach sub_ability"
+        );
+
+        let attach = def
+            .sub_ability
+            .as_ref()
+            .expect("expected Attach sub_ability after Dig");
+        match &*attach.effect {
+            Effect::Attach { attachment, target } => {
+                assert!(
+                    matches!(attachment, TargetFilter::ParentTarget),
+                    "attachment should bind to a chosen moved Equipment, got {attachment:?}"
+                );
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::You),
+                            ref type_filters,
+                            ..
+                        }) if type_filters.iter().any(
+                            |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Samurai"))
+                        )
+                    ),
+                    "expected Samurai you control attach target, got {target:?}"
+                );
+            }
+            other => panic!("expected Attach sub_ability, got {other:?}"),
+        }
+        match &attach.condition {
+            Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                    ),
+                    "expected Equipment on ZoneChangedThisWay, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
+        }
+        assert!(
+            attach.optional,
+            "\"you may attach\" makes the attach step optional"
+        );
     }
 
     /// Quest for the Holy Relic / Stonehewer Giant pattern:

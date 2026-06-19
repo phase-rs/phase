@@ -46,6 +46,9 @@
 //!   pronoun accepts `he`/`she`/`it` so cards from any gender print route
 //!   through the same arm. When neither index is set, the arm declines (no
 //!   modification produced) so the rest of the except clause still parses.
+//! - `<possessive> starting loyalty is N`
+//!   → [`ContinuousModification::SetStartingLoyalty`] so planeswalker-copy
+//!   exceptions seed loyalty counters from the overridden value.
 //!
 //! # Fail-soft semantics
 //!
@@ -67,9 +70,10 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::{opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -161,6 +165,7 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
 ///   - `is a(n) {core_type|subtype} in addition to its other types`
 ///     (elided-subject form for non-leading bodies)            → AddType/AddSubtype
+///   - `<possessive> starting loyalty is N`                    → SetStartingLoyalty
 ///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
 pub(crate) fn parse_except_body<'a>(
@@ -190,6 +195,9 @@ pub(crate) fn parse_except_body<'a>(
         return Some((rest, vec![modification]));
     }
     if let Some((rest, modification)) = parse_enters_with_additional_counter(input) {
+        return Some((rest, vec![modification]));
+    }
+    if let Some((rest, modification)) = parse_starting_loyalty_override(input) {
         return Some((rest, vec![modification]));
     }
     // CR 707.9d: the replacement form ("… and loses all other card types")
@@ -633,6 +641,23 @@ fn parse_has_this_ability<'a>(
     ))
 }
 
+/// CR 707.9b + CR 205.1b: suffix after the named type in additive copy-except
+/// bodies — covers both the generic "other types" and the creature-specific
+/// "other creature types" phrasing (Sakashima's Student class).
+fn split_in_addition_type_suffix(input: &str) -> Option<(&str, &str)> {
+    let in_addition_suffix = (
+        tag::<_, _, OracleError<'_>>(" in addition to "),
+        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
+        tag(" other "),
+        opt(tag("creature ")),
+        tag("types"),
+    );
+    let (rest, (type_word, _)) = (take_until(" in addition to "), in_addition_suffix)
+        .parse(input)
+        .ok()?;
+    Some((type_word.trim(), rest))
+}
+
 /// CR 707.9b + CR 205.1b: "it's a(n) {type_word} in addition to its other
 /// types", plus the elided-subject form "is a(n) {type_word} in addition to
 /// its other types" used for non-leading bodies in a comma-anded copy-except
@@ -662,9 +687,7 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
     ))
     .parse(input)
     .ok()?;
-    let (type_word, rest) = nom_primitives::split_once_on(rest, " in addition to its other types")
-        .ok()
-        .map(|(_, pair)| pair)?;
+    let (type_word, rest) = split_in_addition_type_suffix(rest)?;
     let type_word = type_word.trim();
     if type_word.is_empty() {
         return None;
@@ -954,6 +977,28 @@ fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
         return Some((rest, count));
     }
     Some((rest, 1))
+}
+
+/// CR 707.9b + CR 306.5b/c: Match "`its/their starting loyalty is N`" copy
+/// exceptions. Jace, Mirror Mage is the canonical token-copy form; the grammar
+/// is shared with BecomeCopy exceptions so future planeswalker-copy effects use
+/// the same resolution-time override.
+fn parse_starting_loyalty_override(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("its"),
+            tag("his"),
+            tag("her"),
+            tag("their"),
+            tag("it's"),
+            tag("it\u{2019}s"),
+        )),
+        tag(" starting loyalty is "),
+    )
+    .parse(input)
+    .ok()?;
+    let (rest, value) = nom_primitives::parse_number(rest).ok()?;
+    Some((rest, ContinuousModification::SetStartingLoyalty { value }))
 }
 
 /// Parse the optional `" if it's a <core_type>"` tail trailing a counter
@@ -1430,6 +1475,24 @@ mod tests {
             m,
             ContinuousModification::AddSubtype { subtype } if subtype == "Spider"
         )));
+    }
+
+    /// CR 707.9b: Sakashima's Student — "it's a Ninja in addition to its other
+    /// creature types" uses the creature-type-specific suffix.
+    #[test]
+    fn its_a_ninja_in_addition_to_other_creature_types_emits_add_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a Ninja in addition to its other creature types",
+            "Sakashima's Student",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Ninja".to_string(),
+            }]
+        );
     }
 
     /// CR 205.1a + CR 613.1d + CR 707.9d: Myrkul, Lord of Bones — "it's an
@@ -1976,6 +2039,27 @@ mod tests {
             }
             other => panic!("expected AddCounterOnEnter, got {other:?}"),
         }
+    }
+
+    /// CR 707.9b + CR 306.5b/c: Jace, Mirror Mage's token-copy exception
+    /// changes the copy's starting loyalty instead of merely adding counters.
+    #[test]
+    fn starting_loyalty_exception_emits_override() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and its starting loyalty is 1",
+            "Jace, Mirror Mage",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetStartingLoyalty { value: 1 })));
     }
 
     /// CR 122.1 + CR 614.1c: Spark Double's three-clause body — bare comma

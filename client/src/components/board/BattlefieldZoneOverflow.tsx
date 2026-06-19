@@ -302,9 +302,11 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   const combatMode = useUiStore((s) => s.combatMode);
   const {
     activatableObjectIds,
+    boardChoiceObjectIds,
     committedAttackerIds,
     incomingAttackerCounts,
     manaTappableObjectIds,
+    selectableSacrificeObjectIds,
     validAttackerIds,
     validTargetObjectIds,
   } = useBoardInteractionState();
@@ -321,6 +323,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     let attacking = 0;
     let incoming = 0;
     let mana = 0;
+    let boardChoice = 0;
+    let sacrifice = 0;
     let selected = 0;
     let validAttackers = 0;
     let validTargets = 0;
@@ -330,6 +334,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       if (committedAttackerIds.has(id)) attacking++;
       incoming += incomingAttackerCounts.get(id) ?? 0;
       if (manaTappableObjectIds.has(id)) mana++;
+      if (boardChoiceObjectIds.has(id)) boardChoice++;
+      if (selectableSacrificeObjectIds.has(id)) sacrifice++;
       if (validAttackerIds.has(id)) validAttackers++;
       if (validTargetObjectIds.has(id)) validTargets++;
       if (
@@ -346,18 +352,22 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       attacking,
       incoming,
       mana,
+      boardChoice,
+      sacrifice,
       selected,
       validAttackers: combatMode === "attackers" ? validAttackers : 0,
       validTargets,
     };
   }, [
     activatableObjectIds,
+    boardChoiceObjectIds,
     blockerAssignments,
     combatMode,
     committedAttackerIds,
     incomingAttackerCounts,
     manaTappableObjectIds,
     objectIds,
+    selectableSacrificeObjectIds,
     selectedAttackers,
     selectedCardIds,
     validAttackerIds,
@@ -401,6 +411,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     || interaction.attacking > 0
     || interaction.incoming > 0
     || interaction.mana > 0
+    || interaction.boardChoice > 0
+    || interaction.sacrifice > 0
     || interaction.selected > 0
     || interaction.validAttackers > 0
     || interaction.validTargets > 0;
@@ -494,6 +506,8 @@ interface InteractionSummary {
   attacking: number;
   incoming: number;
   mana: number;
+  boardChoice: number;
+  sacrifice: number;
   selected: number;
   validAttackers: number;
   validTargets: number;
@@ -504,6 +518,12 @@ function InteractionBadges({ interaction }: { interaction: InteractionSummary })
   const badges = [
     interaction.validTargets > 0
       ? { key: "target", label: t("battlefieldOverflow.badges.target"), tooltip: t("battlefieldOverflow.badgeTooltips.target"), count: interaction.validTargets, className: "bg-lime-300 text-lime-950" }
+      : null,
+    interaction.sacrifice > 0
+      ? { key: "sacrifice", label: t("battlefieldOverflow.badges.sacrifice"), tooltip: t("battlefieldOverflow.badgeTooltips.sacrifice"), count: interaction.sacrifice, className: "bg-red-500 text-white" }
+      : null,
+    interaction.boardChoice > interaction.sacrifice
+      ? { key: "choice", label: t("battlefieldOverflow.badges.choice"), tooltip: t("battlefieldOverflow.badgeTooltips.choice"), count: interaction.boardChoice - interaction.sacrifice, className: "bg-sky-400 text-sky-950" }
       : null,
     interaction.validAttackers > 0
       ? { key: "attack", label: t("battlefieldOverflow.badges.attack"), tooltip: t("battlefieldOverflow.badgeTooltips.attack"), count: interaction.validAttackers, className: "bg-orange-500 text-white" }

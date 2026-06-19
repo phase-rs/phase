@@ -54,7 +54,10 @@ pub fn guard_client_message_before_dispatch(
         } => guard_game_reconnect(game_code, player_token),
         ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
-        | ClientMessage::Concede => Ok(()),
+        | ClientMessage::Concede
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => Ok(()),
         ClientMessage::CreateGameWithSettings {
             deck,
             display_name,
@@ -234,7 +237,10 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::JoinDraftWithPassword { .. }
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
-        | ClientMessage::SpectateDraft { .. } => Ok(()),
+        | ClientMessage::SpectateDraft { .. }
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => Ok(()),
     }
 }
 

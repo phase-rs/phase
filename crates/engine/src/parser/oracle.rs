@@ -740,14 +740,24 @@ fn parse_graveyard_keyword_continuation(
 fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<StaticDefinition> {
     let lower = line.to_lowercase();
     let (prefix, continuation) = split_once_on_lower(line, &lower, ". ")?;
-    let (affected, kind) = try_parse_graveyard_keyword_grant_clause(prefix)?;
+    let prefix_lower = prefix.to_lowercase();
+    let (turn_condition, grant_prefix) = nom_on_lower(prefix, &prefix_lower, |input| {
+        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
+    })
+    .map_or((None, prefix), |(condition, rest)| (Some(condition), rest));
+    let (affected, kind) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
     let keyword = parse_graveyard_keyword_continuation(continuation, kind)?;
-    kind.matches_keyword(&keyword).then_some(
-        StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
-            .description(line.to_string()),
-    )
+    if !kind.matches_keyword(&keyword) {
+        return None;
+    }
+    let mut def = StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+        .description(line.to_string());
+    if let Some(condition) = turn_condition {
+        def = def.condition(condition);
+    }
+    Some(def)
 }
 
 /// Returns every `StaticDefinition` produced by `line`, with the
@@ -5071,6 +5081,66 @@ mod tests {
             "counter restriction must survive, got {:?}",
             tf.properties
         );
+    }
+
+    /// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus' ETB trigger uses
+    /// one comma-list continuous effect: affected creatures lose abilities,
+    /// gain a subtype, and get fixed base P/T indefinitely.
+    #[test]
+    fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
+        let r = parse(
+            "When this creature enters, each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1.",
+            "Curious Colossus",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1, "{r:#?}");
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("ETB trigger should have an execute body");
+        assert!(
+            !has_unimplemented(execute),
+            "ETB trigger body must not contain Unimplemented effects: {execute:#?}"
+        );
+        match &*execute.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, None);
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities: {mods:?}"
+                );
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == "Coward"
+                    )),
+                    "must contain AddSubtype(Coward): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected GenericEffect execute body, got {other:?}"),
+        }
     }
 
     /// Issue #69 (Triad of Fates): "Exile target creature that has a fate counter
@@ -12588,6 +12658,7 @@ mod tests {
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
+                kind: None,
             }
         ));
         assert!(

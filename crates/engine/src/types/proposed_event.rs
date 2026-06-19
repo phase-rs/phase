@@ -354,6 +354,12 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 614.1e + CR 708.11: a permanent is being turned face up. "As ~ is turned
+    /// face up" replacement effects apply here (megamorph/disguise).
+    TurnFaceUp {
+        object_id: ObjectId,
+        applied: HashSet<ReplacementId>,
+    },
     Destroy {
         object_id: ObjectId,
         source: Option<ObjectId>,
@@ -535,6 +541,7 @@ impl ProposedEvent {
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
+            | ProposedEvent::TurnFaceUp { applied, .. }
             | ProposedEvent::Destroy { applied, .. }
             | ProposedEvent::Sacrifice { applied, .. }
             | ProposedEvent::BeginTurn { applied, .. }
@@ -563,6 +570,7 @@ impl ProposedEvent {
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
+            | ProposedEvent::TurnFaceUp { applied, .. }
             | ProposedEvent::Destroy { applied, .. }
             | ProposedEvent::Sacrifice { applied, .. }
             | ProposedEvent::BeginTurn { applied, .. }
@@ -600,6 +608,7 @@ impl ProposedEvent {
                 .unwrap_or(PlayerId(0)),
             ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
+            | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Explore { object_id, .. } => state
@@ -663,6 +672,7 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { object_id, .. }
             | ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
+            | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }

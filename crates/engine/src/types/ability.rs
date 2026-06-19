@@ -488,6 +488,17 @@ pub enum Parity {
     Even,
 }
 
+/// Source for odd/even parity predicates over mana value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ParitySource {
+    /// A fixed printed odd/even quality.
+    Fixed(Parity),
+    /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
+    /// the same resolving instruction sequence.
+    LastNamedChoice,
+}
+
 /// A branch in a d20/d6/d4 result table (CR 706.2).
 /// Each branch covers a contiguous range of die results and maps to an effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2311,6 +2322,12 @@ pub enum FilterProp {
         comparator: Comparator,
         value: QuantityExpr,
     },
+    /// CR 202.3 + CR 608.2c: Matches objects whose mana value has the selected
+    /// odd/even quality, either fixed or chosen earlier in the same resolving
+    /// instruction sequence.
+    ManaValueParity {
+        parity: ParitySource,
+    },
     /// CR 202.1: Matches objects whose printed mana cost is exactly one of `costs`.
     /// Distinct from `Cmc`/mana value (CR 202.3): "{0} or {1}" must not match
     /// artifacts with colored one-mana costs like {W}.
@@ -3033,6 +3050,14 @@ pub enum ThisWayCause {
     Bounced,
 }
 
+/// CR 113.3b / CR 113.3c: Which stack ability kinds a `StackAbility` filter accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum StackAbilityKind {
+    Activated,
+    Triggered,
+}
+
 /// Typed target filter replacing all Forge filter strings and TargetSpec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3060,11 +3085,15 @@ pub enum TargetFilter {
     /// CR 113.7a: once activated or triggered, an ability exists on the stack
     /// independently of its source — `tag` matches by keyword-origin marker
     /// (e.g. `AbilityTag::Backup` for "becomes the target of a backup ability").
+    /// `kind` narrows to one ability class when the Oracle text does (Consign to
+    /// Memory's "triggered ability" leg); `None` accepts both.
     StackAbility {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<AbilityTag>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<StackAbilityKind>,
     },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
@@ -3859,6 +3888,15 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 403.3 + CR 608.2h: Count of battlefield entries this turn by the scoped
+    /// player matching `filter`, using `battlefield_entries_this_turn` snapshots
+    /// (lands that entered and later left still count). Smuggler's Share class:
+    /// "for each opponent who had two or more lands enter the battlefield under
+    /// their control this turn."
+    BattlefieldEntriesThisTurn {
+        player: PlayerScope,
+        filter: TargetFilter,
+    },
     /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
     /// `from_zones: None` uses `Player::lands_played_this_turn`; `Some` reads the
     /// per-player land-play origin history for conditions like "played a land
@@ -12138,6 +12176,23 @@ impl AbilityDefinition {
         self.cost.as_ref().is_some_and(AbilityCost::consumes_source)
     }
 
+    /// Card-data migration: older exports stored one-shot semantics in
+    /// `is_consumed` at parse time, which made replacements inert at runtime.
+    pub fn normalize_parsed_replacement_flags(&mut self) {
+        if let Effect::AddTargetReplacement { replacement, .. } = &mut *self.effect {
+            replacement.fix_legacy_parse_time_consumed_flag();
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.normalize_parsed_replacement_flags();
+        }
+        if let Some(else_ab) = self.else_ability.as_mut() {
+            else_ab.normalize_parsed_replacement_flags();
+        }
+        for mode in &mut self.mode_abilities {
+            mode.normalize_parsed_replacement_flags();
+        }
+    }
+
     pub fn player_scope(mut self, scope: PlayerFilter) -> Self {
         self.player_scope = Some(scope);
         self
@@ -13325,6 +13380,12 @@ pub enum TriggerCondition {
     /// self-referential cases.
     PlacedByAbilitySource,
 
+    /// CR 608.2c + CR 603.2 + CR 603.4: "if it targets [filter]" intervening-if
+    /// on a spell-cast trigger — true when the triggering spell's committed targets
+    /// include at least one object matching `filter`. The trigger source is excluded
+    /// when the filter carries `FilterProp::Another` / "other" (Orvar, the All-Form).
+    TriggeringSpellTargetsFilter { filter: TargetFilter },
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },
@@ -14370,6 +14431,11 @@ pub struct ReplacementDefinition {
     /// None = applies to the replacement source player only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_player: Option<ReplacementPlayerScope>,
+    /// Parser/runtime flag: mark `is_consumed` after this replacement successfully
+    /// applies once. Distinct from `is_consumed`, which is the live consumed state
+    /// checked by `find_applicable_replacements`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consume_on_apply: bool,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -14462,6 +14528,13 @@ pub struct ReplacementDefinition {
 }
 
 impl ReplacementDefinition {
+    pub fn fix_legacy_parse_time_consumed_flag(&mut self) {
+        if self.is_consumed && self.shield_kind.is_none() {
+            self.consume_on_apply = true;
+            self.is_consumed = false;
+        }
+    }
+
     /// Create a new replacement definition with only the required event field.
     /// All optional fields default to `None`/`Mandatory`.
     pub fn new(event: ReplacementEvent) -> Self {
@@ -14483,6 +14556,7 @@ impl ReplacementDefinition {
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             expiry: None,
             redirect_target: None,
@@ -14979,6 +15053,14 @@ pub enum ContinuousModification {
         /// applied (CR 707.9f-style "if the copy is or has certain
         /// characteristics").
         if_type: Option<CoreType>,
+    },
+    /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
+    /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,
+    /// this is consumed at copy resolution: token-copy uses the value before
+    /// seeding intrinsic loyalty counters, and BecomeCopy folds it into the
+    /// copied values before installing the layer-1 copy effect.
+    SetStartingLoyalty {
+        value: u32,
     },
     /// CR 707.9 + CR 202.1b: Strip a copy's mana cost — the "has no mana cost"
     /// copy exception used by Embalm (CR 702.128a) and Eternalize
@@ -16263,7 +16345,8 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         );
         assert_eq!(
@@ -16280,7 +16363,8 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
-                tag: None
+                tag: None,
+                kind: None,
             }
         );
         assert_eq!(
@@ -16642,6 +16726,7 @@ mod tests {
             ContinuousModification::AddColor {
                 color: ManaColor::Red,
             },
+            ContinuousModification::SetStartingLoyalty { value: 1 },
         ];
         let json = serde_json::to_string(&mods).unwrap();
         let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();

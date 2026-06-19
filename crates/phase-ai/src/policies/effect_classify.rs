@@ -5,7 +5,7 @@ use engine::types::ability::{
     TargetFilter, TypeFilter,
 };
 use engine::types::counter::CounterType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
@@ -379,6 +379,15 @@ pub(crate) fn targets_creatures(effect: &Effect) -> bool {
 /// Defaults to false (assume harmful) when uncertain — safe fallback since most
 /// targeted spells in MTG are removal/damage.
 pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
+    // CR 702.140a: Mutate targets a non-Human creature with the same owner as
+    // the spell — treat it as beneficial so targeting prefers our creatures over
+    // opponents' creatures when evaluating candidate targets.
+    if let WaitingFor::TargetSelection { pending_cast, .. } = &ctx.decision.waiting_for {
+        if pending_cast.casting_variant == CastingVariant::Mutate {
+            return true;
+        }
+    }
+
     let player_impact = aggregate_player_impact(ctx);
     if player_impact > 0.25 {
         return true;

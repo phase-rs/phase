@@ -148,7 +148,7 @@ pub(super) fn run_post_action_pipeline_from(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(flush_pending_miracle_offer(
+        return Ok(flush_pending_priority_intercepts(
             state,
             WaitingFor::Priority {
                 player: state.active_player,
@@ -158,7 +158,12 @@ pub(super) fn run_post_action_pipeline_from(
 
     super::layers::flush_layers(state);
 
-    Ok(flush_pending_miracle_offer(state, default_wf.clone()))
+    Ok(flush_pending_priority_intercepts(state, default_wf.clone()))
+}
+
+fn flush_pending_priority_intercepts(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+    let outgoing = super::effects::paradigm::flush_pending_remaining_offers(state, outgoing);
+    flush_pending_miracle_offer(state, outgoing)
 }
 
 /// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it

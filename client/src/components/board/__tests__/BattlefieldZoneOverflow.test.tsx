@@ -110,6 +110,8 @@ function renderOverflow(options: {
   groups?: GroupedPermanentType[];
   includePreview?: boolean;
   objects?: Record<number, GameObject>;
+  boardChoiceObjectIds?: Set<number>;
+  selectableSacrificeObjectIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
   zone?: "lands" | "support" | "creatures";
@@ -123,9 +125,11 @@ function renderOverflow(options: {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set([1]),
+        selectableSacrificeObjectIds: options.selectableSacrificeObjectIds ?? new Set(),
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds: new Set(),
         validAttackerIds: new Set(),
@@ -220,6 +224,14 @@ describe("BattlefieldZoneOverflow", () => {
 
     expect(screen.getByText(/target 1/i)).toBeInTheDocument();
     expect(screen.getByText(/mana 1/i)).toBeInTheDocument();
+  });
+
+  it("surfaces hidden board-choice permanents as interactive", () => {
+    renderOverflow({ boardChoiceObjectIds: new Set([2]) });
+
+    const summary = screen.getByRole("button", { name: /open lands drawer/i });
+    expect(screen.getByText(/pick 1/i)).toBeInTheDocument();
+    expect(summary.className).toContain("border-cyan-300");
   });
 
   it("uses the shared battlefield hover preview inside the drawer", () => {

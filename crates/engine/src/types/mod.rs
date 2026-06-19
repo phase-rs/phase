@@ -25,7 +25,7 @@ pub mod zones;
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, BasicLandType,
     ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect,
-    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, PtValue,
+    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, ParitySource, PtValue,
     ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
     TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };

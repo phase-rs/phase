@@ -423,14 +423,17 @@ pub(crate) fn apply_copy_token_after_replacement(
     } = copy;
     let name = values.name.clone();
     let mut created_ids = Vec::with_capacity(final_count as usize);
+    let copied_loyalty =
+        copy_starting_loyalty_override(&additional_modifications).or(values.loyalty);
 
-    // CR 306.5b + CR 707.2: A token that's a copy of a planeswalker enters with
-    // loyalty counters equal to the copied permanent's loyalty — CR 306.5c makes
-    // the counter map the single source of truth for loyalty. The copy path
-    // builds the object directly (not through the ZoneChange ETB-counter seeding
-    // used by cast/play/effect entries), so seed the intrinsic loyalty counters
-    // here, ahead of any explicit `enter_with_counters`, routing them through
-    // `add_counter_with_replacement` below so Doubling Season etc. apply
+    // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
+    // enters with loyalty counters equal to the copied loyalty, except a copy
+    // exception may set that starting loyalty to a different value. CR 306.5c
+    // makes the counter map the single source of truth for loyalty. The copy
+    // path builds the object directly (not through the ZoneChange ETB-counter
+    // seeding used by cast/play/effect entries), so seed the intrinsic loyalty
+    // counters here, ahead of any explicit `enter_with_counters`, routing them
+    // through `add_counter_with_replacement` below so Doubling Season etc. apply
     // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
     // counters and dies immediately to CR 704.5i. Copies don't track battle
     // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
@@ -441,7 +444,7 @@ pub(crate) fn apply_copy_token_after_replacement(
     // intrinsic "enters with counters" replacement is seeded here from its
     // copiable replacement set rather than firing during entry.
     let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
-        crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None)
+        crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None)
             .into_iter()
             .chain(crate::game::printed_cards::self_etb_counter_replacements(
                 &values.replacement_definitions,
@@ -478,8 +481,8 @@ pub(crate) fn apply_copy_token_after_replacement(
         token.power = values.power;
         token.base_toughness = values.toughness;
         token.toughness = values.toughness;
-        token.base_loyalty = values.loyalty;
-        token.loyalty = values.loyalty;
+        token.base_loyalty = copied_loyalty;
+        token.loyalty = copied_loyalty;
         token.base_keywords = values.keywords.clone();
         token.keywords = values.keywords.clone();
         // All four ability sets are Arc-shared — refcount bumps, no deep copy.
@@ -1059,6 +1062,16 @@ fn apply_token_modifications(
                     token.toughness = Some(val);
                 }
             }
+            // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are already
+            // consumed before loyalty counters are seeded, but apply the live
+            // fields idempotently so a paused/resumed modification sequence
+            // keeps the stamped token coherent.
+            ContinuousModification::SetStartingLoyalty { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_loyalty = Some(*value);
+                    token.loyalty = Some(*value);
+                }
+            }
             // CR 707.2 + CR 702 keyword grants flow through `extra_keywords`,
             // not here. Other layered-only modifications (CopyValues,
             // ChangeController, etc.) are intentionally skipped — their
@@ -1069,6 +1082,18 @@ fn apply_token_modifications(
         }
     }
     true
+}
+
+pub(crate) fn copy_starting_loyalty_override(
+    modifications: &[ContinuousModification],
+) -> Option<u32> {
+    modifications.iter().rev().find_map(|modification| {
+        if let ContinuousModification::SetStartingLoyalty { value } = modification {
+            Some(*value)
+        } else {
+            None
+        }
+    })
 }
 
 /// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
@@ -2965,6 +2990,77 @@ mod tests {
             Some(5),
             "copied planeswalker loyalty must derive from its seeded counters",
         );
+    }
+
+    /// CR 707.9b + CR 306.5b/c: Jace, Mirror Mage's token-copy exception sets
+    /// the copy's starting loyalty to 1. This is not an extra loyalty counter;
+    /// it replaces the loyalty value used for intrinsic planeswalker counter
+    /// seeding, so the token must enter with one loyalty counter even if the
+    /// copied source has a different loyalty value.
+    #[test]
+    fn copy_token_starting_loyalty_exception_overrides_seeded_loyalty() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jace, Mirror Mage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_loyalty = Some(5);
+            source.loyalty = Some(5);
+            source.base_card_types = CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Planeswalker],
+                subtypes: vec!["Jace".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::RemoveSupertype {
+                        supertype: crate::types::card_type::Supertype::Legendary,
+                    },
+                    ContinuousModification::SetStartingLoyalty { value: 1 },
+                ],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.base_loyalty, Some(1));
+        assert_eq!(
+            token.counters.get(&CounterType::Loyalty).copied(),
+            Some(1),
+            "starting-loyalty exception must seed one loyalty counter"
+        );
+        assert!(!token
+            .card_types
+            .supertypes
+            .contains(&crate::types::card_type::Supertype::Legendary));
+
+        evaluate_layers(&mut state);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(token.loyalty, Some(1));
     }
 
     /// Regression: Helm of the Host (DOM, MH3, BLC) — pin the already-shipped

@@ -44,7 +44,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 fn is_data_carrying_static(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::ReduceAbilityCost { .. }
+        // CR 514.2: nullary marker static — runtime enforcement is the cleanup
+        // turn-based action in turns.rs::execute_cleanup, which skips removing
+        // marked damage from permanents matching an active such static's
+        // `affected` filter. Not registry-keyed (mirrors the marker cluster).
+        StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
@@ -160,6 +165,14 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
             // safety net. Parameterized — no registry entry; coverage support here.
             | StaticMode::MaxUntapPerType { .. }
+            // CR 509.1a + CR 509.1b: ExtraBlockers carries the additional-blocker
+            // count (Yare, Brave the Sands). Runtime enforcement is in
+            // combat.rs::extra_block_limit; the registry only keys Some(1)/None.
+            | StaticMode::ExtraBlockers { .. }
+            // CR 702.122a / 702.171a / 702.184a: CrewContribution carries the
+            // modifier kind + action list (Giant Ox, Hotshot Mechanic). Runtime
+            // enforcement is in static_abilities.rs::object_crew_power_contribution.
+            | StaticMode::CrewContribution { .. }
     )
 }
 
@@ -404,19 +417,41 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::StackAbility {
             controller: None,
             tag: None,
+            kind: None,
         } => "ability on stack".into(),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+        } => "triggered ability on stack".into(),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(crate::types::ability::StackAbilityKind::Activated),
+        } => "activated ability on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::You),
             tag: None,
+            kind: None,
         } => "ability you control on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::Opponent),
             tag: None,
+            kind: None,
         } => "ability opponent controls on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(controller),
             tag: None,
+            kind: None,
         } => format!("ability scoped to {controller:?} on stack"),
+        TargetFilter::StackAbility {
+            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+            ..
+        } => "triggered ability on stack".into(),
+        TargetFilter::StackAbility {
+            kind: Some(crate::types::ability::StackAbilityKind::Activated),
+            ..
+        } => "activated ability on stack".into(),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
@@ -537,6 +572,17 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     Comparator::NE => "≠",
                 };
                 parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
+            }
+            FilterProp::ManaValueParity { parity } => {
+                let label = match parity {
+                    crate::types::ability::ParitySource::Fixed(parity) => {
+                        format!("{parity:?} mana value").to_lowercase()
+                    }
+                    crate::types::ability::ParitySource::LastNamedChoice => {
+                        "chosen odd/even mana value".to_string()
+                    }
+                };
+                parts.push(label);
             }
             FilterProp::ManaCostIn { costs } => {
                 parts.push(format!("mana cost in {costs:?}"));
@@ -1258,6 +1304,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
+        QuantityRef::BattlefieldEntriesThisTurn { player, filter } => format!(
+            "battlefield entries this turn ({}, {})",
+            fmt_target(filter),
+            fmt_player_scope(player)
+        ),
         QuantityRef::LandsPlayedThisTurn { player, from_zones } => from_zones.as_ref().map_or_else(
             || format!("lands played this turn ({})", fmt_player_scope(player)),
             |zones| {
@@ -2983,6 +3034,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
                 ),
                 None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
+        }
+        ContinuousModification::SetStartingLoyalty { value } => {
+            format!("starting loyalty {value}")
         }
         ContinuousModification::RemoveManaCost => "no mana cost".to_string(),
     }
@@ -5736,6 +5790,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
+        QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
         QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),

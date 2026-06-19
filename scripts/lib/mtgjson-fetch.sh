@@ -33,12 +33,30 @@ MTGJSON_CURL=(
   -H 'User-Agent: phase-rs-card-data/1.0 (+https://github.com/phase-rs/phase)'
 )
 
+MTGJSON_CURL_ONCE=(
+  curl --fail --connect-timeout 30 -sSL -w '%{http_code}'
+  -H 'User-Agent: phase-rs-card-data/1.0 (+https://github.com/phase-rs/phase)'
+)
+
 # Delay between successive per-set requests. Override with MTGJSON_RATE_DELAY.
 MTGJSON_RATE_DELAY="${MTGJSON_RATE_DELAY:-1}"
 
 # mtgjson_rate_limit — sleep MTGJSON_RATE_DELAY seconds between per-set fetches.
 mtgjson_rate_limit() {
   sleep "$MTGJSON_RATE_DELAY"
+}
+
+# mtgjson_curl OUT URL — download once to classify permanent 404s before
+# spending the retry budget intended for transient resets/throttles.
+mtgjson_curl() {
+  local out="$1" url="$2" http_status
+  if http_status="$("${MTGJSON_CURL_ONCE[@]}" -o "$out" "$url" 2>/dev/null)"; then
+    return 0
+  fi
+  if [ "$http_status" = "404" ]; then
+    return 44
+  fi
+  "${MTGJSON_CURL[@]}" -o "$out" "$url"
 }
 
 # mtgjson_download NAME DEST — download MTGJSON file NAME (e.g. AtomicCards.json)
@@ -48,18 +66,19 @@ mtgjson_rate_limit() {
 # guards the uncompressed fallback against a truncated/error body. Returns
 # non-zero only if both the compressed and uncompressed artifacts fail.
 mtgjson_download() {
-  local name="$1" dest="$2" tmp
+  local name="$1" dest="$2" tmp gz_url url
   tmp=$(mktemp "${dest}.XXXXXX")
+  gz_url="$MTGJSON_BASE/$name.gz"
+  url="$MTGJSON_BASE/$name"
   # Preferred path: gzipped artifact -> file (retryable), then decompress.
-  if "${MTGJSON_CURL[@]}" -o "$tmp.gz" "$MTGJSON_BASE/$name.gz" 2>/dev/null \
-     && gunzip -c "$tmp.gz" > "$tmp" 2>/dev/null; then
+  if mtgjson_curl "$tmp.gz" "$gz_url" && gunzip -c "$tmp.gz" > "$tmp" 2>/dev/null; then
     rm -f "$tmp.gz"
     mv -f "$tmp" "$dest"
     return 0
   fi
   rm -f "$tmp.gz"
   # Fallback: uncompressed artifact (a few legacy files lack a .gz sibling).
-  if "${MTGJSON_CURL[@]}" -o "$tmp" "$MTGJSON_BASE/$name"; then
+  if mtgjson_curl "$tmp" "$url"; then
     mv -f "$tmp" "$dest"
     return 0
   fi

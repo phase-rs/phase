@@ -1112,8 +1112,13 @@ fn collect_matching_players(
                             p.id,
                             source_controller,
                             *relation,
-                        ) && crate::game::effects::candidate_player_scalar(p, attr)
-                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        ) && crate::game::effects::candidate_player_scalar_with_state(
+                            state,
+                            p,
+                            source_controller,
+                            attr,
+                        )
+                        .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
@@ -1309,8 +1314,13 @@ pub fn resolve_each_player(
                             p.id,
                             ability.controller,
                             *relation,
-                        ) && crate::game::effects::candidate_player_scalar(p, attr)
-                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        ) && crate::game::effects::candidate_player_scalar_with_state(
+                            state,
+                            p,
+                            ability.controller,
+                            attr,
+                        )
+                        .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })

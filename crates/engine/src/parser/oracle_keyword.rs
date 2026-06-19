@@ -13,7 +13,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
     AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
     QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
@@ -404,13 +404,7 @@ fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
-    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
-    let (quantity_text, _) = alt((
-        tag::<_, _, OracleError<'_>>(", where x is "),
-        tag("where x is "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let quantity_text = strip_where_x_is_clause(rest)?;
     parse_cda_quantity(quantity_text).map(Keyword::Mobilize)
 }
 
@@ -430,13 +424,7 @@ fn parse_firebending_keyword_line(line: &str) -> Option<Keyword> {
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
-    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
-    let (quantity_text, _) = alt((
-        tag::<_, _, OracleError<'_>>(", where x is "),
-        tag("where x is "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let quantity_text = strip_where_x_is_clause(rest)?;
     parse_cda_quantity(quantity_text).map(Keyword::Firebending)
 }
 

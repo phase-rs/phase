@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, peek, value};
+use nom::combinator::{eof, opt, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -16,7 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
@@ -723,17 +725,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         value((), tag("from ")).parse(i)
     })?;
     let target_text = target_text.trim();
-    let target = if is_self_ref(target_text) {
-        TargetFilter::SelfRef
-    } else if is_it_pronoun(target_text) {
-        // CR 608.2k: Bare pronoun — context-dependent
-        resolve_it_pronoun(ctx)
-    } else {
-        let (t, _rem) = parse_target(target_text);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, target_text);
-        t
-    };
+    let target = resolve_remove_counter_from_target(target_text, ctx);
 
     Some(Effect::RemoveCounter {
         counter_type,
@@ -752,6 +744,42 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
 ///   on the runtime `parse_counter_type` lowercase fallback.
 pub(crate) fn normalize_counter_type(raw: &str) -> CounterType {
     parse_counter_type(raw)
+}
+
+/// CR 115.1d + CR 122.1: Strip the distribution prefix "each of any number of "
+/// from a remove-counter "from <objects>" clause. Returns the remainder for
+/// `parse_type_phrase` when the prefix was present (Garnet class — player
+/// chooses any number of matching permanents, not a "target" phrase).
+fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
+    let after_each_of = nom_on_lower(input, input, |i| value((), opt(tag("each of "))).parse(i))
+        .map(|((), rest)| rest)
+        .unwrap_or(input);
+    nom_on_lower(after_each_of, after_each_of, |i| {
+        value((), tag("any number of ")).parse(i)
+    })
+    .map(|((), rest)| rest.trim_start())
+}
+
+/// CR 122.1 + CR 115.1d: Resolve the "from <objects>" clause of a remove-counter
+/// effect. The optional "each of any number of" prefix denotes a variable-count
+/// non-target distribution — strip it and parse the remainder as a type phrase
+/// instead of routing through `parse_target` (whose bare "each " arm would leave
+/// "of any number of …" for `parse_type_phrase` and collapse to `Any`).
+fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    if is_self_ref(text) {
+        return TargetFilter::SelfRef;
+    }
+    if is_it_pronoun(text) {
+        // CR 608.2k: Bare pronoun — context-dependent
+        return resolve_it_pronoun(ctx);
+    }
+    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text) {
+        let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, filter_text);
+        return t;
+    }
+    resolve_counter_target(text, ctx)
 }
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
@@ -1304,6 +1332,55 @@ mod tests {
                 "{input}: target SelfRef, got {target:?}"
             );
         }
+    }
+
+    /// CR 115.1d + CR 122.1: Garnet, Princess of Alexandria — "remove a lore
+    /// counter from each of any number of Sagas you control" must parse to a
+    /// Saga + you-control filter, not `TargetFilter::Any` (which incorrectly
+    /// prompts for player targets).
+    #[test]
+    fn remove_counter_each_of_any_number_sagas_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let result = try_parse_remove_counter(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(counter_type, Some(CounterType::Lore));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed Saga filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Saga")),
+            "expected Saga subtype, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 115.1d: Post-parse fixup must attach `MultiTargetSpec::unlimited(0)` for
+    /// the Garnet distribution prefix.
+    #[test]
+    fn remove_counter_each_of_any_number_carries_multi_target() {
+        let clause = super::super::parse_effect_clause(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        let Effect::RemoveCounter { target, .. } = clause.effect else {
+            panic!("expected RemoveCounter, got {:?}", clause.effect);
+        };
+        assert!(matches!(target, TargetFilter::Typed(_)));
     }
 
     #[test]
