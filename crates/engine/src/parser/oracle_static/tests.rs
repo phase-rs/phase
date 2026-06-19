@@ -7632,6 +7632,152 @@ fn graveyard_cast_permission_muldrotha_legacy_and() {
     ));
 }
 
+#[test]
+fn graveyard_cast_permission_disjunctive_rejects_unmodeled_granted_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+    assert!(
+        parse_static_line(text).is_none(),
+        "unmodeled granted leave-battlefield replacement must remain an honest coverage gap"
+    );
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Tail-zone disjunctive permission —
+/// "Once during each of your turns, you may play a historic land or cast a
+/// historic permanent spell from your graveyard." — lowers to a single
+/// `GraveyardCastPermission { frequency: OncePerTurn, play_mode: Play,
+/// graveyard_destination_replacement: None }`. The two branches resolve to
+/// distinct typed filters (historic land vs. historic permanent), so the merged
+/// `affected` is a `TargetFilter::Or` over both — each branch carries the
+/// `Historic` property (CR 700.6).
+#[test]
+fn graveyard_cast_permission_disjunctive_tail_zone_without_rider() {
+    let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard.";
+    let def = parse_static_line(text).expect("should parse The Eighth Doctor disjunctive line");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
+            }
+        ),
+        "expected OncePerTurn + Play + no stack-exit redirect, got {:?}",
+        def.mode
+    );
+    let filter = def.affected.expect("should have affected filter");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over the historic land / historic permanent branches, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected two branch filters, got {filters:?}"
+    );
+    // Land branch: historic land.
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Land)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected first branch to be a historic Land filter, got {:?}",
+        filters[0]
+    );
+    // Spell branch: historic permanent.
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Permanent)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected second branch to be a historic Permanent filter, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 305.1 + CR 601.2a: Serra Paragon's per-branch-zone form — "play a land
+/// from your graveyard or cast a permanent spell with mana value 3 or less from
+/// your graveyard" — proves the disjunctive parser's filter axis is general: the
+/// two branches differ (bare land vs. permanent with a mana-value bound), so the
+/// merged `affected` is a `TargetFilter::Or` over both branch filters, NOT a
+/// hard-coded "historic" assumption. This tests the building block (any two
+/// graveyard branch filters), not the Doctor string.
+#[test]
+fn graveyard_cast_permission_disjunctive_serra_paragon_per_branch_zone() {
+    let text = "Once during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard.";
+    let def = parse_static_line(text).expect("should parse Serra Paragon disjunctive line");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
+            }
+        ),
+        "expected OncePerTurn + Play, got {:?}",
+        def.mode
+    );
+    let filter = def.affected.expect("should have affected filter");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected divergent branches to produce Or, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected two branch filters, got {filters:?}"
+    );
+    // Land branch: bare Land filter (no properties).
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Land) && tf.properties.is_empty()
+        ),
+        "expected first branch to be a bare Land filter, got {:?}",
+        filters[0]
+    );
+    // Spell branch: Permanent with a mana-value (Cmc) bound.
+    let TargetFilter::Typed(spell_tf) = &filters[1] else {
+        panic!("expected second branch Typed, got {:?}", filters[1]);
+    };
+    assert!(
+        spell_tf.type_filters.contains(&TypeFilter::Permanent),
+        "expected Permanent type filter on spell branch, got {:?}",
+        spell_tf.type_filters
+    );
+    assert!(
+        spell_tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                ..
+            }
+        )),
+        "expected CmcLE bound on spell branch, got {:?}",
+        spell_tf.properties
+    );
+}
+
+/// CR 604.2 + CR 614.1a: the disjunctive once-per-turn permission line carries
+/// the granted rider's "would leave the battlefield" text, which would otherwise
+/// classify the whole line as a replacement (`would ` is the first replacement
+/// contains-pattern). The frequency-prefixed permission anchor must make
+/// `is_static_pattern` win so the line routes to static dispatch (Priority 7)
+/// ahead of the Priority 8 replacement gate. Guards the dispatch ordering for
+/// the whole once-per-turn play/cast-from-zone permission class.
+#[test]
+fn disjunctive_graveyard_permission_classifies_static_not_replacement() {
+    let lower = "once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. if you do, it gains \"if ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
+    assert!(
+        crate::parser::oracle_classifier::is_static_pattern(lower),
+        "disjunctive once-per-turn permission must classify as static"
+    );
+}
+
 // --- Alt-cost rider tests (Ninja Teen et al., CR 118.9 / CR 702.190a) ---
 
 #[test]
