@@ -3303,30 +3303,56 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
-/// CR 603.2 + CR 603.3b: Park or dispatch observer triggers emitted during a
-/// resolution-time player choice (`OptionalEffectChoice`, `OpponentMayChoice`,
-/// etc.) when `run_post_action_pipeline` will not run on this action because
-/// `waiting_for` is no longer `Priority`. Without this, events such as
-/// `CardDrawn` from Kwain's per-player optional draw are dropped when the next
-/// player's "may" prompt opens before the action settles (issue #3265).
-pub(crate) fn park_or_drain_observer_triggers_from_events(
+/// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time
+/// player choice that pauses on another prompt before the action settles.
+/// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
+/// `deferred_triggers` for dispatch once the outer action reaches Priority.
+///
+/// Callers whose handler returns through `apply_action` and therefore reaches
+/// `run_post_action_pipeline` when settled MUST use this park-only helper.
+/// Draining on Priority here would double-fire triggers that the pipeline will
+/// already scan (issue #2866).
+pub(crate) fn park_observer_triggers_if_paused(
     state: &mut GameState,
-    events: &mut Vec<GameEvent>,
+    events: &[GameEvent],
     slice_start: usize,
 ) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
     let trigger_events: Vec<GameEvent> = events[slice_start..]
         .iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
-    if trigger_events.is_empty() {
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+}
+
+/// CR 603.2 + CR 603.3b: For choice handlers that return `ActionResult` directly
+/// and bypass `run_post_action_pipeline`. When the action settles to Priority,
+/// collect this action's observer triggers and drain the deferred queue; when
+/// still paused on another prompt, park only (B2).
+pub(crate) fn collect_and_drain_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        park_observer_triggers_if_paused(state, events, slice_start);
         return;
     }
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+    let trigger_events: Vec<GameEvent> = events[slice_start..]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
+    }
+    if !state.deferred_triggers.is_empty() {
         let _ = drain_deferred_trigger_queue(state, events);
-    } else {
-        collect_triggers_into_deferred(state, &trigger_events);
     }
 }
 
