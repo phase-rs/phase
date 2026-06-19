@@ -3308,10 +3308,11 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
 /// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
 /// `deferred_triggers` for dispatch once the outer action reaches Priority.
 ///
-/// Callers whose handler returns through `apply_action` and therefore reaches
-/// `run_post_action_pipeline` when settled MUST use this park-only helper.
-/// Draining on Priority here would double-fire triggers that the pipeline will
-/// already scan (issue #2866).
+/// Used by handlers that return `ActionResult` directly (e.g. `OpponentMayChoice`)
+/// and therefore bypass `run_post_action_pipeline`. Do not call from
+/// `OptionalEffectChoice` — those handlers return through `apply_action`, and
+/// copy-sensitive events such as `SpellCopied` are already collected by their
+/// dedicated resolution owners (`copy_spell.rs`).
 pub(crate) fn park_observer_triggers_if_paused(
     state: &mut GameState,
     events: &[GameEvent],
@@ -3322,7 +3323,15 @@ pub(crate) fn park_observer_triggers_if_paused(
     }
     let trigger_events: Vec<GameEvent> = events[slice_start..]
         .iter()
-        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .filter(|ev| {
+            // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+            // announcement and drains them after CopyRetarget finalization.
+            // Re-parking the same event duplicates Magecraft (issue #2866).
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
         .cloned()
         .collect();
     if !trigger_events.is_empty() {
@@ -3345,7 +3354,12 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     }
     let trigger_events: Vec<GameEvent> = events[slice_start..]
         .iter()
-        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .filter(|ev| {
+            !matches!(
+                ev,
+                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+            )
+        })
         .cloned()
         .collect();
     if !trigger_events.is_empty() {
