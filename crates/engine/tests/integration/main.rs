@@ -250,6 +250,7 @@ mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3245_abhorrent_oculus_manifest_dread;
 mod issue_3260_phantasmal_image_persist;
+mod issue_3264_jace_mind_sculptor_minus_twelve;
 mod issue_3274_elder_deep_fiend;
 mod issue_3282_consign_to_memory_counter;
 mod issue_3283_sevinne_reclamation_copy_no_self_copy;

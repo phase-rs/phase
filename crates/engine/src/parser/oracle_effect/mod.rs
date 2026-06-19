@@ -12023,6 +12023,7 @@ fn lower_subject_predicate_ast(
                 return wrapped;
             }
             inject_subject_target(&mut clause.effect, &subject);
+            sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
             // CR 109.4 + CR 608.2c (issue #534): When the subject phrase
             // resolved to the chosen player ("That player" after a
             // `Choose(Opponent)`/`Choose(Player)`), the predicate's possessive
@@ -12630,6 +12631,29 @@ fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
 /// the imperative fallback path, where the subject was stripped before parsing.
 /// Only applies to effects with a sentinel `TargetFilter::Any` that should inherit
 /// the subject's targeting information.
+fn sync_subject_into_nested_shuffle_sub(
+    clause: &mut ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) {
+    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected);
+    if !target_filter_can_target_player(subject_filter) {
+        return;
+    }
+    let Some(sub) = clause.sub_ability.as_mut() else {
+        return;
+    };
+    if let Effect::Shuffle { target } = &mut *sub.effect {
+        // CR 701.24a + CR 608.2c: `lower_change_zone_all_to_library` always
+        // chains `Shuffle { target: Controller }`. When the stripped subject
+        // is a player anaphor ("that player shuffles their hand into their
+        // library" — Jace, the Mind Sculptor −12), `inject_subject_target`
+        // rewrites the parent `ChangeZoneAll` but not this nested shuffle.
+        if matches!(*target, TargetFilter::Controller | TargetFilter::Any) {
+            *target = subject_filter.clone();
+        }
+    }
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to

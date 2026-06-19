@@ -208,7 +208,7 @@ expression: "&lowered"
           "effect": {
             "type": "Shuffle",
             "target": {
-              "type": "Controller"
+              "type": "ParentTargetController"
             }
           },
           "cost": null,
