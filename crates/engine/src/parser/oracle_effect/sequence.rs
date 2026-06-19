@@ -326,20 +326,15 @@ pub(super) fn parse_choice_partition_destination(
     .parse(input)
 }
 
-fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: AbilityDefinition) {
     let mut cursor = ability;
     loop {
         if cursor.sub_ability.is_none() {
             if cursor.optional
                 && matches!(*cursor.effect, Effect::CastFromZone { .. })
-                && matches!(
-                    *next.effect,
-                    Effect::PutAtLibraryPosition {
-                        target: TargetFilter::ExiledBySource,
-                        ..
-                    }
-                )
+                && super::lower::is_linked_exile_cast_bottom_cleanup(&next.effect)
             {
+                super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
             }
             cursor.sub_ability = Some(Box::new(next));

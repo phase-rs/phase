@@ -48492,6 +48492,51 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 401.4: Sanwell, Avenger Ace exiles six, offers an optional
+    /// cast from among them, then puts the rest on the bottom in random order.
+    /// The cleanup clause must bind to `ExiledBySource` (cards in exile), not a
+    /// `TrackedSet` of library cards — issue #3267.
+    #[test]
+    fn sanwell_exile_top_optional_cast_and_rest_on_bottom() {
+        let def = parse_effect_chain(
+            "exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ExileTop { count, .. } = &*def.effect else {
+            panic!("expected ExileTop, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("optional cast should chain after exile");
+        let Effect::CastFromZone { target, .. } = &*cast.effect else {
+            panic!("expected CastFromZone, got {:?}", cast.effect);
+        };
+        assert!(cast.optional);
+        assert!(target.references_exiled_by_source());
+
+        for cleanup in [cast.sub_ability.as_deref(), cast.else_ability.as_deref()] {
+            let cleanup = cleanup.expect("cleanup should run after accept or decline");
+            let Effect::PutAtLibraryPosition {
+                target,
+                count,
+                position,
+            } = &*cleanup.effect
+            else {
+                panic!(
+                    "expected PutAtLibraryPosition cleanup, got {:?}",
+                    cleanup.effect
+                );
+            };
+            assert_eq!(*target, TargetFilter::ExiledBySource);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
+            assert_eq!(*position, LibraryPosition::Bottom);
+        }
+    }
+
     /// Issue #501 FOLLOW-UP — ROOT CAUSE B building-block test. After an
     /// `ExileFromTopUntil { NextMatches }` clause, a following sibling clause's
     /// bare anaphor "it" ("Put three time counters on it") binds to the
