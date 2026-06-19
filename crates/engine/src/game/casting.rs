@@ -10517,7 +10517,7 @@ pub(super) fn pay_effect_mana_cost(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 
@@ -10625,7 +10625,7 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 

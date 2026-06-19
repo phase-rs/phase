@@ -730,6 +730,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .players
             .iter()
             .flat_map(|player| player.graveyard.iter().copied())
+            .filter(|id| source_has_trigger_in_zone(state, *id, zone))
             .collect(),
         Zone::Exile => state.exile.iter().copied().collect(),
         Zone::Stack => state
@@ -766,6 +767,31 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             })
             .collect(),
         Zone::Hand | Zone::Library => Vec::new(),
+    }
+}
+
+fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone) -> bool {
+    state.objects.get(&source_id).is_some_and(|obj| {
+        super::functioning_abilities::active_trigger_definitions(state, obj)
+            .any(|(_, def)| trigger_definition_functions_in_zone(def, zone))
+            || (zone != Zone::Battlefield
+                && synthesize_granted_keyword_triggers(
+                    obj,
+                    crate::game::off_zone_characteristics::effective_off_zone_keywords(
+                        state, source_id,
+                    )
+                    .iter(),
+                )
+                .into_iter()
+                .any(|(_, def)| trigger_definition_functions_in_zone(&def, zone)))
+    })
+}
+
+fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+    if def.trigger_zones.is_empty() {
+        zone == Zone::Battlefield
+    } else {
+        def.trigger_zones.contains(&zone)
     }
 }
 

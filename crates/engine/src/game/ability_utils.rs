@@ -893,18 +893,6 @@ pub fn choose_target_for_ability(
                     .is_some_and(|spec| spec.instance == skipped_instance)
             {
                 selected_slots.push(None);
-                if !has_legal_completion_with_specs(
-                    state,
-                    ability,
-                    &specs,
-                    target_slots,
-                    constraints,
-                    next_slot + 1,
-                    &selected_slots,
-                ) {
-                    selected_slots.pop();
-                    break;
-                }
                 next_slot += 1;
             }
         }
@@ -3809,15 +3797,17 @@ fn build_target_selection_progress(
     let current_legal_targets =
         legal_targets_for_slot(target_slots, constraints, current_slot, &selected_slots);
     let slot = &target_slots[current_slot];
-    let mut skipped_slots = selected_slots.clone();
-    skipped_slots.push(None);
-    let can_skip = slot.optional
-        && has_legal_completion(target_slots, constraints, current_slot + 1, &skipped_slots);
 
-    if current_legal_targets.is_empty() && !can_skip {
-        return Err(EngineError::ActionNotAllowed(
-            "No legal target combinations available".to_string(),
-        ));
+    if current_legal_targets.is_empty() {
+        let mut skipped_slots = selected_slots.clone();
+        skipped_slots.push(None);
+        let can_skip = slot.optional
+            && has_legal_completion(target_slots, constraints, current_slot + 1, &skipped_slots);
+        if !can_skip {
+            return Err(EngineError::ActionNotAllowed(
+                "No legal target combinations available".to_string(),
+            ));
+        }
     }
 
     Ok(TargetSelectionProgress {
@@ -3867,23 +3857,25 @@ fn build_target_selection_progress_for_ability(
         &selected_slots,
     );
     let slot = &target_slots[current_slot];
-    let mut skipped_slots = selected_slots.clone();
-    skipped_slots.push(None);
-    let can_skip = slot.optional
-        && has_legal_completion_with_specs(
-            state,
-            ability,
-            &specs,
-            target_slots,
-            constraints,
-            current_slot + 1,
-            &skipped_slots,
-        );
 
-    if current_legal_targets.is_empty() && !can_skip {
-        return Err(EngineError::ActionNotAllowed(
-            "No legal target combinations available".to_string(),
-        ));
+    if current_legal_targets.is_empty() {
+        let mut skipped_slots = selected_slots.clone();
+        skipped_slots.push(None);
+        let can_skip = slot.optional
+            && has_legal_completion_with_specs(
+                state,
+                ability,
+                &specs,
+                target_slots,
+                constraints,
+                current_slot + 1,
+                &skipped_slots,
+            );
+        if !can_skip {
+            return Err(EngineError::ActionNotAllowed(
+                "No legal target combinations available".to_string(),
+            ));
+        }
     }
 
     Ok(TargetSelectionProgress {
@@ -3923,6 +3915,11 @@ fn has_legal_completion(
 ) -> bool {
     if index == target_slots.len() {
         return validate_selected_slot_prefix(target_slots, selected_slots, constraints).is_ok();
+    }
+    if target_slots[index..].iter().all(|slot| slot.optional) {
+        let mut completed_slots = selected_slots.to_vec();
+        completed_slots.resize(target_slots.len(), None);
+        return validate_selected_slot_prefix(target_slots, &completed_slots, constraints).is_ok();
     }
 
     let slot = &target_slots[index];
@@ -4021,6 +4018,19 @@ fn has_legal_completion_with_specs(
             specs,
             target_slots,
             selected_slots,
+            constraints,
+        )
+        .is_ok();
+    }
+    if target_slots[index..].iter().all(|slot| slot.optional) {
+        let mut completed_slots = selected_slots.to_vec();
+        completed_slots.resize(target_slots.len(), None);
+        return validate_selected_slots_with_specs(
+            state,
+            ability,
+            specs,
+            target_slots,
+            &completed_slots,
             constraints,
         )
         .is_ok();
@@ -4185,25 +4195,24 @@ fn validate_selected_slots_with_specs(
             ));
         };
 
-        let legal_targets = specs
-            .get(index)
-            .map(|spec| {
-                // CR 601.2c + CR 115.3: `&specs[..index]` (prior specs) lines up
-                // one-for-one with `&selected_slots[..index]` (prior selections),
-                // so the validate path enforces the same per-instance distinctness
-                // as the offered-set path (`legal_targets_for_spec_slot`).
-                legal_targets_for_selected_slot(
-                    state,
-                    ability,
-                    spec,
-                    &specs[..index],
-                    &selected_slots[..index],
-                )
-            })
-            .unwrap_or_else(|| slot.legal_targets.clone());
-
         match selected_slot {
             Some(target) => {
+                let legal_targets = specs
+                    .get(index)
+                    .map(|spec| {
+                        // CR 601.2c + CR 115.3: `&specs[..index]` (prior specs)
+                        // lines up one-for-one with `&selected_slots[..index]`
+                        // (prior selections), so validation enforces the same
+                        // per-instance distinctness as the offered-set path.
+                        legal_targets_for_selected_slot(
+                            state,
+                            ability,
+                            spec,
+                            &specs[..index],
+                            &selected_slots[..index],
+                        )
+                    })
+                    .unwrap_or_else(|| slot.legal_targets.clone());
                 if !legal_targets.contains(target) {
                     return Err(EngineError::InvalidAction(
                         "Illegal target selected".to_string(),
