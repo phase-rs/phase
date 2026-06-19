@@ -527,12 +527,12 @@ fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
         .min()
 }
 
-/// CR 508.1c + CR 508.5 + CR 802.1: Enforce defender-scoped attacker caps
+/// CR 508.1c + CR 802.1: Enforce defender-scoped attacker caps
 /// (`MaxAttackersEachCombat { defender: Some(_) }`, e.g. Judoon Enforcers'
 /// "no more than one creature can attack you each combat"). Each such static
-/// limits only the attackers whose defending player (CR 508.5) is the static's
-/// controller, so opponents may still be attacked freely. Returns an error if
-/// any active defender-scoped cap is exceeded.
+/// limits only creatures directly attacking the static's controller, so
+/// opponents and non-player permanents may still be attacked freely. Returns an
+/// error if any active defender-scoped cap is exceeded.
 fn validate_per_defender_attacker_caps(
     state: &GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -550,7 +550,7 @@ fn validate_per_defender_attacker_caps(
         let protected_player = source.controller;
         let count = attacks
             .iter()
-            .filter(|(_, target)| defending_player_for_target(state, *target) == protected_player)
+            .filter(|(_, target)| matches!(target, AttackTarget::Player(pid) if *pid == protected_player))
             .count() as u32;
         if count > max {
             return Err(format!(
@@ -3341,6 +3341,26 @@ mod tests {
         id
     }
 
+    fn create_battle(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        protector: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Battle);
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Player(protector));
+        id
+    }
+
     #[test]
     fn valid_attacker_succeeds() {
         let mut state = setup();
@@ -3434,6 +3454,40 @@ mod tests {
         // A defender-scoped cap must NOT register as a global per-combat cap —
         // the two enforcement paths are independent (CR 508.1c).
         assert_eq!(max_attackers_each_combat(&state), None);
+
+        // Two attackers against an unprotected player: legal.
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(2))),
+            ],
+        )
+        .is_ok());
+
+        // "Attack you" is a direct-player scope. It does not include attacking a
+        // planeswalker controlled by that player.
+        let protected_planeswalker = create_planeswalker(&mut state, PlayerId(1), "Jace");
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Planeswalker(protected_planeswalker)),
+                (b, AttackTarget::Planeswalker(protected_planeswalker)),
+            ],
+        )
+        .is_ok());
+
+        // Nor does it include attacking a battle protected by that player.
+        let protected_battle =
+            create_battle(&mut state, PlayerId(0), "Invasion of Test", PlayerId(1));
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Battle(protected_battle)),
+                (b, AttackTarget::Battle(protected_battle)),
+            ],
+        )
+        .is_ok());
     }
 
     #[test]
