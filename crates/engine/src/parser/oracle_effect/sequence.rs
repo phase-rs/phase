@@ -2537,7 +2537,7 @@ pub(super) fn apply_clause_continuation(
                                     caused_by: None,
                                 },
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -2571,7 +2571,7 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
@@ -6323,13 +6323,33 @@ mod tests {
         );
     }
 
-    /// Issue #2349 — Fertile Thicket. "reveal up to one basic land card from
-    /// among them, then put that card on top of your library and the rest on the
-    /// bottom in any order." The kept card routes to a fixed library position
-    /// (top), but the clause's verb is "reveal" (CR 701.20a, public), so
-    /// `reveal_verb` must be true. Previously `parse_dig_destination_tail` did
-    /// not recognize "on top of your library", so the kept destination resolved
-    /// to None and the clause became Unimplemented.
+    #[test]
+    fn put_all_milled_cards_onto_battlefield_tapped_patches_enter_tapped() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put all creature cards milled this way onto the battlefield tapped.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            enter_tapped,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Battlefield));
+        assert!(enter_tapped, "enter_tapped must be true for tapped battlefield returns");
+    }
+
+    #[test]
+    fn mill_put_all_face_down_defaults_to_vanilla_profile() {
+        use super::super::parse_effect_chain;
     #[test]
     fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
         let dig = make_dig_effect();
@@ -7354,6 +7374,34 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    #[test]
+    fn mill_put_all_milled_cards_onto_battlefield_tapped_preserves_enter_tapped() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Put all creature cards milled this way onto the battlefield tapped.",
+            AbilityKind::Spell,
+        );
+
+        let mut chain = vec![];
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            chain.push(&d.effect);
+            node = d.sub_ability.as_deref();
+        }
+
+        let put = chain
+            .iter()
+            .find(|e| matches!(e, Effect::ChangeZoneAll { .. }))
+            .expect("expected a ChangeZoneAll effect");
+        match put {
+            Effect::ChangeZoneAll { enter_tapped, .. } => {
+                assert!(enter_tapped.is_tapped(), "expected milled cards to enter tapped");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
