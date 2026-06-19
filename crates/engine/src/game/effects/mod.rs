@@ -391,7 +391,7 @@ pub(crate) fn matches_player_scope(
                             state, value, controller, source_id,
                         );
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && candidate_player_scalar(p, attr)
+                            && candidate_player_scalar_with_state(state, p, controller, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
@@ -459,6 +459,41 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
         QuantityRef::PlayerCounter { kind, .. } => {
             Some(u32_to_i32_saturating(p.player_counter(kind)))
+        }
+        // CR 121.1: cards drawn this turn is tracked per candidate player.
+        QuantityRef::CardsDrawnThisTurn { .. } => {
+            Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
+        }
+        _ => None,
+    }
+}
+
+/// CR 402.1 / 119.1 / 403.3 / 608.2h: Per-candidate scalar lookup that needs game-state
+/// backing (battlefield entry ledger). Used by `PlayerFilter::PlayerAttribute`
+/// in `resolve_player_count` when `candidate_player_scalar` returns `None`.
+pub(crate) fn candidate_player_scalar_with_state(
+    state: &crate::types::game_state::GameState,
+    candidate: &Player,
+    controller: crate::types::player::PlayerId,
+    attr: &QuantityRef,
+) -> Option<i32> {
+    if let Some(value) = candidate_player_scalar(candidate, attr) {
+        return Some(value);
+    }
+    match attr {
+        QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
+            Some(crate::game::arithmetic::usize_to_i32_saturating(
+                state
+                    .battlefield_entries_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.controller == candidate.id
+                            && crate::game::restrictions::battlefield_entry_matches_filter(
+                                record, filter, controller,
+                            )
+                    })
+                    .count(),
+            ))
         }
         _ => None,
     }
@@ -982,6 +1017,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = stack_pushed_object_context_from_events(state, events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -1101,6 +1140,29 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
     });
     let first = moved.next()?;
     moved.next().is_none().then_some(first)
+}
+
+/// CR 707.10 + CR 608.2c: A `CopySpell` that puts a copy onto the stack
+/// introduces a singular object a chained `ParentTarget` consumer (Isochron
+/// Scepter's free cast) binds to.
+fn stack_pushed_object_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
+    let mut pushed = events.iter().filter_map(|event| match event {
+        GameEvent::StackPushed { object_id } => {
+            state
+                .objects
+                .get(object_id)
+                .map(|obj| CostPaidObjectSnapshot {
+                    object_id: *object_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                })
+        }
+        _ => None,
+    });
+    let first = pushed.next()?;
+    pushed.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -1543,6 +1605,9 @@ pub(super) fn resolve_optional_effect_decision(
     match choice {
         AutoMayChoice::Accept => {
             ability.context.optional_effect_performed = true;
+            state
+                .player_actions_this_way
+                .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
             resolve_ability_chain(state, &ability, events, depth)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
@@ -1962,8 +2027,14 @@ fn detach_after_player_scope_local_chain(
     if next_is_co_scoped_anaphoric_consumer {
         next.player_scope = None;
     }
+    // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
+    // optional for that opponent. Keep the continuation inside the scoped
+    // template so accepting the offer performs both instructions.
+    let next_is_optional_clause_continuation =
+        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
     if next_is_performed_gated
         || next_is_co_scoped_anaphoric_consumer
+        || next_is_optional_clause_continuation
         || is_player_scope_local_continuation(&node.effect, &next.effect)
     {
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
@@ -5278,6 +5349,8 @@ fn resolve_chain_body(
 
             let initial_waiting_for = state.waiting_for.clone();
             let mut iteration = 0usize;
+            let repeated_full_chain =
+                ability.repeat_for.is_some() && effective.sub_ability.is_some();
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -5330,7 +5403,13 @@ fn resolve_chain_body(
                 // `resolve_effect` does not check `optional`, which is correct
                 // because non-per-iteration loops apply their `optional` once up
                 // front in `resolve_chain_body`.
-                if (kind_driven || member_driven) && iter_effective.optional {
+                if repeated_full_chain {
+                    let mut full_chain_iteration = iter_effective.clone();
+                    full_chain_iteration.repeat_for = None;
+                    full_chain_iteration.copy_count_status =
+                        crate::types::ability::CopyCountStatus::Finalized;
+                    resolve_ability_chain(state, &full_chain_iteration, events, depth.max(1))?;
+                } else if (kind_driven || member_driven) && iter_effective.optional {
                     // CR 608.2c: pass a non-zero depth so the depth==0 prelude
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
@@ -5389,6 +5468,9 @@ fn resolve_chain_body(
                     break;
                 }
                 iteration += 1;
+            }
+            if repeated_full_chain {
+                return Ok(());
             }
         } // end shares_quality_failed else
     }
@@ -6553,7 +6635,9 @@ pub(crate) fn evaluate_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
-                super::restrictions::triggering_spell_targets_filter(state, spell_id, filter)
+                super::restrictions::triggering_spell_targets_filter(
+                    state, spell_id, filter, spell_id,
+                )
             }),
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
@@ -7203,6 +7287,43 @@ mod tests {
         assert!(
             parent_referent_context_from_events(&state, &events).is_none(),
             "two tapped creatures have no singular anaphoric referent"
+        );
+    }
+
+    /// CR 707.10 + CR 608.2c: a spell copy put onto the stack can be an
+    /// anaphoric referent only when the parent resolution produced exactly one
+    /// copied stack object.
+    #[test]
+    fn stack_pushed_parent_referent_requires_singular_copy() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First Copy".to_string(),
+            Zone::Stack,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Copy".to_string(),
+            Zone::Stack,
+        );
+        let single = [GameEvent::StackPushed { object_id: first }];
+        let multiple = [
+            GameEvent::StackPushed { object_id: first },
+            GameEvent::StackPushed { object_id: second },
+        ];
+
+        assert_eq!(
+            parent_referent_context_from_events(&state, &single).map(|snapshot| snapshot.object_id),
+            Some(first),
+            "one copied spell can feed ParentTarget"
+        );
+        assert!(
+            parent_referent_context_from_events(&state, &multiple).is_none(),
+            "multiple copied spells must not bind ParentTarget arbitrarily"
         );
     }
 
@@ -7881,6 +8002,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -12106,6 +12228,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
         state.pending_continuation =
@@ -12143,6 +12266,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                library_position: None,
                 is_cost_payment: false,
             },
             GameAction::SelectCards {
@@ -12602,6 +12726,7 @@ mod tests {
             count: 0,
             reveal: false,
             up_to: true,
+            allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
         };
@@ -18230,6 +18355,144 @@ mod tests {
             condition_contains_city_blessing(&condition),
             "city's-blessing gated continuations wrapped in ConditionInstead must run the \
              mid-chain blessing check before the condition is evaluated"
+        );
+    }
+
+    /// CR 601.2a + CR 608.2c (issue #1162): Expressive Iteration looks at
+    /// three cards, keeps one in hand, then must still reach the bottom/exile
+    /// tail on the other looked-at cards.
+    #[test]
+    fn expressive_iteration_dig_chain_reaches_library_bottom_and_exile() {
+        use crate::game::engine;
+        use crate::types::ability::CastingPermission;
+        use crate::types::ability::Duration;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Expressive Iteration".to_string(),
+            Zone::Stack,
+        );
+        let card_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        let card_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Card C".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = vec![card_a, card_b, card_c].into();
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Look at the top three cards of your library. Put one of them into your hand, put one of them on the bottom of your library, and exile one of them. You may play the exiled card this turn.",
+            AbilityKind::Spell,
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "expected initial dig choice, got {:?}",
+            state.waiting_for
+        );
+
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![card_a],
+            },
+        )
+        .unwrap();
+
+        let tracked: Vec<_> = state
+            .tracked_object_sets
+            .get(
+                &state
+                    .chain_tracked_set_id
+                    .expect("dig tail must publish a tracked set"),
+            )
+            .expect("tracked set must exist")
+            .clone();
+        assert_eq!(
+            tracked,
+            vec![card_b, card_c],
+            "dig must publish only the unkept looked-at cards"
+        );
+
+        let WaitingFor::EffectZoneChoice {
+            cards: eligible,
+            effect_kind,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected bottom-of-library choice after keeping to hand, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            effect_kind,
+            crate::types::ability::EffectKind::PutAtLibraryPosition
+        );
+        assert_eq!(
+            eligible,
+            vec![card_b, card_c],
+            "bottom choice must be among unkept library cards"
+        );
+
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![card_b],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&card_a].zone, Zone::Hand);
+        assert_eq!(state.objects[&card_b].zone, Zone::Library);
+        assert_eq!(state.objects[&card_c].zone, Zone::Exile);
+        assert!(
+            state.players[0].library.back() == Some(&card_b),
+            "card B must be on the bottom of the library"
+        );
+        assert!(
+            !state.objects[&card_b]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
+            "bottomed card must not receive play permission"
+        );
+        assert!(
+            state.objects[&card_c]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfTurn,
+                        granted_to: PlayerId(0),
+                        ..
+                    }
+                )),
+            "exiled card must receive play-this-turn permission"
         );
     }
 }

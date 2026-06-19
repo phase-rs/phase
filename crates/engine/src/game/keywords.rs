@@ -6,7 +6,7 @@ use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, ProtectionTarget};
 use crate::types::mana::ManaCost;
@@ -590,6 +590,13 @@ pub fn activate_ninjutsu(
     // `BatchCompletion::NinjutsuPlacement` so the replacement-choice resume
     // runs it exactly once after the entry delivers — the old bail skipped it,
     // leaving the resumed ninja untagged and non-attacking.
+    let ninjutsu_placement = crate::types::game_state::BatchCompletion::NinjutsuPlacement {
+        player,
+        ninjutsu_obj_id,
+        cast_variant: variant.into(),
+        defending_player,
+        attack_target,
+    };
     match super::zone_pipeline::move_object(
         state,
         super::zone_pipeline::ZoneMoveRequest::effect(
@@ -599,19 +606,19 @@ pub fn activate_ninjutsu(
         ),
         events,
     ) {
-        super::zone_pipeline::ZoneMoveResult::Done => {}
+        super::zone_pipeline::ZoneMoveResult::Done => {
+            // CR 707.9: `move_object` can return `Done` while the delivery tail
+            // already surfaced `CopyTargetChoice` (enter-as-copy). Defer combat
+            // placement until the copy target resolves — same contract as the
+            // `NeedsChoice` arms below.
+            if ninjutsu_entry_paused_on_mid_entry_choice(state) {
+                super::zone_pipeline::defer_completion_on_pause(state, ninjutsu_placement);
+                return Ok(());
+            }
+        }
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-            super::zone_pipeline::defer_completion_on_pause(
-                state,
-                crate::types::game_state::BatchCompletion::NinjutsuPlacement {
-                    player,
-                    ninjutsu_obj_id,
-                    cast_variant: variant.into(),
-                    defending_player,
-                    attack_target,
-                },
-            );
+            super::zone_pipeline::defer_completion_on_pause(state, ninjutsu_placement);
             return Ok(());
         }
     }
@@ -627,6 +634,20 @@ pub fn activate_ninjutsu(
     );
 
     Ok(())
+}
+
+/// CR 614.12a + CR 707.9: True when the ninja's battlefield entry paused on an
+/// interactive mid-entry choice and post-entry ninjutsu work must wait.
+fn ninjutsu_entry_paused_on_mid_entry_choice(state: &GameState) -> bool {
+    matches!(
+        state.waiting_for,
+        WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::NamedChoice { .. }
+    )
 }
 
 /// CR 702.49 + CR 702.49a + CR 702.49c: Post-entry ninjutsu work, run exactly
@@ -1594,6 +1615,123 @@ mod tests {
         assert!(
             ninja.cast_variant_paid.is_some(),
             "resumed ninja must carry the ninjutsu cast-variant tag (CR 702.49)"
+        );
+    }
+
+    /// CR 702.49 + CR 707.9 (issue #3662): Sakashima's Student — ninjutsu entry
+    /// with an optional enter-as-copy replacement must surface `CopyTargetChoice`
+    /// and defer CR 702.49c combat placement until the copy target is chosen.
+    #[test]
+    fn ninjutsu_enter_as_copy_defers_combat_placement_until_copy_resolves() {
+        use crate::game::engine::apply_as_current;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, Effect, ReplacementDefinition,
+            ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+
+        let bear_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+
+        {
+            let obj = state.objects.get_mut(&ninja_id).unwrap();
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: vec![ContinuousModification::AddSubtype {
+                                subtype: "Ninja".to_string(),
+                            }],
+                        },
+                    )),
+            );
+        }
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id: ninja_id,
+                creature_to_return: attacker_id,
+            },
+        )
+        .expect("ninjutsu activation should succeed");
+
+        assert!(
+            !state
+                .combat
+                .as_ref()
+                .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == ninja_id)),
+            "combat placement must not run before the copy target is chosen"
+        );
+
+        if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept enter-as-copy");
+        }
+
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after ninjutsu entry, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&bear_id),
+            "opponent's Bear must be a legal copy target"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear_id)),
+            },
+        )
+        .expect("choose copy target");
+
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == ninja_id)),
+            "ninja must be placed attacking after copy + ninjutsu placement complete"
+        );
+        let ninja = &state.objects[&ninja_id];
+        assert_eq!(ninja.power, Some(4), "ninja must copy Bear's power");
+        assert_eq!(ninja.toughness, Some(4), "ninja must copy Bear's toughness");
+        assert!(
+            ninja.card_types.subtypes.iter().any(|s| s == "Ninja"),
+            "copy exception must retain Ninja subtype"
+        );
+        assert!(
+            ninja.cast_variant_paid.is_some(),
+            "ninjutsu cast-variant tag must be applied after deferred placement"
         );
     }
 

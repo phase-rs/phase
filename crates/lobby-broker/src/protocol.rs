@@ -21,6 +21,22 @@ use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::match_config::MatchConfig;
 use serde::{Deserialize, Serialize};
 
+/// Wire-protocol version shared by the native server, client, and Cloudflare
+/// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
+/// added, removed, renamed, or has a field type changed. Adding a new optional
+/// field with `#[serde(default)]` does not require a bump.
+///
+/// Note: renaming or removing a variant silently fails at JSON parse time
+/// (clients see "Invalid message: unknown variant") rather than at the
+/// handshake. When making such changes, plan a deprecation window where
+/// both the old and new variants coexist, then bump and remove the old.
+pub const PROTOCOL_VERSION: u32 = 8;
+
+/// Minimum protocol version accepted at the hello handshake. The window is
+/// "current and previous" by policy, so a release-vs-preview deployment can
+/// coexist in the same lobby server during rollout.
+pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
+
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
 /// `server_core::protocol::LobbyGame` exactly for wire compatibility.

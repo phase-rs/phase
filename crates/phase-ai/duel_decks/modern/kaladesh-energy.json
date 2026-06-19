@@ -1,0 +1,25 @@
+{
+  "name": "Kaladesh Energy",
+  "format": "modern",
+  "frozen_date": "2026-06-18",
+  "source": "constructed-energy-engine",
+  "main": [
+    { "name": "Attune with Aether", "count": 4 },
+    { "name": "Rogue Refiner", "count": 4 },
+    { "name": "Servant of the Conduit", "count": 4 },
+    { "name": "Longtusk Cub", "count": 4 },
+    { "name": "Bristling Hydra", "count": 4 },
+    { "name": "Whirler Virtuoso", "count": 4 },
+    { "name": "Harnessed Lightning", "count": 4 },
+    { "name": "Aether Meltdown", "count": 4 },
+    { "name": "Confiscation Coup", "count": 2 },
+    { "name": "Aetherworks Marvel", "count": 2 },
+    { "name": "Aether Hub", "count": 4 },
+    { "name": "Forest", "count": 6 },
+    { "name": "Island", "count": 4 },
+    { "name": "Mountain", "count": 4 },
+    { "name": "Botanical Sanctum", "count": 4 },
+    { "name": "Spirebluff Canal", "count": 4 },
+    { "name": "Sheltered Thicket", "count": 2 }
+  ]
+}

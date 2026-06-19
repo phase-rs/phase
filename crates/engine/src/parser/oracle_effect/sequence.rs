@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{multispace0, multispace1};
+use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1037,6 +1037,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 613.4b + CR 611.2a: the no-"and" sibling form ", has base power and
+    // toughness N/N" (e.g. the middle conjunct of "becomes a Spirit, has base
+    // power and toughness 1/1, and gains ...") is a layer-7b continuous
+    // modification, not an independent clause — keep it attached so
+    // parse_continuous_modifications emits SetPower/SetToughness rather than
+    // orphaning it as Unimplemented. Mirrors the bare-"and" guard below.
+    if starts_have_base_power_toughness(trimmed) {
+        return None;
+    }
     if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
@@ -1049,6 +1058,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if current_ends_with_damage_recipient(&current_lower)
             && starts_with_damage_amount_continuation(after_and)
         {
+            return None;
+        }
+        // CR 613.1d + CR 613.4b: comma-list continuous modifiers such as
+        // "loses all abilities, becomes a Coward ..., and has base power and
+        // toughness 1/1" keep the base-P/T conjunct attached to the same
+        // subject. It is a layer-7b modification, not an independent clause.
+        if starts_have_base_power_toughness(after_and) {
             return None;
         }
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
@@ -2108,8 +2124,24 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
+/// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(alt((tag(", and "), tag("and ")))),
+            opt(tag("you ")),
+            tag("may choose "),
+            alt((tag("a new target "), tag("new targets "))),
+            tag("for "),
+            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+        ),
+    )
+    .parse(input)
+}
+
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
 ///
 /// The clause is composed from independent axes rather than enumerated as full
@@ -2121,23 +2153,9 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    value(
-        (),
-        (
-            multispace0,
-            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
-            opt(tag("you ")),
-            tag("may choose "),
-            alt((tag("a new target "), tag("new targets "))),
-            tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
-            opt(alt((tag("."), tag(",")))),
-            multispace0,
-            eof,
-        ),
-    )
-    .parse(lower.trim())
-    .is_ok()
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .is_ok()
 }
 
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
@@ -2528,7 +2546,9 @@ pub(super) fn apply_clause_continuation(
                                     caused_by: None,
                                 },
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -2562,7 +2582,9 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
@@ -2741,7 +2763,12 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                *destination = Some(Zone::Library);
+                // Preserve an explicit kept destination (Hand, Battlefield, etc.)
+                // from an earlier "put one into your hand" clause; only default
+                // destination to Library for reveal-only digs.
+                if destination.is_none() {
+                    *destination = Some(Zone::Library);
+                }
                 *rest_destination = Some(Zone::Library);
             }
             let put_def = AbilityDefinition::new(
@@ -3260,56 +3287,6 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     // sub_abilities route them by type via `TargetFilter::TrackedSetFiltered`.
     let (destination, enter_tapped) = parse_dig_kept_destination(lower);
 
-    // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
-    // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = alt((
-        take_until::<_, _, OracleError<'_>>(" of those cards"),
-        take_until(" of those"),
-        take_until(" of them"),
-    ))
-    .parse(lower)
-    {
-        let before_of = before_of.trim();
-        let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
-            .parse(before_of)
-            .map(|(rest, _)| rest)
-            .unwrap_or(before_of);
-
-        // Delegate to nom combinator (input already lowercase from lower).
-        let quantity = if let Ok((_rest, _)) = alt((
-            tag::<_, _, OracleError<'_>>("any number of "),
-            tag("any number"),
-        ))
-        .parse(after_put)
-        {
-            PutCount::AnyNumber
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-            nom_primitives::parse_number
-                .parse(rest)
-                .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-            PutCount::Exactly(n)
-        } else {
-            // "a/an" or unrecognized → treat as up_to 1
-            PutCount::Up(1)
-        };
-
-        // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
-        let rest_destination = parse_of_them_rest_destination(lower);
-
-        return Some(ContinuationAst::DigFromAmong {
-            quantity,
-            filter: TargetFilter::Any,
-            destination,
-            rest_destination,
-            enters_under: None,
-            face_down_profile: None,
-            enter_tapped,
-            // "put N of them" strips only "put" — never a reveal verb (private).
-            reveal_verb: false,
-        });
-    }
-
     // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
     // is the same tracked-set continuation as "from among the milled cards",
     // but its filter appears before the "milled this way" marker rather than
@@ -3434,111 +3411,175 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         });
     }
 
-    // Find "from among" to split the text into count+filter vs destination
-    let (_, before_from) = take_until::<_, _, OracleError<'_>>("from among")
-        .parse(lower)
-        .ok()?;
-    let before_from = &before_from.trim();
+    // CR 701.20e + CR 608.2c: "put/return/reveal … <filter> from among them/those
+    // cards …" — the more specific grammar; try before the bare "put N of them"
+    // idiom so "any number of Equipment cards from among them" never falls into
+    // the count-only arm.
+    if let Ok((_, before_from)) = take_until::<_, _, OracleError<'_>>("from among").parse(lower) {
+        let before_from = before_from.trim();
 
-    // Strip leading "put " or "you may reveal " using nom combinators.
-    // CR 701.20a vs 701.20e: capture whether the stripped verb was "reveal"
-    // (a public action) vs "put"/"return" (a private look) so the patch arm can
-    // promote the Dig to `reveal: true` even when the kept card routes to a
-    // fixed destination (Fertile Thicket).
-    let (after_put, reveal_verb) = alt((
-        value(true, tag::<_, _, OracleError<'_>>("you may reveal ")),
-        value(false, tag("you may put ")),
-        value(false, tag("you may return ")),
-        value(false, tag("put ")),
-        value(true, tag("reveal ")),
-        value(false, tag("return ")),
-    ))
-    .parse(*before_from)
-    .unwrap_or((before_from, false));
+        // Strip leading "put " or "you may reveal " using nom combinators.
+        // CR 701.20a vs 701.20e: capture whether the stripped verb was "reveal"
+        // (a public action) vs "put"/"return" (a private look) so the patch arm can
+        // promote the Dig to `reveal: true` even when the kept card routes to a
+        // fixed destination (Fertile Thicket).
+        let (after_put, reveal_verb) = alt((
+            value(true, tag::<_, _, OracleError<'_>>("you may reveal ")),
+            value(false, tag("you may put ")),
+            value(false, tag("you may return ")),
+            value(false, tag("put ")),
+            value(true, tag("reveal ")),
+            value(false, tag("return ")),
+        ))
+        .parse(before_from)
+        .unwrap_or((before_from, false));
 
-    // CR 701.20e: Mass quantifier ("put all/each <filter> from among them onto
-    // the battlefield ...") moves the entire matching set → `PutCount::All`.
-    let (after_put_q, mass) =
-        match alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(after_put) {
-            Ok((rest, _)) => (rest, true),
-            Err(_) => (after_put, false),
+        // CR 701.20e: Mass quantifier ("put all/each <filter> from among them onto
+        // the battlefield ...") moves the entire matching set → `PutCount::All`.
+        let (after_put_q, mass) =
+            match alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(after_put) {
+                Ok((rest, _)) => (rest, true),
+                Err(_) => (after_put, false),
+            };
+
+        // Parse "up to N" or "a/an" or just a number
+        // Delegate to nom combinator (input already lowercase from lower).
+        let (quantity, filter_text) = if mass {
+            (PutCount::All, after_put_q)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+            if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
+                (PutCount::Up(n), remainder.trim())
+            } else {
+                (PutCount::Up(1), rest)
+            }
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
+        {
+            (PutCount::AnyNumber, rest)
+        } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
+            // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
+            (PutCount::Up(1), rest)
+        } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+            // Explicit numeric count: "two creature cards" → exactly 2
+            (PutCount::Exactly(n), remainder.trim())
+        } else {
+            (PutCount::Up(1), after_put)
         };
 
-    // Parse "up to N" or "a/an" or just a number
-    // Delegate to nom combinator (input already lowercase from lower).
-    let (quantity, filter_text) = if mass {
-        (PutCount::All, after_put_q)
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-        if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-            (PutCount::Up(n), remainder.trim())
+        // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
+        let filter = if filter_text.is_empty()
+            || filter_text == "card"
+            || filter_text == "cards"
+            || filter_text == "of them"
+        {
+            TargetFilter::Any
         } else {
-            (PutCount::Up(1), rest)
-        }
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(after_put) {
-        (PutCount::AnyNumber, rest)
-    } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
-        // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
-        (PutCount::Up(1), rest)
-    } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
-        // Explicit numeric count: "two creature cards" → exactly 2
-        (PutCount::Exactly(n), remainder.trim())
-    } else {
-        (PutCount::Up(1), after_put)
-    };
+            let (parsed_filter, _) = parse_target(filter_text);
+            parsed_filter
+        };
+        // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
+        // with the stripped "where X is <expression>" defining clause.
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
 
-    // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
-    let filter = if filter_text.is_empty()
-        || filter_text == "card"
-        || filter_text == "cards"
-        || filter_text == "of them"
+        // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
+        // the full clause for the from-among put-step.
+        let enters_under = if nom_primitives::scan_contains(lower, "under your control") {
+            Some(ControllerRef::You)
+        } else {
+            None
+        };
+        let face_down_profile = if nom_primitives::scan_contains(lower, "face down") {
+            Some(FaceDownProfile::vanilla_2_2())
+        } else {
+            None
+        };
+
+        // CR 608.2c: A trailing "and the rest on the bottom ..." rider sits in the
+        // SAME clause as the from-among put-step when the rest-subject ("the rest")
+        // does not begin with a recognized imperative verb, so `split_clause_sequence`
+        // never splits it off into a standalone `PutRest` continuation (Muxus, Goblin
+        // Grandee: "Put all ... from among them onto the battlefield and the rest on
+        // the bottom of your library in a random order"). Capture it here with the
+        // shared rest-anaphor matcher so the rest pile is routed correctly instead of
+        // falling through to the `None`→Graveyard default. A genuinely separate
+        // "Put the rest ..." sentence still patches via its own PutRest continuation.
+        let rest_destination = parse_of_them_rest_destination(lower);
+
+        return Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            rest_destination,
+            enters_under,
+            face_down_profile,
+            enter_tapped,
+            reveal_verb,
+        });
+    }
+
+    // CR 701.20e + CR 608.2c: bare "put N of them into your hand [and the rest on
+    // the bottom]" — no filter, count explicit. Requires a put/reveal/return verb
+    // prefix so unrelated "of them" anaphors (Gilgamesh's "attach one of them to …")
+    // do not match.
+    if let Ok((_, before_of)) = alt((
+        take_until::<_, _, OracleError<'_>>(" of those cards"),
+        take_until(" of those"),
+        take_until(" of them"),
+    ))
+    .parse(lower)
     {
-        TargetFilter::Any
-    } else {
-        let (parsed_filter, _) = parse_target(filter_text);
-        parsed_filter
-    };
-    // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
-    // with the stripped "where X is <expression>" defining clause.
-    let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+        let before_of = before_of.trim();
+        if let Ok((after_put, _)) = alt((
+            tag::<_, _, OracleError<'_>>("you may put "),
+            tag("put "),
+            tag("you may reveal "),
+            tag("reveal "),
+            tag("you may return "),
+            tag("return "),
+        ))
+        .parse(before_of)
+        {
+            let quantity = if let Ok((_rest, _)) = alt((
+                tag::<_, _, OracleError<'_>>("any number of "),
+                tag("any number"),
+            ))
+            .parse(after_put)
+            {
+                PutCount::AnyNumber
+            } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+                nom_primitives::parse_number
+                    .parse(rest)
+                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
+            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
+                PutCount::Exactly(n)
+            } else {
+                PutCount::Up(1)
+            };
 
-    // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
-    // the full clause for the from-among put-step.
-    let enters_under = if nom_primitives::scan_contains(lower, "under your control") {
-        Some(ControllerRef::You)
-    } else {
-        None
-    };
-    let face_down_profile = if nom_primitives::scan_contains(lower, "face down") {
-        Some(FaceDownProfile::vanilla_2_2())
-    } else {
-        None
-    };
+            let rest_destination = parse_of_them_rest_destination(lower);
 
-    // CR 608.2c: A trailing "and the rest on the bottom ..." rider sits in the
-    // SAME clause as the from-among put-step when the rest-subject ("the rest")
-    // does not begin with a recognized imperative verb, so `split_clause_sequence`
-    // never splits it off into a standalone `PutRest` continuation (Muxus, Goblin
-    // Grandee: "Put all ... from among them onto the battlefield and the rest on
-    // the bottom of your library in a random order"). Capture it here with the
-    // shared rest-anaphor matcher so the rest pile is routed correctly instead of
-    // falling through to the `None`→Graveyard default. A genuinely separate
-    // "Put the rest ..." sentence still patches via its own PutRest continuation.
-    let rest_destination = parse_of_them_rest_destination(lower);
+            return Some(ContinuationAst::DigFromAmong {
+                quantity,
+                filter: TargetFilter::Any,
+                destination,
+                rest_destination,
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped,
+                reveal_verb: false,
+            });
+        }
+    }
 
-    Some(ContinuationAst::DigFromAmong {
-        quantity,
-        filter,
-        destination,
-        rest_destination,
-        enters_under,
-        face_down_profile,
-        enter_tapped,
-        reveal_verb,
-    })
+    None
 }
 
 fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
     if let Some(parsed) = parse_dig_from_among_destination(lower) {
+        return parsed;
+    }
+
+    if let Some(parsed) = parse_milled_this_way_destination(lower) {
         return parsed;
     }
 
@@ -3554,6 +3595,16 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         None
     };
     (destination, false)
+}
+
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+    let (tail, _) = preceded(
+        take_until::<_, _, OracleError<'_>>("milled this way"),
+        tag::<_, _, OracleError<'_>>("milled this way"),
+    )
+    .parse(lower)
+    .ok()?;
+    parse_dig_destination_tail(tail)
 }
 
 fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
@@ -5432,6 +5483,37 @@ mod tests {
         );
     }
 
+    /// CR 613.1d + CR 613.4b: Curious Colossus — a comma-separated chain with
+    /// additive type change and trailing "and has base power and toughness N/N"
+    /// must stay one continuous-modification clause so the target/affected
+    /// subject applies to every layer-4/6/7b modification.
+    #[test]
+    fn comma_and_does_not_split_type_change_and_has_base_pt() {
+        let chunks = clause_texts(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1"
+            ]
+        );
+    }
+
+    /// CR 613.4b: the no-"and" sibling form ", has base power and toughness N/N"
+    /// (the middle conjunct of e.g. "becomes a Spirit, has base power and
+    /// toughness 1/1, and gains ...") must also stay attached — the bare-"and"
+    /// guard above only covers the trailing ", and has ..." form.
+    #[test]
+    fn comma_no_and_does_not_split_has_base_pt() {
+        let chunks =
+            clause_texts("target creature loses all abilities, has base power and toughness 2/2");
+        assert_eq!(
+            chunks,
+            vec!["target creature loses all abilities, has base power and toughness 2/2"]
+        );
+    }
+
     #[test]
     fn bare_and_does_not_split_you_and_target_opponent() {
         let chunks = clause_texts("you and target opponent each draw a card");
@@ -6282,13 +6364,33 @@ mod tests {
         );
     }
 
-    /// Issue #2349 — Fertile Thicket. "reveal up to one basic land card from
-    /// among them, then put that card on top of your library and the rest on the
-    /// bottom in any order." The kept card routes to a fixed library position
-    /// (top), but the clause's verb is "reveal" (CR 701.20a, public), so
-    /// `reveal_verb` must be true. Previously `parse_dig_destination_tail` did
-    /// not recognize "on top of your library", so the kept destination resolved
-    /// to None and the clause became Unimplemented.
+    #[test]
+    fn put_all_milled_cards_onto_battlefield_tapped_patches_enter_tapped() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put all creature cards milled this way onto the battlefield tapped.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            enter_tapped,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Battlefield));
+        assert!(
+            enter_tapped,
+            "enter_tapped must be true for tapped battlefield returns"
+        );
+    }
+
     #[test]
     fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
         let dig = make_dig_effect();
@@ -7313,6 +7415,38 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    #[test]
+    fn mill_put_all_milled_cards_onto_battlefield_tapped_preserves_enter_tapped() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Put all creature cards milled this way onto the battlefield tapped.",
+            AbilityKind::Spell,
+        );
+
+        let mut chain: Vec<&Effect> = vec![];
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            chain.push(d.effect.as_ref());
+            node = d.sub_ability.as_deref();
+        }
+
+        let put = chain
+            .iter()
+            .find(|effect| matches!(***effect, Effect::ChangeZoneAll { .. }))
+            .expect("expected a ChangeZoneAll effect");
+        let put = *put;
+        match put {
+            Effect::ChangeZoneAll { enter_tapped, .. } => {
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected milled cards to enter tapped"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -8398,6 +8532,77 @@ mod tests {
             result,
             Some(ContinuationAst::ExileOneOfThemFaceDown),
             "a pure-peek 'you may reveal it' must not be fused into the Gonti exile continuation"
+        );
+    }
+
+    #[test]
+    fn from_among_any_number_equipment_not_misrouted_as_of_them() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "You may put any number of Equipment cards from among them onto the battlefield.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::AnyNumber);
+        assert!(
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    ref type_filters,
+                    ..
+                }) if type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                )
+            ),
+            "expected Equipment filter, got {filter:?}"
+        );
+        assert_eq!(destination, Some(Zone::Battlefield));
+    }
+
+    #[test]
+    fn put_two_of_them_into_hand_still_uses_of_them_arm() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put two of them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(ContinuationAst::DigFromAmong {
+                    quantity: PutCount::Exactly(2),
+                    filter: TargetFilter::Any,
+                    destination: Some(Zone::Hand),
+                    ..
+                })
+            ),
+            "expected bare of-them DigFromAmong, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn attach_one_of_them_reflexive_gate_is_not_dig_from_among() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "When you put one or more Equipment onto the battlefield this way, you may attach one of them to a Samurai you control.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            result.is_none(),
+            "reflexive attach gate must not re-patch the Dig, got {result:?}"
         );
     }
 }

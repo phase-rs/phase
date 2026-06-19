@@ -363,6 +363,7 @@ mod tests {
                         TargetFilter::StackAbility {
                             controller: None,
                             tag: None,
+                            kind: None,
                         },
                         single,
                     ],

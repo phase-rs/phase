@@ -4,7 +4,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
     SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
 };
@@ -158,6 +158,9 @@ pub(super) fn handle_opponent_may_choice(
             if let Some(legal) = target_selection {
                 if !legal.is_empty() {
                     ability.context.optional_effect_performed = true;
+                    state
+                        .player_actions_this_way
+                        .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
                     if let Some(mut sub) = ability.sub_ability.take() {
                         // CR 608.2c + CR 608.2d: the "If a player does, …"
                         // consequence runs because the player accepted. Carry the
@@ -199,6 +202,9 @@ pub(super) fn handle_opponent_may_choice(
                 resolve_all_declined_opponent_may(state, &ability, events)?;
             } else {
                 ability.context.optional_effect_performed = true;
+                state
+                    .player_actions_this_way
+                    .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
                 if matches!(ability.effect, Effect::DealDamage { .. }) {
                     ability.targets = vec![TargetRef::Player(promptee)];
                 }

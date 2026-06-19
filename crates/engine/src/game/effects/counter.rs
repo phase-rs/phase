@@ -710,6 +710,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
@@ -865,6 +866,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: Some(CounterSourceRider::Destroy),
             },
@@ -1333,7 +1335,7 @@ mod tests {
 
     /// CR 113.3 + CR 405.1: "Counter all abilities" — the resolver matches
     /// every activated/triggered ability on the stack, including keyword actions, via
-    /// `TargetFilter::StackAbility { controller: None, tag: None }` and removes the entry without moving any
+    /// `TargetFilter::StackAbility { controller: None, tag: None, kind: None }` and removes the entry without moving any
     /// card to a graveyard (abilities aren't cards).
     #[test]
     fn test_counter_all_abilities_removes_ability_entries() {
@@ -1429,6 +1431,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
             },
             vec![],
@@ -1507,6 +1510,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(ControllerRef::Opponent),
                     tag: None,
+                    kind: None,
                 },
             },
             vec![],

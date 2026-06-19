@@ -82,7 +82,8 @@ fn louisoix_sacrifice_parses_disjunctive_counter_target() {
             f,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         )),
         "missing the activated/triggered ability disjunct: {target:?}"

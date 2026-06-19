@@ -6,7 +6,10 @@ import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { TriggerOrderModal } from "../TriggerOrderModal.tsx";
 
-function orderTriggersPrompt(sourceNames: [string, string]): WaitingFor {
+function orderTriggersPrompt(
+  sourceNames: [string, string],
+  descriptions?: [string, string],
+): WaitingFor {
   return {
     type: "OrderTriggers",
     data: {
@@ -14,7 +17,7 @@ function orderTriggersPrompt(sourceNames: [string, string]): WaitingFor {
       triggers: sourceNames.map((sourceName, index) => ({
         source_id: index + 1,
         source_name: sourceName,
-        description: `${sourceName} triggered ability`,
+        description: descriptions?.[index] ?? `${sourceName} triggered ability`,
       })),
     },
   };
@@ -57,5 +60,20 @@ describe("TriggerOrderModal", () => {
       type: "OrderTriggers",
       data: { order: [0, 1] },
     });
+  });
+
+  it("renders mana symbols in trigger descriptions", () => {
+    useGameStore.setState({
+      waitingFor: orderTriggersPrompt(
+        ["Llanowar Elves", "Soul Warden"],
+        ["{T}: Add {G}.", "Whenever another creature enters, gain 1 life."],
+      ),
+      dispatch: vi.fn().mockResolvedValue([]),
+    });
+
+    render(<TriggerOrderModal />);
+
+    expect(screen.getAllByAltText("T").length).toBeGreaterThan(0);
+    expect(screen.getAllByAltText("G").length).toBeGreaterThan(0);
   });
 });

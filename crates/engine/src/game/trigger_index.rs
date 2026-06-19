@@ -487,12 +487,23 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::XValueChosen { .. } => {}
         GameEvent::AbilityActivated { .. } => push(TriggerEventKey::AbilityOrCopyActivated),
         GameEvent::ZoneChanged {
-            from, to, record, ..
+            from,
+            to,
+            record,
+            object_id,
         } => {
             // CR 603.6a: ETB. Emit broad + per-core-type narrow.
             if *to == Zone::Battlefield {
                 push(TriggerEventKey::EnterBattlefield(None));
-                for ct in &record.core_types {
+                // Use the live object's post-layer core_types if available (e.g., after
+                // Ashaya's layer effect adds the Land type). Fall back to the record's
+                // pre-layer types if the object is not in state.objects.
+                let core_types = if let Some(obj) = state.objects.get(object_id) {
+                    &obj.card_types.core_types
+                } else {
+                    &record.core_types
+                };
+                for ct in core_types {
                     push(TriggerEventKey::EnterBattlefield(Some(*ct)));
                 }
             }

@@ -34,6 +34,12 @@ fn tempt_with_discovery_oracle() -> &'static str {
      and put it onto the battlefield. Then shuffle."
 }
 
+fn tempt_with_bunnies_oracle() -> &'static str {
+    "Tempting Offer — Draw a card and create a 1/1 white Rabbit creature token. \
+     Then each opponent may draw a card and create a 1/1 white Rabbit creature token. \
+     For each opponent who does, you draw a card and you create a 1/1 white Rabbit creature token."
+}
+
 /// CR 207.2c + CR 608.2c + CR 109.5: Tempt with Discovery's full Oracle text
 /// must produce an ability whose 4th sentence uses
 /// `repeat_for: PlayerCount { PerformedActionThisWay { Opponent, SearchedLibrary } }`.
@@ -126,6 +132,159 @@ fn make_land(
     obj.card_types.core_types = vec![CoreType::Land];
     obj.card_types.supertypes.push(Supertype::Basic);
     land
+}
+
+fn make_library_card(
+    state: &mut GameState,
+    card_id: u64,
+    owner: PlayerId,
+    name: impl Into<String>,
+) -> ObjectId {
+    create_object(state, CardId(card_id), owner, name.into(), Zone::Library)
+}
+
+fn player_hand_size(state: &GameState, player: PlayerId) -> usize {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .hand
+        .len()
+}
+
+fn rabbit_tokens_controlled_by(state: &GameState, player: PlayerId) -> usize {
+    state
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.is_token
+                && obj.controller == player
+                && obj.zone == Zone::Battlefield
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Rabbit")
+        })
+        .count()
+}
+
+#[test]
+fn tempt_with_bunnies_bonus_counts_opponents_who_accept_offer() {
+    let result = parse_oracle_text(
+        tempt_with_bunnies_oracle(),
+        "Tempt with Bunnies",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    fn walk(def: &engine::types::ability::AbilityDefinition) -> bool {
+        let here_matches = matches!(&*def.effect, Effect::Draw { .. })
+            && matches!(
+                &def.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::PerformedActionThisWay {
+                            relation: PlayerRelation::Opponent,
+                            action: PlayerActionKind::AcceptedOptionalEffect,
+                        },
+                    },
+                })
+            )
+            && def
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| matches!(&*sub.effect, Effect::Token { .. }));
+        if here_matches {
+            return true;
+        }
+        if let Some(sub) = &def.sub_ability {
+            if walk(sub) {
+                return true;
+            }
+        }
+        if let Some(else_branch) = &def.else_ability {
+            if walk(else_branch) {
+                return true;
+            }
+        }
+        false
+    }
+
+    assert!(
+        result.abilities.iter().any(walk),
+        "expected the bonus Rabbit token step to repeat for opponents who accepted \
+         the offer. Parsed abilities: {:#?}",
+        result.abilities
+    );
+}
+
+#[test]
+fn parsed_tempt_with_bunnies_two_accepting_opponents_full_flow() {
+    let parsed = parse_oracle_text(
+        tempt_with_bunnies_oracle(),
+        "Tempt with Bunnies",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = build_resolved_from_def(&parsed.abilities[0], ObjectId(9100), PlayerId(0));
+
+    let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+    for i in 0..3 {
+        make_library_card(&mut state, 100 + i, PlayerId(0), format!("P0 Card {i}"));
+    }
+    make_library_card(&mut state, 200, PlayerId(1), "P1 Card");
+    make_library_card(&mut state, 300, PlayerId(2), "P2 Card");
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: PlayerId(1),
+            ..
+        }
+    ));
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::DecideOptionalEffect { accept: true },
+    )
+    .unwrap();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: PlayerId(2),
+            ..
+        }
+    ));
+
+    apply(
+        &mut state,
+        PlayerId(2),
+        GameAction::DecideOptionalEffect { accept: true },
+    )
+    .unwrap();
+
+    assert_eq!(
+        player_hand_size(&state, PlayerId(0)),
+        3,
+        "controller draws once initially and once for each accepting opponent"
+    );
+    assert_eq!(player_hand_size(&state, PlayerId(1)), 1);
+    assert_eq!(player_hand_size(&state, PlayerId(2)), 1);
+    assert_eq!(
+        rabbit_tokens_controlled_by(&state, PlayerId(0)),
+        3,
+        "controller creates one Rabbit initially and one for each accepting opponent"
+    );
+    assert_eq!(rabbit_tokens_controlled_by(&state, PlayerId(1)), 1);
+    assert_eq!(rabbit_tokens_controlled_by(&state, PlayerId(2)), 1);
 }
 
 /// Build a 3-player game state and seed P0's library with `count` basic

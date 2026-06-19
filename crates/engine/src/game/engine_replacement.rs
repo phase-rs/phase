@@ -270,6 +270,11 @@ pub(super) fn handle_replacement_choice(
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
+                // CR 614.1e + CR 708.11: TurnFaceUp is performed inline in
+                // `morph::turn_face_up` (the replacement only adds its actions and
+                // does not prevent the turn-up), so there is nothing to apply on
+                // the post-replacement Execute path here.
+                ProposedEvent::TurnFaceUp { .. } => {}
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -781,6 +786,15 @@ pub(super) fn handle_copy_target_choice(
     // phantom entry trigger.
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
         return Ok(waiting_for);
+    }
+    // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
+    // while paused on `CopyTargetChoice` must run combat placement after the copy
+    // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
+    if state.pending_batch_deliveries.is_some() {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
     }
     Ok(WaitingFor::Priority {
         player: state.active_player,

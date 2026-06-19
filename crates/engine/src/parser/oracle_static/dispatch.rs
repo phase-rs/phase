@@ -223,6 +223,50 @@ fn parse_reveal_hand_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefin
     )
 }
 
+/// CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
+/// Builds a `StaticMode::DamageNotRemovedDuringCleanup` static whose `affected`
+/// filter is the subject — `~`/`this creature`/`this permanent` map to SelfRef
+/// (Ancient Adamantoise, Uthgardt Fury), and any other subject ("creatures",
+/// "creatures your opponents control") is parsed as a typed filter (Patient
+/// Zero, Case of the Market Melee). The cleanup turn-based action skips removing
+/// damage from permanents matching an active such static.
+pub(crate) fn parse_damage_not_removed_during_cleanup(
+    tp: &TextPair,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Composed grammar (CR 514.2):
+    //   "damage isn't removed from " <subject> " during cleanup steps" [.] EOF
+    // where <subject> is a self-reference or a type phrase. The cleanup-step
+    // suffix is anchored at end-of-sentence (nothing but an optional period may
+    // follow), so a sentence that merely mentions "cleanup" later is rejected
+    // and the subject must parse to completion.
+    let body = nom_tag_lower(tp.lower, tp.lower, "damage isn't removed from ")?;
+
+    let (affected, after_subject) = if let Some(rest) = nom_tag_lower(body, body, "~")
+        .or_else(|| nom_tag_lower(body, body, "this creature"))
+        .or_else(|| nom_tag_lower(body, body, "this permanent"))
+    {
+        (TargetFilter::SelfRef, rest)
+    } else {
+        let (filter, rest) = parse_type_phrase(body);
+        if matches!(&filter, TargetFilter::Any) {
+            return None;
+        }
+        (filter, rest)
+    };
+
+    let tail = nom_tag_lower(after_subject, after_subject, " during cleanup steps")?;
+    if !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::DamageNotRemovedDuringCleanup)
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -232,6 +276,10 @@ pub(crate) fn parse_static_line_inner(
     let tp = TextPair::new(&text, &lower);
 
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
+        return Some(def);
+    }
+    // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
+    if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
         return Some(def);
     }
     // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —

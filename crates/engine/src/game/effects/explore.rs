@@ -394,11 +394,13 @@ pub fn handle_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ReplacementDefinition,
         TargetFilter, TargetRef, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
@@ -945,5 +947,86 @@ mod tests {
             }
             other => panic!("expected ExploreChoice, got {other:?}"),
         }
+    }
+
+    /// CR 701.44a (issue #1151): Jadelight Ranger explores twice — the second
+    /// explore must resume after the first explore's nonland DigChoice completes.
+    #[test]
+    fn chained_explore_resumes_after_nonland_dig_choice() {
+        let mut state = GameState::new_two_player(42);
+        let ranger = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jadelight Ranger".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&ranger)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let bolt_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        let bolt_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = vec![bolt_a, bolt_b].into();
+
+        let second_explore = ResolvedAbility::new(Effect::Explore, vec![], ranger, PlayerId(0));
+        let ability = ResolvedAbility::new(Effect::Explore, vec![], ranger, PlayerId(0))
+            .sub_ability(second_explore);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "first explore should pause on DigChoice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_continuation.is_some(),
+            "second explore must be stashed while first explore waits for DigChoice"
+        );
+        assert_eq!(
+            state.objects[&ranger]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "first explore should add one +1/+1 counter"
+        );
+
+        let WaitingFor::DigChoice { cards, .. } = state.waiting_for.clone() else {
+            unreachable!();
+        };
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![cards[0]],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&ranger]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "second explore should add another +1/+1 counter after DigChoice resolves"
+        );
     }
 }

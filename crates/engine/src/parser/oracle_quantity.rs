@@ -481,6 +481,13 @@ pub(crate) fn parse_quantity_ref_with_context(
                 });
             }
         }
+        if let Ok((remainder, (relation, action))) = parse_optional_offer_accepted_clause(rest) {
+            if remainder.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PerformedActionThisWay { relation, action },
+                });
+            }
+        }
         // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
         // this way" — count from the tracked set populated by the preceding
         // destroy/sacrifice in the sub_ability chain. Must run BEFORE
@@ -1120,6 +1127,31 @@ fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), Oracle
     .map(|(rest, _)| (rest, ()))
 }
 
+/// CR 109.5: "opponent who [scalar predicate]" → `PlayerCount` over opponents
+/// matching the per-candidate attribute threshold.
+fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<QuantityRef> {
+    let ((relation, attr, count), rest) = nom_on_lower(clause, clause, |input| {
+        let (input, relation) = parse_player_population(input)?;
+        let (input, (attr, count)) = alt((
+            parse_cards_drawn_attr_clause,
+            parse_battlefield_entries_attr_clause,
+        ))
+        .parse(input)?;
+        Ok((input, (relation, attr, count)))
+    })?;
+    if !rest.is_empty() || relation != PlayerRelation::Opponent {
+        return None;
+    }
+    Some(QuantityRef::PlayerCount {
+        filter: PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: count }),
+        },
+    })
+}
+
 /// CR 402.1 / 119.1 / 122.1f / 404.1: Parse a player population whose scalar
 /// attribute crosses a threshold, into `PlayerFilter::PlayerAttribute`. Reached
 /// after `"the number of "` has been stripped.
@@ -1142,6 +1174,8 @@ fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilte
     let (input, (attr, count)) = alt((
         parse_player_counter_attr_clause,
         parse_hand_size_attr_clause,
+        parse_cards_drawn_attr_clause,
+        parse_battlefield_entries_attr_clause,
     ))
     .parse(input)?;
     Ok((
@@ -1203,6 +1237,50 @@ fn parse_hand_size_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i3
         (
             QuantityRef::HandSize {
                 player: PlayerScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 121.1: "who drew N or more cards this turn" → the candidate's draw count.
+fn parse_cards_drawn_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("who drew ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more cards this turn").parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 403.3: "who had N or more [type] enter the battlefield under their control
+/// this turn" → battlefield-entry count for the candidate.
+fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("who had ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) =
+        take_until(" enter the battlefield under their control this turn").parse(input)?;
+    let (input, _) = tag(" enter the battlefield under their control this turn").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        (
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::ScopedPlayer,
+                filter,
             },
             n as i32,
         ),
@@ -1468,7 +1546,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 
     // Fall back to parse_quantity_ref for named quantity patterns
     // (e.g., "the life you've lost this turn" → LifeLostThisTurn).
-    // Strip leading "the " article before matching.
+    // Strip leading "the " article before matching. If that fails, try the full
+    // phrase only for CommanderManaValue — that grammar requires the leading
+    // article (Stinging Study's "where X is the mana value of a commander…").
+    // Keep broader object-count phrases on the stripped path so context-aware
+    // callers can still bind "they control" through parse_cda_quantity_with_context.
     // Exclude target-referent variants (TargetPower, TargetLifeTotal) — these
     // reference a targeting selection, not an event-context source object.
     let stripped = tag::<_, _, OracleError<'_>>("the ")
@@ -1485,6 +1567,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         ) {
             return Some(QuantityExpr::Ref { qty });
         }
+    }
+    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) = parse_quantity_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     None
@@ -2041,6 +2126,22 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
     .parse(input)
 }
 
+/// "opponent who does" / "players who do" → accepted the optional offer.
+fn parse_optional_offer_accepted_clause(
+    input: &str,
+) -> nom::IResult<&str, (PlayerRelation, PlayerActionKind), OracleError<'_>> {
+    let (input, relation) = alt((
+        value(PlayerRelation::Opponent, tag("opponents ")),
+        value(PlayerRelation::Opponent, tag("opponent ")),
+        value(PlayerRelation::All, tag("players ")),
+        value(PlayerRelation::All, tag("player ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, _) = alt((tag("does"), tag("do"), tag("did"))).parse(input)?;
+    Ok((input, (relation, PlayerActionKind::AcceptedOptionalEffect)))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 /// CR 702.62b: A suspended card is a card in the exile zone with the suspend
 /// keyword and a time counter on it. Counting clauses (`for each suspended card
@@ -2278,6 +2379,14 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    if let Ok((rest, (relation, action))) = parse_optional_offer_accepted_clause(clause) {
+        if rest.is_empty() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay { relation, action },
+            });
+        }
+    }
+
     // "card put into a graveyard this way" / "creature card exiled this way" / etc.
     // "this way" references objects from the preceding effect's tracked set.
     if clause.contains("this way") {
@@ -2358,6 +2467,13 @@ fn parse_for_each_clause_with_they_controller(
         return Some(QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentLostLife,
         });
+    }
+
+    // CR 121.1 / CR 403.3: "opponent who drew N or more cards this turn" and
+    // "opponent who had N or more [type] enter the battlefield under their
+    // control this turn" (Smuggler's Share class).
+    if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
+        return Some(qty);
     }
 
     // "opponent who gained life this turn"
@@ -3050,6 +3166,57 @@ mod tests {
     /// and the Storage Counter cycle depend on this dispatch — without it, the
     /// generic `TrackedSetSize` fallback returns the count of *objects* affected
     /// (always 1 for a self-counter-removal), which is wrong.
+    #[test]
+    fn for_each_opponent_drew_two_or_more_cards_this_turn() {
+        let qty = parse_for_each_clause("opponent who drew two or more cards this turn").unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::CardsDrawnThisTurn { .. }
+                ));
+            }
+            other => panic!("expected PlayerCount PlayerAttribute draw filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_had_two_lands_enter_this_turn() {
+        let qty = parse_for_each_clause(
+            "opponent who had two or more lands enter the battlefield under their control this turn",
+        )
+        .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::BattlefieldEntriesThisTurn { .. }
+                ));
+            }
+            other => {
+                panic!("expected PlayerCount PlayerAttribute land-entry filter, got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
         let qty = parse_for_each_clause("charge counter removed this way").unwrap();
@@ -4464,6 +4631,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_context_quantity_commander_mana_value() {
+        // CR 903.3d: Stinging Study's "where X is the mana value of a commander
+        // you own on the battlefield or in the command zone" must bind X via
+        // CommanderManaValue — the fallback must try the full "the …" phrase
+        // before stripping the article.
+        assert_eq!(
+            parse_event_context_quantity(
+                "the mana value of a commander you own on the battlefield or in the command zone"
+            ),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CommanderManaValue {
+                    owner: ControllerRef::You,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_does_not_consume_context_scoped_object_count() {
+        assert_eq!(
+            parse_event_context_quantity("the number of artifacts they control"),
+            None
+        );
+    }
+
+    #[test]
     fn parse_event_context_quantity_unrecognized_returns_none() {
         assert_eq!(
             parse_event_context_quantity("the number of creatures you control"),
@@ -4988,6 +5181,20 @@ mod tests {
                 filter: PlayerFilter::PerformedActionThisWay {
                     relation: PlayerRelation::Opponent,
                     action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_does_counts_accepted_optional_offer() {
+        let qty = parse_for_each_clause("opponent who does").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::AcceptedOptionalEffect,
                 },
             }
         );

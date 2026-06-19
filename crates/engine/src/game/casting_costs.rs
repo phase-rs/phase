@@ -13598,6 +13598,97 @@ library in a random order.";
         );
     }
 
+    // ─── Memory Deluge (issue #843) ─────────────────────────────────────────
+    //
+    // Oracle: "Look at the top X cards of your library, where X is the amount
+    // of mana spent to cast this spell. Put two of them into your hand and the
+    // rest on the bottom of your library in a random order.
+    // Flashback {5}{U}{U}"
+    //
+    // The Dig resolver reads `QuantityRef::ManaSpentToCast { SelfObject, Total }`
+    // which resolves via `obj.mana_spent_to_cast_amount` on the spell object.
+    // If the payment-write seam fails to stamp that field, the count resolves
+    // to 0 and the Dig silently no-ops (CR 401.5 clamp → early return).
+    //
+    // This test drives the REAL cast pipeline (`CastSpell` → mana payment →
+    // stack resolution → `DigChoice`) to discriminate a payment-write defect
+    // from the isolated `resolve_ability_chain` unit coverage in
+    // `effects::dig::tests`.
+
+    const MEMORY_DELUGE_ORACLE: &str = "Look at the top X cards of your library, \
+where X is the amount of mana spent to cast this spell. Put two of them into your \
+hand and the rest on the bottom of your library in a random order.\n\
+Flashback {5}{U}{U}";
+
+    /// CR 601.2h + CR 608.2c: Casting Memory Deluge for {2}{U}{U} (4 total mana)
+    /// must surface a DigChoice with exactly 4 selectable cards.
+    #[test]
+    fn memory_deluge_dig_count_equals_mana_spent_via_full_cast_pipeline() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 6 distinguishable cards on top of library (more than we'll look at)
+        for i in 0..6 {
+            scenario.add_spell_to_library_top(PlayerId(0), &format!("Library Card {i}"), false);
+        }
+
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Memory Deluge",
+            true, // instant
+            MEMORY_DELUGE_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let mut runner = scenario.build();
+
+        // Fund the mana pool with exactly 4 mana ({2}{U}{U})
+        fund_blue(&mut runner, 2);
+        fund_colorless(&mut runner, 2);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting Memory Deluge must be accepted");
+
+        // Advance past any optional-cost prompts (Flashback is an alt cost,
+        // not relevant here since we're casting from hand)
+        runner.advance_until_stack_empty();
+
+        // The engine must surface a DigChoice with count = 4 (mana spent)
+        match &runner.state().waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                keep_count,
+                ..
+            } => {
+                assert_eq!(
+                    selectable_cards.len(),
+                    4,
+                    "Memory Deluge cast for {{2}}{{U}}{{U}} (4 mana) must look at \
+                     top 4 cards; got {} (issue #843). If 0, the payment-write seam \
+                     failed to stamp mana_spent_to_cast_amount on the spell object.",
+                    selectable_cards.len()
+                );
+                assert_eq!(*keep_count, 2, "Memory Deluge must keep exactly 2 cards");
+            }
+            other => panic!(
+                "expected WaitingFor::DigChoice after Memory Deluge resolution, \
+                 got {other:?}. If Priority, the Dig resolved to count=0 and \
+                 silently no-op'd (issue #843)."
+            ),
+        }
+    }
+
     /// Engine test 2 — declining the kicker at the first prompt COMPLETES the
     /// cast (decline != abort). The artifact enters with 0 charge counters.
     #[test]

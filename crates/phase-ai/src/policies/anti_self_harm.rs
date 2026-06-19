@@ -1045,7 +1045,9 @@ mod tests {
         ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
         TriggerDefinition, TypeFilter, TypedFilter,
     };
-    use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::game_state::{
+        CastingVariant, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
@@ -1126,6 +1128,25 @@ mod tests {
                 tactical_class: TacticalClass::Target,
             },
         };
+        (decision, candidate)
+    }
+
+    fn make_mutate_target_selection_ctx(
+        state: &GameState,
+        legal_targets: Vec<TargetRef>,
+        candidate_target: Option<TargetRef>,
+    ) -> (AiDecisionContext, CandidateAction) {
+        let (mut decision, candidate) = make_target_selection_ctx(
+            state,
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            legal_targets,
+            candidate_target,
+        );
+        if let WaitingFor::TargetSelection { pending_cast, .. } = &mut decision.waiting_for {
+            pending_cast.casting_variant = CastingVariant::Mutate;
+        }
         (decision, candidate)
     }
 
@@ -1322,6 +1343,52 @@ mod tests {
         assert!(
             score_opp < 0.0,
             "Opponent creature score should be negative"
+        );
+    }
+
+    #[test]
+    fn mutate_target_prefers_own_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let (decision, candidate) = make_mutate_target_selection_ctx(
+            &state,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_mutate_target_selection_ctx(
+            &state,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "Mutate should prefer own creature: own={score_own}, opp={score_opp}"
         );
     }
 

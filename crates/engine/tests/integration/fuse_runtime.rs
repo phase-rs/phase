@@ -6,8 +6,9 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastingVariant, StackEntryKind};
+use engine::types::game_state::{CastingVariant, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -116,4 +117,42 @@ fn fused_breaking_entering_combines_cost_characteristics_and_resolves_left_then_
     outcome.assert_zone(&[milled_creature], Zone::Battlefield);
     assert_eq!(outcome.state().objects[&milled_creature].controller, P0);
     outcome.assert_zone(&[breaking], Zone::Graveyard);
+}
+
+/// Regression for PR #3687 review: spell//spell split cards with Fuse must keep
+/// the `CastingVariant::Fuse` prompt — not the Life // Death ModalFaceChoice path.
+#[test]
+fn fuse_split_card_uses_casting_variant_choice_not_modal_face_choice() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        pool_units(&[ManaType::Blue, ManaType::Black, ManaType::Red]),
+    );
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&breaking].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: breaking,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("CastSpell Breaking");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModalFaceChoice { .. }
+        ),
+        "Fuse split cards must not use ModalFaceChoice; got {:?}",
+        runner.state().waiting_for
+    );
 }

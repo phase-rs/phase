@@ -5440,6 +5440,40 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
     }
 }
 
+/// CR 709.3 / CR 709.3a-b: Split cards whose two faces are both spells
+/// (Life // Death, etc.) require a cast-time face choice — the same player
+/// decision as spell//spell MDFCs. Fuse split cards (Breaking // Entering) keep
+/// the existing `CastingVariant::Fuse` prompt instead.
+fn split_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card_type::CoreType;
+    let Some(back) = obj.back_face.as_ref() else {
+        return false;
+    };
+    if back.layout_kind != Some(LayoutKind::Split) {
+        return false;
+    }
+    if obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, crate::types::keywords::Keyword::Fuse))
+    {
+        return false;
+    }
+    let face_is_castable_spell = |types: &crate::types::card_type::CardType| {
+        types
+            .core_types
+            .iter()
+            .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery))
+    };
+    face_is_castable_spell(&obj.card_types) && face_is_castable_spell(&back.card_types)
+}
+
+/// CR 712.11b + CR 709.3: Cast-time face choice for spell//spell MDFCs and
+/// spell//spell split cards.
+fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    modal_spell_face_choice_available(obj) || split_spell_face_choice_available(obj)
+}
+
 /// CR 712.11b: Returns true if `obj` is a Modal double-faced card whose two
 /// faces present a real *cast*-time face choice — i.e. both faces are spells
 /// (neither is a land). This is the spell//spell MDFC class (Esika, God of the
@@ -7436,8 +7470,7 @@ pub fn handle_cast_spell_with_payment_mode(
     // re-enters this function; the swap clears the back face's Modal
     // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj)
-        {
+        if cast_face_choice_offered_from_zone(state, obj) && cast_spell_face_choice_available(obj) {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
@@ -9653,7 +9686,7 @@ fn can_cast_prepared_now(
     // recursion: swap to the back face and re-test. `swap_to_alternative_spell_face`
     // clears the back face's `layout_kind`, so the recursive call does not
     // re-enter this branch (no infinite recursion).
-    if modal_spell_face_choice_available(obj) {
+    if cast_spell_face_choice_available(obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
@@ -11866,6 +11899,7 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_sac.activation_cost = Some(cost.clone());
             pending_sac.activation_ability_index = Some(ability_index);
+            pending_sac.deferred_target_selection = true;
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Sacrifice,
@@ -11904,35 +11938,45 @@ pub fn handle_activate_ability(
         }
 
         // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
-        // costs — detour to `WaitingFor::ExileForCost` before any cost payment,
-        // mirroring the Sacrifice/Discard detours above. The full `Composite`
-        // cost (including the `Mana` sub-cost) stays in `activation_cost`; the
-        // mana is paid by `push_activated_ability_to_stack` after the card
-        // selection completes (CR 601.2h: remaining costs paid in any order).
+        // costs. Untargeted abilities can detour to `WaitingFor::ExileForCost`
+        // immediately; targeted abilities must choose their effect targets first
+        // (CR 601.2c), then `casting_targets::pay_activation_costs_after_target_selection`
+        // surfaces this same cost prompt before the ability reaches the stack.
         if let Some((count, zone, filter)) = find_non_self_exile(cost) {
-            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
-                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
-            let eligible =
-                find_eligible_exile_for_cost_targets(state, player, source_id, narrow_zone, filter);
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible cards to exile".into(),
-                ));
+            let has_effect_targets = {
+                let slots = build_target_slots(state, &resolved)?;
+                !slots.is_empty()
+            };
+            if !has_effect_targets {
+                let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                    .expect("find_non_self_exile restricts zone to Hand or Graveyard");
+                let eligible = find_eligible_exile_for_cost_targets(
+                    state,
+                    player,
+                    source_id,
+                    narrow_zone,
+                    filter,
+                );
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible cards to exile".into(),
+                    ));
+                }
+                let mut pending_exile =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_exile.activation_cost = Some(cost.clone());
+                pending_exile.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_exile),
+                    },
+                });
             }
-            let mut pending_exile =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_exile.activation_cost = Some(cost.clone());
-            pending_exile.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
-                choices: eligible,
-                count: count as usize,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_exile),
-                },
-            });
         }
 
         // CR 702.167a/b: Pre-check for a craft materials cost — detour to
@@ -12343,15 +12387,20 @@ pub fn handle_cancel_cast(
         }
     }
 
-    if pending
+    let restore_swapped_cast_face = pending
         .casting_variant
         .restores_front_face_after_stack_exit()
-    {
-        // CR 601.2i + CR 712.11a: backing out of a cast with an alternative
-        // spell face before it completes restores the card's normal front face
-        // in its origin zone.
+        || state
+            .objects
+            .get(&pending.object_id)
+            .is_some_and(|obj| obj.modal_back_face);
+    if restore_swapped_cast_face {
+        // CR 601.2i + CR 712.11a / CR 709.3: backing out of a cast with an
+        // alternative spell face before it completes restores the card's normal
+        // front face in its origin zone.
+        super::stack::restore_alternative_spell_normal_face(state, pending.object_id);
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-            swap_to_alternative_spell_face(obj);
+            obj.modal_back_face = false;
         }
     }
 
@@ -17473,6 +17522,7 @@ mod tests {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
                         tag: None,
+                        kind: None,
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
@@ -18113,6 +18163,188 @@ mod tests {
             ),
             "the exiled card must have suspend granted by Jhoira's sub-ability"
         );
+    }
+
+    #[test]
+    fn grim_lavamancer_targets_before_graveyard_exile_cost() {
+        use super::super::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let lavamancer = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Grim Lavamancer".to_string(),
+            Zone::Battlefield,
+        );
+        let filler_a = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Graveyard Filler A".to_string(),
+            Zone::Graveyard,
+        );
+        let filler_b = create_object(
+            &mut state,
+            CardId(992),
+            PlayerId(0),
+            "Graveyard Filler B".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&lavamancer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{R}, {T}, Exile two cards from your graveyard: This creature deals 2 damage to any target.",
+                "Grim Lavamancer",
+                &[],
+                &[String::from("Creature")],
+                &[String::from("Human"), String::from("Wizard")],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: lavamancer,
+                ability_index: 0,
+            },
+        )
+        .expect("Grim Lavamancer activation must enter targeting");
+
+        match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert!(
+                    target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Player(PlayerId(1))),
+                    "any-target damage must offer the opponent before cost payment"
+                );
+            }
+            other => panic!("expected target selection before exile cost, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        )
+        .expect("target selection should proceed to graveyard exile cost");
+
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
+                count,
+                choices,
+                ..
+            } => {
+                assert_eq!(*count, 2);
+                assert!(choices.contains(&filler_a));
+                assert!(choices.contains(&filler_b));
+            }
+            other => panic!("expected graveyard exile cost after targets, got {other:?}"),
+        }
+        assert!(
+            !state.objects[&lavamancer].tapped,
+            "tap cost is not paid until the exile selection completes"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![filler_a, filler_b],
+            },
+        )
+        .expect("paying Grim Lavamancer's exile cost should finish activation");
+
+        assert!(state.objects[&lavamancer].tapped);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.objects[&filler_a].zone, Zone::Exile);
+        assert_eq!(state.objects[&filler_b].zone, Zone::Exile);
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == lavamancer),
+            "activated ability should be on the stack after full cost payment"
+        );
+    }
+
+    #[test]
+    fn targeted_exile_cost_activation_with_no_legal_target_does_not_prompt_or_pay_cost() {
+        use super::super::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(993),
+            PlayerId(0),
+            "Targeted Exile-Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        let filler_a = create_object(
+            &mut state,
+            CardId(994),
+            PlayerId(0),
+            "Graveyard Filler A".to_string(),
+            Zone::Graveyard,
+        );
+        let filler_b = create_object(
+            &mut state,
+            CardId(995),
+            PlayerId(0),
+            "Graveyard Filler B".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(1);
+            obj.summoning_sick = false;
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{T}, Exile two cards from your graveyard: Destroy target artifact.",
+                "Targeted Exile-Cost Source",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        let err = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect_err("activation with no legal target must fail before cost payment");
+
+        assert!(
+            format!("{err:?}").contains("No legal targets"),
+            "expected target-legality error, got {err:?}"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "illegal activation must not enter an exile-cost prompt"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "tap cost must not be paid when target selection is impossible"
+        );
+        assert_eq!(state.objects[&filler_a].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&filler_b].zone, Zone::Graveyard);
     }
 
     /// Issues #520 (Curse of the Cabal) + #521 (Profane Tutor): activating a
@@ -20129,6 +20361,7 @@ mod tests {
                             TargetFilter::StackAbility {
                                 controller: None,
                                 tag: None,
+                                kind: None,
                             },
                         ],
                     },
@@ -20274,6 +20507,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: None,
             },
@@ -24443,6 +24677,44 @@ mod tests {
             state.objects.get(&gy).unwrap().zone,
             Zone::Exile,
             "the delved card should move to exile"
+        );
+    }
+
+    #[test]
+    fn delve_records_exiled_with_casting_spell() {
+        use super::super::engine::apply_as_current;
+        let mut state = setup_game_at_main_phase();
+        let obj_id = make_delve_spell(&mut state);
+        let gy = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Old Spell".to_string(),
+            Zone::Graveyard,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+                .expect("delve spell should begin casting");
+        state.waiting_for = result;
+
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::TapForConvoke {
+                object_id: gy,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .expect("delving a graveyard card is legal");
+
+        assert!(
+            state
+                .cards_exiled_with_source_this_turn
+                .get(&obj_id)
+                .is_some_and(|ids| ids.contains(&gy)),
+            "delved card must be tracked as exiled with the casting spell"
         );
     }
 

@@ -6,6 +6,9 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerFilter;
+use nom::character::complete::{digit1, one_of};
+use nom::combinator::{all_consuming, opt, recognize};
+use nom::sequence::{delimited, pair};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
 pub(crate) fn lower_rule_static(
@@ -1173,6 +1176,17 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
     }
 }
 
+/// True when `trimmed_prefix` is a bracketed planeswalker loyalty cost (`[+N]`,
+/// `[−N]`, `[0]`, `[-N]`) as printed in granted-ability text (Ichormoon Gauntlet).
+fn is_bracket_loyalty_cost_prefix(trimmed_prefix: &str) -> bool {
+    parse_bracket_loyalty_cost_prefix(trimmed_prefix).is_ok()
+}
+
+fn parse_bracket_loyalty_cost_prefix(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    let loyalty_number = recognize(pair(opt(one_of("+−–-")), digit1));
+    all_consuming(delimited(tag("["), loyalty_number, tag("]"))).parse(input)
+}
+
 /// Find the position of the cost/effect separator colon in ability text.
 ///
 /// Looks for `: ` or `:\n` that appears after cost-like content (mana symbols,
@@ -1188,6 +1202,7 @@ pub(crate) fn find_cost_separator(text: &str) -> Option<usize> {
             let lower_prefix = trimmed_prefix.to_lowercase();
             let has_cost = prefix.contains('{')
                 || trimmed_prefix.parse::<i32>().is_ok()
+                || is_bracket_loyalty_cost_prefix(trimmed_prefix)
                 || trimmed_prefix.strip_prefix('+').is_some() // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 || trimmed_prefix.strip_prefix('\u{2212}').is_some() // minus sign for loyalty // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 // CR 118.12: Text-based costs — sacrifice, discard, pay life, tap/untap, exile, remove

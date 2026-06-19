@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
+use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry};
+use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry, TargetFilter};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
@@ -1268,6 +1269,69 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
     None
 }
 
+/// CR 514.2: Remove marked damage from every battlefield permanent as the
+/// cleanup-step turn-based action, EXCEPT permanents matched by an active
+/// "Damage isn't removed from [filter] during cleanup steps" static (Ancient
+/// Adamantoise, Patient Zero, Uthgardt Fury, …), whose marked damage persists
+/// across turns. Shared by both cleanup exits — the direct `execute_cleanup`
+/// (no discard) and the deferred `finish_cleanup_discard` (after the active
+/// player discards to maximum hand size) — so the protection holds on either
+/// path.
+fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 514.2: An active "Damage isn't removed from [filter] during cleanup
+    // steps" static suppresses removal for the permanents it matches; gather
+    // that protected set first.
+    let damage_persists: HashSet<ObjectId> = {
+        let sources: Vec<(ObjectId, PlayerId, TargetFilter)> =
+            super::functioning_abilities::battlefield_active_statics(state)
+                .filter(|(_, def)| matches!(def.mode, StaticMode::DamageNotRemovedDuringCleanup))
+                .filter_map(|(obj, def)| {
+                    def.affected
+                        .as_ref()
+                        .map(|f| (obj.id, obj.controller, f.clone()))
+                })
+                .collect();
+
+        // CR 514.2 + CR 702.26b: removing marked damage is a turn-based cleanup
+        // action over the whole battlefield, including phased-out permanents — it
+        // is not targeting — so the protected membership is evaluated with the
+        // phased-out-aware matcher to mirror the unconditional removal below.
+        let mut protected = std::collections::HashSet::new();
+        for (source_id, source_controller, filter) in sources {
+            let ctx = FilterContext::from_source_with_controller(source_id, source_controller);
+            for id in state.battlefield.iter().copied() {
+                if matches_target_filter_including_phased_out(state, id, &filter, &ctx) {
+                    protected.insert(id);
+                }
+            }
+        }
+        protected
+    };
+
+    // CR 514.2: Damage on creatures is removed at cleanup.
+    let to_clear: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !damage_persists.contains(id))
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.damage_marked > 0)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_clear {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.damage_marked = 0;
+            obj.dealt_deathtouch_damage = false;
+            events.push(GameEvent::DamageCleared { object_id: id });
+        }
+    }
+}
+
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
@@ -1359,27 +1423,10 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         }
     }
 
-    // CR 514.2: Damage on creatures is removed at cleanup.
-    let to_clear: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.damage_marked > 0)
-                .unwrap_or(false)
-        })
-        .collect();
-
-    for id in to_clear {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.damage_marked = 0;
-            obj.dealt_deathtouch_damage = false;
-            events.push(GameEvent::DamageCleared { object_id: id });
-        }
-    }
+    // CR 514.2: Remove cleanup damage, preserving any permanent protected by a
+    // "Damage isn't removed during cleanup steps" static (shared with the
+    // deferred discard path so the protection holds regardless of discard).
+    clear_cleanup_damage(state, events);
 
     // CR 702.171b: "Once a permanent has become saddled, it stays saddled until
     // the end of the turn or it leaves the battlefield." Clear the designation
@@ -1486,27 +1533,11 @@ pub fn finish_cleanup_discard(
         }
     }
 
-    // Clear damage on all battlefield creatures (deferred from execute_cleanup)
-    let to_clear: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.damage_marked > 0)
-                .unwrap_or(false)
-        })
-        .collect();
-
-    for id in to_clear {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.damage_marked = 0;
-            obj.dealt_deathtouch_damage = false;
-            events.push(GameEvent::DamageCleared { object_id: id });
-        }
-    }
+    // CR 514.2: Clear cleanup damage deferred from execute_cleanup — through the
+    // same shared helper so a "Damage isn't removed during cleanup steps" static
+    // (Patient Zero, Ancient Adamantoise, …) still preserves protected marked
+    // damage even when the active player had to discard to maximum hand size.
+    clear_cleanup_damage(state, events);
     false
 }
 
@@ -4587,6 +4618,228 @@ mod tests {
         execute_cleanup(&mut state, &mut events);
 
         assert_eq!(state.objects[&id].damage_marked, 0);
+    }
+
+    #[test]
+    fn execute_cleanup_preserves_damage_under_damage_not_removed_static() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+
+        // Ancient-Adamantoise-style permanent: its own damage isn't removed at
+        // cleanup. CR 514.2 — the static suppresses the turn-based removal.
+        let protected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ancient Adamantoise".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let defs = crate::parser::oracle_static::parse_static_line_multi(
+                "Damage isn't removed from this creature during cleanup steps.",
+            );
+            assert!(
+                defs.iter()
+                    .any(|d| d.mode == StaticMode::DamageNotRemovedDuringCleanup),
+                "static must parse to DamageNotRemovedDuringCleanup, got {:?}",
+                defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+            );
+            let obj = state.objects.get_mut(&protected).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.damage_marked = 4;
+            for def in defs.iter().cloned() {
+                obj.static_definitions.push(def);
+            }
+            Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+        }
+
+        // A normal creature: its damage IS removed at cleanup (control).
+        let normal = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&normal).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.damage_marked = 3;
+        }
+
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&protected].damage_marked, 4,
+            "damage must persist under DamageNotRemovedDuringCleanup"
+        );
+        assert_eq!(
+            state.objects[&normal].damage_marked, 0,
+            "a normal creature's damage is still removed at cleanup"
+        );
+    }
+
+    #[test]
+    fn finish_cleanup_discard_preserves_damage_under_damage_not_removed_static() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // 9 cards in hand so cleanup must DEFER to a discard-to-hand-size choice,
+        // routing the damage clearing through `finish_cleanup_discard`.
+        let mut hand_ids = Vec::new();
+        for i in 0..9 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+            hand_ids.push(id);
+        }
+
+        // Ancient-Adamantoise-style protected permanent with marked damage.
+        let protected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ancient Adamantoise".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let defs = crate::parser::oracle_static::parse_static_line_multi(
+                "Damage isn't removed from this creature during cleanup steps.",
+            );
+            let obj = state.objects.get_mut(&protected).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.damage_marked = 4;
+            for def in defs.iter().cloned() {
+                obj.static_definitions.push(def);
+            }
+            Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+        }
+
+        // Normal creature with marked damage (control).
+        let normal = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&normal).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.damage_marked = 3;
+        }
+
+        // Cleanup defers: over hand size, the damage clearing is postponed to the
+        // discard finish, so both creatures still carry their damage here.
+        let mut events = Vec::new();
+        let waiting = execute_cleanup(&mut state, &mut events);
+        assert!(
+            matches!(waiting, Some(WaitingFor::DiscardToHandSize { .. })),
+            "expected a discard-to-hand-size choice, got {:?}",
+            waiting
+        );
+        assert_eq!(
+            state.objects[&protected].damage_marked, 4,
+            "damage clearing is deferred until the discard finishes"
+        );
+        assert_eq!(
+            state.objects[&normal].damage_marked, 3,
+            "damage clearing is deferred until the discard finishes"
+        );
+
+        // Finish the discard: the deferred cleanup damage clearing runs through
+        // the shared helper, so the protected creature KEEPS its damage while the
+        // normal creature's is removed.
+        finish_cleanup_discard(
+            &mut state,
+            PlayerId(0),
+            &[hand_ids[7], hand_ids[8]],
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&protected].damage_marked, 4,
+            "CR 514.2: protected damage must persist even through the discard path"
+        );
+        assert_eq!(
+            state.objects[&normal].damage_marked, 0,
+            "a normal creature's damage is removed when the discard finishes"
+        );
+    }
+
+    #[test]
+    fn execute_cleanup_preserves_phased_out_creature_damage_under_static() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Patient Zero: "Damage isn't removed from creatures your opponents
+        // control during cleanup steps." — the static source (controlled by P0).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Patient Zero".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let defs = crate::parser::oracle_static::parse_static_line_multi(
+                "Damage isn't removed from creatures your opponents control during cleanup steps.",
+            );
+            assert!(defs
+                .iter()
+                .any(|d| d.mode == StaticMode::DamageNotRemovedDuringCleanup));
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            for def in defs.iter().cloned() {
+                obj.static_definitions.push(def);
+            }
+            Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+        }
+
+        // A phased-out opponent creature with marked damage. CR 514.2 + CR
+        // 702.26b: damage removal at cleanup is a turn-based action over the
+        // whole battlefield (including phased-out permanents), so the static must
+        // preserve this creature's damage even while it is phased out.
+        let phased = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&phased).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.damage_marked = 3;
+            obj.phase_status = PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            };
+        }
+
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&phased].damage_marked, 3,
+            "a phased-out opponent creature's damage must persist under the static"
+        );
     }
 
     /// CR 117.1c + CR 503.2: After Untap (no priority), the engine must hand

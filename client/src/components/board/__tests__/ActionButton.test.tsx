@@ -112,4 +112,56 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: "Block with None" })).toBeInTheDocument();
     expect(screen.queryByText("Auto-Passing to End Step...")).not.toBeInTheDocument();
   });
+
+  it("shows resolve when turn decision controller differs from priority player (issue #1218)", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState({
+          type: "Priority",
+          data: { player: 0 },
+        }),
+        turn_decision_controller: 1,
+        active_player: 0,
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+    useMultiplayerStore.setState({ activePlayerId: 1, actionPending: false });
+
+    render(<ActionButton />);
+
+    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeInTheDocument();
+  });
+
+  it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: createGameState(blockerPrompt()),
+      waitingFor: blockerPrompt(),
+      legalActions: [],
+    });
+    useGameStore.setState((state) => ({
+      gameState: state.gameState
+        ? {
+            ...state.gameState,
+            turn_decision_controller: 1,
+            active_player: 0,
+          }
+        : state.gameState,
+    }));
+    useMultiplayerStore.setState({ activePlayerId: 1, actionPending: false });
+
+    render(<ActionButton />);
+
+    expect(screen.getByRole("button", { name: "Block with None" })).toBeInTheDocument();
+  });
 });

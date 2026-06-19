@@ -557,6 +557,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             def = def.multi_target(spec);
         } else if let Some(spec) = extract_bounded_target_multi_target(&clause_ir.source_text) {
             def = def.multi_target(spec);
+        } else if let Some(spec) = extract_optional_target_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
+        } else if let Some(spec) = extract_verb_up_to_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
         } else if let Some(ref spec) = clause_ir.parsed.multi_target {
@@ -1459,7 +1463,21 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
         | Effect::ChangeZone { target, .. } => {
-            if matches!(target, TargetFilter::ParentTarget) {
+            // CR 603.7c + CR 608.2c: inside an ETB-triggered token-copier (e.g.
+            // Flameshadow Conjuring / Inalla: "create a token that's a copy of
+            // that creature. … Exile it at the beginning of the next end step"),
+            // the trigger sets the effect's subject to the *entering* creature,
+            // so the bare-"it" pronoun lowers to `TriggeringSource` rather than
+            // `ParentTarget`. In this gated post-token scope the antecedent of
+            // "it"/"that token" is the newly created token, so both fallback
+            // anaphors rewrite to `LastCreated`. (The `CopyTokenOf` copy source
+            // is structurally absent from these arms, so it stays
+            // `TriggeringSource` — the token is still a copy of the entering
+            // creature.)
+            if matches!(
+                target,
+                TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+            ) {
                 *target = TargetFilter::LastCreated;
             }
         }
@@ -2970,6 +2988,34 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
     None
 }
 
+/// CR 115.1d: Recover "up to N target …" from imperative text where the verb
+/// precedes the count phrase — "tap up to four target permanents" (Elder
+/// Deep-Fiend). The targeted-action parser strips the count via
+/// `strip_optional_target_prefix` but does not attach `MultiTargetSpec`.
+pub(crate) fn extract_optional_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    for verb in MULTI_TARGET_VERBS {
+        let Ok((after_verb, _)) =
+            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
+        else {
+            continue;
+        };
+        let (_, multi_target) = strip_optional_target_prefix(after_verb);
+        if multi_target.is_some() {
+            return multi_target;
+        }
+    }
+    None
+}
+
+/// CR 115.1d: Recover "verb up to N <filter>" when the phrase omits the word
+/// "target" — "untap up to five lands" (Peregrine Drake). Delegates to
+/// `strip_any_number_quantifier`, which is the single authority for that shape.
+pub(crate) fn extract_verb_up_to_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let (_, multi_target) = strip_any_number_quantifier(text);
+    multi_target
+}
+
 fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     let lower = text.to_lowercase();
     let mut parser = preceded(
@@ -3087,6 +3133,18 @@ pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTar
     }
     let (_, multi_target) = strip_optional_target_prefix(target_text);
     multi_target
+}
+
+/// CR 115.1d + CR 122.1: Recover `MultiTargetSpec` for "remove … from each of
+/// any number of <type>". The imperative parser strips the distribution prefix
+/// so `parse_type_phrase` sees a bare filter; rebuild the spec from the
+/// original text (parallel to `extract_switch_pt_multi_target`).
+pub(super) fn extract_remove_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    if strip_after(&lower, "from each of any number of ").is_some() {
+        return Some(MultiTargetSpec::unlimited(0));
+    }
+    None
 }
 
 fn parse_each_of_up_to_damage_target<'a>(
@@ -4587,6 +4645,8 @@ fn resolve_player_anaphor_damage_recipient(
     }
     match ctx.relative_player_scope {
         Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
+        Some(ControllerRef::ParentTargetController) => Some(TargetFilter::ParentTargetController),
+        Some(ControllerRef::ParentTargetOwner) => Some(TargetFilter::ParentTargetOwner),
         Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
             Some(TargetFilter::TriggeringPlayer)
         }
@@ -5435,7 +5495,8 @@ fn apply_where_x_continuous_modification(
         }
         // Resolution-time-consumed; where-X counter quantities are applied by
         // the counter/enter-with parser paths before this continuous grant pass.
-        ContinuousModification::AddCounterOnEnter { .. } => {}
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => {}
         // Non-dynamic modifications carry fixed integers, enum payloads, or
         // nested definitions that are already parsed/lowered independently.
         // Keep this wildcard-free so a future QuantityExpr-carrying variant
@@ -5532,7 +5593,8 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
             rebind_cost_paid_object_pt_to_target(value);
         }
-        ContinuousModification::AddCounterOnEnter { .. } => {}
+        ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
@@ -6061,6 +6123,28 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn extract_optional_target_multi_target_recovers_tap_up_to_four() {
+        use crate::types::ability::MultiTargetSpec;
+        let spec = super::extract_optional_target_multi_target("tap up to four target permanents")
+            .expect("Elder Deep-Fiend cast trigger shape");
+        assert_eq!(
+            spec,
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })
+        );
+    }
+
+    #[test]
+    fn extract_verb_up_to_multi_target_recovers_untap_lands() {
+        use crate::types::ability::MultiTargetSpec;
+        let spec = super::extract_verb_up_to_multi_target("untap up to five lands")
+            .expect("Peregrine Drake ETB shape");
+        assert_eq!(
+            spec,
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 5 })
+        );
+    }
 
     #[test]
     fn distribute_damage_power_equal_pattern() {

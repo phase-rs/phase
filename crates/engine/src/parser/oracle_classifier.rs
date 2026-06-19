@@ -500,6 +500,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     ) {
         return true;
     }
+    // CR 117.1c + CR 113.6b: Evendo-class compact persistent exile-play
+    // permission. Like the Matrix form above, this may be preceded by timing
+    // and condition qualifiers.
+    if scan_contains(lower, "you may play cards exiled with")
+        || scan_contains(lower, "you may play the cards exiled with")
+    {
+        return true;
+    }
     // CR 601.3f + CR 406.6: The "look-at" variant leads with "you may look at
     // cards exiled with ~, and you may play lands and cast spells from among
     // those cards." — the play/cast clause uses "those cards" (a back-reference
@@ -611,6 +619,13 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
     }
 
     if lower.trim_end_matches('.').ends_with(" enter untapped") {
+        return true;
+    }
+
+    // CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+    // is a replacement effect. The "When ~ is turned face up" form is a trigger
+    // and stays out of this path, so the lead is required to be "As".
+    if lower_starts_with(lower, "as ") && scan_contains(lower, "is turned face up") {
         return true;
     }
 
