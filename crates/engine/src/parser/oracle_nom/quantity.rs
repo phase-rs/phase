@@ -2248,17 +2248,31 @@ fn parse_cost_paid_object_prepositional_ref(input: &str) -> OracleResult<'_, Qua
     ))
 }
 
-/// Shared participle + noun matcher for the cost-paid-object class. Each axis is
-/// a single `alt()` over independent variants — adding a participle or noun
-/// extends one branch and both the possessive and prepositional arms inherit it.
+/// Shared participle + noun matcher for the cost-paid / event-context object
+/// class. Each axis is a single `alt()` over independent variants — adding a
+/// participle or noun extends one branch and both the possessive and
+/// prepositional arms inherit it.
 ///
 /// CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+/// "returned" names an object moved to another zone by a previous instruction.
 fn parse_cost_paid_participle_noun(input: &str) -> OracleResult<'_, ()> {
     let (rest, _) = alt((
-        tag("sacrificed "),
-        tag("exiled "),
-        tag("discarded "),
-        tag("milled "),
+        alt((
+            tag("sacrificed "),
+            tag("exiled "),
+            tag("discarded "),
+            tag("milled "),
+            tag("targeted "),
+        )),
+        alt((
+            tag("destroyed "),
+            tag("countered "),
+            tag("returned "),
+            tag("revealed "),
+            tag("drawn "),
+            tag("copied "),
+            tag("discovered "),
+        )),
     ))
     .parse(input)?;
     let (rest, _) = alt((
@@ -4973,6 +4987,7 @@ mod tests {
             "mana value of the sacrificed permanent",
             "the mana value of the exiled creature",
             "the converted mana cost of the sacrificed artifact",
+            "the mana value of the returned creature",
         ] {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
             assert_eq!(
