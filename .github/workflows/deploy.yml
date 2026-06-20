@@ -36,14 +36,17 @@ jobs:
       card_data_filename: ${{ steps.card-data-hash.outputs.filename }}
     env:
       # Release-gate: Marvel Super Heroes (MSH/MSC/TMSH) are implemented in the
-      # engine but must NOT be playable or visible on the preview/staging site
-      # until release (2026-06-26). GATED_SETS makes the data generators drop
-      # these sets from the deployed card pool: card-data.json (deck search +
-      # gameplay), set-list.json (set pickers / draft UI), and draft-pools.json
-      # (draftable sets). Reprint-aware — a card also printed in a non-gated set
-      # stays available. Local dev is unaffected (GATED_SETS is unset there).
+      # engine but must NOT be playable on the preview/staging site until release
+      # (2026-06-26). GATED_SETS gates these sets two ways at data-generation
+      # time: (1) cards available ONLY through gated sets stay in card-data.json
+      # (so they remain browsable/previewable) but are marked Banned in every
+      # format, excluding them from every format-scoped deck-builder pool; and
+      # (2) the sets are hidden from set-list.json (set pickers / draft UI) and
+      # draft-pools.json (draftable sets), so they cannot be drafted. Reprint-
+      # aware — a card also printed in a non-gated set keeps its real legalities.
+      # Local dev is unaffected (GATED_SETS is unset there).
       # TO UNLOCK ON RELEASE: delete this `GATED_SETS` line (or set it empty) and
-      # re-run the deploy.
+      # re-run the deploy — real MTGJSON legalities and the sets are restored.
       GATED_SETS: MSH,MSC,TMSH
     steps:
       - uses: actions/checkout@v4

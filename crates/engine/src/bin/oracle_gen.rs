@@ -869,20 +869,31 @@ fn main() {
         }
     }
 
-    // Release-gate: drop cards available ONLY through gated sets (reprint-aware).
-    // No-op when GATED_SETS is unset/empty. See `database::set_gating`.
+    // Release-gate (hybrid): keep cards available ONLY through gated sets in
+    // card-data so they stay browsable, but mark them Banned in every format so
+    // they are excluded from every format-scoped deck-builder pool. The gated
+    // sets are separately hidden from the draft/picker/deck-builder UIs below
+    // (the `is_set_gated` filter on the set list), so the sets remain
+    // un-draftable. Reprint-aware. No-op when GATED_SETS is unset/empty. See
+    // `database::set_gating`.
     let gated_sets = set_gating::gated_sets_from_env();
     if !gated_sets.is_empty() {
-        let before = face_index.len();
-        face_index.retain(|_, entry| !set_gating::is_card_gated(&entry.printings, &gated_sets));
+        let banned = legalities_to_export_map(&set_gating::all_formats_banned());
+        let mut gated_count = 0usize;
+        for entry in face_index.values_mut() {
+            if set_gating::is_card_gated(&entry.printings, &gated_sets) {
+                entry.legalities = banned.clone();
+                gated_count += 1;
+            }
+        }
         eprintln!(
-            "Set gating active ({}): excluded {} card face(s) available only via gated sets",
+            "Set gating active ({}): marked {} card face(s) Banned in all formats (available only via gated sets)",
             {
                 let mut codes: Vec<&str> = gated_sets.iter().map(String::as_str).collect();
                 codes.sort_unstable();
                 codes.join(",")
             },
-            before - face_index.len()
+            gated_count
         );
     }
 

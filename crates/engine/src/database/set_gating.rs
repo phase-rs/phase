@@ -14,6 +14,8 @@
 
 use std::collections::HashSet;
 
+use super::legality::{CardLegalities, LegalityFormat, LegalityStatus};
+
 /// Name of the environment variable that lists gated set codes.
 pub const GATED_SETS_ENV: &str = "GATED_SETS";
 
@@ -62,6 +64,21 @@ pub fn is_card_gated(printings: &[String], gated: &HashSet<String>) -> bool {
     printings
         .iter()
         .all(|set| gated.contains(&set.to_uppercase()))
+}
+
+/// Legalities map marking a card `Banned` in every format.
+///
+/// The hybrid release-gate keeps a gated card in card-data (browsable) but
+/// overrides its legalities to this map, so it is excluded from every
+/// format-scoped deck-builder pool (`database::search` drops non-legal cards).
+/// The override is reversed on unlock — regenerate without `GATED_SETS` to
+/// restore the card's real MTGJSON legalities. This is a release-gate override,
+/// not a statement about the card's true format legality.
+pub fn all_formats_banned() -> CardLegalities {
+    LegalityFormat::ALL
+        .into_iter()
+        .map(|format| (format, LegalityStatus::Banned))
+        .collect()
 }
 
 #[cfg(test)]
@@ -150,5 +167,18 @@ mod tests {
     fn card_gating_is_case_insensitive() {
         let gated = set(&["MSH"]);
         assert!(is_card_gated(&["msh".to_string()], &gated));
+    }
+
+    #[test]
+    fn all_formats_banned_covers_every_format() {
+        let banned = all_formats_banned();
+        assert_eq!(banned.len(), LegalityFormat::ALL.len());
+        assert!(banned
+            .values()
+            .all(|status| *status == LegalityStatus::Banned));
+        // Every known format must be present (the hybrid gate bans everywhere).
+        assert!(LegalityFormat::ALL
+            .iter()
+            .all(|format| banned.get(format) == Some(&LegalityStatus::Banned)));
     }
 }
