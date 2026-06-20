@@ -140,6 +140,20 @@ impl CardDatabase {
         self.face_index.get(&key)
     }
 
+    /// Resolve a face by its Scryfall oracle id. Used as a fallback when a
+    /// name-based lookup fails — e.g. cube/deck imports whose source cached a
+    /// pre-reveal placeholder name that no longer matches the printed name.
+    /// oracle id is stable across renames, alternate art, and split/Room faces
+    /// (which share one oracle id). Returns the first exported face for the id;
+    /// for single-face cards that is unambiguous, and split-card imports resolve
+    /// by name long before this fallback runs.
+    pub fn get_face_by_oracle_id(&self, oracle_id: &str) -> Option<&CardFace> {
+        self.oracle_id_index
+            .get(oracle_id)?
+            .iter()
+            .find_map(|name| self.face_index.get(name))
+    }
+
     pub fn get_face_by_printed_ref(&self, printed_ref: &PrintedCardRef) -> Option<&CardFace> {
         self.oracle_id_index
             .get(&printed_ref.oracle_id)?
