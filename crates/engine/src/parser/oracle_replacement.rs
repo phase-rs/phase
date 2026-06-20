@@ -276,6 +276,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // CR 614.1a + CR 120.6: Wolverine, Fierce Fighter — heal-prior-damage
+    // replacement ("instead that damage is dealt, but all other damage already
+    // dealt to him is healed"). The new damage IS dealt (no prevention); only
+    // prior marked damage clears. Tried before the generic self-instead
+    // followup, whose "<effect> instead" shape this mid-clause "instead" does
+    // not fit.
+    if let Some(def) = parse_damage_heal_self_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
     if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
         return Some(def);
@@ -4030,10 +4040,19 @@ fn parse_damage_modification_static(
     let modification =
         nom_primitives::scan_at_word_boundaries(norm_lower, parse_damage_modification_quantifier)?;
 
-    // --- 2. Extract source filter from the subject clause (between "that" and "would deal") ---
-    // Pattern: "Double all damage that [subject] would deal"
-    // Split on "that" to get the modification prefix, then extract subject between "that" and "would deal"
-    let (_, (_, after_that)) = nom_primitives::split_once_on(norm_lower, "that ").ok()?;
+    // --- 2. Extract source filter from the subject clause ---
+    // Pattern: "Double all damage[ that] [subject] would deal" — the "that"
+    // relative-clause marker is OPTIONAL. "Double all damage that creature
+    // would deal" carries it; Mjölnir ("Double all damage equipped creature
+    // would deal") omits it. Consume it with opt(tag) rather than requiring a
+    // split on "that ", and extract the subject as the span between the
+    // "double all damage" quantifier and " would deal".
+    let (_, (_, after_quantifier)) =
+        nom_primitives::split_once_on(norm_lower, "double all damage").ok()?;
+    let after_quantifier = after_quantifier.trim_start();
+    let (after_that, _) = opt(tag::<_, _, OracleError<'_>>("that "))
+        .parse(after_quantifier)
+        .ok()?;
     let (_, (subject, _)) = nom_primitives::split_once_on(after_that, " would deal").ok()?;
 
     let source_filter = parse_damage_source_subject_filter(subject.trim());
@@ -4494,7 +4513,31 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
     None
 }
 
+/// CR 301.5 + CR 702.6: "equipped creature" (Equipment) and "enchanted
+/// creature" (Aura) both name the host object the permanent is attached to,
+/// which the runtime resolves via `TargetFilter::AttachedTo`. Mirrors the
+/// `parse_damage_history_source` "enchanted creature" mapping so both the
+/// "instead" and no-"instead" damage-replacement surfaces agree.
+fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::AttachedTo,
+            tag::<_, _, OracleError<'_>>("equipped creature"),
+        ),
+        value(TargetFilter::AttachedTo, tag("enchanted creature")),
+    ))
+    .parse(input)
+}
+
 fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+    // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
+    // "enchanted creature") resolve to the attached object before the generic
+    // typed-source grammar, which would otherwise treat "creature" as a type.
+    if let Ok((rest, filter)) = parse_attached_host_subject(subject) {
+        if rest.trim().is_empty() {
+            return Some(filter);
+        }
+    }
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
     }
@@ -5513,6 +5556,23 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
         TokenReplacementShape::PlusSpec { spec } => {
             def = def.additional_token_spec(*spec);
         }
+        TokenReplacementShape::Substitute { token } => {
+            // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation).
+            // Approach (A) — no new ReplacementDefinition field: carry the
+            // substitute characteristics as an Effect::Token in the existing
+            // `execute` field (mirrors `mill_applier` reading `def.execute`).
+            // `create_token_applier` resolves it to a TokenSpec and swaps it in,
+            // preserving the event's count and owner.
+            def = def.execute(AbilityDefinition::new(AbilityKind::Spell, *token));
+            // CR 111.1: gate the substitution on the proposed token's core card
+            // type ("if one or more CREATURE tokens would be created" — only
+            // creature tokens become Angels).
+            if let Some(core_type) = parse_token_core_type_gate(lower) {
+                def = def.condition(ReplacementCondition::TokenCoreTypeMatches {
+                    core_types: vec![core_type],
+                });
+            }
+        }
     }
 
     // Scope: "under your control" → restrict to controller's tokens
@@ -5538,6 +5598,10 @@ enum TokenReplacementShape {
     PlusSpec {
         spec: Box<crate::types::proposed_event::TokenSpec>,
     },
+    /// "that many [spec] are created instead" — full token substitution
+    /// (Divine Visitation). The substitute characteristics are carried as an
+    /// `Effect::Token` (resolved to a `TokenSpec` by the applier).
+    Substitute { token: Box<Effect> },
 }
 
 /// CR 614.1a: Nom dispatch on the two token-replacement shapes. Uses
@@ -5561,6 +5625,28 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     }
 
     // "those tokens plus <spec> (is|are) created instead" → Chatterfang / Donatello.
+    if let Some(spec) = parse_token_plus_spec_shape(lower) {
+        return Some(TokenReplacementShape::PlusSpec {
+            spec: Box::new(spec),
+        });
+    }
+
+    // "that many <spec> (is|are) created instead" → full token SUBSTITUTION
+    // (Divine Visitation). Disjoint prefix from PlusSpec ("those tokens plus")
+    // and gated after Double ("twice that many"), so order is unambiguous.
+    if let Some(token) = parse_token_substitute_shape(lower) {
+        return Some(TokenReplacementShape::Substitute {
+            token: Box::new(token),
+        });
+    }
+
+    None
+}
+
+/// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
+/// instead" appended-token spec (Chatterfang / Donatello). Returns the parsed
+/// `TokenSpec` for the appended token, or `None` if the phrase is absent.
+fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::proposed_event::TokenSpec> {
     // Extract the spec descriptor between "those tokens plus " and the trailing
     // "are/is created instead" clause using nom combinators.
     let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
@@ -5580,10 +5666,49 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
         .trim();
     let descriptor = normalize_additional_token_descriptor(descriptor)?;
     let token = super::oracle_effect::parse_token_description(&descriptor)?;
-    let spec = token_description_to_spec(&token)?;
-    Some(TokenReplacementShape::PlusSpec {
-        spec: Box::new(spec),
-    })
+    token_description_to_spec(&token)
+}
+
+/// CR 614.1a + CR 111.1: Extract the "that many <spec> (is|are) created instead"
+/// substitution spec (Divine Visitation). The "that many " count prefix is left
+/// on the descriptor so `try_parse_token` binds it to `EventContextAmount`
+/// (the substitution keeps the proposed event's count at apply time, so this
+/// resolved count is ignored). Returns the substitute `Effect::Token`, or `None`
+/// when the phrase is absent or doesn't parse to a token effect.
+fn parse_token_substitute_shape(lower: &str) -> Option<Effect> {
+    let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
+        let (i, pre) = take_until::<_, _, OracleError<'_>>("that many ").parse(i)?;
+        let start_offset = pre.len();
+        let (i, _) = tag("that many ").parse(i)?;
+        let (_, descriptor) = alt((
+            take_until::<_, _, OracleError<'_>>(" are created instead"),
+            take_until::<_, _, OracleError<'_>>(" is created instead"),
+        ))
+        .parse(i)?;
+        Ok((i, (start_offset, "that many ".len() + descriptor.len())))
+    })?;
+
+    let descriptor = lower
+        .get(descriptor_start..descriptor_start + descriptor_len)?
+        .trim();
+    let mut ctx = ParseContext::default();
+    let effect = super::oracle_effect::try_parse_token(descriptor, descriptor, &mut ctx)?;
+    matches!(effect, Effect::Token { .. }).then_some(effect)
+}
+
+/// CR 111.1: Extract the gated core card type from "if one or more <core type>
+/// tokens would be created" (Divine Visitation gates on Creature). Returns
+/// `None` when no typed gate is present (e.g. Doubling Season's untyped "one or
+/// more tokens").
+fn parse_token_core_type_gate(lower: &str) -> Option<crate::types::card_type::CoreType> {
+    let (word, _) = nom_on_lower(lower, lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>("one or more ").parse(i)?;
+        let (i, _) = tag("one or more ").parse(i)?;
+        let (i, word) = take_until::<_, _, OracleError<'_>>(" tokens would be created").parse(i)?;
+        Ok((i, word.to_string()))
+    })?;
+    // The line is lowercased; `CoreType::from_str` expects title case ("Creature").
+    crate::types::card_type::CoreType::from_str(&capitalize_first(word.trim())).ok()
 }
 
 /// CR 614.1a + CR 111.1: Normalize the optional "additional" modifier on
@@ -6246,6 +6371,59 @@ fn parse_damage_redirection_replacement(
     }
 
     None
+}
+
+/// CR 614.1a + CR 120.6 + CR 510.2: Wolverine, Fierce Fighter — "If damage
+/// would be dealt to ~, instead that damage is dealt, but all other damage
+/// already dealt to him is healed."
+///
+/// Unlike the generic self-instead followup, the new damage instance is NOT
+/// prevented (it IS dealt); only the receiver's PRIOR marked damage is cleared.
+/// Emits a `DealtDamage` replacement with NO prevention shield, carrying an
+/// `Effect::RemoveAllDamage { SelfRef }` in `execute`. `dealt_damage_applier`
+/// runs the heal in Phase B (before delivery), so same-batch combat instances
+/// (CR 510.2) are preserved while prior damage clears.
+///
+/// The receiver self-reference may surface as `~` (the source's own normalized
+/// name) or an object pronoun (`him`/`her`/`it`/`them`), which `~`-normalization
+/// does not rewrite — both are accepted via a shared `alt`.
+fn parse_damage_heal_self_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    fn self_ref(i: &str) -> OracleResult<'_, &str> {
+        alt((
+            tag::<_, _, OracleError<'_>>("~"),
+            tag("him"),
+            tag("her"),
+            tag("it"),
+            tag("them"),
+        ))
+        .parse(i)
+    }
+
+    let mut combinator = all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("if damage would be dealt to "),
+            self_ref,
+            tag(", instead that damage is dealt, but all other damage already dealt to "),
+            self_ref,
+            tag(" is healed"),
+        ),
+        opt(char('.')),
+    ));
+    combinator.parse(norm_lower.trim()).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DealtDamage)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RemoveAllDamage {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .description(original_text.to_string()),
+    )
 }
 
 fn parse_damage_to_self_instead_followup(

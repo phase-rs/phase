@@ -370,6 +370,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::ExtraTurn { target, .. }
         | Effect::SkipNextStep { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }

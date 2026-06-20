@@ -795,6 +795,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
         | EffectKind::Regenerate
+        | EffectKind::RemoveAllDamage
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie

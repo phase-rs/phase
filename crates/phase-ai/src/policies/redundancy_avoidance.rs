@@ -362,6 +362,7 @@ fn redundancy_delta(
         | Effect::ChangeSpeed { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::LoseLife { .. }

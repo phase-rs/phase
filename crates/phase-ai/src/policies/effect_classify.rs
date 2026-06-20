@@ -112,6 +112,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::DoublePTAll { .. } => EffectPolarity::Beneficial,
         Effect::SkipNextTurn { .. } | Effect::SkipNextStep { .. } => EffectPolarity::Contextual,
         Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
         | Effect::PreventDamage { .. }
         | Effect::Animate { .. }
         | Effect::DoublePT { .. } => EffectPolarity::Beneficial,
@@ -211,6 +212,7 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::DoublePT { target, .. }
         | Effect::DoublePTAll { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::PreventDamage { target, .. }
         // Harmful effects
         | Effect::Destroy { target, .. }

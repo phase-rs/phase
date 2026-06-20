@@ -153,6 +153,7 @@ pub mod rad_counters;
 pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
+pub mod remove_all_damage;
 pub mod remove_from_combat;
 pub mod renown;
 pub mod return_as_aura;
@@ -2554,6 +2555,7 @@ pub fn resolve_effect(
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
         Effect::Destroy { .. } => destroy::resolve(state, ability, events),
         Effect::Regenerate { .. } => regenerate::resolve(state, ability, events),
+        Effect::RemoveAllDamage { .. } => remove_all_damage::resolve(state, ability, events),
         Effect::Counter { .. } => counter::resolve(state, ability, events),
         Effect::CounterAll { .. } => counter::resolve_all(state, ability, events),
         Effect::Token { .. } => token::resolve(state, ability, events),
@@ -4168,6 +4170,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::PairWith { target }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::GainControl { target, .. }
         | Effect::Counter { target, .. }

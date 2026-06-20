@@ -1489,7 +1489,7 @@ fn normalize_token_self_lki_trigger(trigger: &mut TriggerDefinition) {
 /// CR 111.1 + CR 111.4: Resolve a base `Effect::Token`'s per-resolution
 /// `TokenSpec` (+ owner, enter-tap state, resolved count) read-only, mirroring
 /// the prefix of `resolve` exactly. Returns `None` for any non-`Token` effect.
-fn resolve_token_spec(
+pub(crate) fn resolve_token_spec(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<(

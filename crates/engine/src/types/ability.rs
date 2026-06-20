@@ -7341,6 +7341,16 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 120.6 + CR 120.3: Remove all damage marked on the target creature(s)
+    /// ("all damage already dealt to him is healed"). Unlike `Regenerate`, this
+    /// does not create a shield, tap, or remove from combat — it only clears
+    /// marked damage (and the deathtouch flag) early, before the cleanup step
+    /// (CR 514.2) at which damage would otherwise wear off. Used by Wolverine,
+    /// Fierce Fighter's heal-on-damage replacement.
+    RemoveAllDamage {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     Counter {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -10430,6 +10440,7 @@ impl Effect {
             | Effect::PairWith { target }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
+            | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
             | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
@@ -10853,6 +10864,7 @@ impl Effect {
             | Effect::PairWith { .. }
             | Effect::Destroy { .. }
             | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
             | Effect::Counter { .. }
             | Effect::CounterAll { .. }
             // CR 701.26a/b: tap/untap carry no QuantityExpr in any scope.
@@ -11063,6 +11075,7 @@ impl Effect {
             | Effect::PairWith { .. }
             | Effect::Destroy { .. }
             | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
             | Effect::Counter { .. }
             | Effect::CounterAll { .. }
             // CR 701.26a/b: tap/untap carry no QuantityExpr in any scope.
@@ -11219,6 +11232,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PairWith { .. } => "PairWith",
         Effect::Destroy { .. } => "Destroy",
         Effect::Regenerate { .. } => "Regenerate",
+        Effect::RemoveAllDamage { .. } => "RemoveAllDamage",
         Effect::Counter { .. } => "Counter",
         Effect::CounterAll { .. } => "CounterAll",
         Effect::Token { .. } => "Token",
@@ -11540,6 +11554,7 @@ pub enum EffectKind {
     PreventDamage,
     CreateDamageReplacement,
     Regenerate,
+    RemoveAllDamage,
     LoseTheGame,
     WinTheGame,
     RollDie,
@@ -11643,6 +11658,7 @@ impl From<&Effect> for EffectKind {
             Effect::PairWith { .. } => EffectKind::PairWith,
             Effect::Destroy { .. } => EffectKind::Destroy,
             Effect::Regenerate { .. } => EffectKind::Regenerate,
+            Effect::RemoveAllDamage { .. } => EffectKind::RemoveAllDamage,
             Effect::Counter { .. } => EffectKind::Counter,
             Effect::CounterAll { .. } => EffectKind::CounterAll,
             Effect::Token { .. } => EffectKind::Token,
@@ -14190,6 +14206,15 @@ pub enum ReplacementCondition {
     /// `subtypes` is `Vec<String>` to mirror the existing `TokenSpec.subtypes`
     /// shape; introducing a typed `Subtype` enum is a separate, broader refactor.
     TokenSubtypeMatches { subtypes: Vec<String> },
+    /// CR 614.1a + CR 111.1: Gate a `CreateToken` replacement on whether the
+    /// proposed event creates a token whose core card types overlap a fixed set.
+    /// Used by Divine Visitation ("If one or more creature tokens would be
+    /// created under your control, …") — the substitution applies only to
+    /// CREATURE tokens. Sibling of `TokenSubtypeMatches` but on the orthogonal
+    /// core-type axis (CR 111.1 token characteristics); distinct fields, so the
+    /// two are NOT a sibling-cluster smell. Matched case-exactly against the
+    /// proposed `TokenSpec.characteristics.core_types`.
+    TokenCoreTypeMatches { core_types: Vec<CoreType> },
     /// CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in each
     /// of your draw steps" — the replacement applies to every card-draw EXCEPT
     /// the draw step's mandatory first draw (the active player's CR 504.1

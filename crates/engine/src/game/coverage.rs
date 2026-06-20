@@ -1989,7 +1989,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
-        | Effect::Regenerate { target } => {
+        | Effect::Regenerate { target }
+        | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.

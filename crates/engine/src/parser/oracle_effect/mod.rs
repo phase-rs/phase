@@ -53,6 +53,7 @@ use lower::{
 };
 
 pub(crate) use self::token::parse_token_description;
+pub(crate) use self::token::try_parse_token;
 
 use std::str::FromStr;
 
@@ -13367,6 +13368,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::Pump { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::Counter { target, .. }
         // CR 701.26a/b: only single-target tap/untap carries an `Any` target to
         // rewrite into the subject filter.
@@ -16033,6 +16035,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }

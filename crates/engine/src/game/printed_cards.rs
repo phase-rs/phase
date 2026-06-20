@@ -900,6 +900,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
