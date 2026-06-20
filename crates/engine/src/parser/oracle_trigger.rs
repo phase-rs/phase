@@ -2922,6 +2922,22 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
     alt((compact, split_your)).parse(rest)
 }
 
+/// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become
+/// tapped this turn" — intervening-if gating a tap trigger on the triggering
+/// object's first tap of the turn (Captain America, Living Legend). The "it's" is
+/// the expletive subject; the real object is "that creature" / "that permanent" /
+/// "it", which binds to the tapped object carried by the `PermanentTapped` event.
+fn parse_first_time_tapped_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = alt((
+        tag("if it's the first time "),
+        tag("if it is the first time "),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag("that creature"), tag("that permanent"), tag("it"))).parse(rest)?;
+    let (rest, _) = tag(" has become tapped this turn").parse(rest)?;
+    Ok((rest, TriggerCondition::FirstTimeObjectTappedThisTurn))
+}
+
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
@@ -3040,6 +3056,20 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // is a prefix of "if it was cast using web-slinging" and would shadow it.
     if let Some((before, condition, rest)) =
         scan_preceded(&lower, parse_cast_using_variant_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
+    // CR 701.26 + CR 603.4: "if it's the first time that creature has become tapped
+    // this turn" — first-tap intervening-if (Captain America, Living Legend). Source/
+    // triggering-object-referential, so it cannot lower through a StaticCondition.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_first_time_tapped_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
@@ -6226,6 +6256,7 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
             alt((
                 preceded(tag("an "), tag("opponent")),
                 preceded(tag("one of your "), tag("opponents")),
+                preceded(tag("one or more of your "), tag("opponents")),
                 preceded(tag("another "), tag("player")),
             )),
         )
@@ -13941,6 +13972,30 @@ mod tests {
         ));
     }
 
+    /// MSH Wave 2 (Molten Lavamancer): the batched "one or more of your opponents"
+    /// recipient must parse as a noncombat damage trigger whose recipient is an
+    /// opponent. Without the new `parse_opponent_player_recipient` arm, the
+    /// recipient is unmatched, `try_parse_source_deals_damage_trigger` bails on the
+    /// `valid_target.is_none()` guard, and `mode != DamageDone`.
+    #[test]
+    fn molten_lavamancer_one_or_more_opponents_recipient_parses() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals noncombat damage to one or more of your \
+             opponents during your turn, you create a 1/1 red Elemental creature token. \
+             This ability triggers only once each turn.",
+            "Molten Lavamancer",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            "recipient must be an opponent-controlled player filter"
+        );
+    }
+
     #[test]
     fn hunters_insight_class_builds_whenever_event_delayed_trigger() {
         use crate::parser::oracle::parse_oracle_text;
@@ -19736,6 +19791,22 @@ mod tests {
         );
         assert!(cond.is_some(), "condition must be extracted");
         assert_eq!("~ deals 1 damage to you", cleaned);
+    }
+
+    /// CR 701.26 + CR 603.4: Captain America, Living Legend — the first-tap
+    /// intervening-if lowers to `TriggerCondition::FirstTimeObjectTappedThisTurn`
+    /// and is stripped from the effect text, leaving the bare "untap it" effect.
+    #[test]
+    fn extract_if_condition_first_time_tapped_pattern() {
+        let (cleaned, cond) = super::extract_if_condition(
+            "if it's the first time that creature has become tapped this turn, untap it.",
+        );
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::FirstTimeObjectTappedThisTurn),
+            "first-tap intervening-if must extract FirstTimeObjectTappedThisTurn"
+        );
+        assert_eq!("untap it", cleaned);
     }
 
     #[test]

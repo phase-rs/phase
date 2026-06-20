@@ -560,6 +560,17 @@ pub struct BattlefieldEntryRecord {
     pub supertypes: Vec<Supertype>,
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 403.3 + CR 603.10: keyword abilities the object had at the moment it
+    /// entered (entry snapshot per CR 403.3), so look-back conditions ("a creature
+    /// with flying entered this turn") evaluate via the CR 603.10 last-known-state
+    /// against entry-time characteristics (like the existing core_types/colors
+    /// snapshots). KNOWN LIMITATION: this captures the object's keywords at record
+    /// time, which is BEFORE the layer system re-evaluates (layers are only marked
+    /// dirty, not recomputed, at zone-change). Printed flyers and keyword-counter /
+    /// intrinsic flyers are counted; a creature granted flying ONLY by a Layer-6
+    /// continuous effect (e.g. an anthem) at the moment it enters is NOT counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
 }
 
@@ -5851,6 +5862,14 @@ pub struct GameState {
     /// set is the authoritative "was exerted this turn" record.
     #[serde(default)]
     pub exerted_this_turn: std::collections::HashSet<ObjectId>,
+    /// CR 701.26 + CR 603.4: Count of times each object became tapped this turn,
+    /// keyed by object id. Populated at the central `GameEvent::PermanentTapped`
+    /// observer (the same sink that records damage), so combat, effect, and crew
+    /// taps all count. Cleared at turn start. A value of 1 means "first time this
+    /// turn" — the count model (not a HashSet) keeps the CR 603.4 resolution-time
+    /// re-check of `FirstTimeObjectTappedThisTurn` correct.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub object_tap_count_this_turn: std::collections::HashMap<ObjectId, u32>,
     /// CR 508.1g + CR 508.2: Declaration events (e.g. `AttackersDeclared`) held
     /// while the active player resolves the optional "exert as it attacks"
     /// sub-step. Because triggers are matched against the per-action event slice
@@ -7078,6 +7097,7 @@ impl GameState {
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
+            object_tap_count_this_turn: std::collections::HashMap::new(),
             pending_attack_trigger_events: Vec::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),

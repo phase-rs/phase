@@ -1072,6 +1072,22 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
 /// `collect_triggers_into_deferred` composes it with the `deferred_triggers`
 /// queue for resolution-choice handlers that must collect without dispatching
 /// (issue #423).
+/// CR 701.26: Increment the per-object "became tapped this turn" count for each
+/// `PermanentTapped` event in the batch. Cleared at turn start (turns.rs). The
+/// count model (vs. a set) lets the CR 603.4 resolution-time re-check of
+/// `FirstTimeObjectTappedThisTurn` distinguish the genuine first tap (== 1) from
+/// any later tap of the same object in the same turn.
+fn observe_object_taps(state: &mut GameState, events: &[GameEvent]) {
+    for event in events {
+        if let GameEvent::PermanentTapped { object_id, .. } = event {
+            *state
+                .object_tap_count_this_turn
+                .entry(*object_id)
+                .or_insert(0) += 1;
+        }
+    }
+}
+
 fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -1085,6 +1101,14 @@ fn collect_pending_triggers(
     // `obj.trigger_definitions` and `obj.keywords` reflect all active
     // continuous effects before this pass scans for matching triggers.
     super::layers::flush_layers(state);
+    // CR 701.26 + CR 603.4: Observe every `PermanentTapped` event in this batch and
+    // bump the per-object tap-count ledger BEFORE any trigger condition is checked,
+    // so a "first time it became tapped this turn" intervening-if
+    // (`FirstTimeObjectTappedThisTurn`) reads count == 1 for the tap that just fired.
+    // `collect_pending_triggers` is the single chokepoint all trigger collection
+    // funnels through (combat declaration, mana taps, cost taps, crew), so combat +
+    // effect + crew taps all count here regardless of which producer emitted them.
+    observe_object_taps(state, events);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -5126,6 +5150,18 @@ pub(crate) fn check_trigger_condition(
                     && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
+        // CR 701.26 + CR 603.4: "if it's the first time [it] has become tapped this
+        // turn" — the intervening-if subject is the tapped object carried by the
+        // `PermanentTapped` event (not the trigger source). The ledger is incremented
+        // in `observe_object_taps` before this check, so exactly-one tap reads
+        // count == 1. Checked at both trigger time and resolution (CR 603.4); a later
+        // tap of the same object advances the count past 1 and the re-check fizzles.
+        TriggerCondition::FirstTimeObjectTappedThisTurn => trigger_event
+            .and_then(|e| match e {
+                GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|id| state.object_tap_count_this_turn.get(&id).copied() == Some(1)),
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
         TriggerCondition::WasType { card_type } => source_id
@@ -11284,6 +11320,110 @@ pub mod tests {
             Some(source),
             None,
         ));
+    }
+
+    /// CR 701.26 + CR 603.4: `FirstTimeObjectTappedThisTurn` holds only when the
+    /// tapped object (carried by the `PermanentTapped` event) has become tapped
+    /// exactly once this turn (ledger == 1). A second tap (== 2) fails the
+    /// resolution-time re-check; a non-tap event and an absent event also fail.
+    #[test]
+    fn test_first_time_object_tapped_this_turn_condition() {
+        let mut state = setup();
+        let tapped = ObjectId(42);
+        let condition = TriggerCondition::FirstTimeObjectTappedThisTurn;
+        let event = GameEvent::PermanentTapped {
+            object_id: tapped,
+            caused_by: None,
+        };
+
+        // No taps recorded yet → false.
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+
+        // First tap (count == 1) → true.
+        state.object_tap_count_this_turn.insert(tapped, 1);
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+
+        // Second tap of the same object this turn (count == 2) → false.
+        state.object_tap_count_this_turn.insert(tapped, 2);
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+
+        // A different object's tap event with no ledger entry → false.
+        state.object_tap_count_this_turn.insert(tapped, 1);
+        let other_event = GameEvent::PermanentTapped {
+            object_id: ObjectId(99),
+            caused_by: None,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&other_event),
+        ));
+
+        // A non-tap event → false (only PermanentTapped carries the subject).
+        let non_tap = GameEvent::CreatureDestroyed { object_id: tapped };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&non_tap),
+        ));
+
+        // No event → false.
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None,
+        ));
+    }
+
+    /// CR 701.26: `observe_object_taps` increments the per-object tap-count ledger
+    /// once per `PermanentTapped` event in the batch — the single chokepoint that
+    /// makes combat, effect, and crew taps all count.
+    #[test]
+    fn test_observe_object_taps_counts_each_tap_event() {
+        let mut state = setup();
+        let a = ObjectId(1);
+        let b = ObjectId(2);
+        let events = vec![
+            GameEvent::PermanentTapped {
+                object_id: a,
+                caused_by: None,
+            },
+            GameEvent::PermanentTapped {
+                object_id: b,
+                caused_by: None,
+            },
+            GameEvent::PermanentTapped {
+                object_id: a,
+                caused_by: None,
+            },
+        ];
+        observe_object_taps(&mut state, &events);
+        assert_eq!(state.object_tap_count_this_turn.get(&a).copied(), Some(2));
+        assert_eq!(state.object_tap_count_this_turn.get(&b).copied(), Some(1));
     }
 
     /// CR 120.1 + CR 108.3: `DamagedPlayerIsEventSourceOwner` holds only when the

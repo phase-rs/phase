@@ -7338,6 +7338,43 @@ fn backup_grant_modifications(face: &CardFace) -> Vec<ContinuousModification> {
     modifications
 }
 
+/// CR 702 + CR 201.5: Collect the keywords the raw Oracle text grants as standalone
+/// keyword lines (e.g. "Flying" or "Flying, vigilance"). A line counts only when EVERY
+/// comma-separated part parses as a real keyword via `parse_keyword_from_oracle`, so
+/// ability lines that merely mention a keyword word ("Whenever Storm attacks, ...") are
+/// excluded. Used to corroborate name-colliding MTGJSON keywords before they are kept.
+fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
+    let mut keywords = Vec::new();
+    for line in raw_oracle_text.lines() {
+        let without_reminder = strip_reminder_text(line);
+        let parts: Vec<&str> = without_reminder
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let mut line_keywords = Vec::new();
+        let mut all_keywords = true;
+        for part in parts {
+            match parse_keyword_from_oracle(&part.to_ascii_lowercase()) {
+                Some(keyword) if !matches!(keyword, Keyword::Unknown(_)) => {
+                    line_keywords.push(keyword)
+                }
+                _ => {
+                    all_keywords = false;
+                    break;
+                }
+            }
+        }
+        if all_keywords {
+            keywords.extend(line_keywords);
+        }
+    }
+    keywords
+}
+
 fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModification> {
     let mut modifications = Vec::new();
     for line in granted_text.lines() {
@@ -9754,6 +9791,28 @@ fn build_oracle_face_inner(
         keywords.retain(|keyword| !matches!(keyword, Keyword::Craft { .. }));
     }
 
+    // CR 702.40 + CR 201.5: MTGJSON sometimes asserts a keyword whose token coincides
+    // with a word in the card's own name (e.g. it tags the Storm keyword for "Storm,
+    // Queen of Wakanda"). A keyword ability is only real if the card's rules text grants
+    // it. Drop a name-colliding MTGJSON keyword that the Oracle text does NOT corroborate
+    // as a standalone keyword line; corroborated keywords (e.g. Flying on a card literally
+    // named "Flying Men") and non-colliding keywords (e.g. Storm's real Flying) are kept.
+    // Corroboration re-scans the raw Oracle lines via `parse_keyword_from_oracle` rather
+    // than reading `extracted_keywords`, because the latter deliberately omits evergreen
+    // keywords already present in the MTGJSON list (only multi-instance keywords survive
+    // there — see `extract_keyword_line`). Value-equality (e == kw) matches the
+    // `merge_extracted_keywords` convention.
+    let name_words: std::collections::HashSet<String> = face_name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let oracle_corroborated = oracle_corroborated_keywords(raw_oracle_text);
+    keywords.retain(|kw| {
+        let token = kw.to_string().to_lowercase();
+        !name_words.contains(&token) || oracle_corroborated.iter().any(|e| e == kw)
+    });
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
@@ -10426,6 +10485,104 @@ mod cycling_synthesis_tests {
                 )
             }),
             "cycling line must not become an Unimplemented spell ability"
+        );
+    }
+
+    /// MSH Wave 2 (Storm, Queen of Wakanda): MTGJSON phantom-tags the Storm keyword
+    /// (CR 702.40) because the card's name embeds the word "Storm". The synthesis
+    /// name-guard must drop the uncorroborated Storm keyword while keeping the real
+    /// standalone Flying line. CR 201.5: a name reference means just that object.
+    #[test]
+    fn synthesis_drops_name_colliding_uncorroborated_keyword() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+
+        let oracle = "Flying\n\
+                      Whenever Storm attacks, until end of turn, another target attacking \
+                      creature gains flying and gets +X/+0, where X is Storm's power.";
+        let storm = AtomicCard {
+            name: "Storm, Queen of Wakanda".to_string(),
+            mana_cost: Some("{3}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            text: Some(oracle.to_string()),
+            power: Some("4".to_string()),
+            toughness: Some("4".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Legendary Creature — Human Hero".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string(), "Hero".to_string()],
+            supertypes: vec!["Legendary".to_string()],
+            keywords: Some(vec!["Flying".to_string(), "Storm".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 4.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("storm-queen-test".to_string()),
+                scryfall_id: Some("storm-queen-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&storm, None);
+        assert!(
+            face.keywords.contains(&Keyword::Flying),
+            "real standalone Flying line must survive"
+        );
+        assert!(
+            !face.keywords.iter().any(|k| matches!(k, Keyword::Storm)),
+            "phantom name-colliding Storm keyword must be dropped (not in Oracle text)"
+        );
+    }
+
+    /// Negative: a keyword that collides with the card's name but IS corroborated by
+    /// a standalone Oracle keyword line (a card literally named "Flying Men" with a
+    /// "Flying" line) must be kept — corroboration overrides the name collision.
+    #[test]
+    fn synthesis_keeps_name_colliding_corroborated_keyword() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+
+        let men = AtomicCard {
+            name: "Flying Men".to_string(),
+            mana_cost: Some("{U}".to_string()),
+            colors: vec!["U".to_string()],
+            color_identity: vec!["U".to_string()],
+            text: Some("Flying".to_string()),
+            power: Some("1".to_string()),
+            toughness: Some("1".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Human".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string()],
+            supertypes: vec![],
+            keywords: Some(vec!["Flying".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 1.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("flying-men-test".to_string()),
+                scryfall_id: Some("flying-men-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&men, None);
+        assert!(
+            face.keywords.contains(&Keyword::Flying),
+            "name-colliding Flying corroborated by a standalone Oracle line must be kept"
         );
     }
 }

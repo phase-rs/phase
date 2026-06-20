@@ -2505,7 +2505,10 @@ fn resolve_ref(
                             .filter(|record| {
                                 record.controller == scoped_player.id
                                     && crate::game::restrictions::battlefield_entry_matches_filter(
-                                        record, filter, controller,
+                                        record,
+                                        filter,
+                                        controller,
+                                        Some(filter_ctx.source_id),
                                     )
                             })
                             .count(),

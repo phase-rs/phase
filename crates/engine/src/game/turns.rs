@@ -614,6 +614,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.sacrificed_permanents_this_turn.clear();
     state.zone_changes_this_turn.clear();
     state.battlefield_entries_this_turn.clear();
+    // CR 701.26 + CR 603.4: reset per-object tap counts so "first time it became
+    // tapped this turn" intervening-ifs start fresh each turn.
+    state.object_tap_count_this_turn.clear();
     state.damage_dealt_this_turn.clear();
     // CR 702.173a + CR 514: Clear the Freerunning eligibility ledger at
     // cleanup. CR 702.173a's "was dealt combat damage this turn" predicate

@@ -3097,6 +3097,9 @@ fn parse_counter_word(input: &str) -> OracleResult<'_, ()> {
 fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
     alt((
+        // CR 201.5: self-reference ("on ~" ← "on Beast") binds the counter-added
+        // filter to the source object (Beast, Erudite Aerialist).
+        value(TargetFilter::SelfRef, tag("~")),
         value(
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             // number axis × controller-phrase axis (PATTERNS.md §8b) — "creatures"
@@ -4705,6 +4708,30 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::permanent().controller(ControllerRef::You)
                 ),
+            }
+        );
+    }
+
+    /// MSH Wave 2 (Beast, Erudite Aerialist): "you've put one or more +1/+1
+    /// counters on ~ this turn" (self-ref normalized from "on Beast") must parse
+    /// the counter-added target as `TargetFilter::SelfRef`, so the runtime quantity
+    /// resolver counts only counters placed on the source object (CR 201.5). Without
+    /// the `~` arm the target is unmatched and the whole condition fails to parse.
+    #[test]
+    fn parse_counter_added_condition_accepts_self_ref_target() {
+        let (rest, q) = parse_counter_added_this_turn_condition(
+            "you've put one or more +1/+1 counters on ~ this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::Controller,
+                counters: crate::types::counter::CounterMatch::OfType(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                ),
+                target: TargetFilter::SelfRef,
             }
         );
     }

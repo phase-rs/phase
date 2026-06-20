@@ -935,28 +935,46 @@ fn parse_you_event_this_turn(text: &str) -> nom::IResult<&str, ParsedCondition, 
     .parse(text)
 }
 
-/// "[type] enter(ed) the battlefield under your control this turn"
+/// CR 400.7: modern templating elides "the battlefield" after "enter(ed)", so
+/// "[type] entered under your control this turn" is equivalent to the full form
+/// "[type] entered the battlefield under your control this turn". Matches the
+/// optional " the battlefield" then the mandatory control/this-turn suffix.
+fn entered_under_your_control_suffix(text: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value(
+        (),
+        (
+            opt(tag(" the battlefield")),
+            tag(" under your control this turn"),
+        ),
+    )
+    .parse(text)
+}
+
+/// "[type] enter(ed) [the battlefield] under your control this turn"
 fn parse_etb_this_turn_condition(
     text: &str,
 ) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::YouHadCreatureEnterThisTurn,
-            alt((
-                tag("a creature entered the battlefield under your control this turn"),
-                tag("creature enter the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("a creature entered"), tag("creature enter"))),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn,
-            tag("angel or berserker enter the battlefield under your control this turn"),
+            (
+                tag("angel or berserker enter"),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadArtifactEnterThisTurn,
-            alt((
-                tag("an artifact entered the battlefield under your control this turn"),
-                tag("artifact entered the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("an artifact entered"), tag("artifact entered"))),
+                entered_under_your_control_suffix,
+            ),
         ),
     ))
     .parse(text)
