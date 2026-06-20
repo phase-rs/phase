@@ -3633,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_pest_preset_grants_attack_life_trigger() {
+    fn catalog_pest_preset_grants_dies_life_trigger() {
         let preset = crate::game::token_presets::known_token_preset_by_id(
             "00a0801d-0212-5890-8957-3cde30f382f9",
         )
@@ -3657,12 +3657,12 @@ mod tests {
         assert_eq!(
             obj.trigger_definitions.len(),
             1,
-            "catalog rules_text must install the attacks life trigger intrinsically"
+            "catalog rules_text must install the dies life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
         assert_eq!(
             obj.token_rules_text.as_deref(),
-            Some("Whenever this token attacks, you gain 1 life.")
+            Some("When this creature dies, you gain 1 life.")
         );
     }
 

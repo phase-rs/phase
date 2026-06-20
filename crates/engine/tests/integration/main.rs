@@ -174,6 +174,7 @@ mod issue_1973_rise_of_dark_realms;
 mod issue_1985_dfc_command_zone_cast;
 mod issue_1987_bucknards_everfull_purse;
 mod issue_2011_eldrazi_temple_kozilek_cast;
+mod issue_2020_smeagol_ring_tempt;
 mod issue_2345_lavinia_no_mana_spent;
 mod issue_2348_key_to_the_vault;
 mod issue_2351_aven_interrupter;

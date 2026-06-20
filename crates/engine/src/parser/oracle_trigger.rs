@@ -1168,10 +1168,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     }
 
     // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
-    // references ControllerRef::TargetPlayer.
+    // references ControllerRef::TargetPlayer, when the effect text names a
+    // target opponent/player (Sméagol, Helpful Guide RingTemptsYou), or when a
+    // RevealUntil names an opponent library without TargetPlayer binding.
     if def.valid_target.is_none() {
-        if let Some(execute) = def.execute.as_deref() {
-            if execute_references_target_player(&execute.effect) {
+        let effect_lower = modifiers.effect_lower.as_str();
+        if scan_contains(effect_lower, "target opponent")
+            || scan_contains(effect_lower, "target player")
+        {
+            def.valid_target = Some(TargetFilter::Player);
+        } else if let Some(execute) = def.execute.as_deref() {
+            if execute_references_target_player(&execute.effect)
+                || execute_references_opponent_player(&execute.effect)
+            {
                 def.valid_target = Some(TargetFilter::Player);
             }
         }
@@ -5631,6 +5640,28 @@ fn execute_references_target_player(effect: &crate::types::ability::Effect) -> b
         }
     }
     false
+}
+
+/// CR 115.1 + CR 701.20a: Returns `true` when a `RevealUntil` (or nested
+/// sub-ability) names an opponent/player library without `TargetPlayer`
+/// binding — e.g. Sméagol's "target opponent reveals..." RingTemptsYou trigger.
+fn execute_references_opponent_player(effect: &crate::types::ability::Effect) -> bool {
+    fn filter_references_opponent(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(TypedFilter { controller, .. }) => {
+                matches!(controller, Some(ControllerRef::Opponent))
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_references_opponent)
+            }
+            TargetFilter::Not { filter } => filter_references_opponent(filter),
+            _ => false,
+        }
+    }
+    match effect {
+        Effect::RevealUntil { player, .. } => filter_references_opponent(player),
+        _ => false,
+    }
 }
 
 /// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
@@ -21764,6 +21795,51 @@ mod tests {
             "Ringwraiths",
         );
         assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+
+    #[test]
+    fn trigger_ring_tempts_you_target_opponent_reveal_sets_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever the Ring tempts you, target opponent reveals cards from the top of their library until they reveal a land card. Put that card onto the battlefield tapped under your control and the rest into their graveyard.",
+            "Sméagol, Helpful Guide",
+        );
+        assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        let Effect::RevealUntil {
+            player,
+            filter,
+            kept_destination,
+            rest_destination,
+            enter_tapped,
+            enters_under,
+            ..
+        } = def.execute.as_ref().unwrap().effect.as_ref()
+        else {
+            panic!("expected RevealUntil");
+        };
+        assert!(
+            matches!(
+                player,
+                TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)
+            ),
+            "reveal player must be opponent, got {player:?}"
+        );
+        assert!(
+            matches!(filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)),
+            "filter must be land, got {filter:?}"
+        );
+        assert_eq!(*kept_destination, Zone::Battlefield);
+        assert_eq!(*rest_destination, Zone::Graveyard);
+        assert_eq!(
+            *enter_tapped,
+            crate::types::zones::EtbTapState::Tapped,
+            "land must enter tapped"
+        );
+        assert_eq!(
+            *enters_under,
+            Some(ControllerRef::You),
+            "stolen land must enter under ability controller"
+        );
     }
 
     #[test]

@@ -8011,6 +8011,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_reveal_until_target_opponent() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                filter: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Land)),
+                kept_destination: Zone::Battlefield,
+                rest_destination: Zone::Graveyard,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(0))),
+            "target opponent reveal must not allow targeting yourself"
+        );
+    }
+
     /// Issue #933: mass filters can declare a target only through a dynamic
     /// threshold ("power greater than target creature's power"). The target
     /// lives inside `FilterProp::PtComparison.value`, so `DestroyAll` must

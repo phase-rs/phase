@@ -6697,6 +6697,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
+            enters_under: None,
         }));
     }
 
@@ -6746,6 +6747,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         kept_optional_to: None,
+        enters_under: None,
     }))
 }
 
@@ -45015,6 +45017,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    enters_under: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=Controller, creature->hand, rest->library, got: {:?}",
@@ -45081,6 +45084,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    enters_under: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=ParentTargetController, got: {:?}",
@@ -45157,6 +45161,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    enters_under: None,
                 } if type_filters.contains(&TypeFilter::Land)
             ),
             "expected RevealUntil(kept=Graveyard, rest=Graveyard), got: {:?}",
@@ -45234,6 +45239,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    enters_under: None,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),
             "expected RevealUntil player=Controller, artifact->battlefield, got: {:?}",

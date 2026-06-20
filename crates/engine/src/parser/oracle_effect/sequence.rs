@@ -2896,6 +2896,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped: tapped,
             enters_attacking: attacking,
             rest_destination: rest_dest,
+            enters_under,
             optional_decline,
         } => {
             let Some(previous) = defs.last_mut() else {
@@ -2907,6 +2908,7 @@ pub(super) fn apply_clause_continuation(
                 enters_attacking,
                 rest_destination,
                 kept_optional_to,
+                enters_under: effect_enters_under,
                 ..
             } = &mut *previous.effect
             {
@@ -2940,6 +2942,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
+                *effect_enters_under = enters_under;
             }
         }
         ContinuationAst::GrantExtraTurnAfterControlledTurn => {
@@ -4498,11 +4501,17 @@ pub(super) fn parse_followup_continuation_ast(
             } else {
                 None
             };
+            let enters_under = if nom_primitives::scan_contains(&lower, "under your control") {
+                Some(ControllerRef::You)
+            } else {
+                None
+            };
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
                 enters_attacking,
                 rest_destination: rest,
+                enters_under,
                 optional_decline,
             })
         }

@@ -8860,6 +8860,10 @@ pub enum Effect {
         /// kept card unconditionally goes to `kept_destination` (mandatory).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kept_optional_to: Option<Zone>,
+        /// CR 110.2a: When set, the kept card enters the battlefield under this
+        /// controller ("under your control" on Telemin Performance / Sméagol).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
@@ -10280,7 +10284,6 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
-            | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -10360,6 +10363,15 @@ impl Effect {
             // spell ability, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. } => None,
+            // CR 115.1: RevealUntil with a non-context player filter ("target
+            // opponent reveals...") requires a stack-time player target slot.
+            Effect::RevealUntil { player, .. } => {
+                if player.is_context_ref() {
+                    None
+                } else {
+                    Some(player)
+                }
+            }
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
             Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),

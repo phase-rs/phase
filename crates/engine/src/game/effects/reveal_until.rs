@@ -31,6 +31,7 @@ pub fn resolve(
         enter_tapped,
         enters_attacking,
         kept_optional_to,
+        enters_under,
     ) = match &ability.effect {
         Effect::RevealUntil {
             player,
@@ -40,6 +41,7 @@ pub fn resolve(
             enter_tapped,
             enters_attacking,
             kept_optional_to,
+            enters_under,
         } => (
             player,
             filter,
@@ -48,6 +50,7 @@ pub fn resolve(
             *enter_tapped,
             *enters_attacking,
             *kept_optional_to,
+            enters_under.as_ref(),
         ),
         _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
     };
@@ -133,6 +136,12 @@ pub fn resolve(
 
     // Move the matching card to its destination.
     if let Some(hit) = hit_card {
+        let controller_override = super::change_zone::resolve_enters_under_player(
+            state,
+            ability,
+            "RevealUntil",
+            enters_under,
+        )?;
         match kept_destination {
             Zone::Battlefield => {
                 // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
@@ -145,6 +154,9 @@ pub fn resolve(
                 // dropped (it would double the work the tail already does).
                 let mut req = ZoneMoveRequest::effect(hit, Zone::Battlefield, ability.source_id);
                 req.mods.enter_tapped = enter_tapped;
+                if let Some(controller) = controller_override {
+                    req = req.under_control_of(controller);
+                }
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {}
                     // CR 303.4f / CR 616.1: the kept card's battlefield entry
@@ -472,6 +484,7 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -496,6 +509,7 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
+                enters_under: None,
             },
             targets,
             ObjectId(100),
@@ -1051,6 +1065,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
+                    enters_under: None,
                 },
                 vec![],
                 ObjectId(100),
@@ -1168,6 +1183,7 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Library),
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -1239,6 +1255,7 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Battlefield),
+                enters_under: None,
             },
             vec![],
             ObjectId(100),

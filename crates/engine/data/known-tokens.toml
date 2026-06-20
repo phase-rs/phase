@@ -885,7 +885,7 @@ set_name = "Secrets of Strixhaven"
 collector_number = "8"
 released_at = "2026-04-24"
 type_line = "Token Creature — Pest"
-rules_text = "Whenever this token attacks, you gain 1 life."
+rules_text = "When this creature dies, you gain 1 life."
 
 [token.body]
 display_name = "Pest"
@@ -100242,7 +100242,7 @@ set_name = "Secrets of Strixhaven"
 collector_number = "9"
 released_at = "2026-04-24"
 type_line = "Token Creature — Pest"
-rules_text = "Whenever this token attacks, you gain 1 life."
+rules_text = "When this creature dies, you gain 1 life."
 
 [token.body]
 display_name = "Pest"

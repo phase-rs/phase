@@ -10770,6 +10770,7 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
+            enters_under: None,
         };
 
         assert_eq!(

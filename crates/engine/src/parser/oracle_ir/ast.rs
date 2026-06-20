@@ -343,6 +343,8 @@ pub(crate) enum ContinuationAst {
         /// ("tapped and attacking"). Absorbs into `enters_attacking`.
         enters_attacking: bool,
         rest_destination: Option<Zone>,
+        /// CR 110.2a: "under your control" on the kept-card clause.
+        enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`
         /// is then the accept zone and `decline_zone` is where the kept card
