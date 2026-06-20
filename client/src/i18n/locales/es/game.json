@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Resolviendo {{resolved}} / {{total}}"
+    "label": "Resolviendo {{resolved}} / {{total}}",
+    "collapse": "Contraer progreso de resolución",
+    "expand": "Expandir progreso de resolución"
   },
   "card": {
     "faceDownName": "Carta boca abajo",

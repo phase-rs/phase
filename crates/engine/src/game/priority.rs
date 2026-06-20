@@ -25,6 +25,15 @@ pub fn handle_priority_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
+    handle_priority_pass_with_limit(current_seat, state, events, None)
+}
+
+pub fn handle_priority_pass_with_limit(
+    current_seat: PlayerId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    stack_resolution_limit: Option<u32>,
+) -> WaitingFor {
     // Record this seat's pass (CR 117.4).
     state.priority_passes.insert(current_seat);
 
@@ -69,7 +78,8 @@ pub fn handle_priority_pass(
             // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
             // run of identical token triggers collapses into one step that
             // consumes K entries (Tier 3); otherwise exactly one entry resolves.
-            let consumed = super::stack::resolve_next(state, events);
+            let consumed =
+                super::stack::resolve_next_with_limit(state, events, stack_resolution_limit);
 
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth

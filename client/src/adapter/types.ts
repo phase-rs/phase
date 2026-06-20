@@ -2155,7 +2155,7 @@ export function isStateLostMessage(message: string): boolean {
 /**
  * Transport-agnostic interface for communicating with the game engine.
  * Phase 1: WasmAdapter (direct WASM calls)
- * Phase 7: TauriAdapter (IPC to native Rust process)
+ * Tauri desktop uses the same WasmAdapter path as browser local gameplay.
  */
 export interface SubmitResult {
   events: GameEvent[];

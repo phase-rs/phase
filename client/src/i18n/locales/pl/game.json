@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Rozwiązywanie {{resolved}} / {{total}}"
+    "label": "Rozwiązywanie {{resolved}} / {{total}}",
+    "collapse": "Zwiń postęp rozwiązywania",
+    "expand": "Rozwiń postęp rozwiązywania"
   },
   "card": {
     "faceDownName": "Karta zakryta",

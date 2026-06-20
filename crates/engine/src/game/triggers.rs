@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
@@ -13,15 +13,15 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint, WaitingFor,
+    AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, MayTriggerAutoChoiceKey,
+    MayTriggerOrigin, StackEntry, StackEntryKind, TargetSelectionConstraint, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
-use crate::types::statics::{StaticMode, TriggerCause};
+use crate::types::statics::{StaticMode, SuppressedTriggerEvent, TriggerCause};
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
 
@@ -188,6 +188,18 @@ struct MatchedTrigger {
     constraint: Option<crate::types::ability::TriggerConstraint>,
 }
 
+struct OffZoneTriggerSourceCache {
+    zone: Zone,
+    source_ids: Vec<ObjectId>,
+    granted_keyword_triggers: HashMap<ObjectId, Vec<(KeywordKind, TriggerDefinition)>>,
+}
+
+struct ActiveSuppressTriggerStatic {
+    source_id: ObjectId,
+    source_filter: TargetFilter,
+    events: Vec<SuppressedTriggerEvent>,
+}
+
 /// A trigger that has been collected and is queued for stack placement.
 ///
 /// CR 113.2c + CR 603.2 + CR 603.3b: Each instance of a printed triggered
@@ -230,10 +242,17 @@ fn matching_batched_trigger_events(
     obj_id: ObjectId,
     controller: PlayerId,
     matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<GameEvent> {
     event_batch
         .iter()
-        .filter(|candidate| !event_is_suppressed_by_static_triggers(state, candidate))
+        .filter(|candidate| {
+            !event_is_suppressed_by_static_triggers_cached(
+                state,
+                candidate,
+                active_suppress_triggers,
+            )
+        })
         .filter(|candidate| matcher(candidate, trig_def, obj_id, state))
         .filter(|candidate| {
             trig_def.condition.as_ref().is_none_or(|condition| {
@@ -408,6 +427,34 @@ fn collect_matching_triggers(
     zone_filter: Option<Zone>,
     batched_this_pass: &mut HashSet<(ObjectId, usize)>,
     registered_this_event: &mut HashSet<(ObjectId, usize)>,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Vec<MatchedTrigger> {
+    collect_matching_triggers_inner(
+        state,
+        event,
+        event_batch,
+        source_obj,
+        timestamp,
+        zone_filter,
+        batched_this_pass,
+        registered_this_event,
+        None,
+        active_suppress_triggers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_matching_triggers_inner(
+    state: &GameState,
+    event: &GameEvent,
+    event_batch: &[GameEvent],
+    source_obj: &GameObject,
+    timestamp: u32,
+    zone_filter: Option<Zone>,
+    batched_this_pass: &mut HashSet<(ObjectId, usize)>,
+    registered_this_event: &mut HashSet<(ObjectId, usize)>,
+    cached_granted_keyword_triggers: Option<&[(KeywordKind, TriggerDefinition)]>,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
     let obj_id = source_obj.id;
@@ -427,7 +474,9 @@ fn collect_matching_triggers(
     // object just left the battlefield. Runtime-granted keyword triggers such
     // as Undying/Persist may be cleaned from the live object before the LTB
     // trigger scan, but the ZoneChangeRecord preserves the LKI keyword set.
-    let granted_keyword_triggers = if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
+    let granted_keyword_triggers = if let Some(cached) = cached_granted_keyword_triggers {
+        cached.to_vec()
+    } else if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
         let off_zone_keywords =
             crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id);
         synthesize_granted_keyword_triggers(source_obj, off_zone_keywords.iter())
@@ -597,6 +646,7 @@ fn collect_matching_triggers(
                     obj_id,
                     controller,
                     matcher,
+                    active_suppress_triggers,
                 );
                 if trigger_events.is_empty() {
                     continue;
@@ -842,9 +892,39 @@ fn storm_copy_count_before_cast(state: &GameState) -> i32 {
 /// Replacement effects (CR 614) are unaffected — they run in a different phase.
 /// Static "enters with" / "enters tapped" / "as X enters" effects (CR 603.6d) are
 /// also unaffected because they are static abilities, not triggered ones.
-fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) -> bool {
-    use crate::types::statics::SuppressedTriggerEvent;
+fn active_suppress_trigger_statics(state: &GameState) -> Vec<ActiveSuppressTriggerStatic> {
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
+    // command-zone / condition gate so Torpor Orb phased out no longer silently
+    // suppresses ETB triggers.
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(bf_obj, def)| {
+            let StaticMode::SuppressTriggers {
+                source_filter,
+                events,
+            } = &def.mode
+            else {
+                return None;
+            };
+            Some(ActiveSuppressTriggerStatic {
+                source_id: bf_obj.id,
+                source_filter: source_filter.clone(),
+                events: events.clone(),
+            })
+        })
+        .collect()
+}
 
+#[cfg(test)]
+fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) -> bool {
+    let active_suppress_triggers = active_suppress_trigger_statics(state);
+    event_is_suppressed_by_static_triggers_cached(state, event, &active_suppress_triggers)
+}
+
+fn event_is_suppressed_by_static_triggers_cached(
+    state: &GameState,
+    event: &GameEvent,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> bool {
     // Classify the event: is it ETB, Dies, or neither?
     let (record, triggered_event) = match event {
         GameEvent::ZoneChanged {
@@ -861,26 +941,16 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
         _ => return false,
     };
 
-    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
-    // command-zone / condition gate so Torpor Orb phased out no longer silently
-    // suppresses ETB triggers.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::SuppressTriggers {
-            ref source_filter,
-            ref events,
-        } = def.mode
-        else {
-            continue;
-        };
-        if !events.contains(&triggered_event) {
+    for suppressor in active_suppress_triggers {
+        if !suppressor.events.contains(&triggered_event) {
             continue;
         }
         // CR 603.10a: Zone-change last-known information — use the record snapshot.
-        let filter_ctx = super::filter::FilterContext::from_source(state, bf_obj.id);
+        let filter_ctx = super::filter::FilterContext::from_source(state, suppressor.source_id);
         if super::filter::matches_target_filter_on_zone_change_record(
             state,
             record,
-            source_filter,
+            &suppressor.source_filter,
             &filter_ctx,
         ) {
             return true;
@@ -1019,6 +1089,44 @@ fn collect_pending_triggers(
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
+    let off_zone_trigger_sources = if events.is_empty() {
+        Vec::new()
+    } else {
+        [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
+            .into_iter()
+            .map(|zone| {
+                let source_ids = trigger_source_ids_for_zone(state, zone);
+                let granted_keyword_triggers = source_ids
+                    .iter()
+                    .copied()
+                    .filter_map(|source_id| {
+                        let source_obj = state.objects.get(&source_id)?;
+                        let off_zone_keywords =
+                            crate::game::off_zone_characteristics::effective_off_zone_keywords(
+                                state, source_id,
+                            );
+                        Some((
+                            source_id,
+                            synthesize_granted_keyword_triggers(
+                                source_obj,
+                                off_zone_keywords.iter(),
+                            ),
+                        ))
+                    })
+                    .collect();
+                OffZoneTriggerSourceCache {
+                    zone,
+                    source_ids,
+                    granted_keyword_triggers,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let active_suppress_triggers = if events.is_empty() {
+        Vec::new()
+    } else {
+        active_suppress_trigger_statics(state)
+    };
 
     for event in events {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -1035,7 +1143,7 @@ fn collect_pending_triggers(
         // CR 603.6d: Static "enters tapped"/"enters with counters"/"as X enters"
         // effects are NOT triggered and are unaffected (they run as part of the ETB
         // event itself, not through process_triggers).
-        if event_is_suppressed_by_static_triggers(state, event) {
+        if event_is_suppressed_by_static_triggers_cached(state, event, &active_suppress_triggers) {
             continue;
         }
 
@@ -1046,8 +1154,13 @@ fn collect_pending_triggers(
         // have found get falsely skipped as "already batched this pass" in
         // the shadow path.
         #[cfg(debug_assertions)]
-        let (mut shadow_batched, mut shadow_registered) =
-            (batched_this_pass.clone(), registered_this_event.clone());
+        let audit_trigger_index = std::env::var_os("PHASE_TRIGGER_INDEX_AUDIT").is_some();
+        #[cfg(debug_assertions)]
+        let (mut shadow_batched, mut shadow_registered) = if audit_trigger_index {
+            (batched_this_pass.clone(), registered_this_event.clone())
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
 
         // CR 603.2 + CR 603.6a + CR 611.2e: Consult the maintained TriggerIndex
         // for candidate battlefield objects. Replaces the legacy full
@@ -1138,13 +1251,16 @@ fn collect_pending_triggers(
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
+                        &active_suppress_triggers,
                     ),
                 )
             };
 
             for matched in matched_triggers {
                 #[cfg(debug_assertions)]
-                production_matched.insert((obj_id, matched.trig_idx));
+                if audit_trigger_index {
+                    production_matched.insert((obj_id, matched.trig_idx));
+                }
                 record_trigger_fired(
                     state,
                     matched.constraint.as_ref(),
@@ -1156,10 +1272,12 @@ fn collect_pending_triggers(
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
                 registered_this_event.insert((obj_id, matched.trig_idx));
-                pending.push(PendingTriggerContext::batched(
-                    matched.pending,
-                    matched.trigger_events,
-                ));
+                let trigger_context =
+                    PendingTriggerContext::batched(matched.pending, matched.trigger_events);
+                if pending_trigger_is_auto_inert_noop(state, &trigger_context) {
+                    continue;
+                }
+                pending.push(trigger_context);
             }
 
             // CR 702.108a: Prowess triggers when controller casts a noncreature spell.
@@ -1470,34 +1588,37 @@ fn collect_pending_triggers(
         // do not enter the comparison.
         #[cfg(debug_assertions)]
         {
-            for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
-                let Some(obj) = state.objects.get(&obj_id) else {
-                    continue;
-                };
-                let matched = collect_matching_triggers(
-                    state,
-                    event,
-                    events,
-                    obj,
-                    obj.entered_battlefield_turn.unwrap_or(0),
-                    Some(Zone::Battlefield),
-                    &mut shadow_batched,
-                    &mut shadow_registered,
-                );
-                for m in matched {
-                    shadow_matched.insert((obj_id, m.trig_idx));
+            if audit_trigger_index {
+                for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
+                    let Some(obj) = state.objects.get(&obj_id) else {
+                        continue;
+                    };
+                    let matched = collect_matching_triggers(
+                        state,
+                        event,
+                        events,
+                        obj,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut shadow_batched,
+                        &mut shadow_registered,
+                        &active_suppress_triggers,
+                    );
+                    for m in matched {
+                        shadow_matched.insert((obj_id, m.trig_idx));
+                    }
                 }
+                let dropped: Vec<(ObjectId, usize)> = shadow_matched
+                    .difference(&production_matched)
+                    .copied()
+                    .collect();
+                debug_assert!(
+                    dropped.is_empty(),
+                    "TriggerIndex under-approximation (CR 603.2 silent trigger drop): \
+                     event={event:?} dropped_matches={dropped:?} \
+                     candidates_visited={candidates:?}",
+                );
             }
-            let dropped: Vec<(ObjectId, usize)> = shadow_matched
-                .difference(&production_matched)
-                .copied()
-                .collect();
-            debug_assert!(
-                dropped.is_empty(),
-                "TriggerIndex under-approximation (CR 603.2 silent trigger drop): \
-                 event={event:?} dropped_matches={dropped:?} \
-                 candidates_visited={candidates:?}",
-            );
         }
 
         // CR 603.10a: Leaves-the-battlefield abilities look back in time. Objects that
@@ -1533,6 +1654,7 @@ fn collect_pending_triggers(
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
+                        &active_suppress_triggers,
                     )
                 };
                 for matched in matched_triggers {
@@ -1581,6 +1703,7 @@ fn collect_pending_triggers(
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
+                        &active_suppress_triggers,
                     )
                 };
                 for matched in matched_triggers {
@@ -1649,6 +1772,7 @@ fn collect_pending_triggers(
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
+                        &active_suppress_triggers,
                     )
                 };
                 for matched in matched_triggers {
@@ -1677,11 +1801,15 @@ fn collect_pending_triggers(
         // (CR 113.6b), enforced by `active_trigger_definitions`.
         // Synthetic battlefield-only keyword triggers (prowess / ward /
         // firebending / exploit) deliberately do NOT run in this loop.
-        for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command] {
-            for obj_id in trigger_source_ids_for_zone(state, zone) {
-                if !source_was_not_co_departed_into_zone(event, obj_id, zone) {
+        for cache in &off_zone_trigger_sources {
+            for obj_id in cache.source_ids.iter().copied() {
+                if !source_was_not_co_departed_into_zone(event, obj_id, cache.zone) {
                     continue;
                 }
+                let cached_granted_keyword_triggers = cache
+                    .granted_keyword_triggers
+                    .get(&obj_id)
+                    .map(Vec::as_slice);
                 let matched_triggers = {
                     let obj = match state.objects.get(&obj_id) {
                         Some(o) => o,
@@ -1694,7 +1822,7 @@ fn collect_pending_triggers(
                         ..
                     } = event
                     {
-                        if obj_id == *moved_id && *to == zone {
+                        if obj_id == *moved_id && *to == cache.zone {
                             // Full `snapshot_for_zone_change` records always
                             // carry the object name; hand-built test records
                             // omit it. Empty trigger snapshots on named records
@@ -1707,50 +1835,58 @@ fn collect_pending_triggers(
                                 let mut lki_obj = obj.clone();
                                 lki_obj.trigger_definitions =
                                     partition_lki_trigger_definitions(obj, record).0.into();
-                                collect_matching_triggers(
+                                collect_matching_triggers_inner(
                                     state,
                                     event,
                                     events,
                                     &lki_obj,
                                     0,
-                                    Some(zone),
+                                    Some(cache.zone),
                                     &mut batched_this_pass,
                                     &mut registered_this_event,
+                                    cached_granted_keyword_triggers,
+                                    &active_suppress_triggers,
                                 )
                             } else {
-                                collect_matching_triggers(
+                                collect_matching_triggers_inner(
                                     state,
                                     event,
                                     events,
                                     obj,
                                     0,
-                                    Some(zone),
+                                    Some(cache.zone),
                                     &mut batched_this_pass,
                                     &mut registered_this_event,
+                                    cached_granted_keyword_triggers,
+                                    &active_suppress_triggers,
                                 )
                             }
                         } else {
-                            collect_matching_triggers(
+                            collect_matching_triggers_inner(
                                 state,
                                 event,
                                 events,
                                 obj,
                                 0,
-                                Some(zone),
+                                Some(cache.zone),
                                 &mut batched_this_pass,
                                 &mut registered_this_event,
+                                cached_granted_keyword_triggers,
+                                &active_suppress_triggers,
                             )
                         }
                     } else {
-                        collect_matching_triggers(
+                        collect_matching_triggers_inner(
                             state,
                             event,
                             events,
                             obj,
                             0,
-                            Some(zone),
+                            Some(cache.zone),
                             &mut batched_this_pass,
                             &mut registered_this_event,
+                            cached_granted_keyword_triggers,
+                            &active_suppress_triggers,
                         )
                     }
                 };
@@ -2562,6 +2698,7 @@ fn collect_pending_triggers(
     // Scan battlefield for objects with StaticMode::Panharmonicon statics,
     // then clone matching pending triggers.
     apply_trigger_doubling(state, &mut pending);
+    pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 603.3b + CR 101.4: Stack-placement order is full APNAP turn order
     // (active player first / lowest on stack, then each non-active player in
@@ -2576,6 +2713,61 @@ fn collect_pending_triggers(
         )
     });
     pending
+}
+
+fn filter_auto_inert_noop_triggers(
+    state: &mut GameState,
+    pending: Vec<PendingTriggerContext>,
+) -> Vec<PendingTriggerContext> {
+    pending
+        .into_iter()
+        .filter(|ctx| !pending_trigger_is_auto_inert_noop(state, ctx))
+        .collect()
+}
+
+fn pending_trigger_is_auto_inert_noop(state: &mut GameState, ctx: &PendingTriggerContext) -> bool {
+    let pending = &ctx.pending;
+    if !pending.ability.optional {
+        return false;
+    }
+    if pending.ability.sub_ability.is_some() {
+        return false;
+    }
+    let Some(origin) = pending.may_trigger_origin else {
+        return false;
+    };
+    let key = MayTriggerAutoChoiceKey {
+        player: pending.ability.controller,
+        source_id: pending.ability.source_id,
+        origin,
+    };
+    match state.may_trigger_auto_choice(&key) {
+        Some(AutoMayChoice::Decline) => true,
+        Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
+        None => false,
+    }
+}
+
+fn pending_trigger_has_no_legal_resolution_targets(
+    state: &mut GameState,
+    ctx: &PendingTriggerContext,
+) -> bool {
+    let pending = &ctx.pending;
+    let context_snapshot = push_trigger_event_context(
+        state,
+        pending.trigger_event.as_ref(),
+        &ctx.trigger_events,
+        pending.subject_match_count,
+    );
+    let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
+        Ok(slots) => {
+            (pending.ability.effect.target_filter().is_some() && slots.is_empty())
+                || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
+        }
+        Err(_) => true,
+    };
+    restore_trigger_event_context(state, context_snapshot);
+    empty
 }
 
 fn collect_ring_emblem_triggers(
@@ -5689,7 +5881,7 @@ fn record_trigger_fired(
 }
 
 /// Build a ResolvedAbility from a TriggerDefinition using typed fields.
-fn build_triggered_ability(
+pub(super) fn build_triggered_ability(
     state: &GameState,
     trig_def: &TriggerDefinition,
     source_id: ObjectId,
@@ -20488,13 +20680,16 @@ mod dedup_regression_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
-        TargetRef, TriggerDefinition,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::{GameState, WaitingFor, ZoneChangeRecord};
+    use crate::types::game_state::{
+        AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+        ZoneChangeRecord,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
@@ -22881,6 +23076,39 @@ mod dedup_regression_tests {
         id
     }
 
+    /// Helper: install an optional upkeep trigger whose accepted resolution
+    /// would target an opponent's creature. With no such object available, an
+    /// auto-accepted instance is inert and should be
+    /// suppressed before simultaneous-trigger ordering.
+    fn make_optional_phase_trigger_with_no_legal_target(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+    ) -> ObjectId {
+        let id = make_creature(state, owner, name, 1, 1);
+        let target =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(Phase::Upkeep)
+            .optional()
+            .execute(
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::SetTapState {
+                        target,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )
+                .optional(),
+            )
+            .description(format!("{name}: tap target creature card in your hand."));
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.trigger_definitions.push(trig_def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+        id
+    }
+
     /// Read the source IDs of the current stack entries in stack-bottom-to-top
     /// order. Each `StackEntry::source_id` lets the test discriminate which
     /// trigger ended up where.
@@ -22986,6 +23214,54 @@ mod dedup_regression_tests {
             state.stack.len(),
             1,
             "the single trigger reaches the stack directly"
+        );
+    }
+
+    /// CR 603.3b + CR 603.3d: Auto-accepted optional triggers that have no legal
+    /// resolution target are inert. A group of only inert triggers must not
+    /// surface an `OrderTriggers` prompt; otherwise large repeated observer
+    /// piles can spend the fast-forward budget asking the player to order
+    /// triggers that cannot do anything.
+    #[test]
+    fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let src_a =
+            make_optional_phase_trigger_with_no_legal_target(&mut state, PlayerId(0), "Source A");
+        let src_b =
+            make_optional_phase_trigger_with_no_legal_target(&mut state, PlayerId(0), "Source B");
+
+        for source_id in [src_a, src_b] {
+            state.set_may_trigger_auto_choice(
+                MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id,
+                    origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                },
+                AutoMayChoice::Accept,
+            );
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "inert auto-accepted optional triggers must not prompt for ordering"
+        );
+        assert!(
+            state.pending_trigger_order.is_none(),
+            "suppressed inert triggers must not leave an ordering pass"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "suppressed inert triggers must not reach the stack"
         );
     }
 

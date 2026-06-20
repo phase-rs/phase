@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Résolution {{resolved}} / {{total}}"
+    "label": "Résolution {{resolved}} / {{total}}",
+    "collapse": "Réduire la progression de résolution",
+    "expand": "Développer la progression de résolution"
   },
   "card": {
     "faceDownName": "Carte face cachée",

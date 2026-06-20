@@ -18,15 +18,15 @@ use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, PendingCounterPostAction, PendingEffectResolutionEvent,
+    DelayedTrigger, GameState, PendingCopyTokenBatch, PendingCounterPostAction,
+    PendingEffectResolutionEvent,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
-use crate::types::proposed_event::TokenSpec;
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -1305,6 +1305,9 @@ fn try_resolve_copy_batch(
     if prefix_len < 2 {
         return None;
     }
+    if !copy_token_values_emit_only_etb_pair(&prefix_values) {
+        return None;
+    }
 
     // 4. H1 INVARIANCE GATE (AFTER prefix): the condition must be invariant over
     //    the COPY's core types (what enters), not the placeholder spec's. A copy
@@ -1345,14 +1348,52 @@ fn try_resolve_copy_batch(
         return None;
     }
 
-    // 6. Perform the instead-swap ONCE (CR 608.2c) so the batched executor
-    //    resolves the swapped `CopyTokenOf` effect.
-    let swapped = crate::game::ability_utils::apply_instead_swap(ability, sub);
+    // 6. Build the count-aware copy-token batch directly. This uses the same
+    //    replacement/apply primitive as `CopyTokenOf`, but avoids re-resolving the
+    //    self target and recomputing identical copiable values once per stack
+    //    entry.
+    let top_source_id = *run_source_ids.first()?;
+    let top_source = state.objects.get(&top_source_id)?;
+    let copy_batch = PendingCopyTokenBatch {
+        owner,
+        count: prefix_len,
+        copy: Box::new(CopyTokenSpec {
+            values: Box::new(prefix_values.clone()),
+            display_source: top_source.display_source,
+            printed_ref: top_source.printed_ref.clone(),
+            token_image_ref: top_source.token_image_ref.clone(),
+            extra_keywords: extra_keywords.clone(),
+            additional_modifications: additional_modifications.clone(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: ability.duration.clone(),
+            source_id: ability.source_id,
+            controller: ability.controller,
+        }),
+    };
 
     // 7. Hand back the copy-prefix batch.
     Some(super::BatchPlan::copy_token(
-        swapped, probe_spec, prefix_len,
+        copy_batch,
+        EffectKind::from(&sub.effect),
+        ability.source_id,
+        probe_spec,
+        prefix_values.mana_cost.mana_value(),
+        prefix_len,
     ))
+}
+
+/// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
+/// from the copied values while applying the copy. Those counters emit
+/// `CounterAdded` and may pause for replacement choices, so the copy-prefix
+/// batch may only collapse values whose creation still emits exactly the ETB
+/// pair.
+fn copy_token_values_emit_only_etb_pair(values: &crate::types::ability::CopiableValues) -> bool {
+    crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None).is_empty()
+        && crate::game::printed_cards::self_etb_counter_replacements(
+            &values.replacement_definitions,
+        )
+        .is_empty()
 }
 
 /// CR 707.2 + CR 603.6a: Build the Layer C / §2.2a probe `TokenSpec` for a

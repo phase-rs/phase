@@ -1,6 +1,7 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-use crate::game::layers::compute_current_copiable_values;
+use crate::game::layers::{compute_current_copiable_values, has_active_copy_layer_effects};
+use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
@@ -768,6 +769,23 @@ pub(crate) fn compute_copy_batch_prefix(
     source_ids: &[ObjectId],
 ) -> Option<(crate::types::ability::CopiableValues, u32)> {
     let top_id = *source_ids.first()?;
+    if !has_active_copy_layer_effects(state) {
+        let top = state.objects.get(&top_id)?;
+        let prefix_values = intrinsic_copiable_values(top);
+        let mut prefix_len = 1u32;
+        for &id in source_ids.iter().skip(1) {
+            let Some(obj) = state.objects.get(&id) else {
+                break;
+            };
+            if intrinsic_copiable_values(obj) == prefix_values {
+                prefix_len += 1;
+            } else {
+                break;
+            }
+        }
+        return Some((prefix_values, prefix_len));
+    }
+
     // Conserve on a vanished top source.
     let prefix_values = compute_current_copiable_values(state, top_id)?;
 

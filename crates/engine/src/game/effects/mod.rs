@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::game::conditions::{
     eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
@@ -21,7 +21,8 @@ use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
-    MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
+    MayTriggerAutoChoiceKey, PendingContinuation, PendingCopyTokenBatch, WaitingFor,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -2331,11 +2332,11 @@ pub(crate) enum BatchExecutionPlan {
     /// ZoneChanged/TokenCreated probe events from the produced token's true
     /// characteristics.
     CopyToken {
-        // Boxed: `ResolvedAbility` is large, and keeping it inline would make
-        // `BatchExecutionPlan` carry that size in every variant (clippy
-        // `large_enum_variant`).
-        swapped: Box<ResolvedAbility>,
+        copy_batch: PendingCopyTokenBatch,
+        effect_kind: EffectKind,
+        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
+        probe_mana_value: u32,
         prefix_len: u32,
     },
 }
@@ -2363,14 +2364,20 @@ impl BatchPlan {
     /// swapped `CopyTokenOf` `prefix_len` times, producing one copy token each
     /// iteration. Consumes `prefix_len` stack entries (may be < the full run).
     pub(crate) fn copy_token(
-        swapped: ResolvedAbility,
+        copy_batch: PendingCopyTokenBatch,
+        effect_kind: EffectKind,
+        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
+        probe_mana_value: u32,
         prefix_len: u32,
     ) -> Self {
         BatchPlan {
             plan: BatchExecutionPlan::CopyToken {
-                swapped: Box::new(swapped),
+                copy_batch,
+                effect_kind,
+                source_id,
                 probe_spec,
+                probe_mana_value,
                 prefix_len,
             },
             consumed: prefix_len,
@@ -2388,6 +2395,15 @@ impl BatchPlan {
         match &self.plan {
             BatchExecutionPlan::Token { spec, .. } => vec![spec],
             BatchExecutionPlan::CopyToken { probe_spec, .. } => vec![probe_spec],
+        }
+    }
+
+    pub(crate) fn produced_token_mana_values(&self) -> Vec<u32> {
+        match &self.plan {
+            BatchExecutionPlan::Token { .. } => vec![0],
+            BatchExecutionPlan::CopyToken {
+                probe_mana_value, ..
+            } => vec![*probe_mana_value],
         }
     }
 
@@ -2414,12 +2430,24 @@ impl BatchPlan {
             // was applied ONCE in `try_resolve_batch`, and each copy is an
             // independent per-token creation at full multiplicity (§5.2).
             BatchExecutionPlan::CopyToken {
-                swapped,
+                copy_batch,
+                effect_kind,
+                source_id,
                 prefix_len,
                 ..
             } => {
-                for _ in 0..*prefix_len {
-                    let _ = token_copy::resolve(state, swapped, events);
+                token_copy::drive_copy_token_batches(
+                    state,
+                    VecDeque::from([copy_batch.clone()]),
+                    *effect_kind,
+                    *source_id,
+                    events,
+                );
+                for _ in 1..*prefix_len {
+                    events.push(GameEvent::EffectResolved {
+                        kind: *effect_kind,
+                        source_id: *source_id,
+                    });
                 }
             }
         }

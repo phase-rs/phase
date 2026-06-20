@@ -1258,8 +1258,10 @@ pub fn select_action_from_scores(
 /// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
 /// each AI opponent.
 ///
-/// Returns a `BatchResolveResult` with all accumulated events, the final
-/// `WaitingFor`, and a count of items resolved.
+/// Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
+/// count of items resolved. The Resolve All UI does not animate individual
+/// events, so the WASM boundary intentionally returns empty event/log arrays
+/// instead of serializing thousands of records for pathological stacks.
 ///
 /// Stop conditions (all CR-compliant):
 /// - Stack empties
@@ -1314,13 +1316,10 @@ pub fn resolve_all(
 
     with_state_mut(|state| {
         let mut rng = rand::rng();
-        Ok(to_js(&resolve_all_inner(
-            state,
-            requester,
-            &ai_seats,
-            max_resolutions,
-            &mut rng,
-        )))
+        let mut result = resolve_all_inner(state, requester, &ai_seats, max_resolutions, &mut rng);
+        result.events.clear();
+        result.log_entries.clear();
+        Ok(to_js(&result))
     })?
 }
 

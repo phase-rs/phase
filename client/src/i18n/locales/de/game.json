@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Auflösen {{resolved}} / {{total}}"
+    "label": "Auflösen {{resolved}} / {{total}}",
+    "collapse": "Auflösungsfortschritt einklappen",
+    "expand": "Auflösungsfortschritt ausklappen"
   },
   "card": {
     "faceDownName": "Verdeckte Karte",

@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Risoluzione {{resolved}} / {{total}}"
+    "label": "Risoluzione {{resolved}} / {{total}}",
+    "collapse": "Comprimi avanzamento risoluzione",
+    "expand": "Espandi avanzamento risoluzione"
   },
   "card": {
     "faceDownName": "Carta coperta",

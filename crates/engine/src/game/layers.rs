@@ -2149,6 +2149,10 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
+    !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
+}
+
 /// CR 718.3b: A prototyped spell and the permanent it becomes have only their
 /// alternative mana cost and P/T characteristics. If that mana cost contains
 /// colored mana symbols, the spell/permanent is those colors. Reapply this after

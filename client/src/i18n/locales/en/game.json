@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Resolving {{resolved}} / {{total}}"
+    "label": "Resolving {{resolved}} / {{total}}",
+    "collapse": "Collapse resolving progress",
+    "expand": "Expand resolving progress"
   },
   "card": {
     "faceDownName": "Face-down card",
@@ -1547,6 +1549,9 @@
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
+    "exportGameState": "Export Game State",
+    "exported": "Exported",
+    "exportFailed": "Export failed",
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",
