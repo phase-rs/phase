@@ -7658,6 +7658,75 @@ mod tests {
         );
     }
 
+    // CR 205.1a (SET replace) + CR 613.1d (Layer 4) + CR 613.7a (intra-static
+    // written order): Conspiracy's "Creatures you control are the chosen type"
+    // REPLACES the existing creature subtypes. The composed static
+    // [RemoveAllSubtypes{Creature}, AddChosenSubtype{CreatureType}] must wipe the
+    // base "Goblin" subtype (membership resolved against state.all_creature_types)
+    // and re-add the chosen "Zombie" type, in written order, so Zombie survives.
+    #[test]
+    fn test_chosen_creature_type_sets_subtype() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+        // RemoveAllSubtypes{Creature} resolves creature-type membership against
+        // state.all_creature_types — both the wiped Goblin and the re-added Zombie
+        // must be known.
+        state.all_creature_types = vec!["Goblin".to_string(), "Zombie".to_string()];
+
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Conspiracy".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types.subtypes.push("Goblin".to_string());
+            // Mirror into base so the layer-evaluation reset (card_types =
+            // base_card_types) doesn't drop the printed Goblin subtype.
+            obj.base_card_types.subtypes.push("Goblin".to_string());
+            obj.timestamp = ts;
+        }
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Zombie".to_string()));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: crate::types::card_type::SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddChosenSubtype {
+                            kind: ChosenSubtypeKind::CreatureType,
+                        },
+                    ]),
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&goblin).unwrap();
+        assert!(
+            obj.card_types.subtypes.contains(&"Zombie".to_string()),
+            "Creature should gain the chosen Zombie subtype: {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            !obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            "SET form must wipe the original Goblin subtype: {:?}",
+            obj.card_types.subtypes
+        );
+    }
+
     // CR 608.2d + CR 613.1f: Urborg's "loses [chosen ability] until end of
     // turn" — the chosen Keyword is stored on the source's `chosen_attributes`
     // and read back by `RemoveChosenKeyword` at layer evaluation time. The

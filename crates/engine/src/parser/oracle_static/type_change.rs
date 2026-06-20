@@ -89,27 +89,62 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let (scope, _) = nom_on_lower(
+    let ((scope, is_additive), _) = nom_on_lower(
         tp.original,
         tp.lower,
         parse_chosen_creature_type_static_sentence_with_scope,
     )?;
 
+    // CR 205.1b (in-addition retain) vs CR 205.1a (SET replace) + CR 613.1d
+    // (Layer 4) + CR 607.2d (chosen-link). The additive forms (Arcane Adaptation,
+    // Lifecraft Engine, Xenograft) add the chosen creature type while retaining
+    // existing subtypes. The SET form (Conspiracy: "Creatures you control are the
+    // chosen type") REPLACES the existing creature subtypes, modeled by composing
+    // RemoveAllSubtypes{Creature} (wipe) then AddChosenSubtype (re-add the chosen
+    // type) — the IDENTICAL pattern parse_enchanted_is_type uses (Frogify/Lignify).
+    // RemoveAllSubtypes{Creature} retains against state.all_creature_types, so the
+    // added chosen subtype SURVIVES the wipe (CR 613.7a intra-static written order)
+    // and an artifact creature keeps its artifact subtypes (CR 205.1a).
+    let modifications = if is_additive {
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }]
+    } else {
+        match scope {
+            ChosenCreatureTypeStaticScope::Creatures
+            | ChosenCreatureTypeStaticScope::EachCreature => vec![
+                ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Creature,
+                },
+                ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                },
+            ],
+            // CR 301.7: a Vehicle-subtype grant has no known SET printing
+            // (Lifecraft Engine is always additive). Fall back to additive so a
+            // hypothetical non-additive vehicle line is never silently wiped of
+            // its non-creature subtypes.
+            ChosenCreatureTypeStaticScope::VehicleCreatures => {
+                vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }]
+            }
+        }
+    };
+
     Some(
         StaticDefinition::continuous()
             .affected(scope.target_filter())
-            .modifications(vec![ContinuousModification::AddChosenSubtype {
-                kind: ChosenSubtypeKind::CreatureType,
-            }])
+            .modifications(modifications)
             .description(description.to_string()),
     )
 }
 
 fn parse_chosen_creature_type_static_sentence_with_scope(
     input: &str,
-) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
-    let (input, scope) = parse_chosen_creature_type_static_scope_body(input)?;
-    Ok((input, scope))
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, bool)> {
+    let (input, (scope, is_additive)) = parse_chosen_creature_type_static_scope_body(input)?;
+    Ok((input, (scope, is_additive)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
@@ -117,19 +152,23 @@ pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleRes
     Ok((input, ()))
 }
 
+/// CR 205.1a / CR 205.1b + CR 607.2d: Parse the "<scope> are the chosen [creature]
+/// type [in addition to their other types]" body, returning the affected scope and
+/// whether the effect is additive (CR 205.1b "in addition") or replacing (CR 205.1a
+/// SET — Conspiracy's bare "are the chosen type"). The "in addition to ..." suffix is
+/// OPTIONAL: Arcane Adaptation / Lifecraft Engine / Xenograft are additive; Conspiracy
+/// omits it and replaces the creature types.
 fn parse_chosen_creature_type_static_scope_body(
     input: &str,
-) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, bool)> {
     let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
-    let (input, _) = alt((
-        tag(" the chosen type in addition to "),
-        tag(" the chosen creature type in addition to "),
-    ))
-    .parse(input)?;
-    let (input, _) = tag(pronoun).parse(input)?;
-    let (input, _) = tag(" other types").parse(input)?;
+    let (input, _) =
+        alt((tag(" the chosen type"), tag(" the chosen creature type"))).parse(input)?;
+    let (input, addition) =
+        opt((tag(" in addition to "), tag(pronoun), tag(" other types"))).parse(input)?;
+    let is_additive = addition.is_some();
     let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, scope))
+    Ok((input, (scope, is_additive)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_subject(

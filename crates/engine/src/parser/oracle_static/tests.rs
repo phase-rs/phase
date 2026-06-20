@@ -13637,6 +13637,162 @@ fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control()
     }
 }
 
+// CR 205.1a (SET replace) + CR 613.1d (Layer 4) + CR 607.2d (chosen-link):
+// Conspiracy's "Creatures you control are the chosen type." (no "in addition to")
+// REPLACES the existing creature subtypes. It must compose RemoveAllSubtypes{Creature}
+// then AddChosenSubtype{CreatureType}, in that written order (CR 613.7a), mirroring
+// Frogify — NOT fall through to an Unimplemented static.
+#[test]
+fn parse_conspiracy_sets_chosen_creature_type() {
+    let def = parse_static_line("Creatures you control are the chosen type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }),
+        "SET form must wipe creature subtypes: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }),
+        "SET form must re-add the chosen creature type: {mods:?}"
+    );
+    // CR 613.7a written-order: RemoveAllSubtypes must precede AddChosenSubtype so
+    // the re-added chosen type survives the wipe.
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }),
+        "RemoveAllSubtypes must precede AddChosenSubtype: {mods:?}"
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::Creature)));
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
+// CR 205.1b (in-addition retain): regression — Arcane Adaptation's additive form
+// must NOT emit RemoveAllSubtypes; it stays a single AddChosenSubtype.
+#[test]
+fn parse_arcane_adaptation_adds_chosen_creature_type() {
+    let def = parse_static_line(
+        "Creatures you control are the chosen type in addition to their other types.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+        "additive form must NOT wipe creature subtypes: {mods:?}"
+    );
+    assert_eq!(
+        mods,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        "additive form must be a single AddChosenSubtype: {mods:?}"
+    );
+}
+
+// CR 205.1a + CR 607.2d: full Conspiracy oracle. The battlefield SET static must be
+// present (composed RemoveAllSubtypes + AddChosenSubtype) AND the non-battlefield
+// "the same is true for ..." tail must surface as an Unimplemented residual (the
+// multi-zone type application is honestly gapped).
+#[test]
+fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
+    let oracle = "As this enchantment enters, choose a creature type.\nCreatures you control are the chosen type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Conspiracy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let has_set_static = result.statics.iter().any(|def| {
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            })
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                })
+    });
+    assert!(
+        has_set_static,
+        "Conspiracy must produce the composed SET static: {:?}",
+        result.statics
+    );
+    let tail_gapped = result.abilities.iter().any(|ability| {
+        matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
+                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
+                if frag.contains("creature spells you control")
+        )
+    });
+    assert!(
+        tail_gapped,
+        "the 'same is true for ...' multi-zone tail must be gapped as Unimplemented: {:?}",
+        result.abilities
+    );
+}
+
+// CR 205.1b: full Arcane Adaptation oracle (regression). The additive static must be
+// present (AddChosenSubtype, no RemoveAllSubtypes) AND the tail gapped.
+#[test]
+fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
+    let oracle = "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Arcane Adaptation",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let has_additive_static = result.statics.iter().any(|def| {
+        def.modifications
+            .contains(&ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            })
+            && !def
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
+    });
+    assert!(
+        has_additive_static,
+        "Arcane Adaptation must produce the additive static: {:?}",
+        result.statics
+    );
+    let tail_gapped = result.abilities.iter().any(|ability| {
+        matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
+                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
+                if frag.contains("creature spells you control")
+        )
+    });
+    assert!(
+        tail_gapped,
+        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        result.abilities
+    );
+}
+
 // CR 607.2d + CR 301.7: Lifecraft Engine grants the chosen creature subtype to
 // Vehicle permanents you control — not the Creature card type. The additive-type
 // fallback must not mis-tokenize "the chosen creature type" as AddType(Creature).
