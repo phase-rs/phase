@@ -694,10 +694,16 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             // layers-reset (`base_*` → `*`) at the start of each layers pass
             // doesn't wipe them before layer 7 reads dynamic P/T grants.
             if !spec.static_abilities.is_empty() {
+                let static_abilities: Vec<_> = spec
+                    .static_abilities
+                    .iter()
+                    .cloned()
+                    .map(normalized_token_static_definition)
+                    .collect();
                 Arc::make_mut(&mut obj.base_static_definitions)
-                    .extend(spec.static_abilities.iter().cloned());
-                for static_def in &spec.static_abilities {
-                    obj.static_definitions.push(static_def.clone());
+                    .extend(static_abilities.iter().cloned());
+                for static_def in static_abilities {
+                    obj.static_definitions.push(static_def);
                 }
             }
         }
@@ -1372,6 +1378,29 @@ fn base_token_trigger_defs(spec: &TokenSpec) -> Vec<TriggerDefinition> {
         }
     }
     out
+}
+
+fn normalized_token_static_definition(mut static_def: StaticDefinition) -> StaticDefinition {
+    for modification in &mut static_def.modifications {
+        if let ContinuousModification::GrantTrigger { trigger } = modification {
+            normalize_token_self_lki_trigger(trigger.as_mut());
+        }
+    }
+    static_def
+}
+
+fn normalize_token_self_lki_trigger(trigger: &mut TriggerDefinition) {
+    if trigger.mode == TriggerMode::ChangesZone
+        && trigger.valid_card == Some(TargetFilter::SelfRef)
+        && trigger.origin == Some(Zone::Battlefield)
+        && trigger.destination == Some(Zone::Graveyard)
+    {
+        // CR 603.6c + CR 603.10a + CR 111.7: a token's own dies trigger
+        // functions from last-known battlefield information and triggers before
+        // the token ceases to exist. The runtime LKI scan therefore visits the
+        // departed token as a Battlefield source, not as a graveyard source.
+        trigger.trigger_zones = vec![Zone::Battlefield];
+    }
 }
 
 /// CR 111.1 + CR 111.4: Resolve a base `Effect::Token`'s per-resolution
@@ -2306,10 +2335,11 @@ fn wicked_role_spec() -> RoleSpec {
         .valid_card(TargetFilter::SelfRef)
         .origin(Zone::Battlefield)
         .destination(Zone::Graveyard)
-        // CR 603.6c: dies/leaves-battlefield triggers must look up the source
-        // in the LKI graveyard zone after the move; trigger_zones tells the
-        // matcher where to find the source object.
-        .trigger_zones(vec![Zone::Graveyard])
+        // CR 603.6c + CR 603.10a + CR 111.7: the token's own dies trigger
+        // functions from last-known battlefield information before the token
+        // ceases to exist, so the trigger scanner must visit it as a
+        // Battlefield source.
+        .trigger_zones(vec![Zone::Battlefield])
         .execute(opponents_lose_one)
         .description(
             "When this token is put into a graveyard from the battlefield, \
@@ -2410,7 +2440,11 @@ pub(super) fn inject_catalog_token_abilities(
     let mut keywords = Vec::new();
     for modification in modifications {
         match modification {
-            ContinuousModification::GrantTrigger { trigger } => triggers.push(*trigger),
+            ContinuousModification::GrantTrigger { trigger } => {
+                let mut trigger = *trigger;
+                normalize_token_self_lki_trigger(&mut trigger);
+                triggers.push(trigger);
+            }
             ContinuousModification::AddKeyword { keyword } => keywords.push(keyword),
             ContinuousModification::GrantAbility { definition } => abilities.push(*definition),
             other => static_mods.push(other),
@@ -3633,7 +3667,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_pest_preset_grants_dies_life_trigger() {
+    fn catalog_pest_preset_grants_attack_life_trigger() {
         let preset = crate::game::token_presets::known_token_preset_by_id(
             "00a0801d-0212-5890-8957-3cde30f382f9",
         )
@@ -3657,12 +3691,94 @@ mod tests {
         assert_eq!(
             obj.trigger_definitions.len(),
             1,
-            "catalog rules_text must install the dies life trigger intrinsically"
+            "catalog rules_text must install the attacks life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert!(
+            !obj.trigger_definitions
+                .iter_all()
+                .any(|trigger| trigger.mode == TriggerMode::ChangesZone),
+            "SOS Pest must keep its printed attack trigger, not the older Pest dies trigger"
+        );
         assert_eq!(
             obj.token_rules_text.as_deref(),
-            Some("When this creature dies, you gain 1 life.")
+            Some("Whenever this token attacks, you gain 1 life.")
+        );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_uses_battlefield_lki_zone() {
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = &obj.trigger_definitions[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            trigger.trigger_zones,
+            vec![Zone::Battlefield],
+            "CR 603.10a LKI scans a dying token as a Battlefield source"
+        );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_fires_through_zone_pipeline() {
+        use crate::game::triggers::process_triggers;
+        use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(obj_id, Zone::Graveyard, obj_id),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the Pest's own dies trigger must fire from CR 603.10a LKI"
         );
     }
 
@@ -4085,10 +4201,11 @@ mod tests {
             Some(TargetFilter::SelfRef),
             "self-trigger must filter to the Aura itself"
         );
-        assert!(
-            t.trigger_zones.contains(&Zone::Graveyard),
-            "trigger_zones must include Graveyard so the matcher can find \
-             the source after the move (CR 603.6c)"
+        assert_eq!(
+            t.trigger_zones,
+            vec![Zone::Battlefield],
+            "trigger_zones must use Battlefield so CR 603.10a LKI can find \
+             the token before it ceases to exist"
         );
 
         // Execute: per-opponent LoseLife 1.
