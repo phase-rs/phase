@@ -14,7 +14,6 @@ const ADAPTER_FILES = [
   "wasm-adapter.ts",
   "engine-worker-client.ts",
   "engine-worker.ts",
-  "tauri-adapter.ts",
   "index.ts",
 ];
 

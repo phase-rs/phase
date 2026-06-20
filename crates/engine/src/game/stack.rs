@@ -1930,16 +1930,8 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
         return false;
     };
 
-    if condition.as_ref().is_some_and(|condition| {
-        !super::triggers::check_trigger_condition(
-            state,
-            condition,
-            entry.controller,
-            Some(entry.source_id),
-            trigger_event.as_ref(),
-        )
-    }) {
-        return true;
+    if condition.is_some() {
+        return false;
     }
 
     optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
@@ -1993,19 +1985,19 @@ fn change_zone_target_depends_only_on_cost_paid_mana_value(ability: &ResolvedAbi
     let TargetFilter::Typed(typed) = target else {
         return false;
     };
-    typed.properties.iter().all(|prop| match prop {
-        FilterProp::InZone { .. } => true,
-        FilterProp::Cmc {
-            value:
-                QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::ObjectManaValue {
+    typed.properties.iter().all(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone { .. }
+                | FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
                             scope: ObjectScope::CostPaidObject,
                         },
-                },
-            ..
-        } => true,
-        _ => false,
+                    },
+                    ..
+                }
+        )
     })
 }
 
