@@ -69,6 +69,12 @@ pub(crate) enum ChosenCreatureTypeStaticScope {
     VehicleCreatures,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChosenCreatureTypeApplication {
+    Additive,
+    Replacing,
+}
+
 impl ChosenCreatureTypeStaticScope {
     fn target_filter(self) -> TargetFilter {
         match self {
@@ -89,7 +95,7 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let ((scope, is_additive), _) = nom_on_lower(
+    let ((scope, application), _) = nom_on_lower(
         tp.original,
         tp.lower,
         parse_chosen_creature_type_static_sentence_with_scope,
@@ -105,21 +111,22 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     // RemoveAllSubtypes{Creature} retains against state.all_creature_types, so the
     // added chosen subtype SURVIVES the wipe (CR 613.7a intra-static written order)
     // and an artifact creature keeps its artifact subtypes (CR 205.1a).
-    let modifications = if is_additive {
-        vec![ContinuousModification::AddChosenSubtype {
+    let modifications = match application {
+        ChosenCreatureTypeApplication::Additive => vec![ContinuousModification::AddChosenSubtype {
             kind: ChosenSubtypeKind::CreatureType,
-        }]
-    } else {
-        match scope {
+        }],
+        ChosenCreatureTypeApplication::Replacing => match scope {
             ChosenCreatureTypeStaticScope::Creatures
-            | ChosenCreatureTypeStaticScope::EachCreature => vec![
-                ContinuousModification::RemoveAllSubtypes {
-                    set: crate::types::card_type::SubtypeSet::Creature,
-                },
-                ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::CreatureType,
-                },
-            ],
+            | ChosenCreatureTypeStaticScope::EachCreature => {
+                vec![
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: crate::types::card_type::SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::CreatureType,
+                    },
+                ]
+            }
             // CR 301.7: a Vehicle-subtype grant has no known SET printing
             // (Lifecraft Engine is always additive). Fall back to additive so a
             // hypothetical non-additive vehicle line is never silently wiped of
@@ -129,7 +136,7 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
                     kind: ChosenSubtypeKind::CreatureType,
                 }]
             }
-        }
+        },
     };
 
     Some(
@@ -142,9 +149,9 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
 
 fn parse_chosen_creature_type_static_sentence_with_scope(
     input: &str,
-) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, bool)> {
-    let (input, (scope, is_additive)) = parse_chosen_creature_type_static_scope_body(input)?;
-    Ok((input, (scope, is_additive)))
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
+    let (input, (scope, application)) = parse_chosen_creature_type_static_scope_body(input)?;
+    Ok((input, (scope, application)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
@@ -160,15 +167,19 @@ pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleRes
 /// omits it and replaces the creature types.
 fn parse_chosen_creature_type_static_scope_body(
     input: &str,
-) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, bool)> {
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
     let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
     let (input, _) =
         alt((tag(" the chosen type"), tag(" the chosen creature type"))).parse(input)?;
     let (input, addition) =
         opt((tag(" in addition to "), tag(pronoun), tag(" other types"))).parse(input)?;
-    let is_additive = addition.is_some();
+    let application = if addition.is_some() {
+        ChosenCreatureTypeApplication::Additive
+    } else {
+        ChosenCreatureTypeApplication::Replacing
+    };
     let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, (scope, is_additive)))
+    Ok((input, (scope, application)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_subject(
