@@ -9808,6 +9808,13 @@ fn build_oracle_face_inner(
         .map(str::to_lowercase)
         .collect();
     let oracle_corroborated = oracle_corroborated_keywords(raw_oracle_text);
+    // Multi-word / parameterized keywords are safely out of scope here: their
+    // Display contains a space or brace (e.g. "Double Strike", "Ward {2}"), while
+    // `name_words` holds only single alphanumeric tokens (the name is split on
+    // every non-alphanumeric char). Such a multi-token `token` can never equal a
+    // single name word, so `name_words.contains(&token)` is always false and the
+    // keyword is always retained — only genuinely single-word keywords (Flying,
+    // Storm) can ever collide with a name word and be dropped.
     keywords.retain(|kw| {
         let token = kw.to_string().to_lowercase();
         !name_words.contains(&token) || oracle_corroborated.iter().any(|e| e == kw)
@@ -10532,10 +10539,12 @@ mod cycling_synthesis_tests {
 
         let face = build_oracle_face(&storm, None);
         assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
             face.keywords.contains(&Keyword::Flying),
             "real standalone Flying line must survive"
         );
         assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
             !face.keywords.iter().any(|k| matches!(k, Keyword::Storm)),
             "phantom name-colliding Storm keyword must be dropped (not in Oracle text)"
         );
@@ -10581,6 +10590,7 @@ mod cycling_synthesis_tests {
 
         let face = build_oracle_face(&men, None);
         assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
             face.keywords.contains(&Keyword::Flying),
             "name-colliding Flying corroborated by a standalone Oracle line must be kept"
         );

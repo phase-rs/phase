@@ -989,10 +989,11 @@ fn parse_you_event_this_turn(text: &str) -> nom::IResult<&str, ParsedCondition, 
     .parse(text)
 }
 
-/// CR 400.7: modern templating elides "the battlefield" after "enter(ed)", so
-/// "[type] entered under your control this turn" is equivalent to the full form
-/// "[type] entered the battlefield under your control this turn". Matches the
-/// optional " the battlefield" then the mandatory control/this-turn suffix.
+/// CR 603.6a: modern enters templating is written "When [this object] enters"
+/// (the canonical form elides "the battlefield"), so "[type] entered under your
+/// control this turn" is equivalent to the full form "[type] entered the
+/// battlefield under your control this turn". Matches the optional
+/// " the battlefield" then the mandatory control/this-turn suffix.
 fn entered_under_your_control_suffix(text: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     value(
         (),

@@ -1077,6 +1077,15 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
 /// count model (vs. a set) lets the CR 603.4 resolution-time re-check of
 /// `FirstTimeObjectTappedThisTurn` distinguish the genuine first tap (== 1) from
 /// any later tap of the same object in the same turn.
+// Single-count safety: this is the *only* production writer of
+// `object_tap_count_this_turn`, and it runs exclusively from
+// `collect_pending_triggers` (one call per freshly-emitted `events` slice).
+// A given `PermanentTapped` event therefore reaches this loop exactly once: the
+// park/drain path stashes already-collected `PendingTriggerContext`s into
+// `deferred_triggers` (not raw events), so `drain_deferred_trigger_queue` never
+// re-invokes `collect_pending_triggers` over the same slice. The CR 603.4
+// resolution-time re-check of `FirstTimeObjectTappedThisTurn` only *reads* the
+// ledger and never re-enters here, so re-entrant collection cannot double-count.
 fn observe_object_taps(state: &mut GameState, events: &[GameEvent]) {
     for event in events {
         if let GameEvent::PermanentTapped { object_id, .. } = event {

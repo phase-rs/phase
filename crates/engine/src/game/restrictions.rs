@@ -424,6 +424,7 @@ pub(crate) fn battlefield_entry_matches_filter(
                 FilterProp::InZone { zone } => *zone == Zone::Battlefield,
                 // CR 702.9b: keyword presence is read from the entry-time snapshot
                 // (record.keywords) — "a creature with flying entered this turn".
+                // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
                 FilterProp::WithKeyword { value } => record.keywords.contains(value),
                 // CR 109.1: "another [type]" is a same-object identity check —
                 // excludes the ability's own source object (e.g. Flying Drone's
