@@ -4,7 +4,7 @@ use crate::types::ability::{
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
     Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
     PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -466,12 +466,26 @@ fn is_blocked_by_cant_activate_abilities(
         let GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            activity: ProhibitedActivity::ActivateAbilities { exemption },
-            ..
+            expiry,
+            activity:
+                ProhibitedActivity::ActivateAbilities {
+                    exemption,
+                    only_tag,
+                },
         } = restriction
         else {
             return false;
         };
+        // CR 514.2 + CR 500.7: A `UntilEndOfNextTurnOf` prohibition (Kang's "during
+        // that turn, power-up abilities can't be activated") is created PRE-ARMED and
+        // only takes force during the granted extra turn. It stays dormant on the
+        // creating turn until that player's next untap step CONVERTS it to
+        // `EndOfTurn` (turns.rs). While still pre-armed it is not yet in force, so it
+        // must not block activations on the creation turn — the expiry variant is the
+        // single source of truth shared with the untap-step arming.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            return false;
+        }
         let source_controller = state
             .objects
             .get(source)
@@ -480,6 +494,14 @@ fn is_blocked_by_cant_activate_abilities(
             restriction_scope_matches_player(source_controller, affected_players, caster);
         if !caster_affected {
             return false;
+        }
+        // CR 101.2 + CR 602.5: A tag-scoped prohibition (Kang → power-up) applies
+        // only to abilities carrying that keyword tag; every other activation is
+        // still legal. `None` prohibits all activations (legacy behavior).
+        if let Some(required_tag) = only_tag {
+            if activating_ability.ability_tag != Some(*required_tag) {
+                return false;
+            }
         }
         match exemption {
             ActivationExemption::None => true,
@@ -10150,9 +10172,15 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     super::layers::flush_layers(&mut simulated);
 
     let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
+    // CR 106.6: All current callers of this preview path are tag-`None`
+    // activations (mana abilities, ninjutsu, AI affordability). The real
+    // tag-scoped gate (Quinjet power-up restriction) runs at payment time in
+    // `pay_ability_mana_cost_*`, since `is_payable` defers mana affordability to
+    // the payment step (CR 601.2g).
     let activation_ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag: None,
     };
 
     can_pay_mana_cost_after_auto_tap_with_context(
@@ -10413,9 +10441,18 @@ pub(super) fn pay_ability_mana_cost(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_ability_mana_cost_excluding(state, player, source_id, cost, events, &HashSet::new())
+    pay_ability_mana_cost_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_tag,
+        events,
+        &HashSet::new(),
+    )
 }
 
 pub(super) fn pay_ability_mana_cost_excluding(
@@ -10423,6 +10460,7 @@ pub(super) fn pay_ability_mana_cost_excluding(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
@@ -10431,17 +10469,20 @@ pub(super) fn pay_ability_mana_cost_excluding(
         player,
         source_id,
         cost,
+        ability_tag,
         None,
         events,
         excluded_sources,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
@@ -10452,6 +10493,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     let activation_ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag,
     };
 
     let _spent_units = auto_tap_and_pay_cost_excluding(
@@ -10680,6 +10722,22 @@ pub(super) fn activation_source_types(
             (types, subtypes)
         })
         .unwrap_or_default()
+}
+
+/// CR 106.6: Read the keyword tag of the ability at `ability_index` on
+/// `source_id`. Threaded into `PaymentContext::Activation` so tag-scoped mana
+/// spend restrictions (Quinjet: "spend this mana only to activate power-up
+/// abilities") can gate which mana is eligible for the activation being paid.
+pub(super) fn activation_ability_tag(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<crate::types::ability::AbilityTag> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag)
 }
 
 /// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
@@ -11391,6 +11449,7 @@ fn can_pay_ability_cost_now(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
 ) -> bool {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     super::costs::can_pay(
@@ -11400,6 +11459,7 @@ fn can_pay_ability_cost_now(
         cost,
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
+            ability_tag,
         },
     )
 }
@@ -11517,11 +11577,9 @@ pub fn can_activate_ability_now(
     }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
     apply_cost_reduction(state, &mut ability_def, player, source_id);
-    if ability_def
-        .cost
-        .as_ref()
-        .is_some_and(|cost| !can_pay_ability_cost_now(state, player, source_id, cost))
-    {
+    if ability_def.cost.as_ref().is_some_and(|cost| {
+        !can_pay_ability_cost_now(state, player, source_id, cost, ability_def.ability_tag)
+    }) {
         return false;
     }
 
@@ -12201,9 +12259,14 @@ pub fn handle_activate_ability(
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-                if let PaymentOutcome::Paused { remaining_cost } =
-                    pay_ability_cost_for_activation(state, player, source_id, cost, events)?
-                {
+                if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    activation_ability_tag(state, source_id, ability_index),
+                    events,
+                )? {
                     state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
                         source_id,
                         resolved.clone(),
@@ -12291,9 +12354,14 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        if let PaymentOutcome::Paused { remaining_cost } =
-            pay_ability_cost_for_activation(state, player, source_id, cost, events)?
-        {
+        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
+            state,
+            player,
+            source_id,
+            cost,
+            activation_ability_tag(state, source_id, ability_index),
+            events,
+        )? {
             state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
@@ -12541,6 +12609,14 @@ fn apply_static_activated_ability_cost_reduction(
     ability_def: &mut AbilityDefinition,
     source_id: ObjectId,
 ) {
+    // CR 601.2f: A `ReduceAbilityCost` static keyed on a keyword (e.g. "power-up")
+    // also reduces a tagged activated ability whose tag matches that keyword
+    // (Hulk reduces other creatures' power-up abilities). Read the activating
+    // ability's tag keyword before the mutable borrow of its cost below.
+    let active_keyword = ability_def
+        .ability_tag
+        .map(crate::types::ability::AbilityTag::keyword_str);
+
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
     };
@@ -12555,7 +12631,7 @@ fn apply_static_activated_ability_cost_reduction(
         else {
             continue;
         };
-        if keyword != "activated" || *amount == 0 {
+        if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
             continue;
         }
         if def.affected.as_ref().is_some_and(|filter| {
@@ -13257,7 +13333,15 @@ mod tests {
         ));
 
         let mut events = Vec::new();
-        pay_ability_mana_cost(&mut state, PlayerId(0), ability_source, &cost, &mut events).unwrap();
+        pay_ability_mana_cost(
+            &mut state,
+            PlayerId(0),
+            ability_source,
+            &cost,
+            None,
+            &mut events,
+        )
+        .unwrap();
 
         assert!(state.objects.get(&restricted_source).unwrap().tapped);
         assert_eq!(state.players[0].mana_pool.mana.len(), 0);
@@ -15315,6 +15399,7 @@ mod tests {
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::ActivateAbilities {
                 exemption: ActivationExemption::ManaAbilities,
+                only_tag: None,
             },
         });
 
@@ -30667,7 +30752,13 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature()),
             1,
         ));
-        assert!(can_pay_ability_cost_now(&state, PlayerId(0), source, &cost));
+        assert!(can_pay_ability_cost_now(
+            &state,
+            PlayerId(0),
+            source,
+            &cost,
+            None
+        ));
     }
 
     #[test]
@@ -30691,7 +30782,8 @@ mod tests {
             &state,
             PlayerId(0),
             source,
-            &cost
+            &cost,
+            None
         ));
     }
 
@@ -36853,7 +36945,7 @@ mod tests {
                 "cost must be unpayable when the source has no +1/+1 counters"
             );
             assert!(
-                !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost),
+                !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, None),
                 "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
             );
         }

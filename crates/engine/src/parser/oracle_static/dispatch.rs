@@ -2180,6 +2180,56 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // --- "Power-up abilities of [subject] cost {N} less to activate" ---
+    // CR 601.2f: Class-scoped power-up activation cost reduction (Hulk / Gamma
+    // Goliath: "Power-up abilities of other creatures you control cost {3} less
+    // to activate"). The keyword is the ability tag ("power-up"); the static
+    // runtime gate matches the activating ability's tag. The `<subject>` filter
+    // ("other creatures you control") is routed through `parse_type_phrase`,
+    // which handles the "other" self-exclusion.
+    if let Some(((subject, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("power-up abilities of ").parse(i)?;
+        let (i, subject) = take_until(" cost ").parse(i)?;
+        let (i, _) = tag(" cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (subject.to_string(), amount)))
+    }) {
+        let (affected, _rest) = parse_type_phrase(&subject);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "power-up".to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
+    // --- "Each power-up ability of [subject] can be activated an additional time" ---
+    // CR 602.5b: Class-scoped power-up activation-limit raise (Wonder
+    // Man / Hollywood Hero). Power-up's base limit is once-per-game; "an additional
+    // time" with no per-turn qualifier raises the per-game cap to 2.
+    if let Some((subject, _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("each power-up ability of ").parse(i)?;
+        let (i, subject) = take_until(" can be activated an additional time").parse(i)?;
+        let (i, _) = tag(" can be activated an additional time").parse(i)?;
+        Ok((i, subject.to_string()))
+    }) {
+        let (affected, _rest) = parse_type_phrase(&subject);
+        return Some(
+            StaticDefinition::new(StaticMode::ModifyActivationLimit {
+                keyword: "power-up".to_string(),
+                new_limit: 2,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---
     // CR 303.4 + CR 602.1 + CR 601.2f: Aura/Equipment-granted activated ability
     // cost reduction for the attached object (Power Artifact).

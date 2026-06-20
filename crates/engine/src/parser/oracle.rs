@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, FilterProp,
-    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ChosenSubtypeKind, ContinuousModification, CostReduction, DelayedTriggerCondition, Effect,
+    FilterProp, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -2448,6 +2448,46 @@ pub(crate) fn parse_oracle_ir(
                 def.ability_tag = Some(AbilityTag::Exhaust);
                 extract_cost_reduction_from_chain(&mut def);
                 extract_mana_spend_trigger_from_chain(&mut def);
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 3e2: Power-up — "Power-up — {cost}: {effect}" (CR 602.5b).
+        // Power-up is a keyword-labeled activated ability (like Exhaust): it can
+        // be activated only once per game, and its cost is reduced by the source's
+        // mana value if it entered the battlefield this turn. The cost reduction is
+        // set from the keyword definition (not parsed from reminder text, which
+        // `strip_reminder_text` removes).
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("power-up \u{2014} "), tag("power-up -- ")))).parse(i)
+        }) {
+            if let Some(colon_pos) = find_activated_colon(rest_original) {
+                let cost_text = rest_original[..colon_pos].trim();
+                let effect_text = rest_original[colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                def.activation_restrictions.extend(constraints.restrictions);
+                // CR 602.5b: power-up may be activated only once per game.
+                def.activation_restrictions
+                    .push(ActivationRestriction::OnlyOnce);
+                def.ability_tag = Some(AbilityTag::PowerUp);
+                // CR 602.2b + CR 601.2f + CR 302.6: the activation cost's generic
+                // mana is reduced by the source's mana value if it entered this turn.
+                def.cost_reduction = Some(CostReduction {
+                    amount_per: 1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue,
+                    },
+                    condition: Some(ParsedCondition::SourceEnteredThisTurn),
+                });
                 result.abilities.push(def);
                 i += 1;
                 continue;

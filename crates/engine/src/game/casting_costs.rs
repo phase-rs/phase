@@ -2264,7 +2264,14 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
+            super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                source_id,
+                cost,
+                super::casting::activation_ability_tag(state, source_id, ability_index),
+                events,
+            )?
         {
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
@@ -6427,6 +6434,7 @@ fn auto_tap_mana_sources_inner(
                     let activation_ctx = PaymentContext::Activation {
                         source_types: &source_types,
                         source_subtypes: &source_subtypes,
+                        ability_tag: ability_def.ability_tag,
                     };
                     auto_tap_mana_sources_inner(
                         state,
@@ -7151,7 +7159,7 @@ pub fn finalize_mana_payment(
     if let Some(pending_ref) = state.pending_cast.as_ref() {
         let mana_cost = pending_ref.cost.clone();
         let source_id = pending_ref.object_id;
-        if pending_ref.activation_ability_index.is_some() {
+        if let Some(ability_index) = pending_ref.activation_ability_index {
             let excluded_sources = pending_ref
                 .activation_cost
                 .as_ref()
@@ -7167,6 +7175,11 @@ pub fn finalize_mana_payment(
             let activation_ctx = PaymentContext::Activation {
                 source_types: &source_types,
                 source_subtypes: &source_subtypes,
+                ability_tag: super::casting::activation_ability_tag(
+                    state,
+                    source_id,
+                    ability_index,
+                ),
             };
             if let Some(waiting) = maybe_pause_for_phyrexian_choice(
                 state,
@@ -7214,6 +7227,7 @@ pub fn finalize_mana_payment(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
         )?;
@@ -7378,6 +7392,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             Some(phyrexian_choices),
             events,
             &excluded_sources,

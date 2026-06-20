@@ -315,6 +315,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.165a: Backup is a triggered ability — it never emits a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Backup => " activates backup: ",
+                // CR 602.5b: Power-up activation.
+                AbilityTag::PowerUp => " activates power-up: ",
             };
             vec![
                 player_seg(state, *player_id),

@@ -1462,6 +1462,9 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to activate abilities."
     /// Cannot be used to cast spells; only for ability activation costs.
     ActivateOnly,
+    /// CR 106.6: "Spend this mana only to activate power-up abilities." Keyed on
+    /// the activating ability's keyword tag (Quinjet Technician).
+    ActivateTagged(AbilityTag),
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     XCostOnly,
@@ -1586,8 +1589,14 @@ pub enum ProhibitedActivity {
         spell_filter: Option<TargetFilter>,
     },
     /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
-    /// exempting mana abilities.
-    ActivateAbilities { exemption: ActivationExemption },
+    /// exempting mana abilities. `only_tag = None` prohibits all activations;
+    /// `Some(tag)` scopes the prohibition to abilities carrying that keyword tag
+    /// (Kang → power-up), leaving every other activation legal.
+    ActivateAbilities {
+        exemption: ActivationExemption,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only_tag: Option<AbilityTag>,
+    },
 }
 
 /// When a game restriction expires.
@@ -1596,7 +1605,19 @@ pub enum ProhibitedActivity {
 pub enum RestrictionExpiry {
     EndOfTurn,
     EndOfCombat,
-    UntilPlayerNextTurn { player: PlayerId },
+    UntilPlayerNextTurn {
+        player: PlayerId,
+    },
+    /// CR 514.2 + CR 500.7: Mirrors `Duration::UntilEndOfNextTurnOf`. Created
+    /// pre-armed; at `player`'s next untap step it is CONVERTED to
+    /// `RestrictionExpiry::EndOfTurn` (mirroring `prune_until_next_turn_effects`),
+    /// so the existing cleanup-step prune ends it at THAT turn's cleanup — it
+    /// persists through `player`'s entire next turn (Kang's extra turn). It
+    /// survives the creating turn's own cleanup because that turn's untap step
+    /// already passed before creation.
+    UntilEndOfNextTurnOf {
+        player: PlayerId,
+    },
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
@@ -11809,6 +11830,26 @@ pub enum AbilityTag {
     Cycling,
     /// CR 702.165a: ability originated from a Backup keyword definition.
     Backup,
+    /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
+    PowerUp,
+}
+
+impl AbilityTag {
+    /// CR 602.1: Canonical lowercase keyword string for this ability tag.
+    /// Single authority shared by the per-turn and per-game activation-limit
+    /// paths and the static activated-ability cost-reduction gate, so the
+    /// tag→keyword mapping lives in one place.
+    pub fn keyword_str(self) -> &'static str {
+        match self {
+            AbilityTag::Boast => "boast",
+            AbilityTag::Evolve => "evolve",
+            AbilityTag::Exhaust => "exhaust",
+            AbilityTag::Outlast => "outlast",
+            AbilityTag::Cycling => "cycling",
+            AbilityTag::Backup => "backup",
+            AbilityTag::PowerUp => "power-up",
+        }
+    }
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -17428,6 +17469,54 @@ mod tests {
         let json = serde_json::to_string(&filter).unwrap();
         let deserialized: TargetFilter = serde_json::from_str(&json).unwrap();
         assert_eq!(filter, deserialized);
+    }
+
+    #[test]
+    fn power_up_keyword_types_serde_roundtrip() {
+        // CR 602.5b: new AbilityTag leaf.
+        let tag = AbilityTag::PowerUp;
+        let json = serde_json::to_string(&tag).unwrap();
+        assert_eq!(serde_json::from_str::<AbilityTag>(&json).unwrap(), tag);
+        assert_eq!(tag.keyword_str(), "power-up");
+
+        // CR 500.7 + CR 514.2: new RestrictionExpiry temporal anchor.
+        let expiry = RestrictionExpiry::UntilEndOfNextTurnOf {
+            player: crate::types::player::PlayerId(1),
+        };
+        let json = serde_json::to_string(&expiry).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RestrictionExpiry>(&json).unwrap(),
+            expiry
+        );
+
+        // CR 101.2 + CR 602.5: only_tag parameterization round-trips, and an
+        // omitted only_tag (legacy serialized state) defaults to None.
+        let activity = ProhibitedActivity::ActivateAbilities {
+            exemption: ActivationExemption::None,
+            only_tag: Some(AbilityTag::PowerUp),
+        };
+        let json = serde_json::to_string(&activity).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProhibitedActivity>(&json).unwrap(),
+            activity
+        );
+        let legacy: ProhibitedActivity =
+            serde_json::from_str(r#"{"type":"ActivateAbilities","exemption":"None"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::None,
+                only_tag: None,
+            }
+        );
+
+        // CR 106.6: tag-scoped mana-spend parser restriction round-trips.
+        let restriction = ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp);
+        let json = serde_json::to_string(&restriction).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ManaSpendRestriction>(&json).unwrap(),
+            restriction
+        );
     }
 
     #[test]

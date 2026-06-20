@@ -280,6 +280,9 @@ pub(crate) fn resolve_restrictions(
                 ability: *ability,
             }),
             ManaSpendRestriction::ActivateOnly => Some(ManaRestriction::OnlyForActivation),
+            ManaSpendRestriction::ActivateTagged(tag) => {
+                Some(ManaRestriction::OnlyForTaggedActivation(*tag))
+            }
             ManaSpendRestriction::XCostOnly => Some(ManaRestriction::OnlyForXCosts),
             ManaSpendRestriction::SpellWithKeywordKind(kind) => {
                 Some(ManaRestriction::OnlyForSpellWithKeywordKind(*kind))

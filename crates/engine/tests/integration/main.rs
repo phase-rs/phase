@@ -387,6 +387,7 @@ mod phantom_general_token_anthem;
 mod plaguecrafter_etb_class;
 mod ponder_decline_shuffle_regression;
 mod power_fist_combat_damage_regression;
+mod power_up_keyword;
 mod primo_unbounded_fractal_counters;
 mod proliferate_zero_counter;
 mod quirion_ranger_activation;

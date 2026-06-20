@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
-    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
+    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
+    TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -574,20 +574,20 @@ fn effective_activation_limit(
     let Some(tag) = ability_tag else {
         return 1; // No tag → default once-per-turn
     };
-    let keyword = match tag {
-        AbilityTag::Boast => "boast",
-        AbilityTag::Evolve => "evolve",
-        AbilityTag::Exhaust => "exhaust",
-        AbilityTag::Outlast => "outlast",
-        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
-        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
-        // restriction, which the synthesized cycling ability never has.
-        AbilityTag::Cycling => "cycling",
-        // CR 702.165a: Backup is a triggered ability — it is never activated, so
-        // it carries no activation limit and this arm is unreachable here.
-        AbilityTag::Backup => "backup",
-    };
-    // Scan battlefield for ModifyActivationLimit statics that affect this keyword
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
+}
+
+/// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
+/// raise the activation cap for `keyword`-tagged abilities on `source_id`. The
+/// static is scope-agnostic (it reads no per-turn/per-game counter), so both the
+/// per-turn (`effective_activation_limit`) and per-game
+/// (`effective_activation_limit_per_game`) paths share this scan. Base limit 1.
+fn activation_limit_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    keyword: &str,
+) -> u32 {
     let mut limit: u32 = 1;
     for (bf_obj, static_def) in
         crate::game::functioning_abilities::battlefield_active_statics(state)
@@ -619,6 +619,28 @@ fn effective_activation_limit(
         }
     }
     limit
+}
+
+/// CR 602.5b: Compute the effective per-game activation limit for
+/// an ability carrying `ActivationRestriction::OnlyOnce`. Base limit 1, raised by
+/// `ModifyActivationLimit` statics (Wonder Man / Hollywood Hero). Returns only
+/// the cap — the per-game counter comparison stays in the `OnlyOnce` consult arm,
+/// so the per-game and per-turn counters/scopes are never conflated.
+fn effective_activation_limit_per_game(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> u32 {
+    let ability_tag = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag);
+    let Some(tag) = ability_tag else {
+        return 1; // No tag → default once-per-game
+    };
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
 }
 
 fn has_activate_as_instant_permission(
@@ -722,13 +744,15 @@ fn activation_restriction_applies(
         }
         // CR 602.5b: Per-object activation limit. `zones::move_to_zone` clears
         // this count when CR 400.7 makes the stored id represent a new object.
+        // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
+        // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            state
+            let count = state
                 .activated_abilities_this_game
                 .get(&key)
                 .copied()
-                .unwrap_or(0)
-                == 0
+                .unwrap_or(0);
+            count < effective_activation_limit_per_game(state, player, source_id, ability_index)
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {

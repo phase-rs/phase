@@ -18,7 +18,8 @@ use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionPlayerScope, TargetRef,
+    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -381,12 +382,22 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             source,
             affected_players,
             activity,
-            ..
+            expiry,
         } = restriction
         else {
             // DamagePreventionDisabled has no per-player axis — see fn docs.
             continue;
         };
+        // CR 514.2 + CR 500.7: a `UntilEndOfNextTurnOf` prohibition (Kang's "during
+        // that [extra] turn, power-up abilities can't be activated") is created
+        // pre-armed and only takes force during the granted turn, after the untap
+        // step converts it to `EndOfTurn` (turns.rs). Suppress the HUD status badge
+        // while it is still dormant so this display seam agrees with the activation
+        // gate (`is_blocked_by_cant_activate_abilities`) — they share the expiry
+        // variant as the single source of truth.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            continue;
+        }
         let kind = match activity {
             ProhibitedActivity::CastSpells { .. } => PlayerConditionKind::CantCastSpells,
             ProhibitedActivity::ActivateAbilities { .. } => {
@@ -1254,6 +1265,7 @@ mod tests {
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::ActivateAbilities {
                 exemption: ActivationExemption::ManaAbilities,
+                only_tag: None,
             },
         });
         // CR 614.16: no per-player axis — must NOT produce a status row.

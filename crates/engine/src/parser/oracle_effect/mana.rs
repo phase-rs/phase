@@ -10,8 +10,8 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, Comparator, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-    ManaSpendRestriction, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -1409,6 +1409,20 @@ pub(crate) fn parse_mana_spend_restriction(
     })?;
     let base = base.trim_end_matches(['.', '"']);
     let base_lower = base.to_lowercase();
+
+    // CR 106.6: "spend this mana only to activate power-up abilities" -- tag-scoped.
+    // Try BEFORE the broader "to activate abilities" arm (more-specific-first) so
+    // Quinjet's {R}{R} does not collapse to ActivateOnly.
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), tag("to activate power-up abilities")).parse(i)
+    })
+    .is_some()
+    {
+        return Some((
+            ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp),
+            vec![],
+        ));
+    }
 
     // "spend this mana only to activate abilities" -- activation-only
     if nom_on_lower(base, &base_lower, |i| {

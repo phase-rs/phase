@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::Comparator;
+use super::ability::{AbilityTag, Comparator};
 use super::events::GameEvent;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -274,10 +274,12 @@ pub enum PaymentContext<'a> {
     /// Payment for a spell being cast — consult `allows_spell`.
     Spell(&'a SpellMeta),
     /// Payment for an activated ability — consult `allows_activation` using
-    /// the source permanent's core types and subtypes.
+    /// the source permanent's core types and subtypes plus the ability's
+    /// keyword tag (CR 106.6, for tag-scoped restrictions like Quinjet's).
     Activation {
         source_types: &'a [String],
         source_subtypes: &'a [String],
+        ability_tag: Option<AbilityTag>,
     },
     /// Payment for a cost during spell or ability resolution. Current
     /// restriction variants name spell-casting or ability-activation use, so
@@ -363,6 +365,11 @@ pub enum ManaRestriction {
     /// "Spend this mana only to activate abilities."
     /// Cannot be used for casting spells — activation-only.
     OnlyForActivation,
+    /// CR 106.6: "Spend this mana only to activate power-up abilities." Keyed on
+    /// the activating ability's keyword tag (Quinjet Technician), a distinct axis
+    /// from `OnlyForTypeSpellsOrAbilities` (which keys on the source permanent's
+    /// type) and `OnlyForActivation` (which permits any activation).
+    OnlyForTaggedActivation(AbilityTag),
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     OnlyForXCosts,
@@ -480,6 +487,8 @@ impl ManaRestriction {
             }
             // Activation-only mana cannot be used to cast spells.
             ManaRestriction::OnlyForActivation => false,
+            // CR 106.6: Tag-scoped activation mana cannot be used to cast spells.
+            ManaRestriction::OnlyForTaggedActivation(_) => false,
             // CR 106.6: X-cost restriction — conservatively disallow for spells.
             // Full X-cost detection requires ManaCost inspection at the call site.
             ManaRestriction::OnlyForXCosts => false,
@@ -534,7 +543,12 @@ impl ManaRestriction {
     /// on a permanent whose core types include `source_types` and subtypes include
     /// `source_subtypes`.
     /// CR 106.6: Used for "or activate abilities of creatures" restrictions.
-    pub fn allows_activation(&self, source_types: &[String], source_subtypes: &[String]) -> bool {
+    pub fn allows_activation(
+        &self,
+        source_types: &[String],
+        source_subtypes: &[String],
+        ability_tag: Option<AbilityTag>,
+    ) -> bool {
         match self {
             // Spell-only restrictions don't permit ability activation.
             ManaRestriction::OnlyForSpell
@@ -563,10 +577,15 @@ impl ManaRestriction {
             },
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
+            // CR 106.6: Tag-scoped mana — payable only for an activation whose
+            // ability carries the matching keyword tag (Quinjet → power-up).
+            ManaRestriction::OnlyForTaggedActivation(required_tag) => {
+                ability_tag == Some(*required_tag)
+            }
             // CR 106.6: Disjunction — the activation is payable if any branch allows it.
             ManaRestriction::OnlyForAny(subs) => subs
                 .iter()
-                .any(|r| r.allows_activation(source_types, source_subtypes)),
+                .any(|r| r.allows_activation(source_types, source_subtypes, ability_tag)),
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
             ManaRestriction::OnlyForXCosts | ManaRestriction::ConvokePayment => false,
@@ -583,7 +602,8 @@ impl ManaRestriction {
             PaymentContext::Activation {
                 source_types,
                 source_subtypes,
-            } => self.allows_activation(source_types, source_subtypes),
+                ability_tag,
+            } => self.allows_activation(source_types, source_subtypes, *ability_tag),
             PaymentContext::Effect => false,
         }
     }
@@ -1645,9 +1665,17 @@ mod tests {
             },
         ]);
         // An Assassin source's ability is allowed via the second branch.
-        assert!(restriction.allows_activation(&["Creature".to_string()], &["Assassin".to_string()]));
+        assert!(restriction.allows_activation(
+            &["Creature".to_string()],
+            &["Assassin".to_string()],
+            None
+        ));
         // A non-Assassin source's ability is allowed by no branch.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &["Goblin".to_string()]));
+        assert!(!restriction.allows_activation(
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+            None
+        ));
     }
 
     // CR 106.6: "Spend this mana only to cast Ninja spells" (Turtle Lair, issue
@@ -1707,6 +1735,7 @@ mod tests {
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -1766,7 +1795,7 @@ mod tests {
         assert!(!restriction.allows_spell(&elf_creature));
         let source_types = vec!["Creature".to_string()];
         let source_subtypes = vec!["Elf".to_string()];
-        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes, None));
     }
 
     #[test]
@@ -1982,10 +2011,14 @@ mod tests {
         };
         let elemental_creature_types = vec!["Creature".to_string()];
         let elemental_subtypes = vec!["Elemental".to_string(), "Shaman".to_string()];
-        assert!(restriction.allows_activation(&elemental_creature_types, &elemental_subtypes));
+        assert!(restriction.allows_activation(
+            &elemental_creature_types,
+            &elemental_subtypes,
+            None
+        ));
 
         let goblin_subtypes = vec!["Goblin".to_string()];
-        assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes));
+        assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes, None));
 
         // Core-type match also satisfies the check (e.g., "Artifact sources").
         let artifact_restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
@@ -1994,7 +2027,7 @@ mod tests {
         };
         let artifact_types = vec!["Artifact".to_string()];
         let no_subtypes: Vec<String> = vec![];
-        assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
+        assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes, None));
     }
 
     // CR 106.6: `AbilityActivationScope::Any` — "cast a colorless spell or to
@@ -2029,8 +2062,12 @@ mod tests {
         assert!(restriction.allows_spell(&colorless_spell));
         assert!(!restriction.allows_spell(&colored_spell));
         // Ability half: any activation is permitted, regardless of source type.
-        assert!(restriction.allows_activation(&["Goblin".to_string()], &[]));
-        assert!(restriction.allows_activation(&["Land".to_string()], &["Forest".to_string()]));
+        assert!(restriction.allows_activation(&["Goblin".to_string()], &[], None));
+        assert!(restriction.allows_activation(
+            &["Land".to_string()],
+            &["Forest".to_string()],
+            None
+        ));
     }
 
     #[test]
@@ -2066,10 +2103,12 @@ mod tests {
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &artifact_types,
             source_subtypes: &no_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &creature_types,
             source_subtypes: &no_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2130,13 +2169,17 @@ mod tests {
         };
         let colorless_creature_types = vec!["Creature".to_string(), "Colorless".to_string()];
         let eldrazi_subtypes = vec!["Eldrazi".to_string()];
-        assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes));
+        assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes, None));
 
         let colored_creature_types = vec!["Creature".to_string()];
-        assert!(!restriction.allows_activation(&colored_creature_types, &eldrazi_subtypes));
+        assert!(!restriction.allows_activation(&colored_creature_types, &eldrazi_subtypes, None));
 
         let construct_subtypes = vec!["Construct".to_string()];
-        assert!(!restriction.allows_activation(&colorless_creature_types, &construct_subtypes));
+        assert!(!restriction.allows_activation(
+            &colorless_creature_types,
+            &construct_subtypes,
+            None
+        ));
     }
 
     #[test]
@@ -2260,7 +2303,7 @@ mod tests {
         };
         let source_types = vec!["Creature".to_string()];
         let source_subtypes: Vec<String> = vec![];
-        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes, None));
     }
 
     // CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
@@ -2288,7 +2331,7 @@ mod tests {
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // CR 105.2: a color-count gate names spell casting, so it rejects ability
         // activation.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
     }
 
     // CR 105.2: colorless spells have a color count of 0, so "exactly 0 colors"
@@ -2393,7 +2436,7 @@ mod tests {
         // No recorded cast-from zone → ineligible.
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // Zone-gated spend is spell-casting only.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
     }
 
     #[test]
