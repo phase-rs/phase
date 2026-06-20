@@ -42,8 +42,8 @@ use super::mulligan;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
-    bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
-    mark_public_state_from_events, sync_waiting_for,
+    bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
+    mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
 use super::sba;
 use super::splice;
@@ -51,6 +51,10 @@ use super::triggers;
 use super::turn_control;
 use super::turns;
 use super::zones;
+
+pub use super::engine_resolve_batch::{
+    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+};
 
 #[derive(Debug, Clone, Error)]
 pub enum EngineError {
@@ -62,6 +66,12 @@ pub enum EngineError {
     NotYourPriority,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicFinalizeMode {
+    Immediate,
+    DeferredDisplay,
 }
 
 fn handle_unlock_room_door(
@@ -144,6 +154,15 @@ pub fn apply(
     actor: PlayerId,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
+    apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
+}
+
+pub(super) fn apply_action_boundary(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -168,7 +187,10 @@ pub fn apply(
     // consumer of `public_state_dirty`, so marking once here over the complete
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
-    finalize_public_state(state);
+    finalize_rules_state(state);
+    if matches!(mode, PublicFinalizeMode::Immediate) {
+        finalize_display_state(state);
+    }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
 }

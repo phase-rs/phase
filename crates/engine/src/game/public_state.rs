@@ -10,20 +10,31 @@ use super::derived::derive_display_state;
 use super::layers::flush_layers;
 use super::turn_control;
 
-/// Finalize outward-facing game state before it leaves the engine boundary.
+/// Finalize rules-visible game state at an engine action boundary.
 ///
 /// This is the single authoritative place that synchronizes `priority_player`
-/// from `waiting_for`, evaluates layers when dirty, and derives display-only
-/// state used by the frontend.
-pub fn finalize_public_state(state: &mut GameState) {
+/// from `waiting_for` and evaluates layers when dirty. Display-only derivation
+/// is split into [`finalize_display_state`] so engine-owned fast-forward loops
+/// can keep rules state current while batching expensive display recomputes.
+pub fn finalize_rules_state(state: &mut GameState) {
     // CR 614.12a + CR 615.5: Backward-compat for the 2026-05-09 audit M4
     // post-replacement-continuation slot fold. Idempotent on already-migrated
     // states; cheap on every other invocation.
     state.migrate_post_replacement_continuation();
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);
+}
+
+/// Finalize display-only cached state before exposing state to consumers.
+pub fn finalize_display_state(state: &mut GameState) {
     derive_display_state(state);
     clear_public_state_dirty(state);
+}
+
+/// Finalize outward-facing game state before it leaves the engine boundary.
+pub fn finalize_public_state(state: &mut GameState) {
+    finalize_rules_state(state);
+    finalize_display_state(state);
 }
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
