@@ -6210,6 +6210,21 @@ pub(crate) fn parse_reflexive_conditional_connector(
     .parse(input)
 }
 
+/// CR 601.2b/f: subject + tense axes for the Teamwork additional-cost-paid
+/// phrase ("(this spell was | it was | it's) cast using teamwork"), shared by
+/// the modal, trailing-rider, and Dig-instead-alternative recognizers so the
+/// phrase set lives in exactly one place. Input is already-lowercased.
+pub(crate) fn parse_cast_using_teamwork_phrase(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            alt((tag("this spell was "), tag("it was "), tag("it's "))),
+            tag("cast using teamwork"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 603.12: Match "when you do" + optional trailing ", ". Used by the
 /// triggered-modal splitter to detect a reflexive optional-cost header
 /// ("When you do, choose ...") so it can divert that text into the reflexive
