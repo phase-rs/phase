@@ -12332,6 +12332,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12457,6 +12458,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12551,6 +12553,7 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12634,6 +12637,7 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12750,6 +12754,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,

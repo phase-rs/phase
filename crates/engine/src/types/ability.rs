@@ -977,6 +977,28 @@ pub enum CounterSourceRider {
     Destroy,
 }
 
+/// CR 701.6a + CR 614.1a: "put it <zone> instead of into that player's
+/// graveyard" — a replacement redirect on the destination of a countered
+/// *spell* (Memory Lapse, Remand, Spell Crumple). Distinct from
+/// [`CounterSourceRider`], which acts on a countered *ability*'s source
+/// permanent.
+///
+/// CR 701.6a says a countered spell is put into its owner's graveyard; CR
+/// 614.1a makes the "instead" clause a replacement that redirects that move to
+/// the named zone. Exile is deliberately excluded — that case is already
+/// handled by the existing graveyard-exile sub-ability rider in
+/// `game::effects::counter` (Force of Negation, No More Lies).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CounteredSpellDestination {
+    /// "put it on top/bottom of its owner's library" (Memory Lapse,
+    /// Spell Crumple).
+    Library { position: LibraryPosition },
+    /// "return it to its owner's hand" / "put it into its owner's hand"
+    /// (Remand).
+    Hand,
+}
+
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
@@ -7362,6 +7384,15 @@ pub enum Effect {
         /// countered spell is not a permanent (CR 701.8a / CR 110.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_rider: Option<CounterSourceRider>,
+        /// CR 701.6a + CR 614.1a: Redirect for a countered *spell*'s
+        /// destination — "if that spell is countered this way, put it <zone>
+        /// instead of into that player's graveyard" (Memory Lapse, Remand,
+        /// Spell Crumple). When `None`, the countered spell follows the default
+        /// CR 701.6a graveyard rule. Resolved at counter-resolution time on the
+        /// countered spell (not its source); has no effect when an ability is
+        /// countered (an ability is not a card and has no zone — CR 110.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        countered_spell_zone: Option<CounteredSpellDestination>,
     },
     /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
     /// the stack matching `target`. Mirrors `Effect::DestroyAll` /

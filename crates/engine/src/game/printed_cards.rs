@@ -2850,6 +2850,7 @@ mod tests {
             source_rider: Some(CounterSourceRider::LosesAbilities {
                 static_def: Box::new(counter_static),
             }),
+            countered_spell_zone: None,
         };
         walk_effect(&counter, &mut names);
 

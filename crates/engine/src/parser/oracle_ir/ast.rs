@@ -3,10 +3,11 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
-    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider,
+    CounteredSpellDestination, Duration, Effect, FaceDownProfile, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat,
+    PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -225,6 +226,13 @@ pub(crate) enum ContinuationAst {
     /// permanent." — patches `source_rider = Some(CounterSourceRider::Destroy)`
     /// on the preceding `Effect::Counter` (Teferi's Response, Green Slime).
     CounterSourceRiderDestroy,
+    /// CR 701.6a + CR 614.1a: "If that spell is countered this way, put it
+    /// <zone> instead of into that player's graveyard." — patches
+    /// `countered_spell_zone = Some(destination)` on the preceding
+    /// `Effect::Counter` (Memory Lapse, Remand, Spell Crumple).
+    CounterSpellZoneRedirect {
+        destination: CounteredSpellDestination,
+    },
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.

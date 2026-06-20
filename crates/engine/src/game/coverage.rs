@@ -13,13 +13,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
+    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -2048,7 +2048,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Counter {
             target,
             source_rider,
-            ..
+            countered_spell_zone,
         } => {
             d.push(("target".into(), fmt_target(target)));
             match source_rider {
@@ -2057,6 +2057,22 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 }
                 Some(CounterSourceRider::Destroy) => {
                     d.push(("+ destroy".into(), "source".into()));
+                }
+                None => {}
+            }
+            // CR 701.6a + CR 614.1a: countered-spell destination redirect.
+            match countered_spell_zone {
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Top,
+                }) => d.push(("redirect".into(), "library top".into())),
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Bottom,
+                }) => d.push(("redirect".into(), "library bottom".into())),
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::NthFromTop { n },
+                }) => d.push(("redirect".into(), format!("library #{n} from top"))),
+                Some(CounteredSpellDestination::Hand) => {
+                    d.push(("redirect".into(), "hand".into()))
                 }
                 None => {}
             }

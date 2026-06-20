@@ -17,10 +17,10 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect, FaceDownBody,
-    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    ControllerRef, CopyRetargetPermission, CounterSourceRider, CounteredSpellDestination, Duration,
+    Effect, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee,
+    PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2228,6 +2228,51 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 701.6a + CR 614.1a: nom recognizer for the "if that spell is countered
+/// this way, put it <zone> instead of into that player's graveyard"
+/// continuation clause (Memory Lapse, Remand, Spell Crumple). Operates on
+/// lowercased text; tolerates a trailing period/whitespace. Returns the parsed
+/// [`CounteredSpellDestination`], or `None` for an unsupported destination
+/// (Hinder's "your choice of the top or bottom", Transcendent Dragon's "exile
+/// it instead") so those cards are honestly gapped rather than misparsed.
+///
+/// Composed from independent axes rather than enumerated as full strings:
+///   - spell anaphor ("that spell" / "that card" / "it").
+///   - destination ("on top of its owner's library" / "on the bottom of its
+///     owner's library" / "into its owner's hand").
+fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDestination> {
+    let clause = lower.trim().trim_end_matches('.').trim_end();
+    let mut parser = (
+        tag::<_, _, OracleError<'_>>("if "),
+        alt((tag("that spell"), tag("that card"), tag("it"))),
+        tag(" is countered this way, put it "),
+        alt((
+            value(
+                CounteredSpellDestination::Library {
+                    position: LibraryPosition::Top,
+                },
+                tag("on top of its owner's library"),
+            ),
+            value(
+                CounteredSpellDestination::Library {
+                    position: LibraryPosition::Bottom,
+                },
+                tag("on the bottom of its owner's library"),
+            ),
+            value(
+                CounteredSpellDestination::Hand,
+                tag("into its owner's hand"),
+            ),
+        )),
+        tag(" instead of into that player's graveyard"),
+        eof,
+    );
+    parser
+        .parse(clause)
+        .ok()
+        .map(|(_, (_, _, _, destination, _, _))| destination)
+}
+
 /// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
 pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
@@ -2435,6 +2480,21 @@ pub(super) fn apply_clause_continuation(
                 // CR 701.8: "If a permanent's ability is countered this way,
                 // destroy that permanent." rider (Teferi's Response, Green Slime).
                 *existing = Some(CounterSourceRider::Destroy);
+            }
+        }
+        ContinuationAst::CounterSpellZoneRedirect { destination } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Counter {
+                countered_spell_zone,
+                ..
+            } = &mut *previous.effect
+            {
+                // CR 701.6a + CR 614.1a: "put it <zone> instead of into that
+                // player's graveyard" redirect (Memory Lapse, Remand, Spell
+                // Crumple).
+                *countered_spell_zone = Some(destination);
             }
         }
         ContinuationAst::CopyMayRetarget => {
@@ -3221,7 +3281,8 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ManaRestriction { .. }
         | ContinuationAst::ManaGrant { .. }
         | ContinuationAst::CounterSourceStatic { .. }
-        | ContinuationAst::CounterSourceRiderDestroy => true,
+        | ContinuationAst::CounterSourceRiderDestroy
+        | ContinuationAst::CounterSpellZoneRedirect { .. } => true,
         // CR 707.10c: recognition was already gated on a preceding CopySpell in
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
@@ -4383,6 +4444,18 @@ pub(super) fn parse_followup_continuation_ast(
         // from emitting a stray chained `Destroy { ParentTarget }`.
         Effect::Counter { .. } if recognize_counter_destroy_rider(&lower) => {
             Some(ContinuationAst::CounterSourceRiderDestroy)
+        }
+        // CR 701.6a + CR 614.1a: "If that spell is countered this way, put it
+        // <zone> instead of into that player's graveyard." (Memory Lapse,
+        // Remand, Spell Crumple). The `scan_contains` pre-guard mirrors the
+        // source-rider arms above; the real classification is the combinator
+        // recognizer, which returns `None` for unsupported destinations
+        // (Hinder, Transcendent Dragon) so those cards stay honestly gapped.
+        Effect::Counter { .. }
+            if nom_primitives::scan_contains(&lower, "countered this way") => // allow-noncombinator
+        {
+            recognize_counter_spell_zone_redirect(&lower)
+                .map(|destination| ContinuationAst::CounterSpellZoneRedirect { destination })
         }
         // CR 707.10c: "You may choose new targets for the copy/copies." after a
         // CopySpell — directly, or wrapped in a CreateDelayedTrigger ("When you

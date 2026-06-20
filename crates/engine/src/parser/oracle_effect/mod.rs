@@ -25501,6 +25501,176 @@ mod tests {
         );
     }
 
+    /// CR 701.6a + CR 614.1a: Memory Lapse — "put it on top of its owner's
+    /// library instead of into that player's graveyard" is absorbed into
+    /// `Effect::Counter.countered_spell_zone` as `Library { Top }`.
+    #[test]
+    fn memory_lapse_counter_spell_zone_redirect_library_top() {
+        use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+
+        let ability = parse_effect_chain(
+            "Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            ability.sub_ability.is_none(),
+            "redirect should be absorbed, not chained: {:?}",
+            ability.sub_ability
+        );
+        let Effect::Counter {
+            countered_spell_zone,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(
+                countered_spell_zone,
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Top
+                })
+            ),
+            "expected Library {{ Top }}, got {countered_spell_zone:?}"
+        );
+    }
+
+    /// CR 701.6a + CR 614.1a: Spell Crumple — "put it on the bottom of its
+    /// owner's library ..." → `Library { Bottom }`. (The trailing "Put Spell
+    /// Crumple on the bottom of its owner's library." is a separate sentence.)
+    #[test]
+    fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
+        use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+
+        let result = crate::parser::parse_oracle_text(
+            "Counter target spell. If that spell is countered this way, put it on the bottom of its owner's library instead of into that player's graveyard. Put Spell Crumple on the bottom of its owner's library.",
+            "Spell Crumple",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let ability = &result.abilities[0];
+        let Effect::Counter {
+            countered_spell_zone,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(
+                countered_spell_zone,
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Bottom
+                })
+            ),
+            "expected Library {{ Bottom }}, got {countered_spell_zone:?}"
+        );
+    }
+
+    /// CR 701.6a + CR 614.1a: Remand — "put it into its owner's hand ..." →
+    /// `Hand`, and the subsequent "Draw a card." still chains as a sibling.
+    #[test]
+    fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
+        use crate::types::ability::CounteredSpellDestination;
+
+        let result = crate::parser::parse_oracle_text(
+            "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard.\nDraw a card.",
+            "Remand",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let ability = &result.abilities[0];
+        let Effect::Counter {
+            countered_spell_zone,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(countered_spell_zone, Some(CounteredSpellDestination::Hand)),
+            "expected Hand, got {countered_spell_zone:?}"
+        );
+
+        // "Draw a card." must chain as a sibling — not be swallowed.
+        let draw = ability
+            .sub_ability
+            .as_deref()
+            .expect("Draw a card should chain after the counter redirect");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "expected chained Draw sibling, got {:?}",
+            draw.effect
+        );
+    }
+
+    /// NEGATIVE: Hinder — "put that card on your choice of the top or bottom ..."
+    /// is NOT supported (no fixed destination); the recognizer must return None
+    /// so the card is honestly gapped, not silently misparsed.
+    #[test]
+    fn hinder_counter_spell_zone_redirect_unsupported_is_none() {
+        let ability = parse_effect_chain(
+            "Counter target spell. If that spell is countered this way, put that card on your choice of the top or bottom of its owner's library instead of into that player's graveyard.",
+            AbilityKind::Spell,
+        );
+        let Effect::Counter {
+            countered_spell_zone,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            countered_spell_zone.is_none(),
+            "Hinder's 'your choice of top or bottom' must not match the recognizer, got {countered_spell_zone:?}"
+        );
+    }
+
+    /// NEGATIVE: a plain "Counter target spell." has no redirect — the field
+    /// stays None.
+    #[test]
+    fn plain_counter_has_no_spell_zone_redirect() {
+        let ability = parse_effect_chain("Counter target spell.", AbilityKind::Spell);
+        let Effect::Counter {
+            countered_spell_zone,
+            source_rider,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(countered_spell_zone.is_none());
+        assert!(source_rider.is_none());
+    }
+
+    /// REGRESSION: an ability-counter source_rider card still absorbs its
+    /// source_rider with `countered_spell_zone` left None — the two riders do
+    /// not interfere.
+    #[test]
+    fn counter_source_rider_leaves_spell_zone_none() {
+        use crate::types::ability::CounterSourceRider;
+
+        let ability = parse_effect_chain(
+            "counter target spell or ability. If a permanent's ability is countered this way, destroy that permanent",
+            AbilityKind::Spell,
+        );
+        let Effect::Counter {
+            source_rider,
+            countered_spell_zone,
+            ..
+        } = &*ability.effect
+        else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(matches!(source_rider, Some(CounterSourceRider::Destroy)));
+        assert!(
+            countered_spell_zone.is_none(),
+            "source_rider card must not set countered_spell_zone, got {countered_spell_zone:?}"
+        );
+    }
+
     #[test]
     fn effect_counter_unless_pays_parses_mana_cost() {
         use crate::types::mana::ManaCost;

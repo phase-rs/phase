@@ -2935,6 +2935,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.

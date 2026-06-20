@@ -329,6 +329,7 @@ mod tests {
         let mut def = leaf(Effect::Counter {
             target: creature_filter(),
             source_rider: None,
+            countered_spell_zone: None,
         });
         transform_ability_def(&mut def);
         assert!(matches!(*def.effect, Effect::Counter { .. }));

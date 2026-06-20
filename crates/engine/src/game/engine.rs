@@ -11565,6 +11565,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {

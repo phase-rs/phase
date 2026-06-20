@@ -9274,6 +9274,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackSpell,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(spell)],
             ObjectId(100),
@@ -15511,6 +15512,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(ObjectId(7))],
             ObjectId(99),
@@ -15525,6 +15527,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(ObjectId(8))],
             ObjectId(99),

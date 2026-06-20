@@ -7905,6 +7905,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 Effect::Counter {
                     target,
                     source_rider,
+                    // CR 701.6a + CR 614.1a: the countered-spell redirect is a
+                    // continuation absorbed post-hoc (sequence.rs); the base
+                    // effect parses with the default graveyard destination.
+                    countered_spell_zone: None,
                 }
             };
             let mut clause = parsed_clause(effect);
@@ -8692,6 +8696,10 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 Effect::Counter {
                     target,
                     source_rider,
+                    // CR 701.6a + CR 614.1a: the countered-spell redirect is a
+                    // continuation absorbed post-hoc (sequence.rs); the base
+                    // effect parses with the default graveyard destination.
+                    countered_spell_zone: None,
                 }
             }
         }

@@ -278,6 +278,7 @@ mod tests {
             Effect::Counter {
                 target: engine::types::ability::TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
         ));
         oid

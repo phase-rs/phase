@@ -1576,6 +1576,9 @@ fn collect_pending_triggers(
                                     let counter_effect = Effect::Counter {
                                         target: TargetFilter::TriggeringSource,
                                         source_rider: None,
+                                        // CR 701.6a: Ward's counter uses the
+                                        // default graveyard destination.
+                                        countered_spell_zone: None,
                                     };
                                     let mut ward_ability = ResolvedAbility::new(
                                         counter_effect,

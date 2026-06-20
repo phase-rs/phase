@@ -20692,6 +20692,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackSpell,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(opposing_bolt)],
             spell_id,
@@ -20741,6 +20742,7 @@ mod tests {
                     kind: None,
                 },
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(stack_ability_id)],
             spell_id,
@@ -32012,6 +32014,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
