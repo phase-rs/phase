@@ -2309,7 +2309,14 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
+            super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                source_id,
+                cost,
+                super::casting::activation_ability_tag(state, source_id, ability_index),
+                events,
+            )?
         {
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
@@ -5466,6 +5473,19 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     } else {
         None
     };
+    // CR 601.2a + CR 401.5: Capture the *selected* authorizing
+    // `StaticMode::TopOfLibraryCastPermission` source — and its frequency —
+    // BEFORE the card leaves the library for the stack (Assemble the Players,
+    // Johann). The selection prefers an `Unlimited` authorizer when one exists,
+    // so a `OncePerTurn` slot is only spent when the bounded permission is what
+    // actually authorized this cast. The slot is consumed below ONLY when the
+    // captured frequency is `OncePerTurn`; an `Unlimited` selection (Realmwalker,
+    // Future Sight, Bolas's Citadel) never consumes a slot.
+    let top_of_library_permission_source = if source_zone == Zone::Library {
+        super::casting::top_of_library_selected_permission(state, player, object_id)
+    } else {
+        None
+    };
     // CR 601.2a + CR 603.7 + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
     // leaves exile for the stack.
@@ -5670,6 +5690,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         exile_play_permission_source
     {
         state.exile_play_permissions_used.insert(source);
+    }
+    // CR 601.2a + CR 401.5: Consume the per-turn slot ONLY when the *selected*
+    // authorizing top-of-library permission is `OncePerTurn` (Assemble the
+    // Players, Johann). When an `Unlimited` permission (Realmwalker, Future
+    // Sight, Bolas's Citadel) authorized the cast — even if a OncePerTurn
+    // permission also matched the top card — no bounded slot is spent, so a
+    // second matching top spell remains castable this turn.
+    if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
+        top_of_library_permission_source
+    {
+        state.top_of_library_cast_permissions_used.insert(source);
     }
     // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
@@ -6560,6 +6591,7 @@ fn auto_tap_mana_sources_inner(
                     let activation_ctx = PaymentContext::Activation {
                         source_types: &source_types,
                         source_subtypes: &source_subtypes,
+                        ability_tag: ability_def.ability_tag,
                     };
                     auto_tap_mana_sources_inner(
                         state,
@@ -7284,7 +7316,7 @@ pub fn finalize_mana_payment(
     if let Some(pending_ref) = state.pending_cast.as_ref() {
         let mana_cost = pending_ref.cost.clone();
         let source_id = pending_ref.object_id;
-        if pending_ref.activation_ability_index.is_some() {
+        if let Some(ability_index) = pending_ref.activation_ability_index {
             let excluded_sources = pending_ref
                 .activation_cost
                 .as_ref()
@@ -7300,6 +7332,11 @@ pub fn finalize_mana_payment(
             let activation_ctx = PaymentContext::Activation {
                 source_types: &source_types,
                 source_subtypes: &source_subtypes,
+                ability_tag: super::casting::activation_ability_tag(
+                    state,
+                    source_id,
+                    ability_index,
+                ),
             };
             if let Some(waiting) = maybe_pause_for_phyrexian_choice(
                 state,
@@ -7347,6 +7384,7 @@ pub fn finalize_mana_payment(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
         )?;
@@ -7511,6 +7549,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             Some(phyrexian_choices),
             events,
             &excluded_sources,

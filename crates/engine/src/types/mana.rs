@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::Comparator;
+use super::ability::{AbilityTag, Comparator};
 use super::events::GameEvent;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -274,10 +274,12 @@ pub enum PaymentContext<'a> {
     /// Payment for a spell being cast — consult `allows_spell`.
     Spell(&'a SpellMeta),
     /// Payment for an activated ability — consult `allows_activation` using
-    /// the source permanent's core types and subtypes.
+    /// the source permanent's core types and subtypes plus the ability's
+    /// keyword tag (CR 106.6, for tag-scoped restrictions like Quinjet's).
     Activation {
         source_types: &'a [String],
         source_subtypes: &'a [String],
+        ability_tag: Option<AbilityTag>,
     },
     /// Payment for a cost during spell or ability resolution. Current
     /// restriction variants name spell-casting or ability-activation use, so
@@ -298,6 +300,68 @@ pub enum AbilityActivationScope {
     /// "… or to activate an ability" — any ability activation is permitted
     /// (e.g. Sage of the Unknowable, "a colorless spell or to activate an ability").
     Any,
+}
+
+/// CR 106.6 + CR 400.7: Whether a zone-gated spend restriction names the zone a
+/// spell *must* be cast from or a zone it must *not* be cast from. This is the
+/// inclusion/exclusion axis of [`ManaRestriction::OnlyForSpellFromZone`] — "from
+/// your graveyard" (`From`) versus "from anywhere other than your hand"
+/// (`NotFrom`, Mm'menon, the Right Hand). Parameterizing the existing zone
+/// variant over this polarity keeps a single zone-spend variant rather than a
+/// `SpellFromZone` / `SpellNotFromZone` sibling pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ZoneSpendPolarity {
+    /// "from [your] <zone>" — the spell must be cast from the named zone.
+    #[default]
+    From,
+    /// "from anywhere other than [your] <zone>" — the spell must be cast from
+    /// any zone *except* the named one. A spell with no recorded cast-from zone
+    /// is treated as not satisfying the restriction (conservative).
+    NotFrom,
+}
+
+/// CR 106.6 + CR 400.7: parameterized zone-gated spend restriction payload —
+/// the named zone plus an inclusion/exclusion [`ZoneSpendPolarity`]. Carried as
+/// a newtype payload of [`ManaRestriction::OnlyForSpellFromZone`] (and the
+/// parse-time [`crate::types::ability::ManaSpendRestriction::SpellFromZone`]) so
+/// the externally-tagged serialized form stays a single value rather than a
+/// struct variant. A custom [`Deserialize`] (see [`ZoneSpendPayload`]) accepts
+/// both the legacy bare-`Zone` form (`{"OnlyForSpellFromZone":"Graveyard"}`) and
+/// the current `{zone, polarity}` form, mapping the legacy form to `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ZoneSpend {
+    pub zone: Zone,
+    pub polarity: ZoneSpendPolarity,
+}
+
+/// Untagged payload bridging legacy bare-`Zone` serialized data and the current
+/// `{zone, polarity}` object form. Serde cannot deserialize a bare string into a
+/// struct variant, so this enum gives [`ZoneSpend`]'s custom `Deserialize` both
+/// shapes; `polarity` defaults to `From` for the current form when absent.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ZoneSpendPayload {
+    Current {
+        zone: Zone,
+        #[serde(default)]
+        polarity: ZoneSpendPolarity,
+    },
+    Legacy(Zone),
+}
+
+impl<'de> Deserialize<'de> for ZoneSpend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match ZoneSpendPayload::deserialize(deserializer)? {
+            ZoneSpendPayload::Legacy(zone) => Self {
+                zone,
+                polarity: ZoneSpendPolarity::From,
+            },
+            ZoneSpendPayload::Current { zone, polarity } => Self { zone, polarity },
+        })
+    }
 }
 
 /// CR 106.6 + CR 107.3 + CR 202.3: A single qualifying criterion on the cost of
@@ -363,6 +427,11 @@ pub enum ManaRestriction {
     /// "Spend this mana only to activate abilities."
     /// Cannot be used for casting spells — activation-only.
     OnlyForActivation,
+    /// CR 106.6: "Spend this mana only to activate power-up abilities." Keyed on
+    /// the activating ability's keyword tag (Quinjet Technician), a distinct axis
+    /// from `OnlyForTypeSpellsOrAbilities` (which keys on the source permanent's
+    /// type) and `OnlyForActivation` (which permits any activation).
+    OnlyForTaggedActivation(AbilityTag),
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     OnlyForXCosts,
@@ -392,10 +461,15 @@ pub enum ManaRestriction {
     /// `spell_color_count <cmp> count`. Colorless spells have color_count 0.
     OnlyForSpellWithColorCount { comparator: Comparator, count: u32 },
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
-    /// graveyard" / "from exile". Gates on the spell's cast-from zone, consulting
+    /// graveyard" / "from exile" ([`ZoneSpendPolarity::From`]) and "from anywhere
+    /// other than your hand" ([`ZoneSpendPolarity::NotFrom`], Mm'menon, the Right
+    /// Hand). Gates on the spell's cast-from zone, consulting
     /// `SpellMeta.cast_from_zone`. A distinct axis from
     /// `OnlyForSpellWithKeywordKindFromZone` (which also requires a keyword).
-    OnlyForSpellFromZone(Zone),
+    /// Carried as a [`ZoneSpend`] newtype payload whose custom `Deserialize`
+    /// accepts the legacy bare-`Zone` form (`{"OnlyForSpellFromZone":"Graveyard"}`)
+    /// for backward compatibility, mapping it to the inclusion reading.
+    OnlyForSpellFromZone(ZoneSpend),
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition
     /// combinator (each branch is itself a full restriction), not a leaf
@@ -480,6 +554,8 @@ impl ManaRestriction {
             }
             // Activation-only mana cannot be used to cast spells.
             ManaRestriction::OnlyForActivation => false,
+            // CR 106.6: Tag-scoped activation mana cannot be used to cast spells.
+            ManaRestriction::OnlyForTaggedActivation(_) => false,
             // CR 106.6: X-cost restriction — conservatively disallow for spells.
             // Full X-cost detection requires ManaCost inspection at the call site.
             ManaRestriction::OnlyForXCosts => false,
@@ -521,9 +597,18 @@ impl ManaRestriction {
             ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => meta
                 .color_count
                 .is_some_and(|cc| comparator.evaluate(cc as i32, *count as i32)),
-            // CR 106.6 + CR 400.7: zone-gated spend — the spell must be cast from
-            // the named zone. A spell with no recorded cast-from zone is ineligible.
-            ManaRestriction::OnlyForSpellFromZone(zone) => meta.cast_from_zone == Some(*zone),
+            // CR 106.6 + CR 400.7: zone-gated spend. `From` requires the spell be
+            // cast from the named zone; `NotFrom` requires it be cast from any
+            // zone *except* the named one (e.g. "from anywhere other than your
+            // hand"). A spell with no recorded cast-from zone satisfies neither
+            // reading (conservative — `None == Some(zone)` is false for `From`,
+            // and `NotFrom` treats unknown origin as ineligible).
+            ManaRestriction::OnlyForSpellFromZone(zs) => match zs.polarity {
+                ZoneSpendPolarity::From => meta.cast_from_zone == Some(zs.zone),
+                ZoneSpendPolarity::NotFrom => meta
+                    .cast_from_zone
+                    .is_some_and(|cast_from| cast_from != zs.zone),
+            },
             // CR 106.6: Disjunction — the spell is payable if it satisfies any branch.
             ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             ManaRestriction::ConvokePayment => true,
@@ -534,7 +619,12 @@ impl ManaRestriction {
     /// on a permanent whose core types include `source_types` and subtypes include
     /// `source_subtypes`.
     /// CR 106.6: Used for "or activate abilities of creatures" restrictions.
-    pub fn allows_activation(&self, source_types: &[String], source_subtypes: &[String]) -> bool {
+    pub fn allows_activation(
+        &self,
+        source_types: &[String],
+        source_subtypes: &[String],
+        ability_tag: Option<AbilityTag>,
+    ) -> bool {
         match self {
             // Spell-only restrictions don't permit ability activation.
             ManaRestriction::OnlyForSpell
@@ -563,10 +653,15 @@ impl ManaRestriction {
             },
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
+            // CR 106.6: Tag-scoped mana — payable only for an activation whose
+            // ability carries the matching keyword tag (Quinjet → power-up).
+            ManaRestriction::OnlyForTaggedActivation(required_tag) => {
+                ability_tag == Some(*required_tag)
+            }
             // CR 106.6: Disjunction — the activation is payable if any branch allows it.
             ManaRestriction::OnlyForAny(subs) => subs
                 .iter()
-                .any(|r| r.allows_activation(source_types, source_subtypes)),
+                .any(|r| r.allows_activation(source_types, source_subtypes, ability_tag)),
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
             ManaRestriction::OnlyForXCosts | ManaRestriction::ConvokePayment => false,
@@ -583,7 +678,8 @@ impl ManaRestriction {
             PaymentContext::Activation {
                 source_types,
                 source_subtypes,
-            } => self.allows_activation(source_types, source_subtypes),
+                ability_tag,
+            } => self.allows_activation(source_types, source_subtypes, *ability_tag),
             PaymentContext::Effect => false,
         }
     }
@@ -1645,9 +1741,17 @@ mod tests {
             },
         ]);
         // An Assassin source's ability is allowed via the second branch.
-        assert!(restriction.allows_activation(&["Creature".to_string()], &["Assassin".to_string()]));
+        assert!(restriction.allows_activation(
+            &["Creature".to_string()],
+            &["Assassin".to_string()],
+            None
+        ));
         // A non-Assassin source's ability is allowed by no branch.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &["Goblin".to_string()]));
+        assert!(!restriction.allows_activation(
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+            None
+        ));
     }
 
     // CR 106.6: "Spend this mana only to cast Ninja spells" (Turtle Lair, issue
@@ -1707,6 +1811,7 @@ mod tests {
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -1766,7 +1871,7 @@ mod tests {
         assert!(!restriction.allows_spell(&elf_creature));
         let source_types = vec!["Creature".to_string()];
         let source_subtypes = vec!["Elf".to_string()];
-        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes, None));
     }
 
     #[test]
@@ -1982,10 +2087,14 @@ mod tests {
         };
         let elemental_creature_types = vec!["Creature".to_string()];
         let elemental_subtypes = vec!["Elemental".to_string(), "Shaman".to_string()];
-        assert!(restriction.allows_activation(&elemental_creature_types, &elemental_subtypes));
+        assert!(restriction.allows_activation(
+            &elemental_creature_types,
+            &elemental_subtypes,
+            None
+        ));
 
         let goblin_subtypes = vec!["Goblin".to_string()];
-        assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes));
+        assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes, None));
 
         // Core-type match also satisfies the check (e.g., "Artifact sources").
         let artifact_restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
@@ -1994,7 +2103,7 @@ mod tests {
         };
         let artifact_types = vec!["Artifact".to_string()];
         let no_subtypes: Vec<String> = vec![];
-        assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
+        assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes, None));
     }
 
     // CR 106.6: `AbilityActivationScope::Any` — "cast a colorless spell or to
@@ -2029,8 +2138,12 @@ mod tests {
         assert!(restriction.allows_spell(&colorless_spell));
         assert!(!restriction.allows_spell(&colored_spell));
         // Ability half: any activation is permitted, regardless of source type.
-        assert!(restriction.allows_activation(&["Goblin".to_string()], &[]));
-        assert!(restriction.allows_activation(&["Land".to_string()], &["Forest".to_string()]));
+        assert!(restriction.allows_activation(&["Goblin".to_string()], &[], None));
+        assert!(restriction.allows_activation(
+            &["Land".to_string()],
+            &["Forest".to_string()],
+            None
+        ));
     }
 
     // CR 106.6: Hydraulic Helper — "{T}: Add {U}. This mana can't be spent to
@@ -2097,10 +2210,12 @@ mod tests {
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &["Creature".to_string()],
             source_subtypes: &["Human".to_string()],
+            ability_tag: None,
         }));
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &["Land".to_string()],
             source_subtypes: &[],
+            ability_tag: None,
         }));
     }
 
@@ -2137,10 +2252,12 @@ mod tests {
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &artifact_types,
             source_subtypes: &no_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &creature_types,
             source_subtypes: &no_subtypes,
+            ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2201,13 +2318,17 @@ mod tests {
         };
         let colorless_creature_types = vec!["Creature".to_string(), "Colorless".to_string()];
         let eldrazi_subtypes = vec!["Eldrazi".to_string()];
-        assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes));
+        assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes, None));
 
         let colored_creature_types = vec!["Creature".to_string()];
-        assert!(!restriction.allows_activation(&colored_creature_types, &eldrazi_subtypes));
+        assert!(!restriction.allows_activation(&colored_creature_types, &eldrazi_subtypes, None));
 
         let construct_subtypes = vec!["Construct".to_string()];
-        assert!(!restriction.allows_activation(&colorless_creature_types, &construct_subtypes));
+        assert!(!restriction.allows_activation(
+            &colorless_creature_types,
+            &construct_subtypes,
+            None
+        ));
     }
 
     #[test]
@@ -2331,7 +2452,7 @@ mod tests {
         };
         let source_types = vec!["Creature".to_string()];
         let source_subtypes: Vec<String> = vec![];
-        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes, None));
     }
 
     // CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
@@ -2359,7 +2480,7 @@ mod tests {
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // CR 105.2: a color-count gate names spell casting, so it rejects ability
         // activation.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
     }
 
     // CR 105.2: colorless spells have a color count of 0, so "exactly 0 colors"
@@ -2450,7 +2571,10 @@ mod tests {
     // and the restriction never permits ability activation.
     #[test]
     fn restriction_allows_spell_from_zone() {
-        let restriction = ManaRestriction::OnlyForSpellFromZone(Zone::Graveyard);
+        let restriction = ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+            zone: Zone::Graveyard,
+            polarity: ZoneSpendPolarity::From,
+        });
         let from_gy = SpellMeta {
             cast_from_zone: Some(Zone::Graveyard),
             ..SpellMeta::default()
@@ -2464,7 +2588,75 @@ mod tests {
         // No recorded cast-from zone → ineligible.
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // Zone-gated spend is spell-casting only.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
+    }
+
+    // CR 106.6 + CR 400.7: the `NotFrom` polarity (Mm'menon, the Right Hand —
+    // "from anywhere other than your hand") allows any cast-from zone except the
+    // named one, and treats an unknown origin as ineligible.
+    #[test]
+    fn restriction_allows_spell_not_from_zone() {
+        let restriction = ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+            zone: Zone::Hand,
+            polarity: ZoneSpendPolarity::NotFrom,
+        });
+        let from_hand = SpellMeta {
+            cast_from_zone: Some(Zone::Hand),
+            ..SpellMeta::default()
+        };
+        let from_gy = SpellMeta {
+            cast_from_zone: Some(Zone::Graveyard),
+            ..SpellMeta::default()
+        };
+        // Cast from hand → forbidden; cast from any other zone → allowed.
+        assert!(!restriction.allows_spell(&from_hand));
+        assert!(restriction.allows_spell(&from_gy));
+        // No recorded cast-from zone → ineligible (conservative).
+        assert!(!restriction.allows_spell(&SpellMeta::default()));
+        // Still spell-casting only — never permits ability activation.
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
+    }
+
+    // CR 106.6 + CR 400.7: backward-compat for the zone-spend restriction. The
+    // pre-polarity serialized form was a bare-string externally-tagged payload
+    // (`{"OnlyForSpellFromZone":"Graveyard"}`); the custom `ZoneSpend`
+    // deserializer must still accept it and map it to the inclusion (`From`)
+    // reading, while the current `{zone, polarity}` form round-trips. This test
+    // fails against a struct-variant encoding — serde cannot deserialize a bare
+    // string into a struct variant — so it discriminates the newtype+ZoneSpend
+    // backward-compat fix from the struct-variant regression it replaces.
+    #[test]
+    fn zone_spend_restriction_legacy_and_current_serde() {
+        // Legacy bare-`Zone` payload (no `polarity` field existed yet).
+        let legacy: ManaRestriction =
+            serde_json::from_str(r#"{"OnlyForSpellFromZone":"Graveyard"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+                zone: Zone::Graveyard,
+                polarity: ZoneSpendPolarity::From,
+            })
+        );
+
+        // Current `{zone, polarity}` object form with explicit NotFrom round-trips.
+        let current = ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+            zone: Zone::Hand,
+            polarity: ZoneSpendPolarity::NotFrom,
+        });
+        let json = serde_json::to_string(&current).unwrap();
+        let round_tripped: ManaRestriction = serde_json::from_str(&json).unwrap();
+        assert_eq!(current, round_tripped);
+
+        // Current object form omitting `polarity` defaults to the inclusion reading.
+        let defaulted: ManaRestriction =
+            serde_json::from_str(r#"{"OnlyForSpellFromZone":{"zone":"Exile"}}"#).unwrap();
+        assert_eq!(
+            defaulted,
+            ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+                zone: Zone::Exile,
+                polarity: ZoneSpendPolarity::From,
+            })
+        );
     }
 
     #[test]

@@ -2047,6 +2047,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
             play_mode: CardPlayMode::Play,
+            // CR 601.2a: The Bolas's Citadel compound form has no per-turn cap.
+            frequency: CastFrequency::Unlimited,
             alt_cost,
         })
         .affected(TargetFilter::Any)
@@ -2056,6 +2058,19 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         }
         return Some(def);
     }
+
+    // CR 601.2a: Optional once-per-turn frequency prefix. "Once each turn, …"
+    // (Assemble the Players) and the longer "Once during each of your turns, …"
+    // synonym both lower to OncePerTurn; absence keeps the Unlimited shape
+    // (Realmwalker, Future Sight). After stripping the prefix, the standard
+    // "you may play/cast" verb-dispatch below is matched.
+    let (lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
+        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
+    {
+        (r, CastFrequency::OncePerTurn)
+    } else {
+        (lower, CastFrequency::Unlimited)
+    };
 
     // Standard form: "you may [play|cast] [filter] from the top of your library".
     let (rest, play_mode) = if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
@@ -2094,6 +2109,7 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
         play_mode,
+        frequency,
         alt_cost,
     })
     .affected(filter)

@@ -5947,6 +5947,18 @@ pub struct GameState {
     /// resetting the slot when the source leaves and re-enters play.
     #[serde(default)]
     pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 401.5: Tracks `OncePerTurn`
+    /// `StaticMode::TopOfLibraryCastPermission` sources that have already had a
+    /// spell cast through them this turn (Assemble the Players, Johann,
+    /// Apprentice Sorcerer — "Once each turn, you may cast … from the top of
+    /// your library"). Keyed by the granting permanent's ObjectId. `Unlimited`
+    /// frequency permissions (Realmwalker, Future Sight, Bolas's Citadel) never
+    /// populate this set. Cleared at the start of each turn alongside the other
+    /// per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub top_of_library_cast_permissions_used: HashSet<ObjectId>,
     /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
     /// exiled "with" each linked-exile source during the current turn. Keyed
     /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
@@ -7107,6 +7119,7 @@ impl GameState {
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
+            top_of_library_cast_permissions_used: HashSet::new(),
             cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),

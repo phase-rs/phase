@@ -17032,9 +17032,11 @@ fn top_of_library_cast_permission_realmwalker() {
     match def.mode {
         StaticMode::TopOfLibraryCastPermission {
             play_mode,
+            frequency,
             ref alt_cost,
         } => {
             assert_eq!(play_mode, CardPlayMode::Cast);
+            assert_eq!(frequency, CastFrequency::Unlimited);
             assert!(alt_cost.is_none());
         }
         other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
@@ -17068,9 +17070,11 @@ fn top_of_library_cast_permission_future_sight_compound() {
     match def.mode {
         StaticMode::TopOfLibraryCastPermission {
             play_mode,
+            frequency,
             ref alt_cost,
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::Unlimited);
             assert!(alt_cost.is_none());
         }
         other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
@@ -17126,6 +17130,7 @@ fn top_of_library_cast_permission_bolas_alt_cost() {
     match def.mode {
         StaticMode::TopOfLibraryCastPermission {
             play_mode,
+            frequency: CastFrequency::Unlimited,
             alt_cost: Some(crate::types::ability::AbilityCost::PayLife { amount }),
         } => {
             assert_eq!(play_mode, CardPlayMode::Play);
@@ -18891,5 +18896,156 @@ fn damage_not_removed_during_cleanup_rejects_non_cleanup_during() {
         ),
         "a non-\"during cleanup steps\" sentence must not be a cleanup-damage static, got {:?}",
         def.map(|d| d.mode)
+    );
+}
+
+/// CR 401.5 + CR 601.2a: Assemble the Players — "Once each turn, you may cast
+/// a creature spell with power 2 or less from the top of your library." must
+/// lower to a `TopOfLibraryCastPermission { frequency: OncePerTurn }` carrying
+/// the creature + power-2-or-less filter, with ZERO `Effect::Unimplemented`.
+/// Discriminating on the new `frequency` axis: a regression that drops the
+/// once-each-turn prefix would leave `frequency: Unlimited`, flipping this
+/// assertion.
+#[test]
+fn assemble_the_players_once_per_turn_top_of_library() {
+    let parsed = crate::parser::parse_oracle_text(
+        "You may look at the top card of your library any time.\n\
+         Once each turn, you may cast a creature spell with power 2 or less from the top of your library.",
+        "Assemble the Players",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    for a in &parsed.abilities {
+        assert!(
+            !matches!(&*a.effect, Effect::Unimplemented { .. }),
+            "Assemble the Players must emit ZERO Unimplemented, got {:?}",
+            a.effect
+        );
+    }
+    let perm = parsed
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::TopOfLibraryCastPermission { .. }))
+        .expect("Assemble the Players must produce a TopOfLibraryCastPermission static");
+    match &perm.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            alt_cost,
+        } => {
+            assert_eq!(*play_mode, CardPlayMode::Cast);
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    match perm.affected.as_ref().expect("affected filter") {
+        TargetFilter::Typed(tf) => {
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)));
+            assert!(tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            )));
+        }
+        other => panic!("expected Typed creature/power filter, got {other:?}"),
+    }
+}
+
+/// CR 401.5 + CR 601.2a: Johann, Apprentice Sorcerer — "Once each turn, you may
+/// cast an instant or sorcery spell from the top of your library." must lower
+/// to `TopOfLibraryCastPermission { frequency: OncePerTurn }` with an
+/// instant-or-sorcery filter and ZERO `Effect::Unimplemented`.
+#[test]
+fn johann_apprentice_sorcerer_once_per_turn_top_of_library() {
+    let parsed = crate::parser::parse_oracle_text(
+        "You may look at the top card of your library any time.\n\
+         Once each turn, you may cast an instant or sorcery spell from the top of your library. \
+         (You still pay its costs. Timing rules still apply.)",
+        "Johann, Apprentice Sorcerer",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    for a in &parsed.abilities {
+        assert!(
+            !matches!(&*a.effect, Effect::Unimplemented { .. }),
+            "Johann must emit ZERO Unimplemented, got {:?}",
+            a.effect
+        );
+    }
+    let perm = parsed
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::TopOfLibraryCastPermission { .. }))
+        .expect("Johann must produce a TopOfLibraryCastPermission static");
+    match &perm.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ..
+        } => {
+            assert_eq!(*play_mode, CardPlayMode::Cast);
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    match perm.affected.as_ref().expect("affected filter") {
+        TargetFilter::Or { filters } => {
+            assert!(filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf) if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Instant))
+            )));
+            assert!(filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf) if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Sorcery))
+            )));
+        }
+        other => panic!("expected instant-or-sorcery Or filter, got {other:?}"),
+    }
+}
+
+/// CR 601.2a: The `frequency` field round-trips through `StaticMode`'s
+/// `Display`/`FromStr` for both the default `Unlimited` (no segment) and the
+/// `OncePerTurn` (tagged `freq=` segment) shapes. Guards the wire-format
+/// backward-compat: the historical 1-/2-segment Unlimited forms must still
+/// parse, and the OncePerTurn shape must survive a Display→FromStr cycle.
+#[test]
+fn top_of_library_frequency_display_roundtrip() {
+    use std::str::FromStr;
+    let unlimited = StaticMode::TopOfLibraryCastPermission {
+        play_mode: CardPlayMode::Cast,
+        frequency: CastFrequency::Unlimited,
+        alt_cost: None,
+    };
+    let once = StaticMode::TopOfLibraryCastPermission {
+        play_mode: CardPlayMode::Cast,
+        frequency: CastFrequency::OncePerTurn,
+        alt_cost: None,
+    };
+    // Unlimited keeps the historical compact form (no freq= segment).
+    assert_eq!(unlimited.to_string(), "TopOfLibraryCastPermission(Cast)");
+    assert_eq!(
+        once.to_string(),
+        "TopOfLibraryCastPermission(Cast,freq=once_per_turn)"
+    );
+    // Round-trip both.
+    assert_eq!(
+        StaticMode::from_str(&unlimited.to_string()).unwrap(),
+        unlimited
+    );
+    assert_eq!(StaticMode::from_str(&once.to_string()).unwrap(), once);
+    // Legacy compact form (no parens variant) still parses to Unlimited.
+    assert_eq!(
+        StaticMode::from_str("TopOfLibraryCastPermission").unwrap(),
+        unlimited
     );
 }

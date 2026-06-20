@@ -571,6 +571,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // open-ended "cards exiled with ~" filter for sources without a per-turn
     // cap.
     state.exile_cast_permissions_used.clear();
+    // CR 601.2a + CR 401.5: Reset per-turn TopOfLibraryCastPermission
+    // once-per-turn tracking (Assemble the Players, Johann, Apprentice Sorcerer).
+    state.top_of_library_cast_permissions_used.clear();
     state.cards_exiled_with_source_this_turn.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
@@ -749,6 +752,25 @@ pub fn execute_untap_with_choices(
     state.pending_damage_replacements.retain(|r| {
         !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
     });
+    // CR 514.2 + CR 500.7: Arm "until the end of the player's next turn"
+    // restrictions (Kang's power-up prohibition) when that player's next turn
+    // begins — convert to `EndOfTurn` so the cleanup-step prune (`execute_cleanup`)
+    // ends them at THIS turn's cleanup, persisting through the whole turn.
+    // Mirrors `prune_until_next_turn_effects` (layers.rs). NOTE: if the granted
+    // turn is SKIPPED/PREVENTED before its untap step, this conversion never runs
+    // and the restriction is never armed/pruned — a documented narrow edge shared
+    // with the analogous `Duration::UntilEndOfNextTurnOf` arming.
+    {
+        use crate::types::ability::GameRestriction;
+        for restriction in state.restrictions.iter_mut() {
+            if let GameRestriction::ProhibitActivity { expiry, .. } = restriction {
+                if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { player } if *player == active)
+                {
+                    *expiry = RestrictionExpiry::EndOfTurn;
+                }
+            }
+        }
+    }
     state.restrictions.retain(|restriction| {
         use crate::types::ability::GameRestriction;
 

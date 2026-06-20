@@ -10,12 +10,13 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, Comparator, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-    ManaSpendRestriction, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant, SpellCostCriterion,
+    ZoneSpend, ZoneSpendPolarity,
 };
 use crate::types::zones::Zone;
 
@@ -1414,6 +1415,20 @@ pub(crate) fn parse_mana_spend_restriction(
     let base = base.trim_end_matches(['.', '"']);
     let base_lower = base.to_lowercase();
 
+    // CR 106.6: "spend this mana only to activate power-up abilities" -- tag-scoped.
+    // Try BEFORE the broader "to activate abilities" arm (more-specific-first) so
+    // Quinjet's {R}{R} does not collapse to ActivateOnly.
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), tag("to activate power-up abilities")).parse(i)
+    })
+    .is_some()
+    {
+        return Some((
+            ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp),
+            vec![],
+        ));
+    }
+
     // "spend this mana only to activate abilities" -- activation-only
     if nom_on_lower(base, &base_lower, |i| {
         value((), tag("to activate abilities")).parse(i)
@@ -1510,11 +1525,16 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
         });
     }
 
-    // CR 106.6 + CR 400.7: "[a spell|spells] from your graveyard" / "from exile"
-    // — zone-gated spend (no keyword required). Checked before the type-phrase
+    // CR 106.6 + CR 400.7: "[a spell|spells] from [your] <zone>" / "from anywhere
+    // other than [your] <zone>" — zone-gated spend (no keyword required), where
+    // the leading "anywhere other than" upgrades the reading to the `NotFrom`
+    // polarity (Mm'menon, the Right Hand). Checked before the type-phrase
     // fallback, which does not recognize a "from <zone>" tail.
-    if let Some(zone) = parse_spell_from_zone(rest) {
-        return Some(ManaSpendRestriction::SpellFromZone(zone));
+    if let Some((zone, polarity)) = parse_spell_from_zone(rest) {
+        return Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            zone,
+            polarity,
+        }));
     }
 
     // CR 106.6: Check for an "or activate …" ability-activation suffix. If
@@ -1699,23 +1719,30 @@ fn parse_spell_with_keyword(rest: &str) -> Option<(KeywordKind, Option<Zone>)> {
     Some((kind, Some(zone)))
 }
 
-/// CR 106.6 + CR 400.7: Parse "[a spell|spells] from <zone>" (the post-"to cast"
-/// remainder of a zone-gated spend restriction) into the origin `Zone`. Handles
-/// graveyard / exile / hand with the usual "your"/"a" determiners. Returns
-/// `None` when the remainder is not a bare spell-from-zone phrase (e.g. it
-/// carries a keyword or type qualifier handled by other arms).
-fn parse_spell_from_zone(rest: &str) -> Option<Zone> {
+/// CR 106.6 + CR 400.7: Parse "[a spell|spells] from [anywhere other than ]<zone>"
+/// (the post-"to cast" remainder of a zone-gated spend restriction) into the
+/// origin `Zone` and its inclusion/exclusion polarity. Handles graveyard / exile
+/// / hand with the usual "your"/"a" determiners. The optional "anywhere other
+/// than " prefix flips the reading to [`ZoneSpendPolarity::NotFrom`] (Mm'menon,
+/// the Right Hand — "from anywhere other than your hand"). Returns `None` when
+/// the remainder is not a bare spell-from-zone phrase (e.g. it carries a keyword
+/// or type qualifier handled by other arms).
+fn parse_spell_from_zone(rest: &str) -> Option<(Zone, ZoneSpendPolarity)> {
     let rest_lower = rest.to_lowercase();
-    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
-        value(
-            (),
-            (
-                alt((tag("a spell"), tag("spells"))),
-                tag(" from "),
-                opt(alt((tag("your "), tag("a ")))),
-            ),
-        )
-        .parse(i)
+    // Consume "[a spell|spells] from " then, optionally, the "anywhere other
+    // than " exclusion marker; the determiner ("your"/"a") follows in both
+    // readings. The presence of the exclusion marker selects the polarity.
+    let (polarity, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        let (i, _) = alt((tag("a spell"), tag("spells"))).parse(i)?;
+        let (i, _) = tag(" from ").parse(i)?;
+        let (i, exclusion) = opt(tag("anywhere other than ")).parse(i)?;
+        let polarity = if exclusion.is_some() {
+            ZoneSpendPolarity::NotFrom
+        } else {
+            ZoneSpendPolarity::From
+        };
+        let (i, _) = opt(alt((tag("your "), tag("a ")))).parse(i)?;
+        Ok((i, polarity))
     })?;
     let after_lower = after_prefix.to_lowercase();
     let (zone, _) = nom_on_lower(after_prefix, &after_lower, |i| {
@@ -1726,7 +1753,7 @@ fn parse_spell_from_zone(rest: &str) -> Option<Zone> {
         )))
         .parse(i)
     })?;
-    Some(zone)
+    Some((zone, polarity))
 }
 
 /// CR 106.6: Parse the "[spells|a spell] with mana value N [or greater|or
@@ -3361,6 +3388,34 @@ mod tests {
                 comparator: Comparator::GE,
                 value: 5,
             })
+        );
+    }
+
+    // CR 106.6 + CR 400.7: Mm'menon, the Right Hand — "from anywhere other than
+    // your hand" lowers to the `NotFrom` polarity over `Zone::Hand`, while the
+    // existing positive "from your graveyard" reading stays `From`.
+    #[test]
+    fn mana_spend_restriction_not_from_hand() {
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from anywhere other than your hand"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Hand,
+                polarity: ZoneSpendPolarity::NotFrom,
+            }))
+        );
+        // The exclusion marker must not bleed into the inclusion reading.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from your graveyard"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Graveyard,
+                polarity: ZoneSpendPolarity::From,
+            }))
         );
     }
 }

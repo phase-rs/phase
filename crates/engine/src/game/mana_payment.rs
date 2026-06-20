@@ -2969,6 +2969,7 @@ mod tests {
         let goblin_activation = PaymentContext::Activation {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
+            ability_tag: None,
         };
         assert!(can_pay_for_spell(
             &pool,
@@ -3082,6 +3083,7 @@ mod tests {
                 Some(&PaymentContext::Activation {
                     source_types: &creature_types,
                     source_subtypes: &no_subtypes,
+                    ability_tag: None,
                 }),
                 crate::types::mana::CostPermissionContext::default(),
             ),

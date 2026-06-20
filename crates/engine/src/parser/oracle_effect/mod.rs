@@ -88,7 +88,7 @@ use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControllerRef, CopyRetargetPermission, DamageModification,
@@ -2177,10 +2177,61 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::ActivateAbilities {
                     exemption: ActivationExemption::ManaAbilities,
+                    only_tag: None,
                 },
             },
         },
         duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 500.7 + CR 514.2 + CR 602.5: "During that turn, power-up abilities can't
+/// be activated" — Kang's clause appended after "Take an extra turn after this
+/// one." Prohibits the controller's power-up activations throughout the granted
+/// extra turn. The restriction is pre-armed (`Duration::UntilEndOfNextTurnOf`,
+/// lowered to `RestrictionExpiry::UntilEndOfNextTurnOf` and converted to
+/// `EndOfTurn` at the extra turn's untap step), so it persists through that whole
+/// turn and expires at its cleanup.
+fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    nom_on_lower(tp.original, tp.lower, |input| {
+        value(
+            (),
+            preceded(
+                tag("during that turn, "),
+                tag("power-up abilities can't be activated"),
+            ),
+        )
+        .parse(input)
+    })
+    .filter(|((), rest)| rest.trim_matches(['.', ' ']).is_empty())?;
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                // CR 500.7: "power-up abilities can't be activated" during that
+                // turn is an unrestricted prohibition (no player subject) — no
+                // player is exempt, so it affects all players (and creates no
+                // target slot, unlike `TargetedPlayer`).
+                affected_players: RestrictionPlayerScope::AllPlayers,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::ActivateAbilities {
+                    exemption: ActivationExemption::None,
+                    only_tag: Some(AbilityTag::PowerUp),
+                },
+            },
+        },
+        // Pre-armed end-of-next-turn anchor — `fill_runtime_fields` lowers this
+        // to `RestrictionExpiry::UntilEndOfNextTurnOf { player: controller }`.
+        duration: Some(Duration::UntilEndOfNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -4937,6 +4988,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 101.2: "Your opponents can't cast spells this turn" — blanket temporary prohibition.
     // Must run AFTER cast_only_from_zones (more specific "from zones" check).
     if let Some(clause) = try_parse_cant_cast_spells_effect(tp) {
+        return clause;
+    }
+
+    // CR 500.7 + CR 602.5: "During that turn, power-up abilities can't be
+    // activated" (Kang). Tag-scoped prohibition for the granted extra turn — try
+    // before the generic non-mana-ability prohibition.
+    if let Some(clause) = try_parse_during_that_turn_powerup_prohibition(tp) {
         return clause;
     }
 
@@ -43204,6 +43262,7 @@ mod tests {
                     affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: ActivationExemption::ManaAbilities,
+                        ..
                     },
                     ..
                 }

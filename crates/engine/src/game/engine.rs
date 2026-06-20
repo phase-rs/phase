@@ -3086,12 +3086,18 @@ fn apply_action(
                     .find(|p| p.id == player)
                     .map(|p| p.mana_pool.clone())
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                let current_shards = if pending_ref.activation_ability_index.is_some() {
+                let activation_ability_index = pending_ref.activation_ability_index;
+                let current_shards = if let Some(ability_index) = activation_ability_index {
                     let (source_types, source_subtypes) =
                         casting::activation_source_types(state, spell_object);
                     let activation_ctx = crate::types::mana::PaymentContext::Activation {
                         source_types: &source_types,
                         source_subtypes: &source_subtypes,
+                        ability_tag: casting::activation_ability_tag(
+                            state,
+                            spell_object,
+                            ability_index,
+                        ),
                     };
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,

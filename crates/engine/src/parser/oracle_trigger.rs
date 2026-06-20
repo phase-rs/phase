@@ -3950,6 +3950,20 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Boast);
             return Some((TriggerMode::KeywordAbilityActivated(AbilityTag::Boast), def));
         }
+        // CR 602.1 + CR 603.1b: Match "a power-up ability" — Marvel Boy triggers
+        // when its controller activates a power-up ability (one of two trigger
+        // conditions split from the dual-condition text by `split_and_when_compound`).
+        if tag::<_, _, OracleError<'_>>("a power-up ability")
+            .parse(rest)
+            .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::PowerUp);
+            return Some((
+                TriggerMode::KeywordAbilityActivated(AbilityTag::PowerUp),
+                def,
+            ));
+        }
         #[derive(Clone, Copy)]
         enum KeywordActivationSubject {
             SelfRef,

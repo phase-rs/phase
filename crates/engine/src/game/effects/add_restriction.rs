@@ -81,24 +81,31 @@ fn fill_runtime_fields(
 
     match restriction {
         GameRestriction::ProhibitActivity { expiry, .. } => {
-            // CR 514.2: "until [the end of] your next turn" restrictions expire
-            // relative to the controller's next turn. The restriction-expiry
-            // system tracks only `UntilPlayerNextTurn` (begin-of-next-turn), so
-            // both readings map to it here — the precise end-of-next-turn timing
-            // matters only for continuous effects / play-permissions (handled in
-            // the layer prune); no printed restriction uses "end of next turn".
-            if let Some(
-                crate::types::ability::Duration::UntilNextTurnOf {
-                    player: crate::types::ability::PlayerScope::Controller,
+            use crate::types::ability::{Duration, PlayerScope};
+            match ability.duration.as_ref() {
+                // CR 514.2 + CR 611.2a: "until your next turn" expires at the
+                // *beginning* of the controller's next turn.
+                Some(Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                }) => {
+                    *expiry = RestrictionExpiry::UntilPlayerNextTurn {
+                        player: ability.controller,
+                    };
                 }
-                | crate::types::ability::Duration::UntilEndOfNextTurnOf {
-                    player: crate::types::ability::PlayerScope::Controller,
-                },
-            ) = ability.duration.as_ref()
-            {
-                *expiry = RestrictionExpiry::UntilPlayerNextTurn {
-                    player: ability.controller,
-                };
+                // CR 514.2 + CR 500.7: "during [the controller's] next turn …"
+                // (Kang) persists through that entire turn and expires at its
+                // cleanup. Lower to the pre-armed `UntilEndOfNextTurnOf` marker,
+                // which the untap step converts to `EndOfTurn` (mirroring
+                // `prune_until_next_turn_effects`) so the existing cleanup prune
+                // ends it at THAT turn's cleanup.
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }) => {
+                    *expiry = RestrictionExpiry::UntilEndOfNextTurnOf {
+                        player: ability.controller,
+                    };
+                }
+                _ => {}
             }
         }
         GameRestriction::DamagePreventionDisabled { .. } => {}
@@ -207,6 +214,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                        only_tag: None,
                     },
                 },
             },
@@ -241,6 +249,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                        only_tag: None,
                     },
                 },
             },

@@ -2242,11 +2242,15 @@ fn pay_mana_sub_cost(
 ) -> Result<(), EngineError> {
     if hybrid_plan.is_none() {
         let excluded_sources = std::collections::HashSet::from([source_id]);
+        // CR 605.1a: A mana ability never carries a power-up tag (power-up
+        // abilities can't produce mana), so the tag-scoped activation context is
+        // `None` here — Quinjet's {R}{R} must not pay another mana ability's cost.
         return super::casting::pay_ability_mana_cost_excluding(
             state,
             player,
             source_id,
             cost,
+            None,
             events,
             &excluded_sources,
         );
@@ -2259,9 +2263,12 @@ fn pay_mana_sub_cost(
     // mana (e.g. Heart of Ramos) would silently pay through for the {R} half
     // of a hypothetical "{R}: Add {G}{G}" mana ability.
     let (source_types, source_subtypes) = super::casting::activation_source_types(state, source_id);
+    // CR 605.1a: Mana abilities never carry a power-up tag, so `ability_tag` is
+    // `None` for the mana-ability sub-cost activation context.
     let ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag: None,
     };
     let pool = &mut state.players[player.0 as usize].mana_pool;
     let (spent, _life) = match hybrid_plan {
@@ -3441,6 +3448,7 @@ mod tests {
         let non_elemental_activation = PaymentContext::Activation {
             source_types: &non_elemental_types,
             source_subtypes: &non_elemental_subtypes,
+            ability_tag: None,
         };
         let mut pool_clone2 = pool.clone();
         assert!(
@@ -3454,6 +3462,7 @@ mod tests {
         let elemental_activation = PaymentContext::Activation {
             source_types: &non_elemental_types,
             source_subtypes: &elemental_subtypes,
+            ability_tag: None,
         };
         assert!(
             pool_clone2

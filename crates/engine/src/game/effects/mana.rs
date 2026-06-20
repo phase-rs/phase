@@ -280,6 +280,9 @@ pub(crate) fn resolve_restrictions(
                 ability: *ability,
             }),
             ManaSpendRestriction::ActivateOnly => Some(ManaRestriction::OnlyForActivation),
+            ManaSpendRestriction::ActivateTagged(tag) => {
+                Some(ManaRestriction::OnlyForTaggedActivation(*tag))
+            }
             ManaSpendRestriction::XCostOnly => Some(ManaRestriction::OnlyForXCosts),
             ManaSpendRestriction::SpellWithKeywordKind(kind) => {
                 Some(ManaRestriction::OnlyForSpellWithKeywordKind(*kind))
@@ -311,8 +314,8 @@ pub(crate) fn resolve_restrictions(
                     count: *count,
                 })
             }
-            ManaSpendRestriction::SpellFromZone(zone) => {
-                Some(ManaRestriction::OnlyForSpellFromZone(*zone))
+            ManaSpendRestriction::SpellFromZone(zs) => {
+                Some(ManaRestriction::OnlyForSpellFromZone(*zs))
             }
             // CR 106.6: Disjunction — recursively lower each branch. If every branch
             // dropped (e.g. an unresolvable `ChosenCreatureType` with no chosen type),
