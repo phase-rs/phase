@@ -2614,7 +2614,7 @@ mod tests {
         // No recorded cast-from zone → ineligible (conservative).
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // Still spell-casting only — never permits ability activation.
-        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
     }
 
     // CR 106.6 + CR 400.7: backward-compat for the zone-spend restriction. The

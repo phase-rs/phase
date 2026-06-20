@@ -64,7 +64,7 @@ fn rejects_spell_with_unknown_origin() {
 #[test]
 fn never_allows_ability_activation() {
     // CR 106.6: zone-gated spend is spell-casting only.
-    assert!(!not_from_hand_restriction().allows_activation(&["Artifact".to_string()], &[]));
+    assert!(!not_from_hand_restriction().allows_activation(&["Artifact".to_string()], &[], None));
 }
 
 /// Drive the REAL mana-payment route: `ManaPool::spend_for` with
