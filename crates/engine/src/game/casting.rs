@@ -44198,6 +44198,259 @@ mod tests {
         );
     }
 
+    /// CR 602.2b + CR 601.2f + CR 102.1: Hylda's Crown of Winter —
+    /// "{1}, {T}: Tap target creature. This ability costs {1} less to activate
+    /// during your turn." The {1} mana component reduces to {0} on the
+    /// controller's turn and stays {1} on an opponent's turn. The reduction is
+    /// parsed from the real Oracle clause and applied through the production
+    /// `apply_cost_reduction` seam reached by `can_activate_ability` / activation.
+    ///
+    /// Discriminating assertion: `generic_of(&def)` flips 0 ↔ 1 with
+    /// `state.active_player`. Reverting the "during your turn" parser arm yields
+    /// `condition: None` (`try_parse_cost_reduction` returns None → no reduction
+    /// node), so the on-turn case would read {1} and this assertion fails.
+    #[test]
+    fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
+        use crate::parser::oracle_cost::try_parse_cost_reduction;
+        use crate::types::ability::{Effect, ParsedCondition};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        let reduction =
+            try_parse_cost_reduction("this ability costs {1} less to activate during your turn")
+                .expect("Hylda's Crown cost-reduction clause must parse");
+        assert_eq!(
+            reduction.condition,
+            Some(ParsedCondition::IsYourTurn),
+            "during-your-turn clause must gate on IsYourTurn"
+        );
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "tap".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            });
+            def.cost_reduction = Some(reduction.clone());
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hylda's Crown of Winter".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller's turn → {1} reduces to {0}.
+        state.active_player = PlayerId(0);
+        let mut def_on = make_def();
+        apply_cost_reduction(&state, &mut def_on, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_on),
+            0,
+            "on your turn the {{1}} generic reduces to {{0}}"
+        );
+
+        // Opponent's turn → no reduction, stays {1}.
+        state.active_player = PlayerId(1);
+        let mut def_off = make_def();
+        apply_cost_reduction(&state, &mut def_off, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_off),
+            1,
+            "on an opponent's turn the reduction does not apply"
+        );
+    }
+
+    /// CR 602.2b + CR 601.2f + CR 508.1a: Thaumaton Torpedo —
+    /// "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. This
+    /// ability costs {3} less to activate if you attacked with a Spacecraft this
+    /// turn." The {6} component reduces to {3} only when the controller declared a
+    /// Spacecraft attacker this turn. Parsed from the real Oracle clause (the
+    /// "this turn" is stripped upstream as a duration before the cost-reduction
+    /// reparse, mirroring production) and applied through `apply_cost_reduction`.
+    ///
+    /// Discriminating assertion: `generic_of(&def)` is 3 with a Spacecraft
+    /// attacker declaration present and 6 without. Reverting the
+    /// `YouAttackedWithAtLeast { filter }` parser arm leaves `condition: None`
+    /// (try_parse_cost_reduction returns None), so the positive case would read
+    /// {6} and this assertion fails. Reverting the runtime filter arm in
+    /// `restrictions::evaluate_condition` would treat the filtered count as the
+    /// unfiltered count (no Spacecraft tracking), failing the negative case.
+    #[test]
+    fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
+        use crate::parser::oracle_cost::try_parse_cost_reduction;
+        use crate::types::ability::{Effect, ParsedCondition};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        // Mirror the production text reaching the reducer: the activated-ability
+        // duration parser peels the trailing " this turn" before the
+        // cost-reduction clause is reparsed from its Unimplemented description.
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {3} less to activate if you attacked with a spacecraft",
+        )
+        .expect("Thaumaton Torpedo cost-reduction clause must parse");
+        assert!(
+            matches!(
+                reduction.condition,
+                Some(ParsedCondition::YouAttackedWithAtLeast {
+                    count: 1,
+                    filter: Some(_)
+                })
+            ),
+            "must gate on a filtered attacked-with condition, got {:?}",
+            reduction.condition
+        );
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "destroy".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 6,
+                },
+            });
+            def.cost_reduction = Some(reduction.clone());
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(9);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Thaumaton Torpedo".to_string(),
+            Zone::Battlefield,
+        );
+
+        // No attackers declared → no reduction, stays {6}.
+        let mut def_none = make_def();
+        apply_cost_reduction(&state, &mut def_none, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_none),
+            6,
+            "no Spacecraft attacker → full {{6}} cost"
+        );
+
+        // Controller declared a non-Spacecraft creature attacker → still no reduction.
+        let goblin = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&goblin).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+        }
+        state.attacker_declarations_this_turn = vec![state
+            .objects
+            .get(&goblin)
+            .unwrap()
+            .snapshot_for_attack_declaration(goblin)];
+        let mut def_wrong = make_def();
+        apply_cost_reduction(&state, &mut def_wrong, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_wrong),
+            6,
+            "a non-Spacecraft attacker must not satisfy the Spacecraft gate"
+        );
+
+        // Controller declared a Spacecraft attacker → {3} reduction applies.
+        let craft = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Some Ship".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&craft).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+            o.card_types.subtypes.push("Spacecraft".to_string());
+        }
+        state.attacker_declarations_this_turn.push(
+            state
+                .objects
+                .get(&craft)
+                .unwrap()
+                .snapshot_for_attack_declaration(craft),
+        );
+        let mut def_ok = make_def();
+        apply_cost_reduction(&state, &mut def_ok, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_ok),
+            3,
+            "Spacecraft attacker present → cost reduced by {{3}}"
+        );
+
+        // Negative: an OPPONENT's Spacecraft attacker must not satisfy "you attacked".
+        let mut state_opp = GameState::new_two_player(11);
+        let src2 = create_object(
+            &mut state_opp,
+            CardId(1),
+            PlayerId(0),
+            "Thaumaton Torpedo".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_ship = create_object(
+            &mut state_opp,
+            CardId(5),
+            PlayerId(1),
+            "Enemy Ship".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state_opp.objects.get_mut(&opp_ship).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+            o.card_types.subtypes.push("Spacecraft".to_string());
+        }
+        state_opp.attacker_declarations_this_turn = vec![state_opp
+            .objects
+            .get(&opp_ship)
+            .unwrap()
+            .snapshot_for_attack_declaration(opp_ship)];
+        let mut def_opp = make_def();
+        apply_cost_reduction(&state_opp, &mut def_opp, PlayerId(0), src2);
+        assert_eq!(
+            generic_of(&def_opp),
+            6,
+            "an opponent's Spacecraft attacker must not satisfy 'you attacked with a Spacecraft'"
+        );
+    }
+
     // --- cluster-04: first-qualifying-spell keyword grant, cast-time snapshot
     // (CR 611.2f). These tests would FAIL if the Cascade/Demonstrate seams
     // re-queried the grant post-record (the `SpellsCastThisTurn == 0` gate would

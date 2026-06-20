@@ -1118,14 +1118,38 @@ pub(crate) fn evaluate_condition(
             }) == 0
         }
         ParsedCondition::YouAttackedThisTurn => state.players_attacked_this_turn.contains(&player),
-        ParsedCondition::YouAttackedWithAtLeast { count } => {
-            state
-                .attacking_creatures_this_turn
-                .get(&player)
-                .copied()
-                .unwrap_or(0)
-                >= *count
-        }
+        // CR 508.1a: "you attacked with N+ [filter] this turn". Unfiltered uses
+        // the fast per-player count; filtered scans declaration-time snapshots so
+        // attackers that have left the battlefield still count.
+        ParsedCondition::YouAttackedWithAtLeast { count, filter } => match filter {
+            None => {
+                state
+                    .attacking_creatures_this_turn
+                    .get(&player)
+                    .copied()
+                    .unwrap_or(0)
+                    >= *count
+            }
+            Some(filter) => {
+                let filter_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    source_id, player,
+                );
+                state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.lki.controller == player
+                            && crate::game::filter::matches_target_filter_on_attack_declaration_record(
+                                state,
+                                record,
+                                filter,
+                                &filter_ctx,
+                            )
+                    })
+                    .count() as u32
+                    >= *count
+            }
+        },
         ParsedCondition::YouPlayedLandThisTurn => state
             .players
             .get(usize::from(player.0))

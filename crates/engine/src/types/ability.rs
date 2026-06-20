@@ -16,7 +16,9 @@ use super::game_state::{
 };
 use super::identifiers::{ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion};
+use super::mana::{
+    AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
+};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
@@ -1494,10 +1496,16 @@ pub enum ManaSpendRestriction {
     /// [`Comparator`] — one variant per color-count reading. `count` is N.
     SpellWithColorCount { comparator: Comparator, count: u32 },
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
-    /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
-    /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
-    /// which additionally requires a keyword. Resolved against `SpellMeta.cast_from_zone`.
-    SpellFromZone(Zone),
+    /// graveyard" / "from exile" ([`From`](super::mana::ZoneSpendPolarity::From))
+    /// and "from anywhere other than your hand"
+    /// ([`NotFrom`](super::mana::ZoneSpendPolarity::NotFrom), Mm'menon, the Right
+    /// Hand). Gates spending on the spell's cast-from zone alone — a distinct axis
+    /// from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`], which
+    /// additionally requires a keyword. Resolved against `SpellMeta.cast_from_zone`.
+    /// Carried as a [`ZoneSpend`] newtype payload whose custom `Deserialize`
+    /// accepts the legacy bare-`Zone` serialized form for backward compatibility,
+    /// mapping it to the inclusion reading.
+    SpellFromZone(ZoneSpend),
     /// CR 106.6: Disjunction of spend restrictions ("cast X or Y or activate Z").
     /// Lowered to `ManaRestriction::OnlyForAny`.
     Any(Vec<ManaSpendRestriction>),
@@ -5462,8 +5470,18 @@ pub enum ParsedCondition {
     },
     YouControlNoCreatures,
     YouAttackedThisTurn,
+    /// CR 508.1a: True when the player declared at least `count` attackers this
+    /// turn. `filter: None` counts every attacker the player declared (backed by
+    /// the fast `state.attacking_creatures_this_turn` counter — "you attacked
+    /// with N+ creatures this turn"). `filter: Some(_)` counts only attackers
+    /// matching the filter from the declaration-time snapshot
+    /// `state.attacker_declarations_this_turn` (Thaumaton Torpedo — "you attacked
+    /// with a Spacecraft this turn"), so attackers that have since left the
+    /// battlefield still count.
     YouAttackedWithAtLeast {
         count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     /// True when the player has already used at least one land play this turn.
     /// The count is tracked on `Player::lands_played_this_turn` from

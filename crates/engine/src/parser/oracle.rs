@@ -5529,6 +5529,123 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// Build a single-face `CardFace` from an oracle `text` through the real
+    /// synthesis path (`build_oracle_face`), so coverage checks recurse into
+    /// granted abilities and effect payloads exactly as production does.
+    #[cfg(test)]
+    fn oracle_face_for(
+        name: &str,
+        text: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> crate::types::card::CardFace {
+        use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
+        let card = AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{4}{B}".to_string()),
+            colors: vec!["B".to_string()],
+            color_identity: vec!["B".to_string()],
+            power: Some("3".to_string()),
+            toughness: Some("3".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(text.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(types.join(" ")),
+            types: types.iter().map(|s| s.to_string()).collect(),
+            subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+            supertypes: Vec::new(),
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 5.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+        };
+        crate::database::synthesis::build_oracle_face(&card, None)
+    }
+
+    /// CR 602.2b + CR 601.2f + CR 102.1: Hylda's Crown of Winter parses with zero
+    /// unimplemented parts. The whole card is two activated abilities; the only
+    /// previously-failing fragment was the "This ability costs {1} less to
+    /// activate during your turn" cost-reduction clause, now extracted as
+    /// `cost_reduction` with `condition: IsYourTurn`. (Runtime under/over-the-gate
+    /// discrimination lives in `game::casting::tests::
+    /// hyldas_crown_cost_reduction_applies_only_during_your_turn`.)
+    #[test]
+    fn hyldas_crown_full_card_supported_with_during_your_turn_cost_reduction() {
+        let face = oracle_face_for(
+            "Hylda's Crown of Winter",
+            "{1}, {T}: Tap target creature. This ability costs {1} less to activate during your turn.\n{3}, Sacrifice Hylda's Crown of Winter: Draw a card for each tapped creature your opponents control.",
+            &["Legendary", "Artifact"],
+            &[],
+        );
+        let gaps = crate::game::coverage::card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Hylda's Crown must be fully supported, gaps: {gaps:?}"
+        );
+        let tap_ability = face
+            .abilities
+            .iter()
+            .find(|a| a.cost_reduction.is_some())
+            .expect("the tap ability must carry the extracted cost reduction");
+        assert_eq!(
+            tap_ability.cost_reduction.as_ref().unwrap().condition,
+            Some(crate::types::ability::ParsedCondition::IsYourTurn),
+            "cost reduction must gate on IsYourTurn"
+        );
+    }
+
+    /// CR 602.2b + CR 601.2f + CR 508.1a: Thaumaton Torpedo parses with zero
+    /// unimplemented parts. The card is a single activated ability; the only
+    /// previously-failing fragment was the "This ability costs {3} less to
+    /// activate if you attacked with a Spacecraft this turn" cost-reduction
+    /// clause, now extracted with a filtered `YouAttackedWithAtLeast` gate.
+    /// (Runtime discrimination — Spacecraft attacker required, opponent's
+    /// Spacecraft excluded — lives in `game::casting::tests::
+    /// thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker`.)
+    #[test]
+    fn thaumaton_torpedo_full_card_supported_with_spacecraft_attacked_cost_reduction() {
+        let face = oracle_face_for(
+            "Thaumaton Torpedo",
+            "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. This ability costs {3} less to activate if you attacked with a Spacecraft this turn.",
+            &["Artifact"],
+            &[],
+        );
+        let gaps = crate::game::coverage::card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Thaumaton Torpedo must be fully supported, gaps: {gaps:?}"
+        );
+        let ability = face
+            .abilities
+            .iter()
+            .find(|a| a.cost_reduction.is_some())
+            .expect("the destroy ability must carry the extracted cost reduction");
+        assert!(
+            matches!(
+                ability.cost_reduction.as_ref().unwrap().condition,
+                Some(
+                    crate::types::ability::ParsedCondition::YouAttackedWithAtLeast {
+                        count: 1,
+                        filter: Some(_)
+                    }
+                )
+            ),
+            "cost reduction must gate on a filtered attacked-with condition, got {:?}",
+            ability.cost_reduction
+        );
+    }
+
     /// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
     /// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
     /// the `{T}: Add {U}` mana ability carries the negative spend restriction
@@ -14840,6 +14957,60 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
         );
     }
 
+    // CR 106.6 + CR 400.7: Mm'menon, the Right Hand grants its artifacts a mana
+    // ability whose produced mana is spend-restricted to spells cast from
+    // anywhere other than hand. The granted-ability text must parse end-to-end
+    // (no `Effect::Unimplemented`) and the inner mana effect must carry the
+    // `SpellFromZone { Hand, NotFrom }` restriction.
+    #[test]
+    fn mmmenon_granted_mana_carries_not_from_hand_restriction() {
+        let oracle = "Flying\n\
+You may look at the top card of your library any time.\n\
+You may cast artifact spells from the top of your library.\n\
+Artifacts you control have \"{T}: Add {U}. Spend this mana only to cast a spell from anywhere other than your hand.\"";
+        let parsed = super::parse_oracle_text(
+            oracle,
+            "Mm'menon, the Right Hand",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+
+        // The granted mana ability lives inside a `GrantAbility` continuous
+        // modification of one of the parsed statics. Walk the typed tree and
+        // assert the granted ability's mana effect carries the not-from-hand
+        // restriction (and is not an `Unimplemented` gap).
+        use crate::types::ability::{ContinuousModification, Effect, ManaSpendRestriction};
+        use crate::types::mana::{ZoneSpend, ZoneSpendPolarity};
+        use crate::types::zones::Zone;
+
+        let expected = ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            zone: Zone::Hand,
+            polarity: ZoneSpendPolarity::NotFrom,
+        });
+        let mut found = false;
+        for st in &parsed.statics {
+            for modification in &st.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modification {
+                    assert!(
+                        !matches!(*definition.effect, Effect::Unimplemented { .. }),
+                        "Mm'menon's granted mana ability must not be Unimplemented: {definition:?}"
+                    );
+                    if let Effect::Mana { restrictions, .. } = &*definition.effect {
+                        if restrictions.contains(&expected) {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found,
+            "Mm'menon's granted mana must carry the not-from-hand restriction; statics={:?}",
+            parsed.statics
+        );
+    }
+
     #[test]
     fn mana_spend_restriction_x_cost_only() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
@@ -15154,19 +15325,43 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
 
     #[test]
     fn mana_spend_restriction_from_graveyard() {
+        use crate::types::mana::{ZoneSpend, ZoneSpendPolarity};
         assert_eq!(
             crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
                 "spend this mana only to cast a spell from your graveyard"
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellFromZone(Zone::Graveyard))
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Graveyard,
+                polarity: ZoneSpendPolarity::From,
+            }))
         );
         assert_eq!(
             crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
                 "spend this mana only to cast spells from exile"
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellFromZone(Zone::Exile))
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Exile,
+                polarity: ZoneSpendPolarity::From,
+            }))
+        );
+    }
+
+    // CR 106.6 + CR 400.7: Mm'menon, the Right Hand — "from anywhere other than
+    // your hand" parses to the `NotFrom` polarity over `Zone::Hand`.
+    #[test]
+    fn mana_spend_restriction_not_from_hand() {
+        use crate::types::mana::{ZoneSpend, ZoneSpendPolarity};
+        assert_eq!(
+            crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from anywhere other than your hand"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Hand,
+                polarity: ZoneSpendPolarity::NotFrom,
+            }))
         );
     }
 

@@ -1073,6 +1073,37 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 
     let after_mana = after_mana.trim_start();
 
+    // CR 602.2b: An activated ability's analog to a spell's mana cost is its activation cost.
+    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0}.
+    // CR 102.1: The active player is the player whose turn it is, so "during your
+    //           turn" is the controller-is-active-player test.
+    // Timing-gated flat form ("... less to activate during your turn[s]" / "... less
+    // to cast during your turn[s]") is therefore exactly the `IsYourTurn` flat
+    // conditional (count = Fixed(1)). Checked before the generic "if [condition]"
+    // form because "during your turn" is not introduced by "if". Hylda's Crown of
+    // Winter: "This ability costs {1} less to activate during your turn."
+    if nom_on_lower(after_mana, after_mana, |i| {
+        value(
+            (),
+            (
+                alt((
+                    tag("less to activate during your "),
+                    tag("less to cast during your "),
+                )),
+                alt((tag("turns"), tag("turn"))),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some_and(|((), rest)| rest.trim().trim_end_matches('.').trim().is_empty())
+    {
+        return Some(CostReduction {
+            amount_per,
+            count: QuantityExpr::Fixed { value: 1 },
+            condition: Some(crate::types::ability::ParsedCondition::IsYourTurn),
+        });
+    }
+
     // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
     // "... less to cast if [condition]". The reduction is a flat {amount_per}
     // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
@@ -2184,6 +2215,61 @@ mod tests {
         assert!(try_parse_cost_reduction("something else entirely").is_none());
     }
 
+    /// CR 602.2b + CR 601.2f + CR 102.1: the "during your turn[s]" timing-gated
+    /// flat form maps to a `Fixed(1)` reduction gated by `IsYourTurn`, for both
+    /// the activate and cast verb axes and both turn-plurality forms. This is the
+    /// building-block test behind Hylda's Crown of Winter.
+    #[test]
+    fn cost_reduction_during_your_turn_maps_to_is_your_turn() {
+        use crate::types::ability::ParsedCondition;
+        for text in [
+            "this ability costs {1} less to activate during your turn",
+            "this ability costs {2} less to activate during your turns",
+            "this spell costs {1} less to cast during your turn",
+        ] {
+            let r = try_parse_cost_reduction(text).unwrap_or_else(|| panic!("must parse: {text}"));
+            assert_eq!(r.count, QuantityExpr::Fixed { value: 1 }, "{text}");
+            assert_eq!(
+                r.condition,
+                Some(ParsedCondition::IsYourTurn),
+                "during-your-turn must gate on IsYourTurn: {text}"
+            );
+        }
+        // "{2} less to activate during your turn" keeps amount_per = 2.
+        let two =
+            try_parse_cost_reduction("this ability costs {2} less to activate during your turns")
+                .unwrap();
+        assert_eq!(two.amount_per, 2);
+    }
+
+    /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
+    /// with a <filter>" extracts a filtered `YouAttackedWithAtLeast { count: 1 }`.
+    /// The trailing "this turn" is stripped upstream as a duration before the
+    /// reparse, so the bare form is what reaches the reducer (Thaumaton Torpedo).
+    #[test]
+    fn cost_reduction_if_attacked_with_filter_gate() {
+        use crate::types::ability::ParsedCondition;
+        let r = try_parse_cost_reduction(
+            "this ability costs {3} less to activate if you attacked with a spacecraft",
+        )
+        .expect("must parse filtered attacked-with gate");
+        assert_eq!(r.amount_per, 3);
+        assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
+        match r.condition {
+            Some(ParsedCondition::YouAttackedWithAtLeast {
+                count: 1,
+                filter: Some(TargetFilter::Typed(tf)),
+            }) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Spacecraft")),
+                "expected Spacecraft subtype filter, got {:?}",
+                tf.type_filters
+            ),
+            other => panic!("expected filtered attacked-with gate, got {other:?}"),
+        }
+    }
+
     #[test]
     fn cost_exile_self_from_graveyard() {
         assert_eq!(
@@ -2585,6 +2671,47 @@ mod tests {
         assert!(
             !matches!(def.count, QuantityExpr::Fixed { .. }),
             "for-each count is a dynamic ref, not Fixed"
+        );
+    }
+
+    /// CR 305.6 + CR 601.2f: domain-scaled cost reduction — "costs {N} less to
+    /// activate/cast for each basic land type among lands you control" — must
+    /// resolve to the `BasicLandTypeCount` (domain) quantity. Covers Jodah's
+    /// Codex / Wandering Treefolk / Radha's Firebrand (activate) and Scion of
+    /// Draco (cast). Regression for the previously-dropped `for each` domain arm.
+    #[test]
+    fn cost_reduction_for_each_basic_land_type_is_domain() {
+        use crate::types::ability::{ControllerRef, QuantityRef};
+
+        // Activated-ability form (Jodah's Codex, Wandering Treefolk).
+        let activate = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each basic land type among lands you control",
+        )
+        .expect("domain cost reduction (activate) should parse");
+        assert_eq!(activate.amount_per, 1);
+        assert_eq!(activate.condition, None);
+        assert_eq!(
+            activate.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::BasicLandTypeCount {
+                    controller: ControllerRef::You,
+                },
+            },
+        );
+
+        // Spell form (Scion of Draco).
+        let cast = try_parse_cost_reduction(
+            "this spell costs {2} less to cast for each basic land type among lands you control",
+        )
+        .expect("domain cost reduction (cast) should parse");
+        assert_eq!(cast.amount_per, 2);
+        assert_eq!(
+            cast.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::BasicLandTypeCount {
+                    controller: ControllerRef::You,
+                },
+            },
         );
     }
 
