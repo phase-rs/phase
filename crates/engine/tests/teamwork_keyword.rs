@@ -16,10 +16,12 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, AdditionalCost, Comparator, Effect, TapCreaturesAggregateStat,
-    TapCreaturesRequirement,
+    AbilityCondition, AbilityCost, AbilityDefinition, AdditionalCost, AdditionalCostOrigin,
+    Comparator, Effect, SpellCastingOptionKind, TapCreaturesAggregateStat, TapCreaturesRequirement,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -142,16 +144,16 @@ fn teamwork_keyword_extracts_and_synthesizes_aggregate_tap_cost() {
     }
 }
 
-// DEFERRED: Earth's Mightiest Heroes (Teamwork 5). The body "reveal top eight,
-// you may put A creature card onto the battlefield; if cast using teamwork, put
-// ANY NUMBER of creature cards instead; rest to graveyard" parses to a single
-// `Effect::Dig { keep_count: u32::MAX, up_to: true, .. }` — it collapses the
-// base (one) and upgraded (any number) keep counts into "any number"
-// unconditionally, with no `AdditionalCostPaid`-gated count switch. Shipping it
-// would silently let the no-teamwork case put any number of creatures, which is
-// wrong. Deferred until the reveal-N effect supports a teamwork-conditional
-// keep_count; the Teamwork keyword itself is shipped and the other nine cards
-// reuse existing effects cleanly.
+// Earth's Mightiest Heroes (Teamwork 5) — NOW FIXED. The teamwork-gated "put any
+// number of creature cards from among them onto the battlefield instead" lowers
+// to a `SpecialClause::DigInsteadAlt`: the top-level `Effect::Dig` carries
+// `keep_count: u32::MAX, up_to: true` gated on `AdditionalCostPaid{Teamwork}`,
+// with the base "put a creature card" (`keep_count: 1`) Dig stashed in
+// `else_ability`. WITHOUT teamwork the else branch runs (put exactly one); WITH
+// teamwork the main branch runs (put any number). The AST shape and the runtime
+// keep-count divergence are pinned by `emh_dig_any_number_gated_on_teamwork`,
+// `emh_with_teamwork_keeps_any_number`, and `emh_without_teamwork_keeps_one`
+// below.
 
 // ---------------------------------------------------------------------------
 // Runtime discrimination — Team Tactics (Teamwork 1)
@@ -444,4 +446,462 @@ fn resolve_stack(runner: &mut GameRunner) {
             break;
         }
     }
+}
+
+// ===========================================================================
+// Trailing-rider + Dig-instead teamwork conditional fix (Beast Mode, We Say
+// Thee Nay!, Earth's Mightiest Heroes). All three dropped their "if cast using
+// teamwork" gate before this fix; the assertions below revert-fail if the
+// shared teamwork recognizer is removed from `strip_leading_sequence_connector`
+// / `strip_suffix_conditional` / `try_parse_dig_instead_alternative`.
+// ===========================================================================
+
+const BEAST_MODE: &str = "Teamwork 1 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 1 or more.)\nTarget creature gets +2/+2 and gains trample until end of turn. Also put a +1/+1 counter on that creature if this spell was cast using teamwork.";
+
+const EARTHS_MIGHTIEST_HEROES: &str = "Teamwork 5 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 5 or more.)\nReveal the top eight cards of your library. You may put a creature card from among them onto the battlefield. If this spell was cast using teamwork, put any number of creature cards from among them onto the battlefield instead. Put the rest into your graveyard.";
+
+const QUANTUM_REDUCTION: &str = "Teamwork 2 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 2 or more.)\nYou may cast this spell as though it had flash if it's cast using teamwork.\nEnchant creature\nEnchanted creature gets -5/-0 and loses all abilities.";
+
+const HELICARRIER_STRIKE: &str = "Teamwork 2 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 2 or more.)\nHelicarrier Strike deals 2 damage to target attacking or blocking creature. If this spell was cast using teamwork, it deals 4 damage to that creature instead.";
+
+const REPULSOR_BLAST: &str = "Teamwork 2 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 2 or more.)\nRepulsor Blast deals 5 damage to target creature. If this spell was cast using teamwork, it also deals 2 damage to that creature's controller.";
+
+const FOLLOW_THE_LUMARETS: &str = "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.";
+
+/// Flatten a definition forest (`sub_ability` + `else_ability` chains) so tests
+/// can assert on any clause regardless of how it was linked.
+fn collect_defs<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+    out.push(def);
+    if let Some(sub) = def.sub_ability.as_deref() {
+        collect_defs(sub, out);
+    }
+    if let Some(els) = def.else_ability.as_deref() {
+        collect_defs(els, out);
+    }
+}
+
+fn all_defs(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&AbilityDefinition> {
+    let mut out = Vec::new();
+    for def in &parsed.abilities {
+        collect_defs(def, &mut out);
+    }
+    out
+}
+
+/// `true` if the condition is the Teamwork additional-cost-paid gate.
+fn is_teamwork_gate(cond: &AbilityCondition) -> bool {
+    matches!(
+        cond,
+        AbilityCondition::AdditionalCostPaid {
+            origin: Some(AdditionalCostOrigin::Teamwork),
+            ..
+        }
+    )
+}
+
+/// Beast Mode's second clause ("Also put a +1/+1 counter on that creature if
+/// this spell was cast using teamwork") must parse to a real `PutCounter`
+/// effect gated on the Teamwork payment — NOT `Effect::Unimplemented{"also"}`
+/// and NOT an always-on counter. Revert the "Also " connector strip → the clause
+/// becomes `Unimplemented`; revert the trailing recognizer → `condition == None`.
+#[test]
+fn beast_mode_teamwork_counter_rider() {
+    let parsed = parse_spell("Beast Mode", BEAST_MODE, &["Instant"]);
+    assert_no_unimplemented(&parsed, "Beast Mode");
+
+    let counter_def = all_defs(&parsed)
+        .into_iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                }
+            )
+        })
+        .expect("Beast Mode must carry a +1/+1 PutCounter clause");
+
+    let cond = counter_def
+        .condition
+        .as_ref()
+        .expect("the +1/+1 counter must be gated (condition != None)");
+    assert!(
+        is_teamwork_gate(cond),
+        "the +1/+1 counter must be gated on AdditionalCostPaid{{Teamwork}}, got {cond:?}"
+    );
+}
+
+// KNOWN GAP — We Say Thee Nay! ("Counter that spell unless its controller pays
+// {4} instead if this spell was cast using teamwork") is NOT fixed by this change.
+// Tracing proves its inverted "... instead if teamwork" clause is consumed by the
+// instead-clause / counter-unless chain path (try_parse_generic_instead_clause →
+// split_inverted_instead_clause → build_instead_def, conditions.rs:2416/2473)
+// BEFORE it can reach `strip_suffix_conditional` — so the trailing-rider
+// recognizer never sees it (verified: strip_suffix_conditional is never called
+// with the teamwork text for this card). The {4} tax sub-ability keeps
+// `condition: null` and fires on every cast. The correct fix is inverted-form
+// specific (the shared build_instead_def chain also serves the FORWARD teamwork
+// "instead" cards — Cruel Alliance/Too Evil — which rely on it returning None so
+// the leading peel folds them to `AdditionalCostPaidInstead`; adding teamwork to
+// that shared chain would regress them). This is outside the reviewed plan's
+// stated root cause (the plan asserted strip_suffix_conditional would peel it) and
+// is returned to the orchestrator as a stop-and-return item. `shipped_teamwork_
+// cards_parse_without_unimplemented` still covers WSTN parsing cleanly.
+
+/// EMH lowers to a teamwork-gated `DigInsteadAlt`: the top-level Dig keeps any
+/// number (`keep_count == u32::MAX`, `up_to`), gated on Teamwork, with the base
+/// "put one" Dig (`keep_count == 1`) in `else_ability`. Revert the new
+/// `.or_else` arm → a single unconditional `Dig{keep_count:u32::MAX}` (the live
+/// free-upgrade bug) with no condition and no else branch.
+#[test]
+fn emh_dig_any_number_gated_on_teamwork() {
+    let parsed = parse_spell(
+        "Earth's Mightiest Heroes",
+        EARTHS_MIGHTIEST_HEROES,
+        &["Sorcery"],
+    );
+    assert_no_unimplemented(&parsed, "Earth's Mightiest Heroes");
+
+    let top = parsed
+        .abilities
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+        .expect("EMH must have a top-level Dig");
+
+    match &*top.effect {
+        Effect::Dig {
+            keep_count, up_to, ..
+        } => {
+            assert_eq!(
+                *keep_count,
+                Some(u32::MAX),
+                "teamwork branch must keep any number (u32::MAX sentinel)"
+            );
+            assert!(*up_to, "any-number keep is an 'up to' selection");
+        }
+        other => panic!("expected Dig, got {other:?}"),
+    }
+
+    let cond = top
+        .condition
+        .as_ref()
+        .expect("top-level Dig must be gated on Teamwork");
+    assert!(
+        is_teamwork_gate(cond),
+        "EMH top Dig must gate on AdditionalCostPaid{{Teamwork}}, got {cond:?}"
+    );
+
+    let els = top
+        .else_ability
+        .as_deref()
+        .expect("EMH must stash the base 'put one' Dig in else_ability");
+    match &*els.effect {
+        Effect::Dig { keep_count, .. } => assert_eq!(
+            *keep_count,
+            Some(1),
+            "the no-teamwork branch must put exactly one creature"
+        ),
+        other => panic!("expected base Dig in else_ability, got {other:?}"),
+    }
+}
+
+/// Trailing teamwork riders parse for all three subject/tense variants of the
+/// shared phrase combinator ("this spell was" / "it was" / "it's"). Revert the
+/// shared combinator and any of these loses its gate.
+#[test]
+fn trailing_teamwork_rider_subject_tense_variants() {
+    for text in [
+        "Draw a card if this spell was cast using teamwork.",
+        "Draw a card if it was cast using teamwork.",
+        "Draw a card if it's cast using teamwork.",
+    ] {
+        let parsed = parse_spell("Probe", text, &["Instant"]);
+        assert_no_unimplemented(&parsed, text);
+        let gated = all_defs(&parsed)
+            .into_iter()
+            .any(|d| d.condition.as_ref().is_some_and(is_teamwork_gate));
+        assert!(gated, "{text}: trailing rider must produce a Teamwork gate");
+    }
+}
+
+/// Quantum Reduction's conditional flash permission ("as though it had flash if
+/// it's cast using teamwork") is NOT representable yet (deferred honest). The
+/// parser must NOT leak an unconditional flash grant: no `AsThoughHadFlash`
+/// casting option with `condition: None`. Coverage stays RED for the flash
+/// clause; the rest of the Aura body parses normally.
+#[test]
+fn quantum_reduction_flash_not_unconditional() {
+    let parsed = parse_spell(
+        "Quantum Reduction",
+        QUANTUM_REDUCTION,
+        &["Enchantment", "Aura"],
+    );
+
+    let unconditional_flash = parsed
+        .casting_options
+        .iter()
+        .any(|opt| opt.kind == SpellCastingOptionKind::AsThoughHadFlash && opt.condition.is_none());
+    assert!(
+        !unconditional_flash,
+        "Quantum Reduction must NOT emit an unconditional flash grant; got {:?}",
+        parsed.casting_options
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Blast-radius regression — cards that flow near the changed seams must parse
+// IDENTICALLY. These revert-pass (they assert the absence of a new teamwork gate
+// where one should not appear, and the presence of the pre-existing gate).
+// ---------------------------------------------------------------------------
+
+/// Cruel Alliance's leading "instead" form stays an `AdditionalCostPaidInstead`
+/// sub-ability — the trailing/Dig fix must not re-route it.
+#[test]
+fn cruel_alliance_unchanged() {
+    let parsed = parse_spell("Cruel Alliance", CRUEL_ALLIANCE, &["Sorcery"]);
+    assert_no_unimplemented(&parsed, "Cruel Alliance");
+    let has_instead = all_defs(&parsed).into_iter().any(|d| {
+        matches!(
+            d.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        )
+    });
+    assert!(
+        has_instead,
+        "Cruel Alliance must keep its AdditionalCostPaidInstead sub-ability"
+    );
+}
+
+/// Helicarrier Strike's leading "If teamwork, ... instead" peels at the leading
+/// site (which already recognized teamwork) — its `AdditionalCostPaid{Teamwork}`
+/// sub-ability is intact and the trailing rider must not double-handle it.
+#[test]
+fn helicarrier_strike_unchanged() {
+    let parsed = parse_spell("Helicarrier Strike", HELICARRIER_STRIKE, &["Instant"]);
+    assert_no_unimplemented(&parsed, "Helicarrier Strike");
+    let gated = all_defs(&parsed)
+        .into_iter()
+        .filter(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+        .filter(|d| d.condition.as_ref().is_some_and(is_teamwork_gate))
+        .count();
+    assert_eq!(
+        gated, 1,
+        "Helicarrier keeps exactly one Teamwork-gated DealDamage sub-ability"
+    );
+}
+
+/// Repulsor Blast's mid-sentence "it also deals" must NOT be eaten by the
+/// position-0 "Also " connector strip; the card still parses cleanly with its
+/// trailing teamwork gate on the bonus damage.
+#[test]
+fn repulsor_blast_mid_sentence_also_unaffected() {
+    let parsed = parse_spell("Repulsor Blast", REPULSOR_BLAST, &["Sorcery"]);
+    assert_no_unimplemented(&parsed, "Repulsor Blast");
+    let gated = all_defs(&parsed)
+        .into_iter()
+        .any(|d| d.condition.as_ref().is_some_and(is_teamwork_gate));
+    assert!(
+        gated,
+        "Repulsor Blast's bonus damage must remain gated on Teamwork"
+    );
+}
+
+/// Follow the Lumarets' `DigInsteadAlt` ("if you gained life this turn") matches
+/// an earlier condition arm — the appended teamwork arm must never fire for it.
+#[test]
+fn follow_the_lumarets_dig_instead_unchanged() {
+    let parsed = parse_spell("Follow the Lumarets", FOLLOW_THE_LUMARETS, &["Sorcery"]);
+    assert_no_unimplemented(&parsed, "Follow the Lumarets");
+    let top = parsed
+        .abilities
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+        .expect("Follow the Lumarets has a Dig");
+    let cond = top
+        .condition
+        .as_ref()
+        .expect("Lumarets' alt Dig is conditional");
+    assert!(
+        !is_teamwork_gate(cond),
+        "Lumarets must NOT acquire a Teamwork gate; got {cond:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime discrimination — Beast Mode (+1/+1 counter gated on teamwork).
+// ---------------------------------------------------------------------------
+
+/// Build P0 with Beast Mode (cost {0}) in hand + a 3/3 (power 3 >= Teamwork 1)
+/// that is both the spell target and the teamwork tapper.
+fn setup_beast_mode() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P0, "Bear", 3, 3).id();
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, "Beast Mode", true, BEAST_MODE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let spell = builder.id();
+    (scenario.build(), spell, target)
+}
+
+fn beast_mode_counters(runner: &GameRunner, target: ObjectId) -> u32 {
+    runner.state().objects[&target]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[test]
+fn beast_mode_without_teamwork_no_counter() {
+    let (mut runner, spell, target) = setup_beast_mode();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Beast Mode must be accepted");
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining teamwork must be accepted");
+    drive_single_target(&mut runner, target);
+    resolve_stack(&mut runner);
+    assert_eq!(
+        beast_mode_counters(&runner, target),
+        0,
+        "WITHOUT teamwork, no +1/+1 counter is placed"
+    );
+}
+
+#[test]
+fn beast_mode_with_teamwork_adds_counter() {
+    let (mut runner, spell, target) = setup_beast_mode();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Beast Mode must be accepted");
+    drive_cast_paying_teamwork(&mut runner, &[target], target);
+    resolve_stack(&mut runner);
+    assert_eq!(
+        beast_mode_counters(&runner, target),
+        1,
+        "WITH teamwork, exactly one +1/+1 counter is placed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime discrimination — Earth's Mightiest Heroes (keep-count cap gated on
+// teamwork). With teamwork the DigChoice caps at the number of revealed creature
+// cards (any number); without, it caps at one.
+// ---------------------------------------------------------------------------
+
+/// Build P0 with EMH (cost {0}) in hand, a power-5 tapper on the battlefield
+/// (Teamwork 5), and eight creature cards on top of the library.
+fn setup_emh() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tapper = scenario.add_creature(P0, "Hulk", 5, 5).id();
+    let lib_ids: Vec<ObjectId> = (0..8)
+        .map(|i| scenario.add_card_to_library_top(P0, &format!("Recruit {i}")))
+        .collect();
+    let mut builder = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Earth's Mightiest Heroes",
+        false,
+        EARTHS_MIGHTIEST_HEROES,
+    );
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let spell = builder.id();
+    let mut runner = scenario.build();
+    // Make the eight library cards real creature cards so the Dig's Creature
+    // filter selects them.
+    for id in lib_ids {
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    (runner, spell, tapper)
+}
+
+/// Drive EMH up to its `DigChoice` and return the surfaced keep-count cap.
+fn drive_emh_keep_count(runner: &mut GameRunner, pay_teamwork: bool, tapper: ObjectId) -> usize {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                    .expect("deciding teamwork must be accepted");
+            }
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![tapper],
+                    })
+                    .expect("tapping the power-5 creature must pay teamwork");
+            }
+            WaitingFor::DigChoice { keep_count, .. } => return keep_count,
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("unexpected window before DigChoice: {other:?}"),
+        }
+    }
+    panic!("EMH never surfaced a DigChoice");
+}
+
+#[test]
+fn emh_with_teamwork_keeps_any_number() {
+    let (mut runner, spell, tapper) = setup_emh();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting EMH must be accepted");
+    let keep = drive_emh_keep_count(&mut runner, true, tapper);
+    assert_eq!(
+        keep, 8,
+        "WITH teamwork, the player may put any number (all 8 revealed creatures)"
+    );
+}
+
+#[test]
+fn emh_without_teamwork_keeps_one() {
+    let (mut runner, spell, tapper) = setup_emh();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting EMH must be accepted");
+    let keep = drive_emh_keep_count(&mut runner, false, tapper);
+    assert_eq!(
+        keep, 1,
+        "WITHOUT teamwork, the base branch puts exactly one creature"
+    );
 }

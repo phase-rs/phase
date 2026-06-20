@@ -5519,6 +5519,9 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
 
     // Try to strip a leading sequence connector using nom alt().
     // Mixed case requires explicit variants since nom tag() is exact-match.
+    // CR 608.2c: "Also" is an additive sequence connector at clause start
+    // (Beast Mode); strip like "then"/"and". Position-0 only — mid-sentence
+    // "also" (e.g. Repulsor Blast's "it also deals") is never reached here.
     match alt((
         tag::<_, _, OracleError<'_>>("Then, "),
         tag("Then "),
@@ -5526,6 +5529,10 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
         tag("then "),
         tag("and "),
         tag("And "),
+        tag("Also, "),
+        tag("Also "),
+        tag("also, "),
+        tag("also "),
     ))
     .parse(trimmed)
     {

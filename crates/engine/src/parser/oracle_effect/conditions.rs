@@ -9,7 +9,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
-use super::super::oracle_nom::condition::inject_controller_you;
+use super::super::oracle_nom::condition::{
+    inject_controller_you, parse_cast_using_teamwork_phrase,
+};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
@@ -1973,6 +1975,10 @@ pub(super) fn strip_suffix_conditional(
         return (Some(cond), effect_text);
     }
 
+    if let Some(cond) = parse_cast_using_teamwork_condition_text(condition_core) {
+        return (Some(cond), effect_text);
+    }
+
     if let Some(cond) = parse_mana_spent_vs_mana_value_target_condition_text(condition_core) {
         return (Some(cond), effect_text);
     }
@@ -2056,6 +2062,27 @@ fn parse_was_kicked_condition(input: &str) -> OracleResult<'_, AbilityCondition>
     )
         .parse(input)?;
     Ok((rest, AbilityCondition::additional_cost_paid_any()))
+}
+
+/// CR 601.2f + CR 608.2c: "<effect> if (this spell was | it was | it's) cast
+/// using teamwork" trailing rider — gates the preceding effect specifically on
+/// the Teamwork additional-cost payment (origin Teamwork), so a different
+/// optional/imposed additional cost on the same spell does not satisfy it.
+/// Mirrors `parse_was_kicked_condition_text`; reuses the shared phrase
+/// combinator so the subject/tense axes live in one place.
+fn parse_cast_using_teamwork_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_cast_using_teamwork_condition).parse(input)
+    })
+}
+
+fn parse_cast_using_teamwork_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, ()) = parse_cast_using_teamwork_phrase(input)?;
+    Ok((
+        rest,
+        AbilityCondition::additional_cost_paid_origin(AdditionalCostOrigin::Teamwork),
+    ))
 }
 
 /// CR 601.2h + CR 608.2c: "if the amount of mana spent to cast it/that spell
@@ -2583,10 +2610,16 @@ pub(super) fn try_parse_dig_instead_alternative(
         crate::parser::oracle_ir::ast::PutCount::Exactly(n) => (Some(n), false),
     };
 
+    // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
+    // instead" alternative reuses the preceding Dig's source; the base
+    // selection runs from else_ability when Teamwork wasn't paid. Appended
+    // last — the teamwork phrase is disjoint from all four arms above, so the
+    // ordering is purely defensive.
     let condition = parse_additional_cost_instead_condition_fragment(cond_text)
         .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text(cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
+        .or_else(|| parse_control_count_as_ability_condition(cond_text))
+        .or_else(|| parse_cast_using_teamwork_condition_text(cond_text))?;
 
     // Clone the preceding Dig's source (top N) and reveal-mode, apply alternative
     // selection parameters. `rest_destination` prefers the alternative's inline value

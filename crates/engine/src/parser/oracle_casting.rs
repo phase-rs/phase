@@ -242,13 +242,16 @@ fn parse_self_flash_option(
     }
 
     if let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(rest) {
-        // CR 601.3d: A target-dependent flash permission ("if it targets a commander")
+        // CR 702.8a (Flash) + CR 601.3d: a conditional flash permission ("if it
+        // targets a commander"; "if it's cast using teamwork" — Quantum Reduction)
         // must NOT degrade to an unconditional permission when the predicate is not
         // recognized — that would let the spell be cast at instant speed against any
-        // target, strictly more permissive than the printed text. Refuse to emit the
-        // option entirely so the spell stays sorcery-speed; the SwallowedClause /
-        // Condition_If swallow detector then flags the dropped clause for the parser
-        // gap-finder rather than fail-silently authorizing an over-permissive cast.
+        // target, strictly more permissive than the printed text. CR 601.3d only
+        // grants flash "if those conditions are met", so an unrecognized predicate
+        // must refuse to emit the option entirely (the spell stays sorcery-speed);
+        // the SwallowedClause / Condition_If swallow detector then flags the dropped
+        // clause for the parser gap-finder rather than fail-silently authorizing an
+        // over-permissive cast.
         let parsed = parse_restriction_condition(condition_text.trim())?;
         option = option.condition(parsed);
         return Some(option);

@@ -307,6 +307,8 @@ mod issue_3654_nyxbloom_mana_reflection;
 mod issue_3660_paradigm_multiple_offers;
 mod issue_3665_smugglers_share;
 mod issue_3681_inferno_titan_divided_damage;
+mod issue_3872_tithe_taker_turn_scoped_tax;
+mod issue_3875_kozilek_graveyard_shuffle;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;

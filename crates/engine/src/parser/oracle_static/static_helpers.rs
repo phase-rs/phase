@@ -696,6 +696,21 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         }
     }
 
+    // CR 102.1 + CR 601.2f: Leading "During your turn," timing restriction —
+    // the cost modification functions only on the static controller's turn
+    // (Tithe Taker: "During your turn, spells your opponents cast cost {1} more
+    // to cast ..."). The trailing/`if` scans above miss this because it is a
+    // comma-separated timing prefix, not an "if"/"as long as" clause. The cost
+    // resolver gates on `StaticCondition::DuringYourTurn`, which is evaluated
+    // against the source permanent's controller (CR 102.1: active player).
+    if definition.condition.is_none()
+        && tag::<_, _, OracleError<'_>>("during your turn, ")
+            .parse(lower)
+            .is_ok()
+    {
+        definition.condition = Some(StaticCondition::DuringYourTurn);
+    }
+
     Some(definition)
 }
 

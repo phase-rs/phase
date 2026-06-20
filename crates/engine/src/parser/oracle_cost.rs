@@ -60,7 +60,7 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
-    let parts: Vec<&str> = split_cost_parts(text);
+    let parts = fixup_from_among_remove_counter_parts(split_cost_parts(text));
     if parts.len() > 1 {
         let mut costs: Vec<AbilityCost> =
             parts.iter().map(|p| parse_single_cost(p.trim())).collect();
@@ -71,7 +71,7 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
         return AbilityCost::Composite { costs };
     }
 
-    parse_single_cost(text)
+    parse_single_cost(parts.first().map_or(text, String::as_str))
 }
 
 fn split_cost_parts(text: &str) -> Vec<&str> {
@@ -110,6 +110,49 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
+}
+
+/// CR 601.2b / CR 602.2b + CR 122.1: "Remove N counters from among [type],
+/// [type], and [type] you control" is one activation-cost component. The
+/// top-level splitter cannot know whether a comma belongs to a type list or to
+/// the next cost, so merge only contiguous fragments that still parse as a
+/// complete `RemoveCounter` from-among cost.
+fn fixup_from_among_remove_counter_parts(parts: Vec<&str>) -> Vec<String> {
+    let mut fixed = Vec::new();
+    let mut i = 0;
+
+    while i < parts.len() {
+        let mut part = parts[i].trim().to_string();
+        if is_from_among_remove_counter_cost(&part) {
+            let mut next = i + 1;
+            while next < parts.len() {
+                let candidate = format!("{part}, {}", parts[next].trim());
+                if !is_from_among_remove_counter_cost(&candidate) {
+                    break;
+                }
+                part = candidate;
+                next += 1;
+            }
+            fixed.push(part);
+            i = next;
+        } else {
+            fixed.push(part);
+            i += 1;
+        }
+    }
+
+    fixed
+}
+
+fn is_from_among_remove_counter_cost(text: &str) -> bool {
+    matches!(
+        parse_single_cost(text),
+        AbilityCost::RemoveCounter {
+            target: Some(_),
+            selection: CounterCostSelection::AmongObjects,
+            ..
+        }
+    )
 }
 
 /// CR 601.2b: After comma/and-splitting, bare noun-phrase segments that follow
@@ -2465,6 +2508,91 @@ mod tests {
                 );
             }
             other => panic!("Expected from-among RemoveCounter cost, got {:?}", other),
+        }
+    }
+
+    /// Regression: Tekuthal's activation cost is "{1}{U/P}{U/P}, Remove three counters from
+    /// among other artifacts, creatures, and planeswalkers you control". The comma-separated
+    /// type list is part of a single RemoveCounter cost, not three separate cost parts.
+    /// Reverts to three Unimplemented parts (coverage gap) if split_cost_parts incorrectly
+    /// breaks on the internal commas.
+    #[test]
+    fn cost_tekuthal_remove_three_counters_from_among_or_types() {
+        match parse_oracle_cost(
+            "{1}{U/P}{U/P}, Remove three counters from among other artifacts, creatures, and planeswalkers you control",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2, "expected mana + remove-counter, got {:?}", costs);
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }), "part 0 should be Mana");
+                match &costs[1] {
+                    AbilityCost::RemoveCounter { count, counter_type, target: Some(target), selection } => {
+                        assert_eq!(*count, 3);
+                        assert_eq!(*counter_type, CounterMatch::Any);
+                        assert_eq!(*selection, CounterCostSelection::AmongObjects);
+                        match target {
+                            TargetFilter::Or { filters } => {
+                                assert_eq!(filters.len(), 3, "expected 3 OR legs (artifact|creature|planeswalker), got {filters:?}");
+                                let types: Vec<_> = filters.iter().filter_map(|f| {
+                                    if let TargetFilter::Typed(t) = f { Some(t) } else { None }
+                                }).collect();
+                                assert_eq!(types.len(), 3, "all legs should be Typed filters");
+                                for typed in &types {
+                                    assert_eq!(typed.controller, Some(ControllerRef::You), "each leg needs 'you control'");
+                                    assert!(typed.properties.contains(&FilterProp::Another), "each leg needs 'other'");
+                                }
+                                let all_types: Vec<TypeFilter> = types.iter().flat_map(|t| t.type_filters.iter().cloned()).collect();
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Artifact)));
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Creature)));
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Planeswalker)));
+                            }
+                            other => panic!("expected Or filter for 3-type cost, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected RemoveCounter with target, got {other:?}"),
+                }
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_from_among_type_list_does_not_swallow_later_cost() {
+        match parse_oracle_cost(
+            "{1}, Remove three counters from among other artifacts, creatures, and planeswalkers you control, Sacrifice a creature",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(
+                    costs.len(),
+                    3,
+                    "expected mana + remove-counter + sacrifice, got {costs:?}"
+                );
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::RemoveCounter {
+                        target: Some(TargetFilter::Or { .. }),
+                        selection: CounterCostSelection::AmongObjects,
+                        ..
+                    }
+                ));
+                match &costs[2] {
+                    AbilityCost::Sacrifice(sacrifice) => {
+                        assert_eq!(sacrifice.requirement.fixed_count(), Some(1));
+                        match &sacrifice.target {
+                            TargetFilter::Typed(filter) => assert!(
+                                filter
+                                    .type_filters
+                                    .iter()
+                                    .any(|filter| matches!(filter, TypeFilter::Creature)),
+                                "expected creature sacrifice, got {filter:?}"
+                            ),
+                            other => panic!("expected typed creature sacrifice, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected trailing Sacrifice cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
         }
     }
 

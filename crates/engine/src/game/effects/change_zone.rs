@@ -927,14 +927,18 @@ pub fn resolve_all(
         // CR 608.2c + CR 109.4: "that player shuffles their hand into their
         // library" (Jace, the Mind Sculptor −12) binds the mass move to the
         // parent instruction's chosen player via `ParentTargetController`.
-        TargetFilter::ParentTargetController => {
-            crate::game::ability_utils::parent_target_controller(ability, state)
-        }
+        TargetFilter::ParentTargetController => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetController,
+        ),
         // CR 108.3 + CR 608.2c: "its owner shuffles their graveyard into their
         // library" mass moves key off owner, not controller.
-        TargetFilter::ParentTargetOwner => {
-            crate::game::ability_utils::parent_target_owner(ability, state)
-        }
+        TargetFilter::ParentTargetOwner => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetOwner,
+        ),
         _ => None,
     };
 

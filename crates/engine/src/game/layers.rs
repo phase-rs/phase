@@ -963,7 +963,23 @@ fn evaluate_condition_with_context(
         // already constrains source availability before this static is evaluated.
         StaticCondition::ClassLevelGE { level } => eval_class_level_ge(state, source_id, *level),
         StaticCondition::Unrecognized { .. } => true,
-        StaticCondition::DuringYourTurn => state.active_player == controller,
+        // CR 102.1: "during your turn" means the turn of the static's source
+        // controller — never the caster. Most call sites pass the source's
+        // controller as `controller`, but the cost-modification resolver passes
+        // the *caster* (so caster-relative conditions like SpellsCastThisTurn
+        // resolve correctly), which would invert this turn check for an
+        // opponent-affecting tax (Tithe Taker: "During your turn, spells your
+        // opponents cast cost {1} more"). Bind to the source permanent's
+        // controller directly so the gate is correct in every call path; fall
+        // back to `controller` only when the source object is absent.
+        StaticCondition::DuringYourTurn => {
+            let source_controller = state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(controller);
+            state.active_player == source_controller
+        }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
         StaticCondition::WasStartingPlayer { .. } => state.current_starting_player == controller,

@@ -526,12 +526,7 @@ fn parse_modal_additional_cost_condition(
     // Stamping `origin: Some(Teamwork)` makes the rider test the Teamwork tap
     // payment, not any optional additional cost — so it composes correctly with
     // another object additional cost on the same spell.
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("this spell was cast using teamwork"),
-        tag("it was cast using teamwork"),
-    ))
-    .parse(input)
-    {
+    if let Ok((rest, ())) = nom_condition::parse_cast_using_teamwork_phrase(input) {
         return Ok((
             rest,
             ModalSelectionCondition::AdditionalCostPaid {
