@@ -2354,15 +2354,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
-                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_spell_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
+                PayCostKind::TapCreatures { aggregate } => {
+                    engine_casting::handle_tap_creatures_for_spell_cost(
+                        state,
+                        *player,
+                        *pending_cast.clone(),
+                        *count,
+                        *aggregate,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::Behold { action } => engine_casting::handle_behold_for_cost(
                     state,
                     *player,
@@ -2385,14 +2388,18 @@ fn apply_action(
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
-                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
+                // CR 605.1a: mana-ability tap costs are always fixed-count; the
+                // aggregate form never resumes a mana ability.
+                PayCostKind::TapCreatures { .. } => {
+                    engine_casting::handle_tap_creatures_for_mana_ability(
+                        state,
+                        *count,
+                        choices,
+                        pending_mana_ability,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
                     state,
                     *count,
@@ -11970,7 +11977,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: crate::types::ability::TypedFilter::creature()
                                 .controller(crate::types::ability::ControllerRef::You)
                                 .into(),
@@ -12008,7 +12015,7 @@ mod tests {
             result.waiting_for,
             WaitingFor::PayCost {
                 player: PlayerId(0),
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count: 1,
                 resume: CostResume::ManaAbility { .. },
                 ..
@@ -12441,7 +12448,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: TypedFilter::creature()
                                 .controller(ControllerRef::You)
                                 .into(),
@@ -12497,7 +12504,7 @@ mod tests {
         match result.waiting_for {
             WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::ManaAbility { .. },
@@ -12573,7 +12580,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 2,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(2),
                             filter: TypedFilter::creature()
                                 .with_type(TypeFilter::Subtype("Elf".to_string()))
                                 .controller(ControllerRef::You)
@@ -12623,7 +12630,7 @@ mod tests {
         match result.waiting_for {
             WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::Spell { .. },
@@ -12680,7 +12687,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: TypedFilter::creature()
                                 .with_type(TypeFilter::Subtype("Elf".to_string()))
                                 .controller(ControllerRef::You)

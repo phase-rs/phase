@@ -2648,6 +2648,24 @@ pub enum FilterProp {
     /// CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
     /// Compound check used by "that attacked or blocked this turn" Oracle text.
     AttackedOrBlockedThisTurn,
+    /// CR 122.1 + CR 122.6: Matches an object onto which `actor` put counters
+    /// matching `counters` this turn, where the total count satisfies
+    /// `comparator` against `count`. This is a *historical-action* predicate
+    /// (CR 122.6: "counters being put on an object"), not a current-counter
+    /// query — the object stays matched even if those counters are later
+    /// removed, which is what distinguishes it from `FilterProp::Counters`.
+    /// Evaluated against `GameState::counter_added_this_turn`. Covers the class
+    /// "[permanents] that [you've / an opponent has] put [one or more] [+1/+1 /
+    /// any] counters on this turn" (Kid Loki's hexproof static, and the broader
+    /// counter-this-turn conditional-static class). The `actor` and `counters`
+    /// axes mirror `QuantityRef::CounterAddedThisTurn` so both the count and the
+    /// membership predicate share one parameterization.
+    CountersPutOnThisTurn {
+        actor: CountScope,
+        counters: crate::types::counter::CounterMatch,
+        comparator: Comparator,
+        count: u32,
+    },
     /// CR 707.2: Matches face-down objects on the battlefield.
     /// Used for "face-down creature" trigger subjects.
     FaceDown,
@@ -5798,6 +5816,94 @@ impl SacrificeRequirement {
     }
 }
 
+/// Aggregate statistic for a tap-creatures-cost selection constraint.
+///
+/// CR 208.1: power is the aggregate axis. Currently only `TotalPower` (Crew
+/// CR 702.122a, Saddle CR 702.171a, Teamwork). Mirrors `SacrificeAggregateStat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TapCreaturesAggregateStat {
+    TotalPower,
+}
+
+/// CR 601.2f + CR 208.1: The aggregate constraint a `TapCreatures` cost payment
+/// must satisfy (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Snapshots
+/// the `TapCreaturesRequirement::Aggregate` `{ stat, comparator, value }` triple
+/// into the interactive payment state (`PayCostKind::TapCreatures`) so the
+/// candidate enumerator and selection validator honor the advertised comparator
+/// instead of hard-coding `>=`. Bundling the three fields keeps them from
+/// desyncing (a lone `value` cannot drift from its comparator/stat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapCreaturesAggregate {
+    pub stat: TapCreaturesAggregateStat,
+    pub comparator: Comparator,
+    pub value: i32,
+}
+
+impl TapCreaturesAggregate {
+    /// CR 208.1: Evaluate whether a chosen set's summed current power satisfies
+    /// this aggregate constraint.
+    pub fn satisfied_by(&self, total_power: i32) -> bool {
+        self.comparator.evaluate(total_power, self.value)
+    }
+}
+
+/// How many creatures must be tapped, or what aggregate constraint the chosen
+/// set must satisfy, for a `TapCreatures` cost.
+///
+/// `Count { count }` is the fixed-number form (Conspire's "tap two creatures",
+/// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value }` is
+/// the "tap any number of creatures with total power N or greater" form used by
+/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork. Mirrors
+/// `SacrificeRequirement` so the two cost families share one parameterization
+/// shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "requirement", rename_all = "snake_case")]
+pub enum TapCreaturesRequirement {
+    #[serde(rename = "count")]
+    Count {
+        #[serde(default = "default_one")]
+        count: u32,
+    },
+    Aggregate {
+        stat: TapCreaturesAggregateStat,
+        comparator: Comparator,
+        value: i32,
+    },
+}
+
+impl Default for TapCreaturesRequirement {
+    fn default() -> Self {
+        Self::Count { count: 1 }
+    }
+}
+
+impl TapCreaturesRequirement {
+    pub fn count(n: u32) -> Self {
+        Self::Count { count: n }
+    }
+
+    /// "Tap any number of creatures you control with total power `value` or
+    /// greater" (Crew/Saddle/Teamwork).
+    pub fn total_power_at_least(value: i32) -> Self {
+        Self::Aggregate {
+            stat: TapCreaturesAggregateStat::TotalPower,
+            comparator: Comparator::GE,
+            value,
+        }
+    }
+
+    pub fn fixed_count(&self) -> Option<u32> {
+        match self {
+            Self::Count { count } => Some(*count),
+            Self::Aggregate { .. } => None,
+        }
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Aggregate { .. })
+    }
+}
+
 /// CR 701.21: Sacrifice cost payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SacrificeCost {
@@ -5954,8 +6060,19 @@ pub enum AbilityCost {
     CollectEvidence {
         amount: u32,
     },
+    /// CR 601.2b: Tap creatures as an additional/activation cost. The
+    /// `requirement` axis selects between a fixed count (Conspire's "tap two
+    /// creatures") and an aggregate "any number with total power N or greater"
+    /// constraint (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Legacy JSON
+    /// that carries a bare `count` field (no `requirement` discriminant)
+    /// deserializes into `Count { count }` via `deserialize_tap_creatures_requirement`.
     TapCreatures {
-        count: u32,
+        #[serde(
+            default,
+            alias = "count",
+            deserialize_with = "deserialize_tap_creatures_requirement"
+        )]
+        requirement: TapCreaturesRequirement,
         filter: TargetFilter,
     },
     /// CR 122.1 + CR 601.2h: Remove `count` counters matching `counter_type`
@@ -6345,6 +6462,12 @@ pub enum AdditionalCostOrigin {
     Offspring,
     Squad,
     Replicate,
+    /// CR 601.2b/f: Teamwork's optional "tap any number of creatures with total
+    /// power N or more" additional cost. A dedicated origin lets "this spell was
+    /// cast using teamwork" riders test the Teamwork payment specifically (not
+    /// any optional additional cost) and lets Teamwork compose with another
+    /// object additional cost in the announcement queue.
+    Teamwork,
     #[default]
     Other,
 }
@@ -9520,6 +9643,31 @@ pub enum Effect {
 
 fn default_one() -> u32 {
     1
+}
+
+/// Deserialize a `TapCreaturesRequirement`, accepting both the current tagged
+/// map form (`{"requirement":"count","count":N}` /
+/// `{"requirement":"aggregate","stat":"TotalPower","comparator":"GE","value":N}`)
+/// and the legacy bare-integer form (`"count": N`, routed here via the
+/// `#[serde(alias = "count")]` on the field). The legacy integer maps to
+/// `Count { count }`, preserving compatibility with pre-parameterization card
+/// data and fixtures.
+fn deserialize_tap_creatures_requirement<'de, D>(
+    deserializer: D,
+) -> Result<TapCreaturesRequirement, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Legacy(u32),
+        Tagged(TapCreaturesRequirement),
+    }
+    Ok(match Repr::deserialize(deserializer)? {
+        Repr::Legacy(count) => TapCreaturesRequirement::Count { count },
+        Repr::Tagged(req) => req,
+    })
 }
 
 fn default_player_filter_controller() -> PlayerFilter {
@@ -13122,6 +13270,21 @@ impl AbilityCondition {
             subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Any,
             origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        }
+    }
+
+    /// CR 601.2b/f: "if this spell was cast using [keyword]" — gates on a
+    /// specific additional-cost origin (e.g. Teamwork) being paid, so the rider
+    /// is not satisfied by an unrelated optional additional cost on the spell.
+    pub fn additional_cost_paid_origin(origin: AdditionalCostOrigin) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
+            source: AdditionalCostPaymentSource::Any,
+            origin: Some(origin),
             origin_ordinal: None,
             variant: None,
             kicker_cost: None,
@@ -17057,7 +17220,7 @@ mod tests {
                 filter: Some(TypedFilter::creature().into()),
             },
             AbilityCost::TapCreatures {
-                count: 2,
+                requirement: TapCreaturesRequirement::count(2),
                 filter: TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .into(),
@@ -17749,7 +17912,7 @@ mod tests {
         #[test]
         fn tap_other_creatures() {
             let cost = AbilityCost::TapCreatures {
-                count: 2,
+                requirement: TapCreaturesRequirement::count(2),
                 filter: TargetFilter::Any,
             };
             assert_eq!(cost.categories(), vec![CostCategory::TapsOtherCreatures]);

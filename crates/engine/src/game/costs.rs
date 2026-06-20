@@ -1294,7 +1294,7 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
-        NinjutsuVariant, QuantityExpr, SacrificeCost,
+        NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -1342,7 +1342,7 @@ mod tests {
             },
             AbilityCost::CollectEvidence { .. } => AbilityCost::CollectEvidence { amount: 1 },
             AbilityCost::TapCreatures { .. } => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: TapCreaturesRequirement::count(1),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter { .. } => AbilityCost::RemoveCounter {
@@ -1443,7 +1443,7 @@ mod tests {
             },
             AbilityCost::CollectEvidence { amount: 0 },
             AbilityCost::TapCreatures {
-                count: 0,
+                requirement: TapCreaturesRequirement::count(0),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter {
@@ -1722,7 +1722,7 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Lord", 2, 2).id();
         let cost = AbilityCost::TapCreatures {
-            count: 2,
+            requirement: TapCreaturesRequirement::count(2),
             filter: TargetFilter::Typed(TypedFilter::creature()),
         };
         // Only the source creature is present (1 < 2).

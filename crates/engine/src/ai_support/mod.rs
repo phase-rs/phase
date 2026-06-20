@@ -493,6 +493,26 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 || chosen.len() < *min_count
                 || chosen.len() > *count
         }
+        // CR 601.2f + CR 208.1: the aggregate Crew/Saddle/Teamwork tap cost
+        // accepts ANY creature subset (drawn from `choices`, no duplicates)
+        // whose summed CURRENT positive power satisfies the advertised comparator
+        // — not a fixed cardinality. Evaluates through the same `satisfied_by`
+        // the payment validator (`handle_tap_creatures_for_spell_cost`) uses, so
+        // both seams agree on which subsets are legal.
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::TapCreatures {
+                        aggregate: Some(aggregate),
+                    },
+                choices,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let total = crate::game::casting_costs::tap_creatures_total_power(state, chosen);
+            selection_mismatch(chosen, choices, None) || !aggregate.satisfied_by(total)
+        }
         // CR 118.3 + CR 605.3b: every other PayCost kind selects exactly `count`.
         (WaitingFor::PayCost { choices, count, .. }, GameAction::SelectCards { cards: chosen }) => {
             selection_mismatch(chosen, choices, Some(*count))

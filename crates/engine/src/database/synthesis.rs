@@ -2576,7 +2576,7 @@ pub fn synthesize_conspire(face: &mut CardFace) {
     if face.additional_cost.is_none() {
         face.additional_cost = Some(AdditionalCost::Optional {
             cost: AbilityCost::TapCreatures {
-                count: 2,
+                requirement: crate::types::ability::TapCreaturesRequirement::count(2),
                 filter: conspire_tap_filter(),
             },
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
@@ -2653,6 +2653,43 @@ fn is_conspire_copy_trigger(t: &TriggerDefinition) -> bool {
                 }
             ) && a.repeat_for.is_none()
         })
+}
+
+/// CR 601.2b/f: Teamwork N — "As an additional cost to cast this spell, you may
+/// tap any number of creatures you control with total power N or more." Builds
+/// the optional additional cost. Unlike Conspire, Teamwork adds no trigger: the
+/// spell's body references whether the cost was paid via an `AdditionalCostPaid`
+/// condition (parsed from "if this spell was cast using teamwork").
+///
+/// The tap requirement is the aggregate "total power N or greater" shape shared
+/// with Crew (CR 702.122a) and Saddle (CR 702.171a); CR 208.1 defines power.
+/// Mirrors `synthesize_conspire`'s optional-additional-cost construction.
+pub fn synthesize_teamwork(face: &mut CardFace) {
+    // allow-raw-authority: parse-time read of the printed Teamwork(N) keyword to extract N for cost synthesis (not a runtime effective-keyword query)
+    let Some(n) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Teamwork(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::TapCreatures {
+                requirement: crate::types::ability::TapCreaturesRequirement::total_power_at_least(
+                    n as i32,
+                ),
+                filter: teamwork_tap_filter(),
+            },
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+        });
+    }
+}
+
+/// CR 601.2b: "creatures you control" — Teamwork's tap-cost candidate filter.
+/// (No color-sharing constraint, unlike Conspire.)
+pub fn teamwork_tap_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
 }
 
 /// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
@@ -8912,6 +8949,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.78a: Conspire — optional "tap two color-sharing creatures" additional
     // cost + a copy-once-on-cast trigger gated on that cost being paid.
     synthesize_conspire(face);
+    // CR 601.2b/f: Teamwork N — optional "tap any number of creatures you control
+    // with total power N or more" additional cost. The body's "if this spell was
+    // cast using teamwork" condition reads the resulting additional-cost-paid flag.
+    synthesize_teamwork(face);
     // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
     // graveyard from the battlefield this turn.
     synthesize_gravestorm(face);
@@ -19126,10 +19167,14 @@ mod conspire_synthesis_tests {
         // CR 702.78a: optional "tap two color-sharing creatures" additional cost.
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
-                cost: AbilityCost::TapCreatures { count, filter },
+                cost:
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    },
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                assert_eq!(*count, 2);
+                assert_eq!(requirement.fixed_count(), Some(2));
                 let TargetFilter::Typed(tf) = filter else {
                     panic!("expected typed creature filter, got {filter:?}");
                 };

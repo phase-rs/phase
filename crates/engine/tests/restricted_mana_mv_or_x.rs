@@ -171,8 +171,8 @@ fn empty_criteria_never_authorizes() {
 fn restriction_never_allows_activation() {
     // CR 106.6: this is a spell-casting spend restriction; ability activation is
     // never permitted.
-    assert!(!helga_restriction().allows_activation(&["Creature".to_string()], &[]));
-    assert!(!troyan_restriction().allows_activation(&["Artifact".to_string()], &[]));
+    assert!(!helga_restriction().allows_activation(&["Creature".to_string()], &[], None));
+    assert!(!troyan_restriction().allows_activation(&["Artifact".to_string()], &[], None));
 }
 
 /// Drive the REAL mana-payment route: `ManaPool::spend_for` with

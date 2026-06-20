@@ -595,6 +595,18 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
     state.created_tokens_this_turn.clear();
+    // CR 122.6 + CR 514.2: The `counter_added_this_turn` ledger backs the
+    // turn-scoped `CountersPutOnThisTurn` filter predicate (CR 122.6 look-back),
+    // which feeds continuous statics such as Kid Loki's hexproof grant. Those
+    // "this turn" effects end at cleanup (CR 514.2), so clearing the ledger
+    // changes layer-relevant state. Route the expiry through the layer
+    // invalidation authority — mirroring the turn-boundary continuous-effect
+    // prunes (`prune_until_next_turn_effects`) — guarded on a non-empty ledger so
+    // we only invalidate when something actually depended on it; otherwise a
+    // static that gained a keyword from a counter placed last turn stays cached.
+    if !state.counter_added_this_turn.is_empty() {
+        state.layers_dirty.mark_full();
+    }
     state.counter_added_this_turn.clear();
     state.players_who_discarded_card_this_turn.clear();
     state.cards_discarded_this_turn_by_player.clear();

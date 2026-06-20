@@ -11,9 +11,9 @@ use crate::game::quantity::{
     counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
 };
 use crate::types::ability::{
-    ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, FilterProp,
-    Parity, ParitySource, PtStat, PtValueScope, QuantityExpr, ResolvedAbility, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope,
+    FilterProp, Parity, ParitySource, PtStat, PtValueScope, QuantityExpr, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -199,6 +199,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
@@ -404,6 +405,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
@@ -2688,6 +2690,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
+        // CR 122.6: A spell on the stack hasn't received counters as a
+        // permanent — fail closed against the spell-cast snapshot.
+        | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
@@ -2952,6 +2957,27 @@ fn attacking_defender_matches(
 }
 
 /// Check if an object satisfies a single FilterProp.
+/// CR 122.6 + CR 109.5: Match a counter-placement record's actor against a
+/// `CountScope` relative to the reference player (the static's controller). This
+/// is the filter-evaluation analog of `quantity::count_scope_actor_matches`,
+/// which is unavailable here because filter evaluation carries no
+/// `QuantityContext` iteration scope. `ScopedPlayer`/`SourceChosenPlayer` fall
+/// back to the controller, matching the quantity path's out-of-iteration default.
+fn filter_count_scope_actor_matches(
+    scope: &CountScope,
+    controller: PlayerId,
+    actor: PlayerId,
+) -> bool {
+    match scope {
+        CountScope::Controller
+        | CountScope::Owner
+        | CountScope::ScopedPlayer
+        | CountScope::SourceChosenPlayer => actor == controller,
+        CountScope::All => true,
+        CountScope::Opponents => actor != controller,
+    }
+}
+
 fn matches_filter_prop(
     prop: &FilterProp,
     state: &GameState,
@@ -3545,6 +3571,30 @@ fn matches_filter_prop(
             state.creatures_attacked_this_turn.contains(&object_id)
                 || state.creatures_blocked_this_turn.contains(&object_id)
         }
+        // CR 122.1 + CR 122.6: Object received counters (matching `counters`) from
+        // `actor` this turn, summed across all qualifying placement records and
+        // tested against `comparator`/`count`. Look-back per CR 122.6 ("counters
+        // being put on an object") — a historical-action predicate, so the match
+        // survives later removal of those counters. The static's controller
+        // (`source.controller`) is the reference player for the `actor` scope.
+        FilterProp::CountersPutOnThisTurn {
+            actor,
+            counters,
+            comparator,
+            count,
+        } => {
+            let controller = source.controller.unwrap_or(PlayerId(0));
+            let total: u32 = state
+                .counter_added_this_turn
+                .iter()
+                .filter(|record| {
+                    record.object_id == object_id
+                        && counters.matches(&record.counter_type)
+                        && filter_count_scope_actor_matches(actor, controller, record.actor)
+                })
+                .fold(0, |sum: u32, record| sum.saturating_add(record.count));
+            comparator.evaluate(i32::try_from(total).unwrap_or(i32::MAX), *count as i32)
+        }
         // CR 115.7: Stack entry has exactly one target — permissive at filter level,
         // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
@@ -3946,6 +3996,9 @@ fn zone_change_record_matches_property(
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
+        // CR 122.6: counters-put-this-turn is a live-history join keyed on the
+        // object id; a zone-change snapshot does not carry it. Fail closed.
+        | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 107.3 + CR 202.1: X-in-cost is a spell-cast-time predicate; it has no

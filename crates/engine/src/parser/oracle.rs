@@ -5529,6 +5529,127 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
+    /// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
+    /// the `{T}: Add {U}` mana ability carries the negative spend restriction
+    /// ("This mana can't be spent to cast a nonartifact spell") lowered to
+    /// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
+    /// "Artifact", ability: Any }`. The restriction governs only what *spells*
+    /// the mana may cast (artifact spells); it must leave ability activation
+    /// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
+    /// lowering would wrongly forbid paying for any ability, so the `ability: Any`
+    /// scope is exactly what keeps ability activation payable.
+    #[test]
+    fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
+        use crate::types::ability::{ManaProduction, ManaSpendRestriction};
+        use crate::types::mana::{AbilityActivationScope, ManaColor};
+        let r = parse_oracle_text(
+            "Defender\n{T}: Add {U}. This mana can't be spent to cast a nonartifact spell.",
+            "Hydraulic Helper",
+            &["Defender".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        assert!(
+            r.extracted_keywords.contains(&Keyword::Defender),
+            "Defender must extract as a keyword, got {:?}",
+            r.extracted_keywords
+        );
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "only the {{T}} mana ability remains: {r:#?}"
+        );
+        let mana_ability = &r.abilities[0];
+        assert!(
+            !has_unimplemented(mana_ability),
+            "no Unimplemented parts on the mana ability: {mana_ability:#?}"
+        );
+        let Effect::Mana {
+            produced,
+            restrictions,
+            ..
+        } = &*mana_ability.effect
+        else {
+            panic!("expected Effect::Mana, got {:?}", mana_ability.effect);
+        };
+        assert!(matches!(
+            produced,
+            ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Blue]
+        ));
+        assert_eq!(
+            restrictions,
+            &[ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::Any,
+            }],
+            "negative nonartifact restriction must lower to \
+             SpellTypeOrAbilityActivation so ability activation stays unrestricted"
+        );
+    }
+
+    /// CR 702.6a + CR 106.6: Ronin, Shadow Stalker. Its second ability
+    /// ("{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4
+    /// until end of turn. Activate only as a sorcery.") is fully supported with
+    /// no Unimplemented parts: a `Pump` effect, a `Composite[Tap, Sacrifice
+    /// Equipment]` cost, and an `AsSorcery` activation restriction.
+    ///
+    /// Its first ability's spend restriction ("Spend this mana only to cast
+    /// Equipment spells or activate equip abilities") is an honest, documented
+    /// gap (an Unimplemented "spend" marker): "equip abilities" (a
+    /// specific keyword ability per CR 702.6a) cannot be modeled by the existing
+    /// `AbilityActivationScope` (`OfSpellType` over-permits any Equipment
+    /// ability; `Any` over-permits any ability), and a categorically-correct
+    /// `EquipAbility` scope would require threading the activated ability's
+    /// identity through `PaymentContext::Activation` and the cost-payment
+    /// authority — out of scope for this change. This test pins both facts so a
+    /// future fix knows exactly what to flip.
+    #[test]
+    fn ronin_second_ability_supported_first_ability_spend_restriction_deferred() {
+        let r = parse_oracle_text(
+            "Pay 2 life: Add two mana of any one color. Spend this mana only to cast Equipment spells or activate equip abilities. Activate only once each turn.\n{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4 until end of turn. Activate only as a sorcery.",
+            "Ronin, Shadow Stalker",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Ninja".to_string()],
+        );
+        assert_eq!(r.abilities.len(), 2, "two activated abilities: {r:#?}");
+
+        // Second ability: fully supported (-4/-4 pump, sac-Equipment cost, sorcery-speed).
+        let second = &r.abilities[1];
+        assert!(
+            !has_unimplemented(second),
+            "second ability must be fully supported: {second:#?}"
+        );
+        assert!(
+            matches!(
+                &*second.effect,
+                Effect::Pump {
+                    power: crate::types::ability::PtValue::Fixed(-4),
+                    toughness: crate::types::ability::PtValue::Fixed(-4),
+                    ..
+                }
+            ),
+            "expected -4/-4 Pump, got {:?}",
+            second.effect
+        );
+        assert!(
+            second
+                .activation_restrictions
+                .contains(&crate::types::ability::ActivationRestriction::AsSorcery),
+            "equip-sac ability is sorcery-speed: {:?}",
+            second.activation_restrictions
+        );
+
+        // First ability: mana production + once-each-turn parse, but the spend
+        // restriction's "equip abilities" half is a documented gap.
+        let first = &r.abilities[0];
+        assert!(
+            has_unimplemented(first),
+            "first ability's equip-ability spend restriction is a known gap: {first:#?}"
+        );
+    }
+
     /// CR 608.2d + CR 113.3 + CR 611.2: Linvala, Shield of Sea Gate's
     /// activated ability — "{W/U}, Sacrifice ~: Choose hexproof or
     /// indestructible. Creatures you control gain that ability until end of

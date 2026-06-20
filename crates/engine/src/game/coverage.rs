@@ -769,6 +769,28 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
             }
+            FilterProp::CountersPutOnThisTurn {
+                actor,
+                counters,
+                comparator,
+                count,
+            } => {
+                let kind = match counters {
+                    CounterMatch::Any => "any".to_string(),
+                    CounterMatch::OfType(ct) => ct.as_str().to_string(),
+                };
+                let cmp = match comparator {
+                    Comparator::GE => "≥",
+                    Comparator::LE => "≤",
+                    Comparator::GT => ">",
+                    Comparator::LT => "<",
+                    Comparator::EQ => "=",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!(
+                    "{actor:?} put {cmp}{count} {kind} counters on this turn"
+                ));
+            }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::TargetsOnly { filter } => {

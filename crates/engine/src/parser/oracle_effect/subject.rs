@@ -1,9 +1,10 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, map, opt, rest, value, verify};
 use nom::multi::separated_list1;
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::animation::{
@@ -98,6 +99,16 @@ pub(super) fn try_parse_subject_predicate_ast(
             },
             ctx,
         ));
+    }
+
+    // CR 613.4b + CR 613.1f: "[subject]'s base power and toughness become N/M and
+    // (it/they) gain(s) <keywords>" — set-base-P/T + keyword grant on the
+    // possessor, no type change. Must run before `try_parse_subject_become_clause`
+    // (which assumes the verb "become" acts on the permanent's type, not its P/T).
+    // Returns a fully-built `ClauseAst` because the possessive subject ("~'s base
+    // power and toughness") cannot be re-derived by `find_predicate_start`.
+    if let Some(clause) = try_parse_subject_base_pt_set_clause_ast(text, ctx) {
+        return Some(clause);
     }
 
     if let Some(clause) = try_parse_subject_become_clause(text, ctx) {
@@ -362,6 +373,145 @@ fn try_parse_subject_become_clause(
         .ok()?;
     let application = parse_subject_application(subject, ctx)?;
     build_become_clause(application, &predicate, ctx)
+}
+
+/// CR 613.4b + CR 613.1f: "[subject]'s base power and toughness become N/M [and
+/// (it/they) gain(s)/has/have <keywords>]" — a set-base-P/T plus keyword-grant
+/// continuous effect on the possessor, with NO type/subtype change.
+///
+/// This differs grammatically from the `becomes a [type] with base power and
+/// toughness N/M` animation form (handled by `parse_animation_spec`): here the
+/// grammatical subject is the *possessive* "[subject]'s base power and
+/// toughness", and the verb "become" acts on the P/T characteristics, not on the
+/// permanent's card type. So it produces a `GenericEffect` carrying
+/// `SetPower`/`SetToughness` (Layer 7b, CR 613.4b) and `AddKeyword` (Layer 6,
+/// CR 613.1f) modifications, without any `AddType`/`AddSubtype`. Covers Moon
+/// Girl and Devil Dinosaur ("~'s base power and toughness become 6/6 and they
+/// gain trample") and the class of "<permanent>'s base power and toughness
+/// become N/M …" effects.
+fn try_parse_subject_base_pt_set_clause_ast(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    type VE<'a> = OracleError<'a>;
+
+    // CR 611.2a: A standalone effect line may carry a *leading* duration
+    // ("Until end of turn, ~'s base power and toughness become 6/6 …"). Strip it
+    // here and thread it onto the clause; inside a trigger the sequence layer has
+    // already stripped it, so this is a no-op in that path.
+    let (body, leading_duration) = strip_leading_duration(text);
+
+    let lower = body.to_lowercase();
+    // Split at the possessive characteristic phrase. The possessive marker may be
+    // ASCII `'s` or the Unicode right single quote `\u{2019}s`. `rest_lower` is the
+    // text after the marker; `to_lowercase` preserves byte offsets for this text
+    // (ASCII letters + apostrophes), so the same offsets index `body`.
+    let (rest_lower, (subject_lower, _marker)) = alt((
+        pair(
+            take_until::<_, _, VE>("'s base power and toughness become "),
+            tag("'s base power and toughness become "),
+        ),
+        pair(
+            take_until::<_, _, VE>("\u{2019}s base power and toughness become "),
+            tag("\u{2019}s base power and toughness become "),
+        ),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+
+    let subject = body[..subject_lower.len()].trim();
+    let remainder = &body[body.len() - rest_lower.len()..];
+
+    // Parse the fixed N/M P/T values.
+    let (power, toughness, after_pt) = super::animation::parse_fixed_become_pt_prefix(remainder)?;
+
+    // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
+    let keywords = parse_base_pt_set_trailing_keywords(after_pt);
+
+    let application = parse_subject_application(subject, ctx)?;
+    let affected = static_affected_for_application(&application);
+
+    let mut modifications = vec![
+        ContinuousModification::SetPower { value: power },
+        ContinuousModification::SetToughness { value: toughness },
+    ];
+    modifications.extend(
+        keywords
+            .into_iter()
+            .map(|keyword| ContinuousModification::AddKeyword { keyword }),
+    );
+
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(body.trim_end_matches('.').to_string())],
+        // CR 611.2a: a leading duration stripped above is threaded onto the
+        // GenericEffect; otherwise the sequence layer's wrapping duration (for
+        // the trigger-body path, where it is already stripped upstream) applies.
+        duration: leading_duration.clone(),
+        target: application.target.clone(),
+    };
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect,
+            duration: leading_duration,
+            sub_ability: None,
+        }),
+    })
+}
+
+/// Strip a leading duration phrase ("Until end of turn, " / "This turn, ") off a
+/// standalone effect line, returning `(remaining_body, duration)`. When no
+/// leading duration is present, returns `(text, None)` so the caller is a no-op.
+fn strip_leading_duration(text: &str) -> (&str, Option<Duration>) {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let parsed = (
+        parse_duration,
+        opt(tag::<_, _, VE>(",")),
+        nom::character::complete::multispace1,
+    )
+        .parse(lower.as_str());
+    let Ok((rest_lower, (duration, _, _))) = parsed else {
+        return (text, None);
+    };
+    let body = &text[text.len() - rest_lower.len()..];
+    (body, Some(duration))
+}
+
+/// Parse the trailing "[, ] and [it/they] gain(s)/has/have <keyword list>"
+/// conjunct after a "base power and toughness become N/M" clause. Returns the
+/// recognized keywords (empty when no trailing conjunct or no keywords parse).
+fn parse_base_pt_set_trailing_keywords(after_pt: &str) -> Vec<Keyword> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = after_pt.to_lowercase();
+    let intro = (
+        opt(tag::<_, _, VE>(",")),
+        multispace0,
+        tag("and "),
+        opt(alt((tag("it "), tag("they "), tag("he "), tag("she ")))),
+        alt((tag("gains "), tag("gain "), tag("has "), tag("have "))),
+    );
+    let Ok((rest, _)) = value((), intro).parse(lower.as_str()) else {
+        return Vec::new();
+    };
+
+    let raw = rest.trim().trim_end_matches('.');
+    super::token::split_token_keyword_list(raw)
+        .into_iter()
+        .filter_map(super::token::map_token_keyword)
+        .collect()
 }
 
 /// CR 508.1d + CR 508.1h: "[creatures] can't attack [you] unless [player] pays
@@ -5799,5 +5949,75 @@ mod tests {
             )),
             "second disjunct (has-haste) dropped by repeated 'by': {filters:?}"
         );
+    }
+
+    /// CR 613.4b + CR 613.1f: the possessive base-P/T-set + keyword-grant clause
+    /// builds a `GenericEffect` with `SetPower`/`SetToughness` and `AddKeyword`,
+    /// across the trigger-body form ("~'s …, they gain …"), the singular pronoun
+    /// ("it gains"), the multi-keyword conjunct, and the standalone form with a
+    /// leading "Until end of turn," duration (which exercises
+    /// `strip_leading_duration`).
+    fn base_pt_set_mods(text: &str) -> (Vec<ContinuousModification>, Option<Duration>) {
+        let mut ctx = ParseContext::default();
+        let ast = try_parse_subject_base_pt_set_clause_ast(text, &mut ctx)
+            .unwrap_or_else(|| panic!("clause did not parse: {text:?}"));
+        let ClauseAst::SubjectPredicate { predicate, .. } = ast else {
+            panic!("expected SubjectPredicate");
+        };
+        let PredicateAst::Continuous {
+            effect, duration, ..
+        } = *predicate
+        else {
+            panic!("expected Continuous predicate");
+        };
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected GenericEffect");
+        };
+        (static_abilities[0].modifications.clone(), duration)
+    }
+
+    #[test]
+    fn base_pt_set_clause_trigger_body_form() {
+        // Moon Girl's trigger-body form (leading duration already stripped
+        // upstream). "they gain trample" plural pronoun.
+        let (mods, duration) =
+            base_pt_set_mods("~'s base power and toughness become 6/6 and they gain trample");
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 6 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 6 }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample
+        }));
+        // No leading duration in the trigger-body form.
+        assert_eq!(duration, None);
+    }
+
+    #[test]
+    fn base_pt_set_clause_leading_duration_and_singular_pronoun() {
+        // Standalone form: leading "Until end of turn," + singular "it gains".
+        // The leading duration must be stripped and threaded onto the clause.
+        let (mods, duration) = base_pt_set_mods(
+            "Until end of turn, ~'s base power and toughness become 4/4 and it gains flying",
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }));
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn base_pt_set_clause_no_keyword_conjunct() {
+        // Bare "become N/M" with no trailing keyword grant is still a valid
+        // set-base-P/T clause.
+        let (mods, _) = base_pt_set_mods("~'s base power and toughness become 2/3");
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 2 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 3 }));
+        assert!(!mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
     }
 }

@@ -4724,4 +4724,122 @@ mod tests {
             cast_copy.effect
         );
     }
+
+    /// CR 613.4b + CR 613.1f + CR 603.2: Moon Girl's full Oracle text parses with
+    /// zero Unimplemented effects. The second-draw trigger lowers the possessive
+    /// "~'s base power and toughness become 6/6 and they gain trample" clause to a
+    /// `GenericEffect` set-base-P/T + keyword grant; the artifact-ETB once-per-turn
+    /// draw already parsed. Shape gate paired with the runtime regression in
+    /// `tests/moon_girl_second_draw_base_pt.rs`.
+    #[test]
+    fn moon_girl_full_oracle_parses_zero_unimplemented() {
+        let parsed = parse_named(
+            "Whenever you draw your second card each turn, until end of turn, Moon Girl and Devil Dinosaur's base power and toughness become 6/6 and they gain trample.\n\
+             Whenever an artifact you control enters, draw a card. This ability triggers only once each turn.",
+            "Moon Girl and Devil Dinosaur",
+            &["Creature"],
+        );
+        assert!(parsed
+            .abilities
+            .iter()
+            .all(|d| !def_tree_has_unimplemented(d)));
+        assert!(parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .all(|d| !def_tree_has_unimplemented(d)));
+    }
+
+    /// CR 122.1 + CR 122.6 + CR 702.11: Kid Loki's full Oracle text parses with
+    /// zero Unimplemented effects. The conditional hexproof static lowers to a
+    /// continuous static whose affected filter carries
+    /// `FilterProp::CountersPutOnThisTurn`; the second-draw trigger puts a +1/+1
+    /// counter on the source. Shape gate paired with the runtime regression in
+    /// `tests/kid_loki_counter_hexproof_static.rs`.
+    #[test]
+    fn kid_loki_full_oracle_parses_zero_unimplemented() {
+        use crate::types::ability::{CountScope, FilterProp, TypedFilter};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let parsed = parse_named(
+            "Each creature you control that you've put one or more +1/+1 counters on this turn has hexproof.\n\
+             Whenever you draw your second card each turn, put a +1/+1 counter on Kid Loki.",
+            "Kid Loki",
+            &["Creature"],
+        );
+        assert!(parsed
+            .abilities
+            .iter()
+            .all(|d| !def_tree_has_unimplemented(d)));
+        assert!(parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .all(|d| !def_tree_has_unimplemented(d)));
+        // Building-block assertion: the static's affected filter carries the new
+        // counters-put-this-turn FilterProp with the correct axes.
+        let static_def = parsed
+            .statics
+            .first()
+            .expect("Kid Loki has a conditional hexproof static");
+        let TargetFilter::Typed(TypedFilter { properties, .. }) = static_def
+            .affected
+            .as_ref()
+            .expect("static has affected filter")
+        else {
+            panic!("expected a Typed affected filter");
+        };
+        assert!(properties.iter().any(|p| matches!(
+            p,
+            FilterProp::CountersPutOnThisTurn {
+                actor: CountScope::Controller,
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: crate::types::ability::Comparator::GE,
+                count: 1,
+            }
+        )));
+    }
+
+    /// CR 122.1 + CR 603.2: Construct a Cosmic Cube's second-draw trigger body
+    /// (token + plan counter) parses with zero Unimplemented. The
+    /// seventh-plan-counter sacrifice parses too; ONLY the heavy "you control
+    /// target opponent during their next turn" rider stays honestly
+    /// `Effect::Unimplemented` (intentionally deferred). Shape gate paired with
+    /// `tests/construct_cosmic_cube_second_draw_token.rs`.
+    #[test]
+    fn construct_second_draw_body_parses_token_and_plan_counter() {
+        let parsed = parse_named(
+            "Whenever you draw your second card each turn, create a 2/1 black Villain creature token with menace and put a plan counter on this enchantment.\n\
+             When the seventh plan counter is put on this enchantment, sacrifice it. When you do, you control target opponent during their next turn.",
+            "Construct a Cosmic Cube",
+            &["Enchantment"],
+        );
+        // The second-draw trigger body (token + plan counter) is fully supported.
+        let second_draw = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(
+                    t.constraint,
+                    Some(crate::types::ability::TriggerConstraint::NthDrawThisTurn { n: 2 })
+                )
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("Construct has a second-draw trigger");
+        assert!(
+            !def_tree_has_unimplemented(second_draw),
+            "the token + plan-counter body must be fully supported"
+        );
+        // The deferred control-opponent rider remains honest: exactly one
+        // Unimplemented across the whole card.
+        let total_unimpl: usize = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .filter(|d| def_tree_has_unimplemented(d))
+            .count();
+        assert_eq!(
+            total_unimpl, 1,
+            "only the deferred 'you control target opponent' rider stays Unimplemented"
+        );
+    }
 }

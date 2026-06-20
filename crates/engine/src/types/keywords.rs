@@ -807,6 +807,23 @@ pub enum Keyword {
     Toxic(u32),
     /// CR 702.171a: Saddle N — tap creatures with total power N+ to saddle this Mount.
     Saddle(u32),
+    /// Teamwork N — "As an additional cost to cast this spell, you may tap any
+    /// number of creatures you control with total power N or more." The spell's
+    /// body then references whether this optional cost was paid ("if this spell
+    /// was cast using teamwork, ...").
+    ///
+    /// Teamwork is not yet in the printed Comprehensive Rules (Marvel Super
+    /// Heroes set keyword). Its tap-any-number-with-total-power-N cost is
+    /// structurally identical to Crew (CR 702.122a) and Saddle (CR 702.171a); it
+    /// is an optional additional cast cost per CR 601.2b/f, and is a keyword
+    /// ability per CR 702.
+    ///
+    /// Runtime: `database::synthesis::synthesize_teamwork` builds an
+    /// `AdditionalCost::Optional { cost: TapCreatures { requirement:
+    /// Aggregate { TotalPower, GE, N }, .. } }`. Paying it sets the spell's
+    /// `additional_cost_paid` flag, which the body's `AdditionalCostPaid`
+    /// condition reads (mirrors Conspire).
+    Teamwork(u32),
     /// CR 702.46: Soulshift N — when this creature dies, return target Spirit card
     /// with mana value N or less from your graveyard to your hand.
     Soulshift(u32),
@@ -1244,6 +1261,7 @@ impl Keyword {
             | Keyword::Reinforce { .. }
             | Keyword::Ripple(_)
             | Keyword::Saddle(_)
+            | Keyword::Teamwork(_)
             | Keyword::Scavenge(_)
             | Keyword::Soulshift(_)
             | Keyword::Spectacle(_)
@@ -1316,6 +1334,9 @@ impl Keyword {
                 | Keyword::Impending { .. }
                 | Keyword::MoreThanMeetsTheEye(_)
                 | Keyword::Freerunning(_)
+                // CR 601.2b/f: Teamwork is an optional additional cast cost; it
+                // is inert on a non-cast token copy.
+                | Keyword::Teamwork(_)
         )
     }
 
@@ -2051,6 +2072,9 @@ impl FromStr for Keyword {
                 "toxic" => return Ok(Keyword::Toxic(p.parse().unwrap_or(1))),
                 // CR 702.171a
                 "saddle" => return Ok(Keyword::Saddle(p.parse().unwrap_or(1))),
+                // Teamwork N — optional additional cast cost (CR 601.2b/f);
+                // tap-any-number-with-total-power-N mirrors Crew/Saddle.
+                "teamwork" => return Ok(Keyword::Teamwork(p.parse().unwrap_or(1))),
                 // CR 702.46
                 "soulshift" => return Ok(Keyword::Soulshift(p.parse().unwrap_or(1))),
                 // CR 702.165
@@ -2956,6 +2980,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.164 / CR 702.171a / CR 702.46 / CR 702.165
         "Toxic" => Ok(Keyword::Toxic(uint(data))),
         "Saddle" => Ok(Keyword::Saddle(uint(data))),
+        // Teamwork N — optional additional cast cost (CR 601.2b/f).
+        "Teamwork" => Ok(Keyword::Teamwork(uint(data))),
         "Soulshift" => Ok(Keyword::Soulshift(uint(data))),
         "Backup" => Ok(Keyword::Backup(uint(data))),
         // Avatar crossover: Firebending

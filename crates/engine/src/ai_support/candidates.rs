@@ -1598,6 +1598,30 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             min_count,
             ..
         } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+        // CR 601.2f + CR 208.1: The aggregate Crew/Saddle/Teamwork tap cost is
+        // paid by ANY creature subset whose summed current power satisfies the
+        // advertised comparator — not a fixed cardinality. Enumerate minimal-cover
+        // subsets (mirroring crew/saddle) so the AI/MP legal-action set offers
+        // them; measure each creature via the same current-power authority, and
+        // evaluate acceptance through the same `satisfied_by` the payment
+        // validator uses, so all three seams agree. The `aggregate: None`
+        // (fixed-count) form falls through to the exact-`count` selection below.
+        WaitingFor::PayCost {
+            player,
+            kind:
+                PayCostKind::TapCreatures {
+                    aggregate: Some(aggregate),
+                },
+            choices,
+            ..
+        } => minimal_power_subset_candidates(
+            state,
+            *player,
+            choices,
+            |total| aggregate.satisfied_by(total),
+            crate::game::casting_costs::tap_creature_power_contribution,
+            |cards| GameAction::SelectCards { cards },
+        ),
         WaitingFor::PayCost {
             player,
             choices,
@@ -4005,8 +4029,14 @@ fn crew_vehicle_candidates(
         state,
         player,
         eligible_creatures,
-        crew_power as i32,
-        crate::types::statics::CrewAction::Crew,
+        |total| total >= crew_power as i32,
+        |state, id| {
+            crate::game::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Crew,
+            )
+        },
         |creature_ids| GameAction::CrewVehicle {
             vehicle_id,
             creature_ids,
@@ -4028,8 +4058,14 @@ fn saddle_mount_candidates(
         state,
         player,
         eligible_creatures,
-        saddle_power as i32,
-        crate::types::statics::CrewAction::Saddle,
+        |total| total >= saddle_power as i32,
+        |state, id| {
+            crate::game::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Saddle,
+            )
+        },
         |creature_ids| GameAction::SaddleMount {
             mount_id,
             creature_ids,
@@ -4037,43 +4073,46 @@ fn saddle_mount_candidates(
     )
 }
 
-/// Shared engine policy for power-threshold subset selection (Crew/Saddle).
-/// Enumerates only the **minimal-size** valid covers, with creatures explored
-/// in ascending-power order so the lowest-power valid cover is yielded first.
-/// Capped at 20 candidates within the minimal size for search bounding.
-fn minimal_power_subset_candidates<F>(
+/// Shared engine policy for power-threshold subset selection (Crew/Saddle/
+/// Teamwork). Enumerates only the **minimal-size** valid covers, with creatures
+/// explored in ascending-power order so the lowest-power valid cover is yielded
+/// first. Capped at 20 candidates within the minimal size for search bounding.
+///
+/// `power_of` is the per-creature power accessor: each cost family measures
+/// contribution through its own authority (Crew/Saddle via
+/// `object_crew_power_contribution`, which honors "as though its power were N
+/// greater"/"uses its toughness"; Teamwork via the plain current-power sum). The
+/// candidate enumerator MUST use the same authority as that family's activation
+/// gate and announcement validator — measuring power any other way yields zero
+/// valid covers and hangs the controller with an empty legal-action set.
+///
+/// `satisfies` evaluates a candidate subset's summed power against the cost's
+/// constraint (Crew/Saddle: `>= N`; Teamwork: the advertised comparator via
+/// `TapCreaturesAggregate::satisfied_by`). The minimal-cover early-break assumes
+/// the constraint is monotone non-decreasing in the total (the only shapes
+/// produced today — `>=`/`>`); a future non-monotone comparator would need a
+/// different enumeration policy, but the payment validator remains the exact
+/// authority regardless.
+fn minimal_power_subset_candidates<S, P, F>(
     state: &GameState,
     player: PlayerId,
     eligible_creatures: &[crate::types::identifiers::ObjectId],
-    threshold: i32,
-    action: crate::types::statics::CrewAction,
+    satisfies: S,
+    power_of: P,
     wrap: F,
 ) -> Vec<CandidateAction>
 where
+    S: Fn(i32) -> bool,
+    P: Fn(&GameState, crate::types::identifiers::ObjectId) -> i32,
     F: Fn(Vec<crate::types::identifiers::ObjectId>) -> GameAction,
 {
     const MAX_CANDIDATES: usize = 20;
 
-    // CR 702.122c / 702.171a: a creature's contribution toward the crew/saddle
-    // threshold may be modified ("as though its power were N greater" / "using
-    // its toughness rather than its power"). The activation gate and the
-    // announcement validator both measure power via `object_crew_power_contribution`,
-    // so the candidate enumerator must use the same authority — measuring raw
-    // `power` here disagrees with those seams and yields zero valid covers for
-    // Pilot-style creatures (e.g. Deathless Pilot, "crews as though its power
-    // were 2 greater"), hanging the controller with an empty legal-action set.
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
             .filter(|&&id| state.objects.contains_key(&id))
-            .map(|&id| {
-                (
-                    id,
-                    crate::game::static_abilities::object_crew_power_contribution(
-                        state, id, action,
-                    ),
-                )
-            })
+            .map(|&id| (id, power_of(state, id)))
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic
     // and surfaces low-power covers first within each subset size.
@@ -4094,7 +4133,7 @@ where
                         .map(|(_, p)| *p)
                 })
                 .sum();
-            if total >= threshold {
+            if satisfies(total) {
                 actions.push(candidate(wrap(combo), TacticalClass::Utility, Some(player)));
                 if actions.len() >= MAX_CANDIDATES {
                     return actions;

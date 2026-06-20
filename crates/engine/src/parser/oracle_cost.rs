@@ -20,8 +20,8 @@ use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, TargetFilter, TypedFilter, EXILE_COST_X,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
+    EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -155,7 +155,10 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                         };
                     }
                     PrecedingVerb::TapCreatures => {
-                        costs[i] = AbilityCost::TapCreatures { count: 1, filter };
+                        costs[i] = AbilityCost::TapCreatures {
+                            requirement: TapCreaturesRequirement::count(1),
+                            filter,
+                        };
                     }
                 }
             }
@@ -789,7 +792,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let target_text = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
-                return AbilityCost::TapCreatures { count, filter };
+                return AbilityCost::TapCreatures {
+                    requirement: TapCreaturesRequirement::count(count),
+                    filter,
+                };
             }
         }
     }
@@ -1618,7 +1624,7 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Tapped four untapped Humans you control"),
             AbilityCost::TapCreatures {
-                count: 4,
+                requirement: TapCreaturesRequirement::count(4),
                 filter: TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Subtype("Human".to_string())],
                     controller: Some(ControllerRef::You),
@@ -1818,7 +1824,7 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Tap an untapped creature you control"),
             AbilityCost::TapCreatures {
-                count: 1,
+                requirement: TapCreaturesRequirement::count(1),
                 filter: TargetFilter::Typed(
                     TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
                 ),

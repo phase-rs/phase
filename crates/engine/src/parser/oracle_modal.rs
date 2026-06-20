@@ -7,9 +7,10 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ChoiceType,
-    Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter,
-    ReplacementDefinition, StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
+    AdditionalCostPaymentSource, ChoiceType, Effect, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, PlayerFilter, ReplacementDefinition, StaticCondition, TargetFilter,
+    TargetSelectionMode, TriggerCondition,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -520,6 +521,30 @@ fn parse_modal_static_condition(
 fn parse_modal_additional_cost_condition(
     input: &str,
 ) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    // CR 601.2b/f: Teamwork is an optional additional cast cost; the modal
+    // "choose both instead" upgrade gates specifically on the Teamwork payment.
+    // Stamping `origin: Some(Teamwork)` makes the rider test the Teamwork tap
+    // payment, not any optional additional cost — so it composes correctly with
+    // another object additional cost on the same spell.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("this spell was cast using teamwork"),
+        tag("it was cast using teamwork"),
+    ))
+    .parse(input)
+    {
+        return Ok((
+            rest,
+            ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Any,
+                origin: Some(AdditionalCostOrigin::Teamwork),
+                origin_ordinal: None,
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            },
+        ));
+    }
+
     if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("this spell's additional cost was paid").parse(input)
     {

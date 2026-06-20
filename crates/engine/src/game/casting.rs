@@ -4,7 +4,8 @@ use crate::types::ability::{
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
     Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
     PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TapCreaturesRequirement,
+    TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -11013,9 +11014,14 @@ fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(CostObjectCount, &Ta
     }
 }
 
-pub(super) fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+pub(super) fn find_tap_creatures_cost(
+    cost: &AbilityCost,
+) -> Option<(&TapCreaturesRequirement, &TargetFilter)> {
     match cost {
-        AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
+        AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        } => Some((requirement, filter)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
         _ => None,
     }
@@ -12199,7 +12205,15 @@ pub fn handle_activate_ability(
         // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
         // activated abilities use the same WaitingFor flow as flashback tap
         // costs; completion resumes through `finish_pending_cost_or_cast`.
-        if let Some((count, filter)) = find_tap_creatures_cost(cost) {
+        if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
+            // CR 602.1a: Activated-ability tap costs are fixed-count today
+            // (Convoke-style). The aggregate "total power N" form is reserved for
+            // Crew/Saddle/Teamwork, which are not dispatched through this path.
+            let count = requirement.fixed_count().ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Aggregate-power tap cost is not valid for this activation".into(),
+                )
+            })?;
             let eligible =
                 find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
             if eligible.len() < count as usize {
@@ -12213,7 +12227,7 @@ pub fn handle_activate_ability(
             pending_tap.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { aggregate: None },
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
@@ -28602,7 +28616,7 @@ mod tests {
             obj.modal.as_mut().unwrap().max_choices = 3;
             obj.keywords
                 .push(Keyword::Escalate(AbilityCost::TapCreatures {
-                    count: 1,
+                    requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                 }));
         }
@@ -28616,7 +28630,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::PayCost {
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::Spell { .. },

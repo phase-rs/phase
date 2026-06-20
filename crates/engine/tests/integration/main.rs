@@ -426,6 +426,8 @@ mod surveil_rest_pile_redirect_continuation;
 mod swans_prevention_followup;
 mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
+mod teamwork_aggregate_legal_actions;
+mod teamwork_origin_composition;
 mod teferi_time_raveler_sorcery_speed_lock;
 mod tempt_with_discovery;
 mod terra_herald_optional_prompt;

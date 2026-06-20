@@ -9,9 +9,9 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, FilterProp, ObjectProperty, ObjectScope, ParitySource, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope, ParitySource, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation,
+    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4197,6 +4197,86 @@ fn parse_counter_spec_after_lead(
     None
 }
 
+/// CR 122.1 + CR 122.6: Parse the relative-clause body AFTER "that " for the
+/// historical counter-placement predicate "[actor] put [count] [type] counters
+/// on this turn". `input` begins at the actor word. Returns
+/// `(FilterProp::CountersPutOnThisTurn, bytes consumed from `input`)`.
+///
+/// Axes (all parameterized — covers the class, not just Kid Loki):
+/// - actor: "you've"/"you have" → Controller; "an opponent has"/"an opponent's"
+///   → Opponents; "a player has"/"a player's" → All.
+/// - count: "one or more"/"a"/"an" → GE 1; "<N> or more" → GE N; "<N>" → EQ N.
+/// - counters: a typed "+1/+1"/"<name>" → OfType; bare "counters" → Any.
+fn parse_counters_put_this_turn_clause(input: &str) -> Option<(FilterProp, usize)> {
+    use nom::bytes::complete::take_until;
+    use nom::combinator::value;
+
+    type VE<'a> = OracleError<'a>;
+
+    // Actor scope (CR 122.6 + CR 109.5). Longest-match-first within each group.
+    let (rest, actor) = alt((
+        value(CountScope::Controller, tag::<_, _, VE>("you've put ")),
+        value(CountScope::Controller, tag("you have put ")),
+        value(CountScope::Opponents, tag("an opponent has put ")),
+        value(CountScope::Opponents, tag("an opponent's put ")),
+        value(CountScope::Opponents, tag("an opponent\u{2019}s put ")),
+        value(CountScope::All, tag("a player has put ")),
+        value(CountScope::All, tag("a player's put ")),
+        value(CountScope::All, tag("a player\u{2019}s put ")),
+    ))
+    .parse(input)
+    .ok()?;
+
+    // Count threshold (CR 122.6). "one or more"/"a"/"an" all mean GE 1.
+    let (rest, (comparator, count)) = alt((
+        value((Comparator::GE, 1u32), tag::<_, _, VE>("one or more ")),
+        value((Comparator::GE, 1u32), tag("a ")),
+        value((Comparator::GE, 1u32), tag("an ")),
+        |i| {
+            let (i, n) = nom_primitives::parse_number(i)?;
+            let (i, _) = tag::<_, _, VE>(" or more ").parse(i)?;
+            Ok((i, (Comparator::GE, n)))
+        },
+        |i| {
+            let (i, n) = nom_primitives::parse_number(i)?;
+            let (i, _) = tag::<_, _, VE>(" ").parse(i)?;
+            Ok((i, (Comparator::EQ, n)))
+        },
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Counter type, then the elided-recipient terminator "counter(s) on this
+    // turn". `take_until` grabs the (possibly empty) type text before the
+    // terminator; a blank type text means a bare untyped counter
+    // (CounterMatch::Any). The terminator carries no leading space so the bare
+    // "a counter on this turn" form (no type text) matches as well as the typed
+    // "+1/+1 counters on this turn" form (type text + trailing space).
+    for suffix in ["counters on this turn", "counter on this turn"] {
+        let Ok((after, counter_text)) = take_until::<_, _, VE>(suffix).parse(rest) else {
+            continue;
+        };
+        let counter_type = counter_text.trim();
+        let counters = if counter_type.is_empty() {
+            CounterMatch::Any
+        } else {
+            CounterMatch::OfType(crate::types::counter::parse_counter_type(counter_type))
+        };
+        let consumed = input.len() - after.len() + suffix.len();
+        return Some((
+            FilterProp::CountersPutOnThisTurn {
+                actor,
+                counters,
+                comparator,
+                count,
+            },
+            consumed,
+        ));
+    }
+
+    None
+}
+
 struct KeywordSuffix {
     properties: Vec<FilterProp>,
     disjunctive: bool,
@@ -4979,6 +5059,16 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                 return Some((props, consumed_at(after_disjunction)));
             }
         }
+    }
+
+    // CR 122.1 + CR 122.6: "that you've put one or more +1/+1 counters on this
+    // turn" — historical counter-placement relative clause (Kid Loki). The
+    // relative pronoun is the object of "on" (counters put on THAT creature this
+    // turn), so the surface form ends "...on this turn" with the recipient
+    // elided. Lowers to `FilterProp::CountersPutOnThisTurn`, distinct from the
+    // current-counter `FilterProp::Counters` ("that has a +1/+1 counter on it").
+    if let Some((prop, consumed)) = parse_counters_put_this_turn_clause(after_that) {
+        return Some((vec![prop], that_len + consumed));
     }
 
     // CR 122.1 / CR 122.1a: "that has a/an <type> counter on it" / "that have …
@@ -13059,5 +13149,70 @@ mod tests {
             filters.iter().any(has_noncreature),
             "expected a noncreature branch in {filters:?}"
         );
+    }
+
+    /// CR 122.1 + CR 122.6: the "that [actor] put [count] [type] counters on this
+    /// turn" relative clause lowers to `FilterProp::CountersPutOnThisTurn` with
+    /// the right actor/counter/comparator/count axes — across "you've put", the
+    /// "an opponent has put" actor scope, the "N or more" / "a" count forms, and
+    /// the bare untyped "counters" form.
+    #[test]
+    fn counters_put_this_turn_clause_kid_loki_form() {
+        // Kid Loki: "that you've put one or more +1/+1 counters on this turn".
+        let (prop, _) = parse_counters_put_this_turn_clause(
+            "you've put one or more +1/+1 counters on this turn",
+        )
+        .expect("clause parses");
+        assert_eq!(
+            prop,
+            FilterProp::CountersPutOnThisTurn {
+                actor: CountScope::Controller,
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn counters_put_this_turn_clause_opponent_and_numeric_count() {
+        // Opponent actor scope + explicit "two or more" threshold.
+        let (prop, _) = parse_counters_put_this_turn_clause(
+            "an opponent has put two or more +1/+1 counters on this turn",
+        )
+        .expect("clause parses");
+        assert_eq!(
+            prop,
+            FilterProp::CountersPutOnThisTurn {
+                actor: CountScope::Opponents,
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn counters_put_this_turn_clause_bare_untyped_singular() {
+        // Bare untyped "a counter ... on this turn" → CounterMatch::Any, GE 1.
+        let (prop, _) = parse_counters_put_this_turn_clause("you've put a counter on this turn")
+            .expect("clause parses");
+        assert_eq!(
+            prop,
+            FilterProp::CountersPutOnThisTurn {
+                actor: CountScope::Controller,
+                counters: CounterMatch::Any,
+                comparator: Comparator::GE,
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn counters_put_this_turn_clause_rejects_non_matching() {
+        // No actor/verb → not this clause.
+        assert!(parse_counters_put_this_turn_clause("attacked this turn").is_none());
+        // Missing the "on this turn" terminator → not this clause.
+        assert!(parse_counters_put_this_turn_clause("you've put a +1/+1 counter on it").is_none());
     }
 }

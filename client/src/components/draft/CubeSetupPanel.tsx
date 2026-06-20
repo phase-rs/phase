@@ -79,7 +79,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       setCubeText(await fetchCubeList(cubeUrl));
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("cubeSetup.fetchError"));
+      setError(errorMessage(err, t("cubeSetup.fetchError")));
     } finally {
       setLoading(false);
     }
@@ -91,7 +91,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       await onStart({ cubeName, cubeListText: cubeText, settings });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("cubeSetup.startError"));
+      setError(errorMessage(err, t("cubeSetup.startError")));
     } finally {
       setLoading(false);
     }
@@ -205,6 +205,20 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
       </div>
     </div>
   );
+}
+
+/**
+ * Surface the real failure text from a thrown value. WASM (wasm-bindgen) throws
+ * its `Err(JsValue)` payloads as raw strings, which are NOT `Error` instances —
+ * so a bare `err instanceof Error` check would discard the actual reason (e.g.
+ * "Failed to resolve cube cards: [...]") and show only a generic fallback. Match
+ * the repo-wide `String(err)` convention, keeping the localized fallback solely
+ * for genuinely empty/non-string throws.
+ */
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string" && err.trim().length > 0) return err;
+  return fallback;
 }
 
 function NumberField({

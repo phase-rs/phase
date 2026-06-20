@@ -1362,11 +1362,10 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 1,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition: None,
-            } => {}
+            } if requirement.fixed_count() == Some(1) => {}
             other => panic!("expected TapCreatures alt-cost, got {other:?}"),
         }
     }
@@ -1384,11 +1383,10 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 3,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition: None,
-            } => {}
+            } if requirement.fixed_count() == Some(3) => {}
             other => panic!("expected TapCreatures(count=3) alt-cost, got {other:?}"),
         }
     }
@@ -1484,15 +1482,14 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 1,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition:
                     Some(ParsedCondition::YouControlSubtypeCountAtLeast {
                         ref subtype,
                         count: 1,
                     }),
-            } if subtype == "plains" => {}
+            } if subtype == "plains" && requirement.fixed_count() == Some(1) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
     }

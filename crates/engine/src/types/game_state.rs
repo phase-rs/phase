@@ -12,8 +12,8 @@ use super::ability::{
     ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
     CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
     KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    ThisWayCause, TriggerCondition, TriggerDefinition,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -2460,7 +2460,20 @@ pub enum PayCostKind {
         #[serde(default)]
         selection: CounterCostSelection,
     },
-    TapCreatures,
+    /// CR 601.2b: Tap creatures as a cost. `aggregate` distinguishes the two
+    /// `TapCreaturesRequirement` shapes at the interactive payment layer: `None`
+    /// is the fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
+    /// creatures; Conspire/Convoke), while `Some(aggregate)` is the aggregate
+    /// "tap any number satisfying the constraint" form (Crew CR 702.122a / Saddle
+    /// CR 702.171a / Teamwork) — the chosen set may be any size whose total
+    /// positive power (CR 208.1) satisfies `aggregate`'s comparator vs its value.
+    /// Carrying the full `TapCreaturesAggregate` (not just a threshold int) keeps
+    /// the payment validator honoring the advertised comparator instead of
+    /// hard-coding `>=`.
+    TapCreatures {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aggregate: Option<TapCreaturesAggregate>,
+    },
     Behold {
         action: BeholdCostAction,
     },
@@ -8316,7 +8329,7 @@ mod tests {
         // variant here does not lose mid-cast tracking.
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
-            kind: PayCostKind::TapCreatures,
+            kind: PayCostKind::TapCreatures { aggregate: None },
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,

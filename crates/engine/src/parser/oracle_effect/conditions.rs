@@ -18,10 +18,10 @@ use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
-    CastVariantPaid, Comparator, ControllerRef, CountScope, Duration, Effect, FilterProp,
-    ObjectScope, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, Duration, Effect,
+    FilterProp, ObjectScope, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -429,9 +429,39 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         if let Some((cond, rest)) = strip_quantified_kicker_conditional(text, &lower) {
             return (Some(cond), rest);
         }
+        // CR 601.2b/f: "if this spell was cast using teamwork, [body]" gates the
+        // body specifically on the Teamwork additional-cost payment (origin
+        // Teamwork), so a different optional/imposed additional cost on the same
+        // spell does not satisfy it. The leading-"instead" form folds to
+        // `AdditionalCostPaidInstead` via the shared `instead` handling below, so
+        // only the non-instead form is peeled here.
+        if let Ok((_, (_, rest))) =
+            nom_primitives::split_once_on(lower.as_str(), " was cast using teamwork, ")
+        {
+            let is_instead = tag::<_, _, OracleError<'_>>("instead")
+                .parse(rest.trim_start())
+                .is_ok();
+            if !is_instead {
+                let offset = text.len() - rest.len();
+                return (
+                    Some(AbilityCondition::additional_cost_paid_origin(
+                        AdditionalCostOrigin::Teamwork,
+                    )),
+                    text[offset..].to_string(),
+                );
+            }
+        }
         nom_primitives::split_once_on(lower.as_str(), " was kicked, ")
             .or_else(|_| nom_primitives::split_once_on(lower.as_str(), " was bargained, "))
             .or_else(|_| nom_primitives::split_once_on(lower.as_str(), " was beheld, "))
+            // CR 601.2b/f: Teamwork is an optional additional cast cost; "if this
+            // spell was cast using teamwork" gates the body on the same
+            // `additional_cost_paid` flag as kicker/bargain. The leading-"instead"
+            // form (Cruel Alliance, Too Evil to Stay Dead) is folded to
+            // `AdditionalCostPaidInstead` by the shared `instead` handling below.
+            .or_else(|_| {
+                nom_primitives::split_once_on(lower.as_str(), " was cast using teamwork, ")
+            })
             .ok()
             .map(|(_, (_, rest))| {
                 let offset = text.len() - rest.len();
