@@ -2781,6 +2781,27 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 },
+                // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
+                // deferred optional attach (Nahiri, the Lithomancer +2).
+                EffectKind::Attach => {
+                    let Some(cont) = state.pending_continuation.take() else {
+                        return Err(EngineError::InvalidAction(
+                            "Attach EffectZoneChoice missing stashed ability".to_string(),
+                        ));
+                    };
+                    effects::attach::complete_resolution_attachment_choice(
+                        &mut *state,
+                        *cont.chain,
+                        chosen[0],
+                        events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    set_priority(state, player);
+                    resume_with_error_propagation(state, events)?;
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
                 // CR 601.2c + CR 115.1: Resolution-time hand pick for
                 // `CastFromZone` (Electrodominance, Baral's Expertise).
                 EffectKind::CastFromZone => {

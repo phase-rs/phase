@@ -9,7 +9,9 @@ use engine::game::planeswalker;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::EffectKind;
 use engine::types::ability::{AbilityCost, ContinuousModification, Effect, TargetFilter};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
@@ -124,6 +126,74 @@ fn nahiri_plus_two_does_not_collect_attach_targets_at_activation() {
     assert!(
         !matches!(waiting, WaitingFor::TargetSelection { .. }),
         "+2 must not force target selection at activation when attach is optional"
+    );
+}
+
+fn add_equipment(
+    runner: &mut engine::game::scenario::GameRunner,
+    name: &str,
+    card_id: u64,
+) -> engine::types::identifiers::ObjectId {
+    let id = create_object(
+        runner.state_mut(),
+        CardId(card_id),
+        P0,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = runner.state_mut().objects.get_mut(&id).expect("equipment");
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Equipment".to_string());
+    id
+}
+
+#[test]
+fn nahiri_plus_two_prompts_equipment_choice_after_accepting_optional_attach() {
+    let (mut runner, nahiri) = setup_nahiri(5);
+    let first_equipment = add_equipment(&mut runner, "Bonesplitter", 99);
+    let chosen_equipment = add_equipment(&mut runner, "Skullclamp", 100);
+
+    runner.activate(nahiri, 0).accept_optional().resolve();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::Attach,
+                ..
+            }
+        ),
+        "accepting optional attach must prompt for Equipment when multiple are legal"
+    );
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen_equipment],
+        })
+        .expect("equipment selection");
+
+    let state = runner.state();
+    let kor = state
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("Kor Soldier token");
+    assert_eq!(
+        state
+            .objects
+            .get(&chosen_equipment)
+            .and_then(|o| o.attached_to),
+        Some(engine::game::game_object::AttachTarget::Object(kor)),
+        "chosen Equipment must attach to the created Kor Soldier"
+    );
+    assert!(
+        state
+            .objects
+            .get(&first_equipment)
+            .unwrap()
+            .attached_to
+            .is_none(),
+        "unselected Equipment must stay unattached"
     );
 }
 
