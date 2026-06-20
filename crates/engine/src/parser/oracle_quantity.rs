@@ -890,6 +890,20 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // CR 202.3 + CR 208.2a: "the greatest <prop> among <A> and <B>" where A and B
+    // are filters that may span distinct zones (Dragon Man, Reformed Robot:
+    // noncreature permanents you control AND noncreature cards in your graveyard).
+    // Each operand resolves as an independent single-zone Aggregate; the
+    // cross-source extremum is their Max (empty → 0 per CR 208.2a). Mirrors the
+    // " plus "/" minus " Sum
+    // composition above: only fires when BOTH operands parse as non-empty typed
+    // filters, so single-filter aggregates fall through to the QuantityRef
+    // delegate below unchanged. Tried before the delegate so the conjunction is
+    // recognized as a unit rather than the bare leading aggregate.
+    if let Some(expr) = parse_greatest_among_conjunction(text, ctx) {
+        return Some(expr);
+    }
+
     // Delegate to existing parse_quantity_ref for patterns like
     // "the number of {type} you control", "your devotion to X"
     if let Some(qty) = parse_quantity_ref_with_context(text, ctx) {
@@ -897,6 +911,75 @@ pub(crate) fn parse_cda_quantity_with_context(
     }
 
     None
+}
+
+/// CR 202.3: aggregate prefix for the cross-zone "greatest <prop> among"
+/// extremum. Mirrors the single-aggregate prefix set in
+/// `parse_quantity_ref_with_context` so both paths decode the same grammar.
+fn parse_greatest_among_prefix(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("the greatest mana value among "),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 202.3 + CR 208.2a: "the greatest <prop> among <A> and <B>" → Max of two
+/// single-zone Aggregates. Each operand is decoded through the shared
+/// `parse_type_phrase_with_ctx` filter grammar, so per-arm zone/controller
+/// semantics (e.g. "noncreature cards in your graveyard" → InZone Graveyard) are
+/// unambiguous. Returns None unless both operands parse to non-empty typed
+/// filters with the conjunction fully consumed.
+fn parse_greatest_among_conjunction(text: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
+    let (rest, (func, prop)) = parse_greatest_among_prefix(text).ok()?;
+
+    let (filter_a, remainder) = parse_type_phrase_with_ctx(rest, ctx);
+    if matches!(filter_a, TargetFilter::Any) || is_empty_typed_filter(&filter_a) {
+        return None;
+    }
+
+    let (after_and, _) = tag::<_, _, OracleError<'_>>(" and ")
+        .parse(remainder.trim_end())
+        .ok()?;
+
+    let (filter_b, tail) = parse_type_phrase_with_ctx(after_and, ctx);
+    if !tail.trim().is_empty()
+        || matches!(filter_b, TargetFilter::Any)
+        || is_empty_typed_filter(&filter_b)
+    {
+        return None;
+    }
+
+    Some(QuantityExpr::Max {
+        exprs: vec![
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: func,
+                    property: prop,
+                    filter: filter_a,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: func,
+                    property: prop,
+                    filter: filter_b,
+                },
+            },
+        ],
+    })
 }
 
 // CR 604.3: "the total number of cards you own in exile and in your graveyard

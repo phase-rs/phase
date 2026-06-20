@@ -2566,6 +2566,14 @@ pub enum FilterProp {
     Renowned,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
+    /// CR 208.1 + CR 613.4a + CR 613.4b: Matches a creature whose current
+    /// (post-layer) power exceeds its base power. Base power is established by
+    /// layer 7a CDAs (CR 613.4a) and layer 7b set effects (CR 613.4b), before
+    /// the counters and pumps applied in layers 7c–7e. True for a creature
+    /// pumped above its base by +1/+1 counters, auras, or anthems; false when
+    /// power == base or power < base. Consolidation target if a 3rd same-object
+    /// P/T self-comparison appears: `PtSelfComparison { lhs, comparator, rhs }`.
+    PowerExceedsBase,
     /// Disjunctive composite: the object matches if ANY inner prop matches.
     /// Used for natural-language OR within a property suffix — e.g.
     /// "creature with power or toughness N or less" decomposes to
@@ -3761,7 +3769,12 @@ pub enum QuantityRef {
     /// 0 outside cost/trigger resolution, whereas this one is correct any time
     /// the resolver has a `source_id` (cost payment, ability resolution, etc.).
     SelfManaValue,
-    /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
+    /// CR 202.3: Aggregate query (max/min/sum) over a property of objects in the
+    /// zones the `filter` declares (battlefield by default; e.g. an `InZone`
+    /// graveyard filter aggregates over the graveyard). The resolver scans
+    /// `filter.extract_zones()`, so the query is zone-general.
+    // TODO: no dedicated CR governs the extremum/aggregation itself; CR 202.3 is
+    // cited for the mana-value property — the most common aggregated property.
     Aggregate {
         function: AggregateFunction,
         property: ObjectProperty,

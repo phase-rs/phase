@@ -724,6 +724,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
+            FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
             FilterProp::InAnyZone { zones } => {

@@ -3255,7 +3255,8 @@ fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
-        | FilterProp::ToughnessGTPower => true,
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
         // CR 608.2c: Negation reads the inner prop's stats — recurse (mirrors AnyOf).
         FilterProp::Not { prop } => filter_prop_references_pt_stat(prop),
@@ -8143,6 +8144,128 @@ mod tests {
             obj.toughness,
             Some(4),
             "Creature + Instant + Artifact → toughness 4"
+        );
+    }
+
+    /// CR 202.3 + CR 208.2a + CR 604.3 / CR 613.4a: Dragon Man, Reformed Robot's
+    /// CDA power = the greatest mana value among (noncreature permanents you
+    /// control) and (noncreature cards in your graveyard). Drives the real
+    /// parser (`parse_cda_quantity`) to build the AST, then evaluates through the
+    /// live layer system — revert the "A and B" conjunction arm and
+    /// `parse_cda_quantity` returns None, so the static can't be built and the
+    /// test panics. Creature cards are excluded from both arms; empty → 0
+    /// (CR 208.2a); a +1/+1 counter stacks on top of the CDA base (layer 7c).
+    #[test]
+    fn dragon_man_cda_power_greatest_mana_value_across_zones() {
+        use crate::parser::oracle_quantity::parse_cda_quantity;
+
+        let mut state = setup();
+
+        let value = parse_cda_quantity(
+            "the greatest mana value among noncreature permanents you control and noncreature cards in your graveyard",
+        )
+        .expect("conjunction CDA quantity must parse");
+
+        // Dragon Man itself (a creature) carries the self-ref CDA.
+        let dragon_man = make_creature(&mut state, "Dragon Man, Reformed Robot", 0, 4, PlayerId(0));
+        state
+            .objects
+            .get_mut(&dragon_man)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::SetDynamicPower { value }])
+                    .cda(),
+            );
+
+        // Empty board + graveyard → 0 (CR 208.2a "use 0").
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(0),
+            "no noncreature permanents/cards → power 0"
+        );
+
+        // MV-5 noncreature permanent on the battlefield you control.
+        let bf_artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Mox".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bf_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 5,
+            };
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(5),
+            "battlefield-only max → power 5"
+        );
+
+        // MV-7 noncreature card in your graveyard (greater than the bf 5).
+        let gy_artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Spent Relic".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+        }
+        // MV-9 *creature* card in your graveyard — must be excluded (noncreature).
+        let gy_creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Titan".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 9,
+            };
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(7),
+            "graveyard noncreature 7 beats bf 5; creature 9 excluded → power 7"
+        );
+
+        // +1/+1 counter stacks on top of the CDA base (proves CDA is the base).
+        state
+            .objects
+            .get_mut(&dragon_man)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(8),
+            "CDA 7 + one +1/+1 counter → power 8"
         );
     }
 

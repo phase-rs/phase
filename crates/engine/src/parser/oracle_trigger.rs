@@ -8346,6 +8346,13 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     )))
     .parse(rest)?;
 
+    // Optional "with <property>" clause on the damage source — delegates to the
+    // shared `parse_with_property` inner-clause combinator so every "with X" the
+    // filter grammar supports (P/T constraints, keywords, etc.) attaches to the
+    // source. CR 208.1 + CR 613.4b: Ms. Marvel, Elastic Ally — "a creature you
+    // control with power greater than its base power deals combat damage…".
+    let (rest, with_prop) = opt(preceded(space1, parse_with_property)).parse(rest)?;
+
     // Require trailing space before the "deals" verb so we don't match
     // "sourceless" / "sourced".
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
@@ -8363,6 +8370,9 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     }
     if let Some(col) = color {
         props.push(FilterProp::HasColor { color: col });
+    }
+    if let Some(p) = with_prop {
+        props.push(p);
     }
     if !props.is_empty() {
         typed.properties = props;

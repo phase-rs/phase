@@ -189,6 +189,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -395,6 +396,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -2682,6 +2684,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
         | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
         | FilterProp::DifferentNameFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
@@ -3522,6 +3525,10 @@ fn matches_filter_prop(
             let toughness = obj.toughness.unwrap_or(0);
             toughness > power
         }
+        // CR 208.1 + CR 613.4b: Match creatures whose current (post-layer) power
+        // exceeds their base power (layer-7b baseline incl. CDA, before
+        // counters/pumps in 7c–7e).
+        FilterProp::PowerExceedsBase => obj.power.unwrap_or(0) > obj.base_power.unwrap_or(0),
         // Match objects whose name differs from all controlled battlefield objects matching the filter.
         FilterProp::DifferentNameFrom { filter } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
@@ -3774,6 +3781,13 @@ fn zone_change_record_matches_property(
         }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
+        // CR 208.1 + CR 613.4b: `power > base power` on the zone-change snapshot —
+        // both characteristics are captured at event time, so a look-back
+        // ("a creature ... with power greater than its base power deals combat
+        // damage") evaluates faithfully against the record.
+        FilterProp::PowerExceedsBase => {
+            record.power.unwrap_or(0) > record.base_power.unwrap_or(0)
+        }
         // CR 111.1: Token identity as of the zone change. Token-ness is a
         // stable property of the object, captured in the snapshot so that
         // "whenever a creature token dies" (Grismold) and similar LTB
