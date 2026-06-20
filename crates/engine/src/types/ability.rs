@@ -8124,10 +8124,7 @@ pub enum Effect {
         choice_optional: bool,
         /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false =
         /// looked at (private to the ability controller).
-        #[serde(
-            default = "default_reveal_public",
-            skip_serializing_if = "std::ops::Not::not"
-        )]
+        #[serde(default = "default_reveal_public")]
         reveal: bool,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
@@ -17257,6 +17254,38 @@ mod tests {
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn reveal_hand_private_look_serializes_false_and_roundtrips() {
+        let effect = Effect::RevealHand {
+            target: TargetFilter::Player,
+            card_filter: TargetFilter::None,
+            count: None,
+            selection: CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: false,
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        assert!(
+            json.contains("\"reveal\":false"),
+            "private look must serialize reveal:false, got {json}"
+        );
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn reveal_hand_public_reveal_defaults_true_without_field() {
+        let json = r#"{"type":"RevealHand","target":{"type":"Any"},"card_filter":{"type":"Any"}}"#;
+        let effect: Effect = serde_json::from_str(json).unwrap();
+        let Effect::RevealHand { reveal, .. } = effect else {
+            panic!("expected RevealHand");
+        };
+        assert!(
+            reveal,
+            "legacy card data without reveal must default to public reveal"
+        );
     }
 
     #[test]

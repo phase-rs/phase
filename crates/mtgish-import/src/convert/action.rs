@@ -5521,6 +5521,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
             ..
         } => Effect::RevealHand {
             target: target_filter,
@@ -5528,7 +5529,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
-            reveal: true,
+            reveal,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
@@ -7578,5 +7579,33 @@ mod tests {
         };
         assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    #[test]
+    fn apply_player_target_preserves_private_reveal_hand_flag() {
+        let private_look = Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::None,
+            count: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: false,
+        };
+        let rebound = apply_player_target(private_look, TargetFilter::Player).unwrap();
+        let Effect::RevealHand {
+            target,
+            reveal,
+            card_filter,
+            ..
+        } = rebound
+        else {
+            panic!("expected RevealHand, got {rebound:?}");
+        };
+        assert_eq!(target, TargetFilter::Player);
+        assert_eq!(card_filter, TargetFilter::None);
+        assert!(
+            !reveal,
+            "apply_player_target must preserve reveal:false for private looks"
+        );
     }
 }
