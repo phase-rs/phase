@@ -22,6 +22,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 && turn_control::viewer_controls_active_turn(state, viewer))
     };
 
+    // CR 701.20e: A bare "look at" peek privately reveals card(s) to the looking
+    // player only. `dig.rs` and `reveal_hand.rs` record the looker in
+    // `private_look_player`; surface the peeked cards to that player without
+    // leaking them to opponents.
+    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
+        Some(looker) if can_view_private_for_player(looker) => {
+            state.private_look_ids.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
+
     let opponents = players::opponents(state, viewer);
     let opp_hand_ids: Vec<ObjectId> = opponents
         .iter()
@@ -30,7 +41,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|opp| filtered.players[opp.0 as usize].hand.iter().copied())
         .collect();
     for obj_id in opp_hand_ids {
-        if !is_visible_revealed_card(state, obj_id) {
+        if !is_visible_revealed_card(state, obj_id) && !private_look_visible.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -61,19 +72,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     } else {
         HashSet::new()
-    };
-
-    // CR 701.20e: A bare "look at the top card" peek (Dig with keep_count == 0,
-    // reveal == false) privately reveals the card(s) to the looking player only.
-    // `dig.rs` records the looker in `private_look_player`; surface the peeked
-    // cards to that player so they can see the card while deciding a subsequent
-    // "you may reveal that card" optional (Delver of Secrets), without leaking it
-    // to opponents.
-    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
-        Some(looker) if can_view_private_for_player(looker) => {
-            state.private_look_ids.iter().copied().collect()
-        }
-        _ => HashSet::new(),
     };
 
     let search_visible: HashSet<ObjectId> =

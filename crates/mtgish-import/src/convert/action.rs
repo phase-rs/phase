@@ -2315,6 +2315,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::DiscardCard {
                     count: 1,
@@ -2344,6 +2345,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::ChangeZone {
                     origin: Some(Zone::Hand),
@@ -3612,6 +3614,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
@@ -5525,6 +5528,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal: true,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."

@@ -8122,6 +8122,13 @@ pub enum Effect {
         /// card selection optional while the hand reveal itself remains mandatory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         choice_optional: bool,
+        /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false =
+        /// looked at (private to the ability controller).
+        #[serde(
+            default = "default_reveal_public",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        reveal: bool,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
@@ -9455,6 +9462,10 @@ fn is_default_search_zones(zones: &[Zone]) -> bool {
 
 fn default_zone_hand() -> Zone {
     Zone::Hand
+}
+
+fn default_reveal_public() -> bool {
+    true
 }
 
 fn default_zone_graveyard() -> Zone {

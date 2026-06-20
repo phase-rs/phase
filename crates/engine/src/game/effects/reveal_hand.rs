@@ -8,31 +8,35 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// CR 701.20a: RevealHand — reveal target player's hand, then let the caster choose a card.
+/// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
+/// player's hand, then optionally let the caster choose a card.
 ///
-/// Marks all cards in the target player's hand as revealed in `GameState.revealed_cards`
-/// (so `filter_state_for_player` doesn't hide them), emits `CardsRevealed`, and sets
-/// `WaitingFor::RevealChoice` for the caster to select a card matching the filter.
-/// The sub-ability chain (exile, discard, etc.) runs via `pending_continuation`.
+/// Public reveals (`reveal: true`) mark cards in `GameState.revealed_cards` so
+/// `filter_state_for_viewer` shows them to all players. Private looks (`reveal:
+/// false`) record `private_look_ids` / `private_look_player` so only the ability
+/// controller can see the hand. When a post-reveal card choice is required,
+/// `WaitingFor::RevealChoice` is opened for the caster.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, random, choice_optional) = match &ability.effect {
+    let (card_filter, count, random, choice_optional, is_reveal) = match &ability.effect {
         Effect::RevealHand {
             card_filter,
             count,
             selection,
             choice_optional,
+            reveal,
             ..
         } => (
             card_filter.clone(),
             count.clone(),
             selection.is_random(),
             *choice_optional,
+            *reveal,
         ),
-        _ => (TargetFilter::Any, None, false, false),
+        _ => (TargetFilter::Any, None, false, false, true),
     };
 
     // Find the target player from resolved targets
@@ -71,20 +75,35 @@ pub fn resolve(
     }
 
     // CR 701.20b: Revealing a card doesn't cause it to leave the zone it's in.
-    for &card_id in &hand {
-        state.revealed_cards.insert(card_id);
+    if is_reveal {
+        for &card_id in &hand {
+            state.revealed_cards.insert(card_id);
+        }
+
+        // Emit event with card names
+        let card_names: Vec<String> = hand
+            .iter()
+            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+            .collect();
+        events.push(GameEvent::CardsRevealed {
+            player: target_player,
+            card_ids: hand.clone(),
+            card_names,
+        });
+    } else {
+        // CR 701.20e: "Look at" privately shows the hand to the ability controller.
+        state.private_look_ids = hand.clone();
+        state.private_look_player = Some(ability.controller);
     }
 
-    // Emit event with card names
-    let card_names: Vec<String> = hand
-        .iter()
-        .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
-        .collect();
-    events.push(GameEvent::CardsRevealed {
-        player: target_player,
-        card_ids: hand.clone(),
-        card_names,
-    });
+    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
+    if !needs_reveal_choice {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // Filter to only eligible cards for the choice (e.g. "nonland card").
     // CR 107.3a + CR 601.2b: ability-context evaluation for dynamic thresholds.
@@ -98,6 +117,10 @@ pub fn resolve(
     };
 
     if eligible.is_empty() {
+        if !is_reveal {
+            state.private_look_ids.clear();
+            state.private_look_player = None;
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
@@ -124,6 +147,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::visibility::filter_state_for_viewer;
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -137,6 +161,7 @@ mod tests {
                 count: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),
@@ -260,6 +285,7 @@ mod tests {
                 count: Some(crate::types::ability::QuantityExpr::Fixed { value: 1 }),
                 selection: crate::types::ability::CardSelectionMode::Random,
                 choice_optional: false,
+                reveal: true,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -276,6 +302,94 @@ mod tests {
             other => panic!("Expected RevealChoice, got {:?}", other),
         }
         assert_eq!(state.revealed_cards.len(), 1);
+    }
+
+    #[test]
+    fn look_at_hand_is_private_to_looker_and_skips_reveal_choice() {
+        let mut state = GameState::new_two_player(42);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Secret Bolt".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.revealed_cards.contains(&card1),
+            "private look must not publish cards via revealed_cards"
+        );
+        assert_eq!(state.private_look_ids, vec![card1]);
+        assert_eq!(state.private_look_player, Some(PlayerId(0)));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CardsRevealed { .. })),
+            "private look must not emit CardsRevealed"
+        );
+
+        let looker_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            looker_view.objects[&card1].name, "Secret Bolt",
+            "looker must see the privately looked-at hand card"
+        );
+
+        let other_player_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(
+            other_player_view.objects[&card1].name, "Secret Bolt",
+            "hand owner always sees their own hand"
+        );
+    }
+
+    #[test]
+    fn look_at_own_hand_does_not_leak_to_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Probe Secret".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            opponent_view.objects[&card1].name, "Hidden Card",
+            "Gitaxian Probe self-target look must not leak hand contents to the opponent"
+        );
     }
 
     #[test]

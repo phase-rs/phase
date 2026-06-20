@@ -462,6 +462,7 @@ mod tests {
                 count: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source_id,

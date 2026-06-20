@@ -1339,9 +1339,13 @@ fn apply_action(
     // CR 701.20e: A bare "look at the top card" peek is visible to the looker
     // only until they act on it. The peek window must survive the action that
     // serves the dependent "you may reveal that card" optional (the looked-at
-    // card is shown while that `OptionalEffectChoice` is pending), then clear on
-    // the next action boundary — mirroring the momentary `revealed_cards` reveal.
-    if !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+    // card is shown while that `OptionalEffectChoice` is pending) and any
+    // `RevealChoice` opened by a private look-at-hand, then clear on the next
+    // action boundary — mirroring the momentary `revealed_cards` reveal.
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::RevealChoice { .. }
+    ) {
         state.private_look_ids.clear();
         state.private_look_player = None;
     }

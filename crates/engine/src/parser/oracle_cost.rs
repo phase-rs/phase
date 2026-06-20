@@ -782,6 +782,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 count: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             }),
         };
     }

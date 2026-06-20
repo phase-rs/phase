@@ -10338,6 +10338,7 @@ pub mod tests {
                                 count: None,
                                 selection: crate::types::ability::CardSelectionMode::Chosen,
                                 choice_optional: false,
+                                reveal: true,
                             },
                         )
                         .sub_ability(

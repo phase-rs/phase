@@ -37064,10 +37064,14 @@ mod tests {
 
         for (text, expected_target) in cases {
             let def = parse_effect_chain(text, AbilityKind::Spell);
-            let Effect::RevealHand { target, .. } = &*def.effect else {
+            let Effect::RevealHand { target, reveal, .. } = &*def.effect else {
                 panic!("Expected RevealHand for {text}, got {:?}", def.effect);
             };
             assert_eq!(*target, expected_target, "{text}");
+            assert!(
+                !*reveal,
+                "look-at-hand phrases must lower to private RevealHand, got {text}"
+            );
         }
     }
 

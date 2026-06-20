@@ -1657,6 +1657,8 @@ pub(super) fn handle_resolution_choice(
                 for &card_id in &cards {
                     state.revealed_cards.remove(&card_id);
                 }
+                state.private_look_ids.clear();
+                state.private_look_player = None;
                 set_priority(state, player);
                 if decline_runs_continuation {
                     effects::drain_pending_continuation(state, events);
@@ -1695,6 +1697,8 @@ pub(super) fn handle_resolution_choice(
             for &card_id in &cards {
                 state.revealed_cards.remove(&card_id);
             }
+            state.private_look_ids.clear();
+            state.private_look_player = None;
 
             set_priority(state, player);
             // CR 701.20a: For an optional reveal, the stashed continuation is the

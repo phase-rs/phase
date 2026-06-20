@@ -7766,6 +7766,7 @@ mod tests {
                 count: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             vec![],
             ObjectId(10),
