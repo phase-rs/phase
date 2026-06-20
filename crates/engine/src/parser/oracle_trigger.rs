@@ -7287,6 +7287,8 @@ fn try_parse_event(
         Exploits,
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
+        /// CR 701.50b: A permanent "connives" after the connive process completes.
+        Connives,
         /// CR 702.100b: A creature "evolves" when +1/+1 counters are put on it
         /// as a result of its evolve ability resolving.
         Evolves,
@@ -7441,6 +7443,9 @@ fn try_parse_event(
             // CR 701.44b: "explores" / "explore" — explore trigger
             value(SimpleEvent::Explores, tag("explores")),
             value(SimpleEvent::Explores, tag("explore")),
+            // CR 701.50b: "connives" — connive trigger (fires after the connive
+            // process completes).
+            value(SimpleEvent::Connives, tag("connives")),
             // CR 702.100b: "evolves" / "evolve" — evolve trigger
             value(SimpleEvent::Evolves, tag("evolves")),
             value(SimpleEvent::Evolves, tag("evolve")),
@@ -7598,6 +7603,15 @@ fn try_parse_event(
                 }
                 // CR 701.44b: "explores" fires after the explore process completes.
                 def.mode = TriggerMode::Explored;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Connives => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 701.50b: "connives" fires after the connive process completes.
+                // `subject` ("a creature you control" / "~") scopes the conniver.
+                def.mode = TriggerMode::Connives;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Evolves => {
@@ -9978,10 +9992,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // both via `match_play_card`. Matched before the land-play arm; the
     // "a card" object cannot match the land-play helper's "a land"/"another land"
     // object, so neither shadows the other.
-    if parse_play_card_trigger_subject(lower).is_some() {
+    if let Some(origin) = parse_play_card_trigger_subject(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::PlayCard;
         def.valid_target = Some(TargetFilter::Controller);
+        // CR 601.1a + CR 400.1: the cast half honors the play origin via
+        // `spell_cast_origin`; `match_play_card` gates the land half on the same
+        // constraint. `Any` (no "from <zone>" tail) preserves plain play-card
+        // triggers unchanged.
+        def.spell_cast_origin = origin;
         return Some((TriggerMode::PlayCard, def));
     }
 
@@ -12491,13 +12510,15 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
 /// (Recycle, Null Profusion, Jinxed Ring).
 ///
 /// Decomposed into axes (prefix × verb × object) via nom combinators, mirroring
-/// `parse_land_play_trigger_subject`. Returns `Some(())` when the full
-/// "you play a card" subject is present and is followed only by end-of-input or
-/// the effect comma (so "you play a card from your graveyard" does not match).
+/// `parse_land_play_trigger_subject`. Returns `Some(OriginConstraint)` when the
+/// full "you play a card" subject is present, capturing an optional `from <zone>`
+/// tail: "you play a card from exile" yields an exile-origin constraint, while
+/// bare "you play a card" yields the unrestricted (`Any`) origin. The subject
+/// must be followed only by end-of-input, the effect comma, or that zone tail.
 /// Restricted to the exact second-person bare-card form. Qualified variants
 /// such as "a player plays a card exiled with ~" need additional linked-card
 /// filtering before they can safely share this parser arm.
-fn parse_play_card_trigger_subject(lower: &str) -> Option<()> {
+fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
         tag::<_, _, OracleError<'_>>("when "),
@@ -12513,13 +12534,20 @@ fn parse_play_card_trigger_subject(lower: &str) -> Option<()> {
     let (after_card, _) = tag::<_, _, OracleError<'_>>("a card")
         .parse(after_verb)
         .ok()?;
+    // CR 601.1a + CR 400.1: An optional "from <zone>" tail restricts the play
+    // origin ("whenever you play a card from exile"). The shared cast-origin
+    // combinator consumes the "from " prefix and the zone phrase; absent a
+    // "from" clause it returns `Any` (plain "whenever you play a card"). This
+    // mirrors the Rocco, Street Chef cast-from-zone shape.
+    let (after_origin, origin) =
+        parse_origin_constraint_tail(after_card.trim_start(), parse_cast_origin_zone).ok()?;
     // The subject must be the whole condition: either end-of-input, or the
     // effect comma ("..., draw a card.") follows directly. `eof` / `tag(",")`
     // reject any further qualifier text.
     alt((value((), eof), value((), tag::<_, _, OracleError<'_>>(","))))
-        .parse(after_card)
+        .parse(after_origin.trim_start())
         .ok()?;
-    Some(())
+    Some(origin)
 }
 
 /// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.

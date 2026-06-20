@@ -44,6 +44,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Enlisted => match_enlisted,
         TriggerMode::Discover => match_discover,
         TriggerMode::Adapt => match_adapt,
+        TriggerMode::Connives => match_connives,
         TriggerMode::Foretell => match_foretell,
         TriggerMode::DamagePreventedOnce => match_unimplemented,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
@@ -419,6 +420,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     r.insert(TriggerMode::Discover, match_discover);
     r.insert(TriggerMode::Adapt, match_adapt);
+    r.insert(TriggerMode::Connives, match_connives);
     r.insert(TriggerMode::Foretell, match_foretell);
     r.insert(TriggerMode::Enlisted, match_enlisted);
     // CR 702.26b: Phasing triggers fire when a permanent phases out.
@@ -2402,8 +2404,21 @@ pub(super) fn match_play_card(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    match_spell_cast(event, trigger, source_id, state)
-        || match_land_played(event, trigger, source_id, state)
+    if match_spell_cast(event, trigger, source_id, state) {
+        return true;
+    }
+    // CR 601.1a + CR 305.1: the land-play half honors the same play-origin
+    // constraint the cast half routes through `spell_cast_origin`. The shared
+    // `PlayCard` def can't carry the origin on `valid_card` (the cast half's
+    // spell is on the stack at fire time, not its play origin), so the land
+    // half consults `spell_cast_origin` directly here. `Any` → matches every
+    // origin → plain "play a land" triggers are unaffected.
+    if let GameEvent::LandPlayed { from_zone, .. } = event {
+        if !trigger.spell_cast_origin.matches_from(&Some(*from_zone)) {
+            return false;
+        }
+    }
+    match_land_played(event, trigger, source_id, state)
 }
 
 pub(super) fn match_mana_added(
@@ -2900,6 +2915,30 @@ pub(super) fn match_adapt(
         valid_card_matches(trigger, state, *adapted_id, source_id)
     } else {
         *adapted_id == source_id
+    }
+}
+
+/// CR 701.50b: Connives — fires when a permanent connives.
+/// `valid_card` scopes the CONNIVER (the permanent that connived). With no
+/// filter, this is "this creature connives" — match the source by identity
+/// (Ultron's self-connive).
+pub(super) fn match_connives(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Connive,
+        source_id: conniver_id,
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *conniver_id, source_id)
+    } else {
+        *conniver_id == source_id
     }
 }
 

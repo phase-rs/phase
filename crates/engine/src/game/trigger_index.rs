@@ -398,6 +398,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Explored => push(TriggerEventKey::Explored),
         TriggerMode::Discover => push(TriggerEventKey::DiscoverResolved),
         TriggerMode::Adapt => push(TriggerEventKey::AdaptResolved),
+        TriggerMode::Connives => push(TriggerEventKey::ConniveResolved),
         TriggerMode::Exerted => push(TriggerEventKey::Exerted),
         TriggerMode::Enlisted => push(TriggerEventKey::Enlisted),
         TriggerMode::Foretell => push(TriggerEventKey::Foretold),
@@ -680,6 +681,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Explore => push(TriggerEventKey::Explored),
         EffectKind::Discover => push(TriggerEventKey::DiscoverResolved),
         EffectKind::Adapt => push(TriggerEventKey::AdaptResolved),
+        EffectKind::Connive => push(TriggerEventKey::ConniveResolved),
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
@@ -771,7 +773,6 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Choose
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
-        | EffectKind::Connive
         | EffectKind::PhaseOut
         | EffectKind::PhaseIn
         | EffectKind::ForceBlock
