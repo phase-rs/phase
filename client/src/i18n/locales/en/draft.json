@@ -63,6 +63,13 @@
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
+    "difficultyLevels": {
+      "VeryEasy": "Very Easy",
+      "Easy": "Easy",
+      "Medium": "Medium",
+      "Hard": "Hard",
+      "VeryHard": "Very Hard"
+    },
     "chooseSet": "Choose a Set",
     "noPools": "No draft pools available. Run the draft data pipeline first.",
     "setIconAlt": "{{name}} set icon",

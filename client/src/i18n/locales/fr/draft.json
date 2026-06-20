@@ -63,6 +63,13 @@
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
+    "difficultyLevels": {
+      "VeryEasy": "Très facile",
+      "Easy": "Facile",
+      "Medium": "Moyen",
+      "Hard": "Difficile",
+      "VeryHard": "Très difficile"
+    },
     "chooseSet": "Choisir une extension",
     "noPools": "Aucun pool de draft disponible. Lancez d'abord le pipeline de données de draft.",
     "setIconAlt": "Icône d'extension {{name}}",

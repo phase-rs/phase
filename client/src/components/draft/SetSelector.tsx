@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useDraftStore } from "../../stores/draftStore";
+import { BotDifficultySelector } from "./BotDifficultySelector";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -21,22 +21,10 @@ interface SetSelectorProps {
   onStartDraft: (setCode: string, setName: string) => void;
 }
 
-// ── Constants ───────────────────────────────────────────────────────────
-
-const DIFFICULTY_LABELS = [
-  "Very Easy",
-  "Easy",
-  "Medium",
-  "Hard",
-  "Very Hard",
-] as const;
-
 // ── Component ───────────────────────────────────────────────────────────
 
 export function SetSelector({ onStartDraft }: SetSelectorProps) {
   const { t } = useTranslation("draft");
-  const difficulty = useDraftStore((s) => s.difficulty);
-  const setDifficulty = useDraftStore((s) => s.setDifficulty);
 
   const [sets, setSets] = useState<Array<{ code: string; name: string; icon?: string; releasedAt: string }>>([]);
   const [loading, setLoading] = useState(true);
@@ -93,32 +81,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Difficulty selector — single-axis scale, so a segmented control rather than per-level colors */}
-      <div className="flex flex-col gap-2">
-        <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          {t("setSelector.botDifficulty")}
-        </h3>
-        <div className="flex w-full max-w-md rounded-xl border border-white/10 bg-black/18 p-1 backdrop-blur-md">
-          {DIFFICULTY_LABELS.map((label, idx) => {
-            const selected = difficulty === idx;
-            return (
-              <button
-                key={label}
-                type="button"
-                onClick={() => setDifficulty(idx)}
-                aria-pressed={selected}
-                className={`flex-1 cursor-pointer rounded-lg px-2 py-2 text-xs font-medium transition-colors ${
-                  selected
-                    ? "bg-emerald-400/15 text-emerald-100 shadow-[inset_0_0_0_1px] shadow-emerald-300/25"
-                    : "text-white/45 hover:bg-white/[0.05] hover:text-white/70"
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <BotDifficultySelector />
 
       {/* Set grid */}
       <div className="flex flex-col gap-2">

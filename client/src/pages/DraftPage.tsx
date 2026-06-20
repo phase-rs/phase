@@ -6,6 +6,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useDraftStore } from "../stores/draftStore";
 import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftSteps } from "../components/draft/DraftSteps";
@@ -414,12 +415,15 @@ export function DraftPage() {
             {setupMode === "set" ? (
               <SetSelector onStartDraft={handleStartDraft} />
             ) : (
-              <CubeSetupPanel
-                onStart={async ({ cubeName, cubeListText, settings }) => {
-                  const { difficulty, startCubeDraft } = useDraftStore.getState();
-                  await startCubeDraft(cubeListText, cubeName, settings, difficulty);
-                }}
-              />
+              <div className="flex flex-col gap-6">
+                <BotDifficultySelector />
+                <CubeSetupPanel
+                  onStart={async ({ cubeName, cubeListText, settings }) => {
+                    const { difficulty, startCubeDraft } = useDraftStore.getState();
+                    await startCubeDraft(cubeListText, cubeName, settings, difficulty);
+                  }}
+                />
+              </div>
             )}
           </div>
         )}

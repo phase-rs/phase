@@ -63,6 +63,13 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "difficultyLevels": {
+      "VeryEasy": "Bardzo łatwy",
+      "Easy": "Łatwy",
+      "Medium": "Średni",
+      "Hard": "Trudny",
+      "VeryHard": "Bardzo trudny"
+    },
     "chooseSet": "Wybierz dodatek",
     "noPools": "Brak dostępnych pul do draftu. Najpierw uruchom pipeline danych draftu.",
     "setIconAlt": "Ikona dodatku {{name}}",
