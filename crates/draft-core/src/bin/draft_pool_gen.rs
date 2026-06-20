@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process;
 
 use draft_core::extraction::extract_all_set_pools;
+use engine::database::set_gating;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -25,13 +26,25 @@ fn main() {
         process::exit(1);
     }
 
-    let pools = match extract_all_set_pools(&sets_dir) {
+    let mut pools = match extract_all_set_pools(&sets_dir) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error extracting set pools: {e}");
             process::exit(1);
         }
     };
+
+    // Release-gate: drop gated sets so they can't be drafted. No-op when
+    // GATED_SETS is unset/empty. See `engine::database::set_gating`.
+    let gated_sets = set_gating::gated_sets_from_env();
+    if !gated_sets.is_empty() {
+        let before = pools.len();
+        pools.retain(|code, _| !set_gating::is_set_gated(code, &gated_sets));
+        eprintln!(
+            "Set gating active: excluded {} draftable set(s)",
+            before - pools.len()
+        );
+    }
 
     if pools.is_empty() {
         eprintln!(
