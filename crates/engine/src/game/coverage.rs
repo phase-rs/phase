@@ -5953,6 +5953,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
+        StaticCondition::SourceIsEnchanted => ("SourceIsEnchanted", Unhandled),
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),

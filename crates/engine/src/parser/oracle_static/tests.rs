@@ -4015,6 +4015,23 @@ fn static_as_long_as_unrecognized_condition() {
 }
 
 #[test]
+fn static_enchanted_or_equipped_stays_unrecognized() {
+    // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
+    // first strike." The rhs "equipped" elides its subject, so the disjunction
+    // cannot be decomposed — the whole condition falls through to Unrecognized
+    // (no regression: it is Unrecognized today, and the new bare "is enchanted"
+    // arm intentionally does NOT salvage half of it).
+    let def =
+        parse_static_line("As long as this creature is enchanted or equipped, ~ has first strike.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.condition,
+        Some(StaticCondition::Unrecognized { .. })
+    ));
+}
+
+#[test]
 fn static_has_keyword_as_long_as() {
     let def = parse_static_line("Tarmogoyf has trample as long as a land card is in a graveyard.")
         .unwrap();

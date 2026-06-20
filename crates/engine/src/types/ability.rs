@@ -5200,6 +5200,11 @@ pub enum StaticCondition {
     /// CR 301.5a: True when at least one Equipment is attached to the source object.
     /// Used for "as long as ~ is equipped" statics (Auriok Steelshaper, etc.).
     SourceIsEquipped,
+    /// CR 303.4: True when at least one Aura is attached to the source object.
+    /// Aura-twin of `SourceIsEquipped` (CR 301.5). Used for "as long as this
+    /// creature is enchanted" statics (Pillar of War, Thran Golem, Gate Hound,
+    /// Freewind Equenaut).
+    SourceIsEnchanted,
     /// CR 701.37: True when the source permanent is monstrous.
     /// Read from `GameObject::monstrous` (existing bool field).
     /// Used for "as long as this creature is monstrous" statics (Fleecemane Lion, etc.).

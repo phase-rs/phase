@@ -668,6 +668,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
@@ -792,6 +793,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
@@ -1039,6 +1041,15 @@ fn evaluate_condition_with_context(
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
             obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
                 && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
+        }),
+        // CR 303.4: True when at least one Aura is attached to the source object.
+        // Aura-twin of `SourceIsEquipped` (CR 301.5a); the only delta is the
+        // subtype check ("Aura" vs "Equipment"). An Aura attaches to objects or
+        // players (CR 303.4), but a creature host is always an Object, so
+        // non-Object hosts are rejected by `as_object`.
+        StaticCondition::SourceIsEnchanted => state.objects.values().any(|obj| {
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
+                && obj.card_types.subtypes.iter().any(|s| s == "Aura")
         }),
         // CR 701.37: True when the source permanent is monstrous.
         StaticCondition::SourceIsMonstrous => state
@@ -9332,6 +9343,70 @@ mod tests {
             &StaticCondition::SourceIsSaddled,
             PlayerId(0),
             id,
+        ));
+    }
+
+    // CR 303.4: `SourceIsEnchanted` gates a continuous modification on at least
+    // one Aura being attached to the source. No attachment → false; an Aura
+    // (subtype "Aura") attached → true; an Equipment (subtype "Equipment")
+    // attached → FALSE (negative twin — the matcher keys solely on the "Aura"
+    // subtype, mirroring `SourceIsEquipped`'s "Equipment" check). Discriminating:
+    // if the matcher arm or the new variant is reverted this test fails to
+    // compile / evaluates wrong, re-exposing the always-true `Unrecognized`
+    // fallback (Pillar of War / Thran Golem / Gate Hound / Freewind Equenaut).
+    #[test]
+    fn source_is_enchanted_gates_on_attached_aura() {
+        use crate::game::game_object::AttachTarget;
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Enchanted Bear", 2, 2, PlayerId(0));
+
+        // No Aura attached → condition false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
+        ));
+
+        // Attach an Equipment (NOT an Aura) → still false (negative twin: the
+        // matcher must not treat Equipment as enchanting).
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
+        ));
+
+        // Attach an Aura to the source → condition true.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Holy Strength".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
         ));
     }
 
