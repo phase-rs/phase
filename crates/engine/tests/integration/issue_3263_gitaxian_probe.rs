@@ -6,9 +6,9 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, Effect, TargetFilter, TargetRef};
+use engine::types::ability::{AbilityKind, Effect, TargetRef};
 use engine::types::game_state::GameState;
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::CardId;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -55,7 +55,7 @@ fn gitaxian_probe_self_look_does_not_leak_hand_to_opponent() {
         vec![TargetRef::Player(PlayerId(1))],
     );
     let mut events = Vec::new();
-    resolve_ability_chain(&mut state, &ability, &mut events).unwrap();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
     assert!(
         !state.revealed_cards.contains(&secret_card),
