@@ -8028,6 +8028,10 @@ fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<Par
                     .map(|(_, qty)| qty)
                     .map(|qty| QuantityExpr::Ref { qty })
             })?;
+        let amount = nom_quantity::parse_quantity_ref_complete(qty_text)
+            .ok()
+            .map(|(_, qty)| QuantityExpr::Ref { qty })
+            .unwrap_or(amount);
         return Some(parsed_clause(Effect::GainEnergy { amount }));
     }
 
