@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Plan', detail: 'engine-planner + review-engine-plan loop' },
     { title: 'Implement', detail: 'branch + implement the card on the AI-CONTRIBUTOR §4 prompt' },
     { title: 'Review', detail: 'review-impl loop + independent fresh-context cross-check' },
-    { title: 'Verify', detail: 'fmt, combinator gate, clippy/test/card-data, coverage, semantic-audit' },
+    { title: 'Verify', detail: 'fmt, combinator gate, clippy/test/card-data, coverage, semantic-audit, parse-regression' },
     { title: 'PR', detail: 'commit, push, open PR with the §7 body template' },
   ],
 }
@@ -132,6 +132,7 @@ const VERIFY_SCHEMA = {
     },
     coverageSupported: { type: 'boolean', description: 'card now supported:true gap_count:0' },
     semanticAuditClean: { type: 'boolean' },
+    parseRegressionClean: { type: 'boolean', description: 'snapshot-regression.sh: only this card changed, no unexpected regression suspects; baseline refreshed' },
     failures: { type: 'array', items: { type: 'string' } },
   },
 }
@@ -259,9 +260,16 @@ function verifyPrompt(card) {
     `set coverageSupported)\n` +
     `5. cargo semantic-audit   (confirm "${card}" has 0 findings -> set ` +
     `semanticAuditClean)\n` +
+    `6. ./scripts/snapshot-regression.sh   (parse-drift gate: diff vs the ` +
+    `committed data/parse-baseline.json. Expect ONLY "${card}" under ` +
+    `"Changed AST"/"New cards" and an EMPTY "Regression suspects" block. If ` +
+    `untouched cards appear as regression suspects, treat as a failure and ` +
+    `investigate before the PR. When the only change is "${card}", refresh the ` +
+    `baseline with ./scripts/refresh-parse-baseline.sh and git add ` +
+    `data/parse-baseline.json so it lands in this PR -> set parseRegressionClean)\n` +
     `Set passed=true only if every command is clean AND coverageSupported AND ` +
-    `semanticAuditClean. Record each command's status; list any unresolved ` +
-    `failures in failures[].`
+    `semanticAuditClean AND parseRegressionClean. Record each command's status; ` +
+    `list any unresolved failures in failures[].`
   )
 }
 

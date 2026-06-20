@@ -256,7 +256,23 @@ fi
 # One-shot audit binaries (always direct — not Tilt resources):
 cargo coverage                                # confirm the named card now has supported: true, gap_count: 0
 cargo semantic-audit                          # confirm the named card surfaces zero findings
+./scripts/snapshot-regression.sh              # parse-drift gate — diff this change vs the committed baseline
 ```
+
+**Parse-regression gate (`./scripts/snapshot-regression.sh`).** After `gen-card-data.sh` produces the post-change `client/public/card-data.json`, this script diffs every card's parse-only `ast_hash` against the committed shared baseline `data/parse-baseline.json` (via `set-check --diff`). It exits non-zero if any card's parse moved, and separately lists **regression suspects** — cards that were `supported` in the baseline whose parse changed (the most likely place a shared-parser edit broke an unrelated card). Read the output the same way you read `cargo coverage`/`cargo semantic-audit`:
+
+- **Only the card(s) you implemented appear under "Changed AST" / "New cards", and the "Regression suspects" block is empty** → expected. Your change touched exactly what it should. Refresh the baseline so the diff lands clean for the next contributor:
+
+  ```bash
+  ./scripts/refresh-parse-baseline.sh         # or: cargo parse-baseline
+  git add data/parse-baseline.json            # commit the refreshed baseline IN THIS PR
+  ```
+
+- **Cards you did NOT touch appear under "Regression suspects"** → a shared parser/combinator edit changed an unrelated card's parse. Treat this exactly like a failing `cargo semantic-audit`: investigate before opening the PR. If the collateral change is intentional and correct, note it in the PR `## Summary`; if it is a regression, fix it. Do not blindly refresh the baseline to silence suspects — refreshing is for *intended* parse changes only.
+
+The committed baseline (`data/parse-baseline.json`) makes parse drift a shared, reviewable signal — the same model as `data/engine-inventory.json`: a committed, generated file that contributors refresh and reviewers see in the PR diff. PRs diff against it; intended parse changes refresh it in the same PR. See `scripts/refresh-parse-baseline.sh` for the full update protocol.
+
+**CI enforces this** (`.github/workflows/ci.yml`, `card-data-gate` job → "Parse-regression gate"). On every PR, CI regenerates the parse from MTGJSON and runs `set-check --diff data/parse-baseline.json --ignore-membership`. If any existing card's parse-only `ast_hash` moved and the committed baseline was *not* refreshed in the same PR, the build fails. So an INTENDED parser/engine change that moves a hash MUST refresh `data/parse-baseline.json` in the same PR (`cargo parse-regression` to see the drift, `cargo parse-baseline` / `./scripts/refresh-parse-baseline.sh` to refresh, then `git add data/parse-baseline.json`). The refreshed hashes land in the diff, the reviewer sees exactly which cards' parses moved, and the gate goes green. (`--ignore-membership` means cards added to / removed from the pool by a weekly MTGJSON refresh do not fail the gate — only a moved AST on a card present in both does.)
 
 **Non-developer track** — skip this step entirely. GitHub Actions runs the same checks on the PR.
 
@@ -303,6 +319,7 @@ Thinking: <medium | high | max>
   - `./scripts/gen-card-data.sh` — `<card>`: 0 Unimplemented entries
   - `cargo coverage` — `<card>`: `supported: true`, `gap_count: 0`
   - `cargo semantic-audit` — `<card>`: 0 findings
+  - `./scripts/snapshot-regression.sh` — only `<card>` changed, 0 unexpected regression suspects (baseline refreshed in this PR)
 Non-developer track — write: "Local verification skipped — see CI status checks.">
 
 ## Scope Expansion

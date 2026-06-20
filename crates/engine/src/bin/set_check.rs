@@ -281,6 +281,7 @@ struct Options {
     snapshot: Option<String>,
     diff: Option<String>,
     quiet: bool,
+    ignore_membership: bool,
 }
 
 fn print_usage() {
@@ -301,6 +302,13 @@ fn print_usage() {
         "  --diff <FILE>       Compare current ast_hashes to a baseline; exit 1 if any moved."
     );
     eprintln!("  --quiet             In --diff mode, print only the changed/regression counts.");
+    eprintln!(
+        "  --ignore-membership In --diff mode, exit non-zero only when an existing card's AST"
+    );
+    eprintln!(
+        "                      moved; added/removed cards (e.g. MTGJSON churn) are reported but"
+    );
+    eprintln!("                      do not fail. Used by the 'generated == committed' CI gate.");
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -313,6 +321,7 @@ fn parse_args() -> Result<Options, String> {
             "--snapshot" => opts.snapshot = Some(args.next().ok_or("--snapshot requires a value")?),
             "--diff" => opts.diff = Some(args.next().ok_or("--diff requires a value")?),
             "--quiet" => opts.quiet = true,
+            "--ignore-membership" => opts.ignore_membership = true,
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
@@ -425,7 +434,12 @@ fn run() -> Result<i32, String> {
                 .map_err(|e| format!("failed to parse baseline {baseline_path}: {e}"))?
         };
         let current = build_snapshot(&faces, &retained);
-        return Ok(run_diff(&baseline, &current, opts.quiet));
+        return Ok(run_diff(
+            &baseline,
+            &current,
+            opts.quiet,
+            opts.ignore_membership,
+        ));
     }
 
     // --snapshot: write baseline.
@@ -452,10 +466,18 @@ fn run() -> Result<i32, String> {
 /// Compare two snapshots. Returns the exit code: non-zero if any `ast_hash`
 /// changed (so CI can gate on it). Cards that were `supported: true` in the
 /// baseline whose AST moved are flagged separately as regression suspects.
+///
+/// When `ignore_membership` is set, only an existing card whose AST *moved*
+/// fails the diff; cards added to or removed from the corpus (e.g. a weekly
+/// MTGJSON refresh that introduces new cards between baseline refresh and the
+/// CI run) are still reported but do not change the exit code. This is what
+/// lets the "generated == committed" CI gate catch genuine parse drift without
+/// turning routine card-pool churn into a spurious red build.
 fn run_diff(
     baseline: &BTreeMap<String, SnapshotEntry>,
     current: &BTreeMap<String, SnapshotEntry>,
     quiet: bool,
+    ignore_membership: bool,
 ) -> i32 {
     let mut changed: Vec<(&String, &SnapshotEntry, &SnapshotEntry)> = Vec::new();
     let mut added: Vec<&String> = Vec::new();
@@ -537,7 +559,10 @@ fn run_diff(
     }
 
     // Exit non-zero if anything moved so scripts/CI can gate on a clean diff.
-    i32::from(!changed.is_empty() || !added.is_empty() || !removed.is_empty())
+    // Under --ignore-membership, only a changed AST on an existing card fails;
+    // added/removed cards are corpus churn, not a parse regression.
+    let membership_changed = !ignore_membership && (!added.is_empty() || !removed.is_empty());
+    i32::from(!changed.is_empty() || membership_changed)
 }
 
 fn main() {
@@ -665,11 +690,69 @@ mod tests {
         current.get_mut("moved card").unwrap().supported = false;
         current.get_mut("moved card").unwrap().gap_count = 1;
 
-        let code = run_diff(&baseline, &current, true);
+        let code = run_diff(&baseline, &current, true, false);
         assert_eq!(code, 1, "a changed hash must yield a non-zero exit code");
 
         // Identical snapshots produce a clean (zero) exit.
-        assert_eq!(run_diff(&baseline, &baseline.clone(), true), 0);
+        assert_eq!(run_diff(&baseline, &baseline.clone(), true, false), 0);
+    }
+
+    #[test]
+    fn ignore_membership_tolerates_added_and_removed_but_not_changed() {
+        // Baseline: one supported card.
+        let mut baseline = BTreeMap::new();
+        baseline.insert(
+            "kept card".to_string(),
+            SnapshotEntry {
+                ast_hash: "aaaaaaaaaaaaaaaa".to_string(),
+                supported: true,
+                gap_count: 0,
+            },
+        );
+        baseline.insert(
+            "removed card".to_string(),
+            SnapshotEntry {
+                ast_hash: "dddddddddddddddd".to_string(),
+                supported: true,
+                gap_count: 0,
+            },
+        );
+
+        // Current: "removed card" gone (corpus churn), a brand-new card added,
+        // and "kept card" unchanged.
+        let mut current = BTreeMap::new();
+        current.insert("kept card".to_string(), baseline["kept card"].clone());
+        current.insert(
+            "added card".to_string(),
+            SnapshotEntry {
+                ast_hash: "eeeeeeeeeeeeeeee".to_string(),
+                supported: true,
+                gap_count: 0,
+            },
+        );
+
+        // Default mode: membership changes fail the gate.
+        assert_eq!(
+            run_diff(&baseline, &current, true, false),
+            1,
+            "added/removed cards must fail the strict diff"
+        );
+        // --ignore-membership: pure corpus churn (no AST moved) passes.
+        assert_eq!(
+            run_diff(&baseline, &current, true, true),
+            0,
+            "added/removed-only churn must pass under --ignore-membership"
+        );
+
+        // But a genuinely moved AST on a retained card still fails, even with
+        // --ignore-membership — that is exactly the parse regression the gate
+        // exists to catch.
+        current.get_mut("kept card").unwrap().ast_hash = "ffffffffffffffff".to_string();
+        assert_eq!(
+            run_diff(&baseline, &current, true, true),
+            1,
+            "a moved AST on a retained card must fail even under --ignore-membership"
+        );
     }
 
     #[test]

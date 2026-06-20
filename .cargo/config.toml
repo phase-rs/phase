@@ -8,14 +8,34 @@ export-cards = "run --profile tool --bin card-data-export --"
 export-json = "run --profile tool --bin json-export --"
 migrate-abilities = "run --profile tool --bin migrate-abilities --"
 serve = "run --release --bin phase-server"
+# --- Semantic-correctness drift gates -------------------------------------
+# These four are the parser/engine "did this change move something it
+# shouldn't" family. Run them after gen-card-data.sh; each diffs the freshly
+# generated parse against a known-good signal:
+#   coverage         — per-card support / gap counts
+#   parser-gaps      — unhandled Oracle-text patterns
+#   semantic-audit   — cards that parse but disagree with their Oracle text
+#   parse-regression — per-card parse-only ast_hash vs the committed baseline
+# parse-regression is the cheapest of the four and the one a parser change is
+# most likely to trip; refresh its baseline with `cargo parse-baseline` when
+# the move is intended (see scripts/refresh-parse-baseline.sh, AI-CONTRIBUTOR §6).
 coverage = "run --profile tool --bin coverage-report -- data/"
 parser-gaps = "run --profile tool --bin parser-gap-analyzer -- data/"
 rules-audit = "run --profile tool --bin rules-audit --features audit --"
 semantic-audit = "run --profile tool --features cli --bin oracle-gen -- semantic-audit"
+# Parse-regression gate: diff the current parse against the committed baseline.
+# Exits non-zero if any card's parse-only ast_hash moved (a parse regression),
+# the semantic-family peer of `coverage` / `semantic-audit`. set-check resolves
+# the data root automatically (client/public, then data).
+parse-regression = "run --profile tool --bin set-check -- --diff data/parse-baseline.json"
 scrape-feeds = "run --release -p feed-scraper --"
 tune-ai = "run --release --features tune --bin ai-tune --"
 ai-gate = "run --bin ai-gate --"
 engine-inventory = "run --quiet -p engine-inventory-gen"
+set-check = "run --profile tool --bin set-check --"
+# Refresh the committed parse-regression baseline (data/parse-baseline.json).
+# set-check resolves the data root automatically (client/public, then data).
+parse-baseline = "run --profile tool --bin set-check -- --snapshot data/parse-baseline.json"
 
 [env]
 # 16 MB stack for test threads — prevents stack overflow when Debug formatting

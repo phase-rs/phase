@@ -199,6 +199,26 @@ jobs:
             data/coverage-data.json \
             --fail-on-engine
 
+      - name: Parse-regression gate (generated == committed baseline)
+        # Semantic-correctness drift gate, peer of the coverage-regression check
+        # above. Diffs the freshly generated parse (data/card-data.json, produced
+        # by the card-gen step) against the committed data/parse-baseline.json via
+        # the set-check ast_hash diff. Fails the build if any EXISTING card's
+        # parse-only ast_hash moved — i.e. this PR changed how a card parses
+        # without refreshing the baseline. An INTENDED parser change must refresh
+        # data/parse-baseline.json in the SAME PR (cargo parse-regression's
+        # refresh path: `cargo parse-baseline` / scripts/refresh-parse-baseline.sh),
+        # so the moved hashes are visible and reviewable in the diff and this gate
+        # stays green. --ignore-membership keeps weekly MTGJSON churn (cards added
+        # to / removed from the pool, which the cardgen cache key tracks) from
+        # turning into a spurious red build — only a moved AST on a retained card
+        # is a regression. Same [tool] fingerprint as card-gen above → engine
+        # cache hit (the bin shares the engine crate; --features cli is irrelevant
+        # to set-check but keeps the fingerprint identical so no recompile).
+        run: |
+          cargo run --profile tool --features cli --bin set-check -- \
+            data/ --diff data/parse-baseline.json --ignore-membership
+
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
         # that parse cleanly but disagree semantically with their Oracle text.

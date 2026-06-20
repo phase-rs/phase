@@ -195,6 +195,7 @@ const VERIFY_SCHEMA = {
     },
     cardsSupported: { type: 'array', items: { type: 'string' }, description: 'cluster cards now supported:true gap:0' },
     semanticAuditClean: { type: 'boolean' },
+    parseRegressionClean: { type: 'boolean', description: 'snapshot-regression.sh: only cluster cards changed, no unrelated regression suspects; baseline refreshed' },
     failures: { type: 'array', items: { type: 'string' } },
   },
 }
@@ -442,9 +443,17 @@ function clusterVerifyPrompt(mechanic, cards) {
     `list the ones that are in cardsSupported:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
     `5. cargo semantic-audit — confirm none of these cards has findings -> ` +
     `semanticAuditClean.\n` +
+    `6. ./scripts/snapshot-regression.sh — parse-drift gate, diff vs the committed ` +
+    `data/parse-baseline.json. A mechanic touches a CLASS of cards, so the most ` +
+    `important signal here is the "Regression suspects" block: it must contain ` +
+    `ONLY cards in this cluster (or cards intentionally swept in by the shared ` +
+    `mechanic). Any UNRELATED card flagged as a regression suspect is a failure — ` +
+    `investigate before the PR. When the diff is as intended, refresh the baseline ` +
+    `(./scripts/refresh-parse-baseline.sh) and git add data/parse-baseline.json so ` +
+    `it lands in this PR -> set parseRegressionClean.\n` +
     `passed=true only if every command is clean AND every listed card is in ` +
-    `cardsSupported AND semanticAuditClean. Record each command status; list ` +
-    `unresolved failures.`
+    `cardsSupported AND semanticAuditClean AND parseRegressionClean. Record each ` +
+    `command status; list unresolved failures.`
   )
 }
 
