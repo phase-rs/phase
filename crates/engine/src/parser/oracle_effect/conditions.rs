@@ -583,6 +583,26 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             );
         }
     }
+    if body.is_none() && scan_contains_phrase(&lower, "prowl cost was paid") {
+        if let Some(after) = tp.strip_after("instead ") {
+            return (
+                Some(AbilityCondition::CastVariantPaidInstead {
+                    variant: CastVariantPaid::Prowl,
+                }),
+                after.original.to_string(),
+            );
+        }
+        // CR 702.76a: "if its prowl cost was paid, [effect]" — non-"instead"
+        // variant that gates a sub-ability on prowl payment.
+        if let Some(after) = tp.strip_after("prowl cost was paid, ") {
+            return (
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Prowl,
+                }),
+                after.original.to_string(),
+            );
+        }
+    }
 
     match body {
         Some(body) => {
@@ -5781,6 +5801,21 @@ mod tests {
             })
         );
         assert_eq!(body, "draw two cards.");
+    }
+
+    /// CR 702.76a: "if its prowl cost was paid, [effect]" — non-"instead"
+    /// variant that gates a sub-ability on prowl payment (Latchkey Faerie).
+    #[test]
+    fn prowl_cost_paid_emits_cast_variant_paid() {
+        let (cond, body) =
+            strip_additional_cost_conditional("if its prowl cost was paid, draw a card.");
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::CastVariantPaid {
+                variant: CastVariantPaid::Prowl,
+            })
+        );
+        assert_eq!(body, "draw a card.");
     }
 
     /// CR 702.33b + CR 603.4: "if it was kicked twice, …" → min_count = 2.

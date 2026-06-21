@@ -25042,6 +25042,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cast_variant_paid_prowl_condition() {
+        // CR 702.76a + CR 603.4: "if its prowl cost was paid" intervening-if
+        // (Latchkey Faerie) → CastVariantPaid { variant: Prowl }.
+        let def = parse_trigger_line(
+            "When this creature enters, if its prowl cost was paid, draw a card.",
+            "Test Prowl",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Prowl,
+            })
+        );
+    }
+
     // CR 702.138c + CR 603.11: Pharika's Spawn — the linked triggered ability of
     // an "[this permanent] escapes with [counters]" replacement effect. "When it
     // enters this way" must (a) resolve the pronoun "it" to SelfRef, (b) lower to
