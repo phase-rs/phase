@@ -2120,10 +2120,7 @@ fn combat_requirement_conjunct_prepend(
 /// with the correct `affected`. Gated on the typed "next untap step" restriction
 /// phrase only, so multi-keyword lists ("gains flying and haste …") stay on the
 /// untouched single-clause path.
-fn untap_restriction_conjunct_prepend(
-    before_and: &str,
-    remainder_trimmed: &str,
-) -> Option<String> {
+fn untap_restriction_conjunct_prepend(before_and: &str, remainder_trimmed: &str) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
     let is_doesnt_untap = (nom_primitives::scan_contains(&remainder_lower, "doesn't untap")
         || nom_primitives::scan_contains(&remainder_lower, "does not untap"))
