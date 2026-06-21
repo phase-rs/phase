@@ -142,6 +142,7 @@ pub(crate) use keyword_grant::{
 };
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
+pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;

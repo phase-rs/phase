@@ -2240,6 +2240,85 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
     })
 }
 
+/// CR 508.1c + CR 514.2 + CR 500.7: "that player can't attack you [or your
+/// permanents/planeswalkers] during their next turn" (Willie Lumpkin) — a
+/// player-scoped, next-turn-expiring attack prohibition. The "that player"
+/// anaphor reuses the parent draw-trigger's targeted player (CR 608.2c), so the
+/// restriction's `affected_players` is `ParentTargetedPlayer`, resolved to a
+/// `SpecificPlayer` at resolution by `add_restriction`. The defended scope rides
+/// the shared `AttackTargetFilter` via `parse_cant_attack_defended_scope_nom`
+/// (the single scope authority), so the declare-attackers gate reuses the same
+/// matcher as static `CantAttack`. The `UntilEndOfNextTurnOf` duration anchors on
+/// the RESTRICTED player (the resolved `SpecificPlayer`), not the controller —
+/// see `add_restriction::fill_runtime_fields`.
+fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+    use crate::types::triggers::AttackTargetFilter;
+
+    // Subject: "that player" / "they" (the parent draw-trigger's targeted
+    // opponent). Both anaphors bind to `ParentTargetedPlayer` (CR 608.2c). The
+    // subject is OPTIONAL: an earlier player-scope subject strip removes the
+    // "that player" / "they" head before this clause is parsed, leaving the bare
+    // "can't attack …" predicate. The full Willie shape (predicate + scope +
+    // "during their next turn") is the discriminator, so defaulting an absent
+    // subject to the parent-target anaphor is safe.
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        value((), opt((alt((tag("that player"), tag("they"))), tag(" ")))).parse(input)
+    })?;
+    let affected_players = RestrictionPlayerScope::ParentTargetedPlayer;
+    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    // "can't attack" / "cannot attack" + the shared defended-scope combinator.
+    let (defended, rest_orig) = nom_on_lower(rest_orig, rest_lower, |input| {
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+        // A bare "can't attack" with no scope defends the player only.
+        Ok((input, defended.unwrap_or(AttackTargetFilter::Player)))
+    })?;
+    let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
+
+    // Duration: "during their next turn" / "during that player's next turn".
+    // REQUIRED — this is the discriminator that gates the whole recognizer, so a
+    // generic "can't attack you" static line never reaches it.
+    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        value(
+            (),
+            alt((
+                tag(" during their next turn"),
+                tag(" during that player's next turn"),
+            )),
+        )
+        .parse(input)
+    })?;
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+    if !remaining_lower.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::Attack { defended },
+            },
+        },
+        // CR 514.2 + CR 500.7: pre-armed end-of-next-turn anchor. The expiry is
+        // lowered in `add_restriction` to the RESTRICTED player's next turn.
+        duration: Some(Duration::UntilEndOfNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn try_parse_self_name_exile(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
@@ -5018,6 +5097,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // activated" (Kang). Tag-scoped prohibition for the granted extra turn — try
     // before the generic non-mana-ability prohibition.
     if let Some(clause) = try_parse_during_that_turn_powerup_prohibition(tp) {
+        return clause;
+    }
+
+    // CR 508.1c + CR 514.2: "that player can't attack you [or your permanents]
+    // during their next turn" (Willie Lumpkin) — player-scoped, next-turn-expiring
+    // attack prohibition. Run before the generic restriction-mode path, which
+    // would otherwise drop the defended scope / duration as Unimplemented.
+    if let Some(clause) = try_parse_that_player_cant_attack_prohibition(tp) {
         return clause;
     }
 

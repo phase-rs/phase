@@ -80,8 +80,22 @@ fn fill_runtime_fields(
     }
 
     match restriction {
-        GameRestriction::ProhibitActivity { expiry, .. } => {
-            use crate::types::ability::{Duration, PlayerScope};
+        GameRestriction::ProhibitActivity {
+            expiry,
+            affected_players,
+            ..
+        } => {
+            use crate::types::ability::{Duration, PlayerScope, RestrictionPlayerScope};
+            // CR 109.5 + CR 514.2: when the restriction targets a specific player
+            // ("that player can't attack …"), a "during their next turn" duration
+            // must expire at the RESTRICTED player's next turn — not the grant
+            // controller's. The affected-player resolution above already lowered a
+            // `TargetedPlayer`/`ParentTargetedPlayer` scope to `SpecificPlayer(p)`,
+            // so read that resolved player here (Willie Lumpkin).
+            let restricted_player = match affected_players {
+                RestrictionPlayerScope::SpecificPlayer(p) => Some(*p),
+                _ => None,
+            };
             match ability.duration.as_ref() {
                 // CR 514.2 + CR 611.2a: "until your next turn" expires at the
                 // *beginning* of the controller's next turn.
@@ -102,7 +116,11 @@ fn fill_runtime_fields(
                     player: PlayerScope::Controller,
                 }) => {
                     *expiry = RestrictionExpiry::UntilEndOfNextTurnOf {
-                        player: ability.controller,
+                        // CR 109.5 + CR 514.2: a player-targeted prohibition
+                        // ("during their next turn") anchors on the restricted
+                        // player; fall back to the controller for grants with no
+                        // resolved specific player (Kang's self-controller form).
+                        player: restricted_player.unwrap_or(ability.controller),
                     };
                 }
                 _ => {}

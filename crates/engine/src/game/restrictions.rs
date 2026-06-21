@@ -1935,6 +1935,22 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_owner)
         }
+        // CR 508.1c + CR 109.5: "can't attack you or permanents you control" — the
+        // "you" being defended is the static's/restriction's controller.
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Player(p)) => {
+            *p == source_controller
+        }
+        // CR 109.4 + CR 508.5: a defended planeswalker compares its controller
+        // against the protected player.
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        // CR 109.4 + CR 508.5 + CR 310.5: battles are attackable permanents, so
+        // "permanents you control" also defends a battle the protected player
+        // controls (the distinctive arm vs `PlayerOrPlaneswalker`, which has none).
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Battle(b_id)) => {
+            permanent_controller(*b_id) == Some(source_controller)
+        }
         _ => false,
     }
 }

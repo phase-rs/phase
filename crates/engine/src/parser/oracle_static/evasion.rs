@@ -2122,6 +2122,12 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
     // so the longer phrase wins (nom `alt` is leftmost-match).
     use crate::types::triggers::AttackTargetFilter;
     let (input, defended) = opt(alt((
+        // CR 508.1c + CR 310.5: " you or permanents you control" also defends
+        // battles — a distinct filter from the planeswalker-only phrase.
+        value(
+            AttackTargetFilter::PlayerOrPermanents,
+            tag_no_case::<_, _, OracleError<'_>>(" you or permanents you control"),
+        ),
         value(
             AttackTargetFilter::PlayerOrPlaneswalker,
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
