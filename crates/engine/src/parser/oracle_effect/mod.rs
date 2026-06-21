@@ -38473,6 +38473,34 @@ mod tests {
     }
 
     #[test]
+    fn create_token_and_attach_equipment_lowers_attach_to_last_created() {
+        // Field-Tested Frying Pan (#835): "create a Food token, then create a 1/1
+        // white Halfling creature token and attach this Equipment to it." The
+        // fused "and attach this Equipment to it" conjunct must survive as an
+        // Attach sub-ability bound to the just-created Halfling token (LastCreated),
+        // not be dropped (which left the equipment unattached).
+        let def = parse_effect_chain(
+            "Create a Food token, then create a 1/1 white Halfling creature token and attach this Equipment to it.",
+            AbilityKind::Spell,
+        );
+
+        fn find_attach_target(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match def.effect.as_ref() {
+                Effect::Attach { target, .. } => Some(target),
+                _ => def.sub_ability.as_deref().and_then(find_attach_target),
+            }
+        }
+
+        let target = find_attach_target(&def)
+            .expect("expected an Attach sub-ability for the fused token+attach clause");
+        assert_eq!(
+            *target,
+            TargetFilter::LastCreated,
+            "attach host anaphor must rebind to the just-created token"
+        );
+    }
+
+    #[test]
     fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
         // CR 702.148a: Cleave's bracketed text is removed at build time, so the
         // parser receives the bracket-stripped (KeepContent) base text — the
