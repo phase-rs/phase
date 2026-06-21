@@ -2516,6 +2516,71 @@ fn self_cost_reduction_if_control_wizard_still_uses_presence_condition() {
 }
 
 #[test]
+fn self_cost_reduction_leading_if_keeps_condition() {
+    let def = parse_static_line(
+        "If an opponent has no cards in hand, this spell costs {6} less to cast.",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 6, .. },
+            ..
+        }
+    ));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+    assert!(matches!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min
+                    }
+                }
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    ));
+}
+
+#[test]
+fn self_cost_reduction_leading_if_supports_avatar_cycle_conditions() {
+    for text in [
+        "If you have 3 or less life, this spell costs {6} less to cast.",
+        "If an opponent controls at least four more creatures than you, this spell costs {6} less to cast.",
+        "If there are ten or more creature cards total in all graveyards, this spell costs {6} less to cast.",
+        "If you weren't the starting player, this spell costs {1} less to cast.",
+    ] {
+        let def =
+            parse_static_line(text).unwrap_or_else(|| panic!("expected cost static for {text:?}"));
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    ..
+                }
+            ),
+            "expected Reduce cost static for {text:?}, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.condition.is_some(),
+            "leading condition must not be dropped for {text:?}"
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    }
+}
+
+#[test]
 fn static_this_spell_cost_less_if_it_targets_creature_filter() {
     let def = parse_static_line("This spell costs {2} less to cast if it targets a red creature.")
         .unwrap();

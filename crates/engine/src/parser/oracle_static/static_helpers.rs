@@ -260,6 +260,12 @@ pub(crate) fn try_parse_impose_additional_cost(
 
 /// Dynamic "for each" counts are extracted when present.
 pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
+    let original_text = text;
+    let (cost_text, leading_condition) =
+        peel_leading_cost_modifier_condition(TextPair::new(text, lower));
+    let text = cost_text.original;
+    let lower = cost_text.lower;
+
     let is_raise = nom_primitives::scan_contains(lower, "more to cast")
         || nom_primitives::scan_contains(lower, "more to activate");
     let is_reduce = nom_primitives::scan_contains(lower, "less to cast")
@@ -596,7 +602,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
 
     let mut definition = StaticDefinition::new(mode)
         .affected(affected)
-        .description(text.to_string());
+        .description(original_text.to_string());
 
     // CR 601.2f: A self-spell cost reduction must apply while the
     // card is in hand (pre-cast affordability checks), in the command zone
@@ -609,6 +615,9 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     }
     if let Some((filter, timing)) = first_qualified_spell.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter, timing));
+    }
+    if definition.condition.is_none() {
+        definition.condition = leading_condition;
     }
 
     // Extract trailing "if [condition]" / "as long as [condition]" clause from
@@ -646,6 +655,37 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     }
 
     Some(definition)
+}
+
+fn peel_leading_cost_modifier_condition<'a>(
+    pair: TextPair<'a>,
+) -> (TextPair<'a>, Option<StaticCondition>) {
+    let trimmed = pair.trim_start();
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed.lower) else {
+        return (pair, None);
+    };
+    let rest = trimmed.slice(trimmed.lower.len() - after_if.len(), trimmed.lower.len());
+    let Some((condition, cost_clause)) = rest.split_around(", ") else {
+        return (pair, None);
+    };
+    if !(nom_primitives::scan_contains(cost_clause.lower, "less to cast")
+        || nom_primitives::scan_contains(cost_clause.lower, "more to cast")
+        || nom_primitives::scan_contains(cost_clause.lower, "less to activate")
+        || nom_primitives::scan_contains(cost_clause.lower, "more to activate"))
+    {
+        return (pair, None);
+    }
+
+    let cond_text = condition.lower.trim().trim_end_matches('.');
+    let parsed = parse_cost_modifier_condition(cond_text).or_else(|| {
+        let (rest, sc) = nom_condition::parse_inner_condition(cond_text).ok()?;
+        (rest.trim().is_empty() || rest.trim() == ".").then_some(sc)
+    });
+
+    match parsed {
+        Some(condition) => (cost_clause.trim_start(), Some(condition)),
+        None => (pair, None),
+    }
 }
 
 fn is_nested_stack_target_condition(cond_text: &str) -> bool {

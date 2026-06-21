@@ -318,7 +318,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "traitor's roar",
     "vein drinker",
     "venom blast",
-    "vivien's invocation",
     "vraska's stoneglare",
     "willow geist",
     "wolf strike",
@@ -541,18 +540,20 @@ fn anaphoric_scope_set_is_frozen() {
     // runtime resolves it to the boosted creature, targets[0]) — adding Burrog
     // Barrage and Wolf Strike (+2), while Osseous Sticktwister's "this creature
     // deals damage equal to its power" self-source clause correctly resolves to
-    // Source, not Anaphoric (-1) — taking the count to 172.
+    // Source, not Anaphoric (-1) — taking the count to 172. The leading-condition
+    // cost-modifier parser broadened condition parsing enough for Vivien's
+    // Invocation to leave the frozen anaphoric set, taking the count to 171.
     assert_eq!(
         observed.len(),
-        172,
-        "Expected exactly 172 cards retaining ObjectScope::Anaphoric (pronoun \
+        171,
+        "Expected exactly 171 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        172,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 172 cards."
+        171,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 171 cards."
     );
 }
 

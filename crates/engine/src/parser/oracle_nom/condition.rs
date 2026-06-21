@@ -99,6 +99,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_player_state_conditions,
         parse_you_have_conditions,
         parse_that_player_has_conditions,
+        parse_there_are_conditions,
         // CR 201.2 + CR 603.4: Named-pair MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
@@ -5076,6 +5077,30 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     let (rest, n) = parse_number(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     let (rest, or_more) = opt(tag("or more ")).parse(rest)?;
+    if let Ok((rest_after_type, type_text)) =
+        take_until::<_, _, OracleError<'_>>(" cards total in ").parse(rest)
+    {
+        let (rest_after_zone, _) = tag(" cards total in ").parse(rest_after_type)?;
+        let (rest_after_zone, (zone, scope)) = parse_scoped_zone_count_ref(rest_after_zone)?;
+        let comparator = if or_more.is_some() {
+            Comparator::GE
+        } else {
+            Comparator::EQ
+        };
+        return Ok((
+            rest_after_zone,
+            make_quantity_comparison(
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: parse_zone_card_type_text(type_text),
+                    filter: None,
+                    scope,
+                },
+                comparator,
+                n,
+            ),
+        ));
+    }
     let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
     let comparator = if or_more.is_some() {
         Comparator::GE
@@ -5253,7 +5278,7 @@ fn parse_zone_count_ref(input: &str) -> OracleResult<'_, ZoneRef> {
     alt((
         value(
             ZoneRef::Graveyard,
-            alt((tag("graveyard"), tag("graveyards"))),
+            alt((tag("graveyards"), tag("graveyard"))),
         ),
         value(ZoneRef::Exile, tag("exile")),
         value(ZoneRef::Hand, alt((tag("hand"), tag("hands")))),
@@ -5515,6 +5540,25 @@ fn parse_triggering_player_has_unattacked_opponent(
 /// refs on the LHS and controller-scoped refs on the RHS.
 fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("an opponent ").parse(input)?;
+
+    // CR 102.2 + CR 402.1: "an opponent has no cards in hand" is existential
+    // over opponents. The condition holds when the minimum opponent hand size is 0.
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has no cards in hand").parse(rest) {
+        return Ok((
+            rest2,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
 
     // CR 109.4 + CR 109.5: "an opponent controls at least N more [type] than you"
     // — existential over opponents (at least one opponent's count is >= yours + N;
@@ -7269,6 +7313,33 @@ mod tests {
                 assert_eq!(card_types, vec![TypeFilter::Creature]);
             }
             other => panic!("expected ZoneCardCount Creature GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_all_graveyards_typed_card_total_ge() {
+        let (rest, c) =
+            parse_inner_condition("there are ten or more creature cards total in all graveyards")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                card_types,
+                                scope: CountScope::All,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            } => {
+                assert_eq!(card_types, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected all-graveyards creature count GE 10, got {other:?}"),
         }
     }
 
