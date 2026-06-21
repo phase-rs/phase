@@ -1443,6 +1443,8 @@ fn try_begin_reflexive_target_selection(
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
     let pending_for_state = pending.clone();
+    let prompt_trigger_event = pending_for_state.trigger_event.clone();
+    let prompt_trigger_events = trigger_events.clone();
     let entry_id = crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
         state,
         pending,
@@ -1456,6 +1458,9 @@ fn try_begin_reflexive_target_selection(
     // the controller completes TriggerTargetSelection.
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: controller,
+        trigger_controller: Some(controller),
+        trigger_event: prompt_trigger_event,
+        trigger_events: prompt_trigger_events,
         target_slots,
         mode_labels: Vec::new(),
         target_constraints: reflexive.target_constraints.clone(),

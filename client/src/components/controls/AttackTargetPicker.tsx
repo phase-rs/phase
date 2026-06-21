@@ -3,12 +3,13 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
 
@@ -61,7 +62,7 @@ export function AttackTargetPicker({
       return getPlayerLabel(t, target.data, myId, teamBased);
     }
     const obj = gameState?.objects[target.data];
-    return obj?.name ?? t("attackTargetPicker.planeswalkerFallback", { id: target.data });
+    return obj?.name ?? t("attackTargetPicker.objectFallback", { id: target.data });
   }
 
   function getTargetSeatColor(target: AttackTarget): string | undefined {
@@ -200,11 +201,37 @@ export function AttackTargetPicker({
                 {selectedAttackers.map((creatureId) => {
                   const obj = gameState?.objects[creatureId];
                   const currentTarget = perCreatureTargets.get(creatureId) ?? validTargets[0];
+                  const counters = objectCounterChips(obj);
+                  const ptLabel = objectPtLabel(obj);
                   return (
-                    <div key={creatureId} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/5">
-                      <span className="min-w-0 flex-1 truncate text-sm text-gray-200" {...hoverProps(creatureId)}>
-                        {obj?.name ?? t("attackTargetPicker.creatureFallback", { id: creatureId })}
-                      </span>
+                    <div key={creatureId} className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-white/5">
+                      <div className="min-w-0 flex-1" {...hoverProps(creatureId)}>
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-sm font-medium text-gray-100">
+                            {obj?.name ?? t("attackTargetPicker.creatureFallback", { id: creatureId })}
+                          </span>
+                          <span className="shrink-0 rounded bg-gray-800 px-1 text-[10px] font-mono text-gray-400">
+                            #{creatureId}
+                          </span>
+                          {ptLabel && (
+                            <span className="shrink-0 rounded bg-amber-900/80 px-1 text-[10px] font-bold text-amber-100">
+                              {ptLabel}
+                            </span>
+                          )}
+                        </div>
+                        {counters.length > 0 && (
+                          <div className="mt-0.5 flex flex-wrap gap-1">
+                            {counters.map(({ type, count }) => (
+                              <span
+                                key={type}
+                                className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100"
+                              >
+                                {formatCounterType(type)} x{count}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                       <TargetDropdown
                         targets={sortedTargets}
                         currentTarget={currentTarget}
@@ -238,6 +265,19 @@ export function AttackTargetPicker({
       {peeked && <RestoreTab onClick={() => setPeeked(false)} />}
     </>
   );
+}
+
+function objectPtLabel(obj: GameObject | undefined): string | null {
+  if (obj?.power == null || obj.toughness == null) return null;
+  return `${obj.power}/${obj.toughness}`;
+}
+
+function objectCounterChips(obj: GameObject | undefined): Array<{ type: string; count: number }> {
+  if (!obj) return [];
+  return Object.entries(obj.counters)
+    .filter((entry): entry is [string, number] => entry[1] != null && entry[1] > 0 && entry[0] !== "loyalty")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([type, count]) => ({ type, count }));
 }
 
 /** Stable key for an AttackTarget. */

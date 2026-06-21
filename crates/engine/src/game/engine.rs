@@ -5226,6 +5226,7 @@ pub(super) fn begin_pending_trigger_target_selection(
     let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
     let description = trigger.description.clone();
+    let trigger_controller = trigger.controller;
     let trigger_event = trigger.trigger_event.clone();
     let trigger_events = if state.pending_trigger_event_batch.is_empty() {
         trigger_event.iter().cloned().collect::<Vec<_>>()
@@ -5270,6 +5271,9 @@ pub(super) fn begin_pending_trigger_target_selection(
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
+        trigger_controller: Some(trigger_controller),
+        trigger_event,
+        trigger_events,
         target_slots,
         mode_labels: Vec::new(),
         target_constraints,
@@ -13773,6 +13777,9 @@ mod trigger_target_tests {
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
@@ -13876,6 +13883,9 @@ mod trigger_target_tests {
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(legal_target)],
                 optional: false,
@@ -14290,6 +14300,9 @@ mod trigger_target_tests {
         state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![
                 crate::types::game_state::TargetSelectionSlot {
                     legal_targets: vec![
@@ -14374,6 +14387,13 @@ mod trigger_target_tests {
             },
         ];
         let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
+        let trigger_event = GameEvent::DamageDealt {
+            source_id: ObjectId(31),
+            target: TargetRef::Object(ObjectId(99)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
         // CR 603.3c + CR 603.3d "Push first" contract migration.
         let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(31),
@@ -14402,7 +14422,7 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: target_constraints.clone(),
             distribute: None,
-            trigger_event: None,
+            trigger_event: Some(trigger_event.clone()),
             modal: None,
             mode_abilities: vec![],
             description: None,
@@ -14421,6 +14441,9 @@ mod trigger_target_tests {
         state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: Some(PlayerId(0)),
+            trigger_event: Some(trigger_event.clone()),
+            trigger_events: vec![trigger_event.clone()],
             target_slots: target_slots.clone(),
             mode_labels: Vec::new(),
             target_constraints: target_constraints.clone(),
@@ -14442,7 +14465,16 @@ mod trigger_target_tests {
         .unwrap();
 
         match intermediate.waiting_for {
-            WaitingFor::TriggerTargetSelection { selection, .. } => {
+            WaitingFor::TriggerTargetSelection {
+                trigger_controller,
+                trigger_event: prompt_event,
+                trigger_events,
+                selection,
+                ..
+            } => {
+                assert_eq!(trigger_controller, Some(PlayerId(0)));
+                assert_eq!(prompt_event, Some(trigger_event.clone()));
+                assert_eq!(trigger_events, vec![trigger_event]);
                 assert_eq!(selection.current_slot, 1);
                 assert_eq!(
                     selection.current_legal_targets,

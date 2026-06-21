@@ -669,6 +669,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    if let WaitingFor::TriggerTargetSelection {
+        trigger_controller,
+        trigger_event,
+        trigger_events,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        if trigger_controller.is_some_and(|controller| !can_view_private_for_player(controller)) {
+            *trigger_event = None;
+            trigger_events.clear();
+        }
+    }
+
     // CR 113.2c + CR 603.2 + CR 603.3b: `deferred_triggers` holds the FIFO
     // queue of same-pass triggers waiting on the active `pending_trigger` to
     // resolve. Each entry is a `PendingTriggerContext` with the same private
@@ -1818,6 +1831,61 @@ mod tests {
                 );
             }
             other => panic!("expected ChooseFromZoneChoice for P1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_target_selection_event_context_redacts_by_trigger_controller() {
+        let trigger_event = crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(10),
+            target: crate::types::ability::TargetRef::Object(ObjectId(20)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(1),
+            trigger_controller: Some(PlayerId(0)),
+            trigger_event: Some(trigger_event.clone()),
+            trigger_events: vec![trigger_event.clone()],
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
+                optional: false,
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress::default(),
+            source_id: Some(ObjectId(10)),
+            description: Some("private trigger text".to_string()),
+        };
+
+        let controller_view = filter_state_for_viewer(&state, PlayerId(0));
+        match controller_view.waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event: prompt_event,
+                trigger_events,
+                ..
+            } => {
+                assert_eq!(prompt_event, Some(trigger_event.clone()));
+                assert_eq!(trigger_events, vec![trigger_event]);
+            }
+            other => panic!("expected trigger target selection, got {other:?}"),
+        }
+
+        let prompted_non_controller_view = filter_state_for_viewer(&state, PlayerId(1));
+        match prompted_non_controller_view.waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event,
+                trigger_events,
+                description,
+                ..
+            } => {
+                assert!(trigger_event.is_none());
+                assert!(trigger_events.is_empty());
+                assert_eq!(description.as_deref(), Some("private trigger text"));
+            }
+            other => panic!("expected trigger target selection, got {other:?}"),
         }
     }
 

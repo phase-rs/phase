@@ -23,6 +23,9 @@ fn scenario_prefers_opponent_target_over_self() {
     let mut runner = GameScenario::new().build();
     runner.state_mut().waiting_for = WaitingFor::TriggerTargetSelection {
         player: P0,
+        trigger_controller: None,
+        trigger_event: None,
+        trigger_events: Vec::new(),
         target_slots: vec![TargetSelectionSlot {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
@@ -55,6 +58,9 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
     let mut runner = GameScenario::new().build();
     runner.state_mut().waiting_for = WaitingFor::TriggerTargetSelection {
         player: P0,
+        trigger_controller: None,
+        trigger_event: None,
+        trigger_events: Vec::new(),
         target_slots: vec![TargetSelectionSlot {
             legal_targets: Vec::new(),
             optional: true,

@@ -3185,6 +3185,17 @@ pub enum WaitingFor {
     },
     TriggerTargetSelection {
         player: PlayerId,
+        /// Controller of the triggered ability whose targets are being chosen.
+        /// This can differ from `player` for "of their choice" prompts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_controller: Option<PlayerId>,
+        /// Event that caused this triggered ability, if the trigger needs it for
+        /// display or event-context quantities while targets are being chosen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        /// Full simultaneous-event batch for this trigger instance.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trigger_events: Vec<GameEvent>,
         target_slots: Vec<TargetSelectionSlot>,
         /// CR 700.2 / CR 601.2b: Per-slot mode display label, parallel to
         /// `target_slots` (`mode_labels[i]` ↔ `target_slots[i]`). Populated for
@@ -8120,6 +8131,9 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
@@ -8491,6 +8505,9 @@ mod tests {
         use crate::types::ability::TargetRef;
         let wf = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![
                     TargetRef::Object(ObjectId(1)),

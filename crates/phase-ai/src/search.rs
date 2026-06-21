@@ -2629,6 +2629,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: Vec::new(),
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -2685,6 +2688,9 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
                     TargetRef::Player(PlayerId(0)),
@@ -2723,6 +2729,9 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,

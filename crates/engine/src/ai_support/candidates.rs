@@ -4751,6 +4751,9 @@ mod tests {
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: p0,
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
