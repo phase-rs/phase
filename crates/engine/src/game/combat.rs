@@ -2183,6 +2183,65 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1c + CR 109.5: Player-scoped temporary attack prohibitions
+    // (`GameRestriction::ProhibitActivity { activity: Attack { defended } }` —
+    // Willie Lumpkin: "that player can't attack you or permanents you control
+    // during their next turn"). Each restriction defends a specific player (the
+    // grant's controller per CR 109.5) against the affected players. Reuse the
+    // SAME `attack_target_matches_defended_scope` authority static `CantAttack`
+    // uses, so both seams share one scope matcher.
+    for (attacker_id, target) in attacks {
+        let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller) else {
+            continue;
+        };
+        for restriction in &state.restrictions {
+            let crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players,
+                activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+                ..
+            } = restriction
+            else {
+                continue;
+            };
+            // CR 109.5: the protected player ("you") is the grant's controller.
+            let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+                continue;
+            };
+            // CR 101.2: only the affected players are prohibited. Targeted scopes
+            // are resolved to `SpecificPlayer` by `add_restriction` before this
+            // gate ever runs.
+            let attacker_is_affected = match affected_players {
+                crate::types::ability::RestrictionPlayerScope::AllPlayers => true,
+                crate::types::ability::RestrictionPlayerScope::SpecificPlayer(p) => {
+                    *p == attacker_controller
+                }
+                crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController => {
+                    attacker_controller != protected
+                }
+                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::DefendingPlayer => false,
+            };
+            if !attacker_is_affected {
+                continue;
+            }
+            // CR 508.5: the defended planeswalker/battle compares on controller,
+            // so pass `protected` as both source-controller and source-owner.
+            if crate::game::restrictions::attack_target_matches_defended_scope(
+                state,
+                Some(target),
+                defended,
+                protected,
+                protected,
+            ) {
+                return Err(format!(
+                    "{attacker_id:?} can't attack {target:?} (CR 508.1c player-scoped attack prohibition)"
+                ));
+            }
+        }
+    }
+
     // CR 701.15b: a goaded creature must attack a player other than the goading
     // player *if able*. "Able" is measured against the players this creature
     // could legally be declared attacking: `get_valid_attack_targets` already

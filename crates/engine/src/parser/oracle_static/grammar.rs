@@ -1339,6 +1339,35 @@ pub(crate) fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     Some((p, t))
 }
 
+/// CR 702.34a / CR 702.128a / CR 702.180a: Map a bare graveyard alt-cost keyword
+/// token (one whose cost, when granted with no explicit value, is the recipient
+/// card's own mana cost) to the `Keyword` carrying `ManaCost::SelfManaCost`.
+/// Parameterized over the keyword by a single `alt()` of token tags — adding a
+/// future self-cost keyword is one more `value(..)` arm, not a new sibling
+/// branch in `map_keyword`. Returns `None` for any other text so `map_keyword`
+/// continues its normal dispatch.
+fn map_self_cost_graveyard_keyword(word: &str) -> Option<Keyword> {
+    let lower = word.to_ascii_lowercase();
+    let (_, keyword) = all_consuming(alt((
+        value(
+            Keyword::Flashback(crate::types::keywords::FlashbackCost::Mana(
+                ManaCost::SelfManaCost,
+            )),
+            tag::<_, _, OracleError<'_>>("flashback"),
+        ),
+        value(
+            Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                ManaCost::SelfManaCost,
+            )),
+            tag("embalm"),
+        ),
+        value(Keyword::Harmonize(ManaCost::SelfManaCost), tag("harmonize")),
+    )))
+    .parse(lower.as_str())
+    .ok()?;
+    Some(keyword)
+}
+
 /// Map a keyword text to a Keyword enum variant using the FromStr impl.
 /// Returns None only for `Keyword::Unknown`.
 pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
@@ -1346,10 +1375,18 @@ pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
     if word.is_empty() {
         return None;
     }
-    if word.eq_ignore_ascii_case("flashback") {
-        return Some(Keyword::Flashback(
-            crate::types::keywords::FlashbackCost::Mana(ManaCost::SelfManaCost),
-        ));
+    // CR 702.34a (Flashback) / CR 702.128a (Embalm) / CR 702.180a (Harmonize):
+    // a bare graveyard alt-cost keyword granted by an effect ("target ... gains
+    // flashback/embalm/harmonize until end of turn. The [keyword] cost is equal
+    // to its mana cost") carries no printed cost — its cost is the granted card's
+    // own mana cost. `ManaCost::SelfManaCost` is the single building block that
+    // resolves to the recipient's mana cost at cast time (see
+    // `game::keywords::resolve_keyword_mana_cost`), so the grant is parameterized
+    // by keyword over one self-cost representation rather than baking a concrete
+    // cost. The trailing "the [keyword] cost is equal to its mana cost" sentence
+    // is therefore redundant reminder text (dropped by the effect-chain parser).
+    if let Some(keyword) = map_self_cost_graveyard_keyword(word) {
+        return Some(keyword);
     }
     // CR 702.73a: "all creature types" is the Changeling CDA effect.
     // Granting Changeling keyword triggers layer system post-fixup to add all types.

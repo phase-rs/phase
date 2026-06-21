@@ -1635,6 +1635,14 @@ pub enum ProhibitedActivity {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only_tag: Option<AbilityTag>,
     },
+    /// CR 508.1c: A temporary effect prohibits an affected player from declaring
+    /// attacks against the defended scope ("that player can't attack you [or your
+    /// permanents/planeswalkers]"). The scope rides the shared `AttackTargetFilter`
+    /// so the declare-attackers gate reuses the same defended-scope matcher as
+    /// static `CantAttack` restrictions.
+    Attack {
+        defended: crate::types::triggers::AttackTargetFilter,
+    },
 }
 
 /// When a game restriction expires.

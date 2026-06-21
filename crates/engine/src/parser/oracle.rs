@@ -5408,6 +5408,45 @@ mod tests {
                 .any(def_chain_has_unimplemented)
     }
 
+    /// CR 702.34a / CR 702.128a / CR 702.180a: the three self-cost graveyard
+    /// keyword-grant cards (Cursecloth Wrappings / Songcrafter Mage / Sphinx of
+    /// Forgotten Lore) must parse with zero Unimplemented effects. The grant
+    /// lowers to `AddKeyword(<keyword>(SelfManaCost))` and the redundant cost
+    /// clarification sentence is absorbed; the printed keyword lines (Flash,
+    /// Flying) are supplied via the MTGJSON keyword list as in production.
+    #[test]
+    fn self_cost_graveyard_keyword_grant_cards_parse_zero_unimplemented() {
+        let cards: [(&str, &str, &[Keyword], &[&str]); 3] = [
+            (
+                "Cursecloth Wrappings",
+                "Zombies you control get +1/+1.\n{T}: Target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost.",
+                &[],
+                &["Artifact"],
+            ),
+            (
+                "Songcrafter Mage",
+                "Flash\nWhen this creature enters, target instant or sorcery card in your graveyard gains harmonize until end of turn. Its harmonize cost is equal to its mana cost.",
+                &[Keyword::Flash],
+                &["Creature"],
+            ),
+            (
+                "Sphinx of Forgotten Lore",
+                "Flash\nFlying\nWhenever this creature attacks, target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to that card's mana cost.",
+                &[Keyword::Flash, Keyword::Flying],
+                &["Creature"],
+            ),
+        ];
+        for (name, text, kw, types) in cards {
+            let r = parse(text, name, kw, types, &[]);
+            assert!(
+                !parsed_has_unimplemented(&r),
+                "{name} must parse with zero Unimplemented effects: abilities={:?} triggers={:?}",
+                r.abilities,
+                r.triggers
+            );
+        }
+    }
+
     /// CR 709.5f + CR 709.5j: Ghostly Keybearer's combat-damage trigger
     /// ("unlock a locked door of up to one target Room you control") must reach
     /// zero Unimplemented effects now that the door-lock effect parser arm

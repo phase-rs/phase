@@ -134,6 +134,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         AttackTargetFilter::Player
         | AttackTargetFilter::Planeswalker
         | AttackTargetFilter::PlayerOrPlaneswalker
+        | AttackTargetFilter::PlayerOrPermanents
         | AttackTargetFilter::Battle => false,
     }
 }

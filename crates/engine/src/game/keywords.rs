@@ -8,7 +8,9 @@ use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, ProtectionTarget};
+use crate::types::keywords::{
+    EmbalmCost, EternalizeCost, FlashbackCost, Keyword, KeywordKind, ProtectionTarget,
+};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -160,6 +162,22 @@ pub fn effective_mayhem_cost(state: &GameState, object_id: ObjectId) -> Option<M
     }
 }
 
+/// CR 702.180a: Effective Harmonize alt-cost for a card in the graveyard,
+/// honoring off-zone keyword grants (e.g. Songcrafter Mage's "target instant or
+/// sorcery card in your graveyard gains harmonize until end of turn. Its
+/// harmonize cost is equal to its mana cost.") in addition to a printed Harmonize
+/// keyword. Resolves `ManaCost::SelfManaCost` to the card's own mana cost via
+/// `resolve_keyword_mana_cost`, mirroring `effective_mayhem_cost`. The
+/// tap-a-creature cost reduction (CR 702.180a/b) is applied separately at
+/// payment time.
+pub fn effective_harmonize_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Harmonize)?;
+    match keyword {
+        Keyword::Harmonize(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic
 /// grants (e.g., Ninja Teen's "creature cards in your graveyard have sneak {cost}").
 pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
@@ -211,6 +229,30 @@ fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &Mana
             .map(|obj| obj.mana_cost.clone())
             .unwrap_or(ManaCost::NoCost),
         _ => cost.clone(),
+    }
+}
+
+/// CR 702.128a / CR 702.129a + CR 602.1a: Resolve a `ManaCost::SelfManaCost`
+/// payload carried by a granted Embalm / Eternalize keyword to the recipient
+/// card's concrete mana cost. Embalm / Eternalize are graveyard *activated*
+/// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
+/// payment path treats `SelfManaCost` as a free cost — so a self-cost grant must
+/// be concretized before the activated ability is synthesized. Non-self-cost
+/// keywords (printed Embalm `{3}{W}`, or any other keyword) pass through
+/// unchanged.
+pub fn resolve_self_cost_graveyard_activated_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Keyword {
+    match keyword {
+        Keyword::Embalm(EmbalmCost::Mana(cost)) => Keyword::Embalm(EmbalmCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Eternalize(EternalizeCost::Mana(cost)) => Keyword::Eternalize(
+            EternalizeCost::Mana(resolve_keyword_mana_cost(state, object_id, cost)),
+        ),
+        other => other.clone(),
     }
 }
 

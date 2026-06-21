@@ -190,6 +190,12 @@ pub enum AttackTargetFilter {
     /// controls" restricts attacks against the owning player and planeswalkers
     /// that player controls.
     OwnerOrPlaneswalker,
+    /// CR 508.1c + CR 508.5 + CR 109.4: "you or permanents you control" defends
+    /// you plus every attackable permanent you control — planeswalkers AND
+    /// battles (CR 310.5: battles can be attacked). Distinct from
+    /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
+    /// planeswalker/battle is compared per CR 109.4.
+    PlayerOrPermanents,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).

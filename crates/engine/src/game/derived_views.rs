@@ -408,6 +408,10 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
                     allowed_zones: allowed_zones.clone(),
                 }
             }
+            // CR 508.1c: a "can't attack" prohibition is enforced only at the
+            // declare-attackers gate; it has no cast/activate HUD badge, so no
+            // player-status row is produced for it.
+            ProhibitedActivity::Attack { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {

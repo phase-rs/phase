@@ -2558,7 +2558,7 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
-        ContinuationAst::FlashbackCostEqualsManaCost => {}
+        ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -3311,7 +3311,7 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
         ContinuationAst::CopyMayRetarget => true,
-        ContinuationAst::FlashbackCostEqualsManaCost => true,
+        ContinuationAst::SelfCostKeywordCostClarification => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
@@ -4365,6 +4365,27 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
     }
 }
 
+/// CR 702.34a / CR 702.128a / CR 702.180a: Recognize the redundant cost
+/// clarification sentence that trails a self-cost graveyard keyword grant —
+/// "the/its [flashback|embalm|harmonize] cost is equal to its/that card's mana
+/// cost". The caller gates on the preceding GenericEffect carrying the matching
+/// granted keyword, so this combinator only needs to confirm the grammatical
+/// shape. Composed from chained `alt()` over the determiner, the self-cost
+/// keyword token, and the possessive reference — not an enumeration of
+/// whole-string permutations.
+fn parse_self_cost_keyword_clarification(lower: &str) -> bool {
+    let lower = lower.trim().trim_end_matches('.');
+    all_consuming((
+        opt(alt((tag::<_, _, OracleError<'_>>("the "), tag("its ")))),
+        alt((tag("flashback"), tag("embalm"), tag("harmonize"))),
+        tag(" cost is equal to "),
+        alt((tag("its"), tag("that card's"), tag("that card\u{2019}s"))),
+        tag(" mana cost"),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -4438,21 +4459,30 @@ pub(super) fn parse_followup_continuation_ast(
             }
             None
         }
+        // CR 702.34a / CR 702.128a / CR 702.180a: the redundant cost-clarification
+        // sentence ("The/Its [flashback|embalm|harmonize] cost is equal to
+        // its/that card's mana cost") that follows a self-cost graveyard keyword
+        // grant. The grant already carries `ManaCost::SelfManaCost`, so this
+        // sentence adds no semantics — absorb it so it never lowers to
+        // `Effect::Unimplemented`. Gated on the preceding GenericEffect actually
+        // carrying a self-cost graveyard keyword (Flashback/Embalm/Harmonize).
         Effect::GenericEffect {
             static_abilities, ..
-        } if lower == "the flashback cost is equal to its mana cost"
+        } if parse_self_cost_keyword_clarification(&lower)
             && static_abilities.iter().any(|def| {
                 def.modifications.iter().any(|modification| {
                     matches!(
                         modification,
                         crate::types::ability::ContinuousModification::AddKeyword {
                             keyword: crate::types::keywords::Keyword::Flashback(_)
+                                | crate::types::keywords::Keyword::Embalm(_)
+                                | crate::types::keywords::Keyword::Harmonize(_)
                         }
                     )
                 })
             }) =>
         {
-            Some(ContinuationAst::FlashbackCostEqualsManaCost)
+            Some(ContinuationAst::SelfCostKeywordCostClarification)
         }
         Effect::Counter { .. }
             if nom_primitives::scan_contains(&lower, "countered this way")

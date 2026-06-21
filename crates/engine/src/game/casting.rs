@@ -96,7 +96,21 @@ fn runtime_granted_graveyard_activated_abilities(
         .into_iter()
         .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
         .filter_map(|keyword| {
-            crate::database::synthesis::graveyard_activated_ability_for_keyword(&keyword)
+            // CR 702.128a / CR 702.129a: Embalm / Eternalize granted with a
+            // self-cost ("the embalm cost is equal to its mana cost") carry
+            // `ManaCost::SelfManaCost`; concretize it to the card's mana cost
+            // before synthesizing the activated ability (the activated-ability
+            // payment path would otherwise treat SelfManaCost as free).
+            let keyword = super::keywords::resolve_self_cost_graveyard_activated_keyword(
+                state, source_id, &keyword,
+            );
+            crate::database::synthesis::graveyard_activated_ability_for_keyword(&keyword).or_else(
+                || {
+                    crate::database::embalm_eternalize::embalm_eternalize_ability_for_keyword(
+                        &keyword,
+                    )
+                },
+            )
         })
         .collect()
 }
@@ -663,7 +677,7 @@ fn graveyard_spell_objects_available_to_cast(
         // Cards in graveyard with graveyard-cast keywords. Escape and Retrace
         // must have enough eligible non-mana additional-cost material available.
         if has_effective_graveyard_cast_keyword(state, obj_id, obj)
-            && (has_harmonize_keyword(obj)
+            && (has_harmonize_keyword(state, obj_id)
                 || has_flashback_keyword(state, obj_id)
                 || has_aftermath_keyword(state, obj_id)
                 || has_disturb_keyword(state, obj_id)
@@ -752,11 +766,11 @@ fn can_pay_escape_additional_cost(
     residual.is_payable(state, player, escape_obj_id)
 }
 
-/// CR 702.180: Check if an object has the Harmonize keyword.
-fn has_harmonize_keyword(obj: &crate::game::game_object::GameObject) -> bool {
-    obj.keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
+/// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
+/// granted graveyard harmonize (Songcrafter Mage) is recognized, mirroring
+/// `has_flashback_keyword`.
+fn has_harmonize_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Harmonize)
 }
 
 /// CR 702.34: Check if an object has the Flashback keyword.
@@ -939,15 +953,14 @@ pub fn handle_foretell(
 fn has_effective_graveyard_cast_keyword(
     state: &GameState,
     object_id: ObjectId,
-    obj: &crate::game::game_object::GameObject,
+    // Retained for call-site symmetry with the surrounding graveyard scan; all
+    // keyword checks below are now off-zone-aware and key on `object_id` only.
+    _obj: &crate::game::game_object::GameObject,
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
         || jumpstart_castable_from_graveyard(state, object_id)
-        || obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
+        || has_harmonize_keyword(state, object_id)
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
         || super::keywords::effective_disturb_cost(state, object_id).is_some()
@@ -3112,11 +3125,9 @@ fn casting_variant_candidates(
         if has_retrace_keyword(state, object_id) {
             candidates.push(CastingVariant::Retrace);
         }
-        if obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
-        {
+        // CR 702.180a: Harmonize may be printed or granted to a graveyard card
+        // (Songcrafter Mage), so query the effective off-zone keyword.
+        if has_harmonize_keyword(state, object_id) {
             candidates.push(CastingVariant::Harmonize);
         }
         // CR 702.187b: Mayhem is available only while the card was discarded this
@@ -3645,13 +3656,13 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
 
-    // Harmonize: use harmonize mana cost when casting from graveyard.
-    // Tap cost reduction is handled in casting_costs::pay_and_push_adventure.
+    // CR 702.180a: Harmonize — use the harmonize mana cost when casting from
+    // graveyard. Off-zone-aware and `SelfManaCost`-resolving so a granted
+    // harmonize whose cost equals the card's mana cost (Songcrafter Mage) is paid
+    // correctly. Tap cost reduction is handled in
+    // casting_costs::pay_and_push_adventure.
     let harmonize_cost = if obj.zone == Zone::Graveyard {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Harmonize(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        super::keywords::effective_harmonize_cost(state, object_id)
     } else {
         None
     };
@@ -23994,6 +24005,174 @@ mod tests {
             encore.1.activation_zone,
             Some(Zone::Graveyard),
             "synthesized Encore ability must function only from the graveyard"
+        );
+    }
+
+    /// CR 702.180a + CR 604.1: Harmonize granted to a graveyard sorcery with a
+    /// self-cost (Songcrafter Mage: "gains harmonize until end of turn. Its
+    /// harmonize cost is equal to its mana cost.") must make the card castable
+    /// from the graveyard, and the effective harmonize cost must resolve to the
+    /// card's OWN mana cost. Discriminating: reverting the off-zone-aware
+    /// `has_harmonize_keyword` flips `can_cast_object_now` to false (granted
+    /// keyword unseen); reverting the `effective_harmonize_cost` SelfManaCost
+    /// resolution makes the cost wrong (free instead of the card's mana cost).
+    #[test]
+    fn granted_self_cost_harmonize_is_castable_at_card_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+
+        let grantor = create_object(
+            &mut state,
+            CardId(9300),
+            PlayerId(0),
+            "Songcrafter Mage".to_string(),
+            Zone::Battlefield,
+        );
+        let card_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(9301),
+            PlayerId(0),
+            "Graveyard Sorcery".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = card_cost.clone();
+            let ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(ability);
+        }
+
+        // Sanity: with no grant, the card is not castable from the graveyard.
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell),
+            "card must not be graveyard-castable before the harmonize grant"
+        );
+
+        // Grant harmonize with cost = its mana cost — exactly the parser output.
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: spell },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Harmonize(ManaCost::SelfManaCost),
+            }],
+            None,
+        );
+
+        // The effective harmonize cost resolves to the card's own mana cost.
+        assert_eq!(
+            super::super::keywords::effective_harmonize_cost(&state, spell),
+            Some(card_cost.clone()),
+            "granted harmonize cost must equal the card's mana cost"
+        );
+
+        // Enough mana for {2}{U}; the card must now be castable from graveyard.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 3);
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell),
+            "granted self-cost harmonize must be castable from the graveyard"
+        );
+        assert!(
+            casting_variant_candidates(&state, PlayerId(0), spell)
+                .contains(&CastingVariant::Harmonize),
+            "granted harmonize must surface the Harmonize casting variant"
+        );
+    }
+
+    /// CR 702.128a + CR 604.1: Embalm granted to a graveyard creature with a
+    /// self-cost (Cursecloth Wrappings: "gains embalm until end of turn. The
+    /// embalm cost is equal to its mana cost.") must surface the embalm activated
+    /// ability from the graveyard, with the mana sub-cost concretized to the
+    /// card's OWN mana cost. Discriminating: before the grant no embalm ability
+    /// exists; reverting the embalm-synthesis wiring removes the granted ability;
+    /// reverting the SelfManaCost concretization leaves the ability free (the
+    /// activated-ability payment path treats SelfManaCost as no cost).
+    #[test]
+    fn granted_self_cost_embalm_surfaces_graveyard_ability_at_card_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+
+        let grantor = create_object(
+            &mut state,
+            CardId(9400),
+            PlayerId(0),
+            "Cursecloth Wrappings".to_string(),
+            Zone::Battlefield,
+        );
+        let card_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::White],
+        };
+        let creature = create_object(
+            &mut state,
+            CardId(9401),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = card_cost.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Sanity: no embalm ability before the grant.
+        assert!(
+            !activated_ability_definitions(&state, creature)
+                .iter()
+                .any(|(_, a)| matches!(&*a.effect, Effect::CopyTokenOf { .. })),
+            "no embalm ability should exist before the grant"
+        );
+
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: creature },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost,
+                )),
+            }],
+            None,
+        );
+
+        let abilities = activated_ability_definitions(&state, creature);
+        let (_, embalm) = abilities
+            .iter()
+            .find(|(_, a)| matches!(&*a.effect, Effect::CopyTokenOf { .. }))
+            .expect("granted embalm must surface a graveyard activated ability");
+        assert_eq!(
+            embalm.activation_zone,
+            Some(Zone::Graveyard),
+            "embalm ability must function only from the graveyard"
+        );
+        // The mana sub-cost must be the card's concrete mana cost, NOT a free
+        // SelfManaCost placeholder. The activation cost is a Composite of the mana
+        // cost + the self-exile; assert the card's mana cost appears in it.
+        let Some(AbilityCost::Composite { costs }) = &embalm.cost else {
+            panic!("embalm cost must be a Composite, got {:?}", embalm.cost);
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == card_cost)),
+            "embalm mana sub-cost must equal the card's mana cost, got {costs:?}"
         );
     }
 

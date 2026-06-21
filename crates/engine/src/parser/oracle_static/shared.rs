@@ -2997,7 +2997,14 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     use crate::types::triggers::AttackTargetFilter;
+    // CR 508.1c + CR 310.5: " you or permanents you control" defends battles too,
+    // so it is a distinct filter from " you or planeswalkers you control". Both
+    // longer phrases precede the bare " you" (nom `alt` is leftmost-match).
     opt(alt((
+        value(
+            AttackTargetFilter::PlayerOrPermanents,
+            tag(" you or permanents you control"),
+        ),
         value(
             AttackTargetFilter::PlayerOrPlaneswalker,
             tag(" you or planeswalkers you control"),

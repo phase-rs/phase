@@ -242,8 +242,12 @@ pub(crate) enum ContinuationAst {
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
-    /// "The flashback cost is equal to its mana cost." after a flashback grant.
-    FlashbackCostEqualsManaCost,
+    /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
+    /// cost is equal to its/that card's mana cost." after a self-cost graveyard
+    /// keyword grant. Redundant reminder text — the grant already carries
+    /// `ManaCost::SelfManaCost`, so this continuation is absorbed as a no-op
+    /// rather than lowering to `Effect::Unimplemented`.
+    SelfCostKeywordCostClarification,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
