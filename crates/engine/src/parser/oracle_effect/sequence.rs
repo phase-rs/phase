@@ -1679,12 +1679,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // 21-arm limit; adding it inline would push the cluster over and trip
     // the `Choice<...>` trait-bound check at compile time.
     .or(value((), tag("puts ")))
-    // CR 301.5b + CR 608.2c: "attach " is an imperative game action — always a
-    // clause start, never a noun-phrase continuation. Peels "create a token and
-    // attach this Equipment to it" (Field-Tested Frying Pan) and "put … and attach
-    // an Equipment that was attached …" (Zack Fair) into a standalone Attach clause,
-    // which `rewire_token_attach_sibling` then rebinds onto LastCreated.
-    .or(value((), tag("attach ")))
+    // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
+    // not noun-phrase continuations. Keep the matcher narrow so name-based
+    // chains like "put counters on it and attach Fractal Harness to it" stay
+    // available to the token-counter attach rewriter.
+    .or(alt((
+        value((), tag("attach this equipment ")),
+        value((), tag("attach an equipment that was attached ")),
+    )))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
