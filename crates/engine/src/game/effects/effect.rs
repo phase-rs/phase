@@ -2966,4 +2966,92 @@ mod tests {
             "an opponent's Elf must NOT gain the keywords (wrong controller)"
         );
     }
+
+    /// CR 611.2a + CR 514.2: End-to-end pipeline test for a keyword grant that
+    /// is compounded with a non-pump conjunct (Homarid Warrior: "This creature
+    /// gains shroud until end of turn and doesn't untap during your next untap
+    /// step."). Drives parse → `build_resolved_from_def` → `resolve_ability_chain`
+    /// → `execute_cleanup` against the real engine. A reverted fix loses the
+    /// "doesn't untap" conjunct (silently swallowed by
+    /// `parse_continuous_modifications`), so the CantUntap restriction is never
+    /// registered — this test fails on that.
+    #[test]
+    fn keyword_grant_compounded_with_doesnt_untap_resolves_both_and_shroud_expires() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::game::turns::execute_cleanup;
+        use crate::types::ability::AbilityKind;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Homarid Warrior".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Parse the FULL clause through the real chain parser.
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "This creature gains shroud until end of turn and doesn't untap during your next untap step.",
+            AbilityKind::Activated,
+        );
+        // Parser-shape guard mirrors the lib parser test: the keyword grant must
+        // carry its duration rather than defaulting permanently.
+        assert_eq!(
+            def.duration,
+            Some(Duration::UntilEndOfTurn),
+            "keyword grant must keep its until-end-of-turn duration"
+        );
+
+        let resolved = build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+
+        // Shroud is live before cleanup.
+        assert!(
+            state
+                .objects
+                .get(&source)
+                .unwrap()
+                .has_keyword(&Keyword::Shroud),
+            "source must have shroud before cleanup"
+        );
+
+        // The "doesn't untap" conjunct survived the split: a CantUntap transient
+        // restriction is registered (it would be dropped if the fix is reverted).
+        assert!(
+            state.transient_continuous_effects.iter().any(|tce| {
+                tce.modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    })
+            }),
+            "the 'doesn't untap' conjunct must register a CantUntap restriction, \
+             not be silently swallowed; TCEs: {:?}",
+            state.transient_continuous_effects
+        );
+
+        // CR 514.2: the until-end-of-turn shroud grant expires at cleanup.
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&source)
+                .unwrap()
+                .has_keyword(&Keyword::Shroud),
+            "shroud must be gone after cleanup (until end of turn expiry)"
+        );
+    }
 }

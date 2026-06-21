@@ -31230,9 +31230,98 @@ mod tests {
             e,
             Effect::GenericEffect {
                 target: Some(TargetFilter::Typed(ref tf)),
+                duration: Some(Duration::UntilEndOfTurn),
                 ..
             } if tf.type_filters.contains(&TypeFilter::Creature)
         ));
+    }
+
+    /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
+    /// conjunct>" must keep the `until end of turn` duration on the keyword
+    /// grant. Homarid Warrior: "This creature gains shroud until end of turn
+    /// and doesn't untap during your next untap step." Previously the trailing
+    /// "and …" conjunct kept the clause unified, the suffix-only
+    /// `strip_trailing_duration` could not reach the mid-clause duration, and
+    /// shroud was granted permanently (duration: None).
+    #[test]
+    fn keyword_grant_with_non_pump_conjunct_keeps_until_end_of_turn() {
+        let def = parse_effect_chain(
+            "This creature gains shroud until end of turn and doesn't untap during your next untap step.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert!(static_abilities.iter().any(|s| s.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud
+            }
+        )));
+
+        // The "doesn't untap" conjunct must survive as a chained sub_ability —
+        // it must not be silently dropped by the split.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("non-pump conjunct must be chained as a sub_ability");
+        assert!(
+            matches!(&*sub.effect, Effect::GenericEffect { .. }),
+            "expected the doesn't-untap conjunct to lower to a restriction GenericEffect, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Over-split guard: a multi-keyword grant whose single duration trails
+    /// both keywords ("gains flying and haste until end of turn") must stay a
+    /// unified clause with the duration applied — the keyword-grant-compound
+    /// split must NOT fire.
+    #[test]
+    fn multi_keyword_grant_with_shared_duration_stays_unified() {
+        let def = parse_effect_chain(
+            "This creature gains flying and haste until end of turn.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "multi-keyword grant must not be split into a sub_ability"
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        let keywords: Vec<&ContinuousModification> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .collect();
+        assert!(keywords.contains(&&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }));
+        assert!(keywords.contains(&&ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }));
+    }
+
+    /// Regression: a standalone keyword grant still carries its duration.
+    #[test]
+    fn standalone_keyword_grant_keeps_until_end_of_turn() {
+        let def = parse_effect_chain("It gains haste until end of turn.", AbilityKind::Spell);
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        let Effect::GenericEffect { duration, .. } = &*def.effect else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
     }
 
     #[test]
