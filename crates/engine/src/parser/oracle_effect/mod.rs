@@ -19407,6 +19407,22 @@ pub(crate) fn parse_effect_chain_ir(
             chain_parent_target_controller_scope = None;
         }
         let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        // CR 608.2c + CR 109.5: A chained clause whose explicit subject is the caster
+        // ("you"/"you may") switches the acting player back to the ability controller
+        // (CR 109.5: "you"/"your" refer to the object's controller). A non-caster
+        // `anchor_subject` from an earlier clause (e.g. ParentTargetController from
+        // "that land's controller may search") must NOT bleed across this switch —
+        // clause (2)'s "search your library"/"then shuffle" route to the activator,
+        // not the opponent. Two parse shapes carry the caster subject: non-optional
+        // "You search ..." surfaces as leading_subject_application.affected == Controller
+        // (subject.rs); optional "You may search ..." has "you may " peeled by
+        // peel_optional_slots BEFORE subject extraction, surfacing only as
+        // `is_optional && opponent_may_scope.is_none() && player_scope.is_none()`.
+        let chunk_declares_caster_subject =
+            matches!(
+                leading_subject_application.as_ref().map(|s| &s.affected),
+                Some(TargetFilter::Controller)
+            ) || (is_optional && opponent_may_scope.is_none() && player_scope.is_none());
         let inherits_carried_targeted_player_subject = leading_subject_application.is_none()
             && player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -19778,6 +19794,15 @@ pub(crate) fn parse_effect_chain_ir(
                     }
                 }
             }
+        }
+        // CR 608.2c: disarm a stale non-caster anchor before applying it to this
+        // chunk's caster-default effects, so the caster's SearchLibrary{target_player:
+        // None} and Shuffle{Controller} are not rewritten to the earlier subject. The
+        // following extract_player_anchor_in_chain re-arms only on a fresh non-caster
+        // subject (it excludes Controller/Any), so a later subject-less continuation
+        // ("...then shuffle") still inherits the caster.
+        if chunk_declares_caster_subject {
+            anchor_subject = None;
         }
         if let Some(ref anchor) = anchor_subject {
             apply_anchor_subject(&mut clause.effect, anchor);
@@ -30681,6 +30706,121 @@ mod tests {
             shuffle.sub_ability.is_none(),
             "chain must end at Shuffle; got extra: {:?}",
             shuffle.sub_ability
+        );
+    }
+
+    /// CR 608.2c + CR 109.5 + CR 701.23a + CR 701.24a (issue #900): Demolition
+    /// Field — two consecutive subject-anchored search chains in one body. The
+    /// first ("That land's controller may search …, then shuffle") anchors the
+    /// destroyed land's controller as `ParentTargetController`. The second ("You
+    /// may search …, then shuffle") is a CASTER-subject switch (CR 109.5: "you"
+    /// is the activator), so its `SearchLibrary`/`Shuffle` must route to the
+    /// activator — NOT inherit the prior clause's `ParentTargetController` anchor.
+    /// Pre-fix, `anchor_subject` was set once by clause (1) and never reset, so
+    /// clause (2)'s caster-default search wrongly inherited the opponent.
+    #[test]
+    fn demolition_field_you_clause_routes_search_to_activator_not_opponent() {
+        use crate::types::ability::AbilityKind;
+        // Demolition Field's second activated ability body (cost stripped).
+        let def = parse_effect_chain(
+            "Destroy target nonbasic land an opponent controls. That land's controller may search their library for a basic land card, put it onto the battlefield, then shuffle. You may search your library for a basic land card, put it onto the battlefield, then shuffle.",
+            AbilityKind::Activated,
+        );
+        // Collect every (SearchLibrary.target_player, Shuffle.target) down the chain.
+        let mut searches: Vec<Option<TargetFilter>> = Vec::new();
+        let mut shuffles: Vec<TargetFilter> = Vec::new();
+        let mut node: Option<&AbilityDefinition> = Some(&def);
+        while let Some(d) = node {
+            match &*d.effect {
+                Effect::SearchLibrary { target_player, .. } => {
+                    searches.push(target_player.clone());
+                }
+                Effect::Shuffle { target } => {
+                    shuffles.push(target.clone());
+                }
+                _ => {}
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert_eq!(
+            searches.len(),
+            2,
+            "expected two SearchLibrary clauses, got {searches:?}"
+        );
+        assert_eq!(
+            shuffles.len(),
+            2,
+            "expected two Shuffle clauses, got {shuffles:?}"
+        );
+        // Clause (1): "that land's controller" — routes to the opponent's controller.
+        assert_eq!(
+            searches[0].as_ref(),
+            Some(&TargetFilter::ParentTargetController),
+            "clause (1) search must route to the destroyed land's controller"
+        );
+        assert_eq!(
+            shuffles[0],
+            TargetFilter::ParentTargetController,
+            "clause (1) shuffle must route to the destroyed land's controller"
+        );
+        // Clause (2): "you" — caster subject. The fix resets the stale anchor so
+        // this stays a caster-default search (None) or explicit Controller — and
+        // crucially NOT ParentTargetController (the pre-fix bug).
+        assert!(
+            matches!(searches[1].as_ref(), None | Some(TargetFilter::Controller)),
+            "clause (2) search must route to the activator (None/Controller), got {:?}",
+            searches[1]
+        );
+        assert_ne!(
+            searches[1].as_ref(),
+            Some(&TargetFilter::ParentTargetController),
+            "clause (2) search must NOT inherit the opponent's-controller anchor (issue #900)"
+        );
+        assert_eq!(
+            shuffles[1],
+            TargetFilter::Controller,
+            "clause (2) shuffle must route to the activator, not the opponent"
+        );
+    }
+
+    /// CR 608.2c + CR 109.5 + CR 701.23a (issue #900): card-agnostic regression
+    /// for the caster-subject anchor reset using the NON-optional caster form
+    /// ("You search your library …"). This exercises the
+    /// `leading_subject_application.affected == Controller` arm of the reset
+    /// trigger (the Demolition Field card form uses the optional "You may"
+    /// shape, which is peeled to `is_optional` before subject extraction). After
+    /// a non-caster subject chain establishes `ParentTargetController`, the
+    /// caster-subject clause must reset the anchor so its search routes to the
+    /// activator, not the earlier subject.
+    #[test]
+    fn caster_subject_switch_resets_chain_anchor_for_search() {
+        use crate::types::ability::AbilityKind;
+        let def = parse_effect_chain(
+            "Destroy target nonbasic land an opponent controls. That land's controller searches their library for a basic land card, puts it onto the battlefield, then shuffles. You search your library for a basic land card, put it onto the battlefield, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let mut searches: Vec<Option<TargetFilter>> = Vec::new();
+        let mut node: Option<&AbilityDefinition> = Some(&def);
+        while let Some(d) = node {
+            if let Effect::SearchLibrary { target_player, .. } = &*d.effect {
+                searches.push(target_player.clone());
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert_eq!(
+            searches.len(),
+            2,
+            "expected exactly two SearchLibrary clauses, got {searches:?}"
+        );
+        assert_eq!(
+            searches[0].as_ref(),
+            Some(&TargetFilter::ParentTargetController),
+            "clause (1) search must route to the prior non-caster subject"
+        );
+        assert!(
+            matches!(searches[1].as_ref(), None | Some(TargetFilter::Controller)),
+            "clause (2) caster-subject search must route to the activator, got {:?}",
+            searches[1]
         );
     }
 
