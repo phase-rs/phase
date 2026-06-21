@@ -277,7 +277,7 @@ fn payment_cost(
             _ => card_value(state, obj_id) * 0.5,
         },
         PayCostKind::RemoveCounter { .. } => permanent_value(state, obj_id) * 0.5,
-        PayCostKind::TapCreatures => permanent_value(state, obj_id) * 0.35,
+        PayCostKind::TapCreatures { .. } => permanent_value(state, obj_id) * 0.35,
         PayCostKind::Behold { .. } => card_value(state, obj_id) * 0.1,
         PayCostKind::Sacrifice => sacrifice_cost(state, obj_id, penalties),
     }

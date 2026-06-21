@@ -206,7 +206,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "domri's ambush",
     "durkwood tracker",
     "effie, fast learner",
-    "electrosiphon",
     "electryte",
     "exile",
     "felling blow",
@@ -305,6 +304,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "teval, arbiter of virtue",
     "teyo, aegis adept",
     "the aesir escape valhalla",
+    "the ancient one",
     "the bears of littjara",
     "the creation of avacyn",
     "the great aerie",
@@ -346,6 +346,7 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "breeches, the blastmaker",
     "brightmare",
     "calibrated blast",
+    "caustic bronco",
     "cinder cloud",
     "cleric class",
     "consuming vapors",
@@ -395,6 +396,7 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "mirkwood elk",
     "narset of the ancient way",
     "niambi, esteemed speaker",
+    "nightmares and daydreams",
     "orchard warden",
     "orim's thunder",
     "overwhelming intellect",
@@ -541,7 +543,15 @@ fn anaphoric_scope_set_is_frozen() {
     // runtime resolves it to the boosted creature, targets[0]) — adding Burrog
     // Barrage and Wolf Strike (+2), while Osseous Sticktwister's "this creature
     // deals damage equal to its power" self-source clause correctly resolves to
-    // Source, not Anaphoric (-1) — taking the count to 172.
+    // Source, not Anaphoric (-1) — taking the count to 172. The reflexive
+    // "When you discard a card this way" feature surfaced The Ancient One's
+    // "mills cards equal to its mana value" anaphor (the discarded card),
+    // taking the count to 173. Upstream's counter-then-act handling then
+    // reclassified Electrosiphon's "you get {E} equal to its mana value" from
+    // the Anaphoric pronoun to the more specific Recipient scope (the countered
+    // spell), dropping it back out (-1) for a net count of 172. Vivien's
+    // Invocation remains Anaphoric: the reflexive-trigger anaphor handling in
+    // this batch keeps its "its mana value" pointing at the entering creature.
     assert_eq!(
         observed.len(),
         172,
@@ -592,17 +602,30 @@ fn demonstrative_scope_set_is_frozen() {
     // grammar so the category-4 bare demonstrative ("that spell's / that card's
     // mana value") now parses on three more cards — Daredevil (Fearless Fighter),
     // The Frightful Four, and Thor (God of Thunder) — taking the count to 114.
+    // The no-infix-window delayed-trigger split (Saga chapter bodies, cluster-33)
+    // now parses Nightmares and Daydreams' "Until your next turn, whenever you
+    // cast an instant or sorcery spell, target player mills cards equal to that
+    // spell's mana value." — surfacing its "that spell's mana value" bare
+    // demonstrative (+1) and taking the count to 115. The Otherwise if/else
+    // feature (saddle-gated reveal-then-act) then parses Caustic Bronco's "You
+    // lose life equal to that card's mana value if ~ isn't saddled. Otherwise,
+    // each opponent loses that much life." — surfacing its "that card's mana
+    // value" bare demonstrative (+1) and taking the count to 116. (The upstream
+    // nom quantity call-site migration briefly resolved Nightmares and Daydreams
+    // out of the demonstrative set, but the delayed-trigger split combined with
+    // this batch's grammar keeps it parsing as a bare demonstrative, so it is
+    // retained.)
     assert_eq!(
         observed.len(),
-        114,
-        "Expected exactly 114 cards retaining ObjectScope::Demonstrative. Count \
+        116,
+        "Expected exactly 116 cards retaining ObjectScope::Demonstrative. Count \
          moved to {}.",
         observed.len()
     );
     assert_eq!(
         DEMONSTRATIVE_SCOPE_CARDS.len(),
-        114,
-        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 114 cards."
+        116,
+        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 116 cards."
     );
 }
 

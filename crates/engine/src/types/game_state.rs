@@ -12,8 +12,8 @@ use super::ability::{
     ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
     CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
     KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    ThisWayCause, TriggerCondition, TriggerDefinition,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -560,6 +560,17 @@ pub struct BattlefieldEntryRecord {
     pub supertypes: Vec<Supertype>,
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 403.3 + CR 603.10: keyword abilities the object had at the moment it
+    /// entered (entry snapshot per CR 403.3), so look-back conditions ("a creature
+    /// with flying entered this turn") evaluate via the CR 603.10 last-known-state
+    /// against entry-time characteristics (like the existing core_types/colors
+    /// snapshots). KNOWN LIMITATION: this captures the object's keywords at record
+    /// time, which is BEFORE the layer system re-evaluates (layers are only marked
+    /// dirty, not recomputed, at zone-change). Printed flyers and keyword-counter /
+    /// intrinsic flyers are counted; a creature granted flying ONLY by a Layer-6
+    /// continuous effect (e.g. an anthem) at the moment it enters is NOT counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
 }
 
@@ -2460,7 +2471,20 @@ pub enum PayCostKind {
         #[serde(default)]
         selection: CounterCostSelection,
     },
-    TapCreatures,
+    /// CR 601.2b: Tap creatures as a cost. `aggregate` distinguishes the two
+    /// `TapCreaturesRequirement` shapes at the interactive payment layer: `None`
+    /// is the fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
+    /// creatures; Conspire/Convoke), while `Some(aggregate)` is the aggregate
+    /// "tap any number satisfying the constraint" form (Crew CR 702.122a / Saddle
+    /// CR 702.171a / Teamwork) — the chosen set may be any size whose total
+    /// positive power (CR 208.1) satisfies `aggregate`'s comparator vs its value.
+    /// Carrying the full `TapCreaturesAggregate` (not just a threshold int) keeps
+    /// the payment validator honoring the advertised comparator instead of
+    /// hard-coding `>=`.
+    TapCreatures {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aggregate: Option<TapCreaturesAggregate>,
+    },
     Behold {
         action: BeholdCostAction,
     },
@@ -3161,6 +3185,17 @@ pub enum WaitingFor {
     },
     TriggerTargetSelection {
         player: PlayerId,
+        /// Controller of the triggered ability whose targets are being chosen.
+        /// This can differ from `player` for "of their choice" prompts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_controller: Option<PlayerId>,
+        /// Event that caused this triggered ability, if the trigger needs it for
+        /// display or event-context quantities while targets are being chosen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        /// Full simultaneous-event batch for this trigger instance.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trigger_events: Vec<GameEvent>,
         target_slots: Vec<TargetSelectionSlot>,
         /// CR 700.2 / CR 601.2b: Per-slot mode display label, parallel to
         /// `target_slots` (`mode_labels[i]` ↔ `target_slots[i]`). Populated for
@@ -3580,6 +3615,21 @@ pub enum WaitingFor {
         player: PlayerId,
         candidates: Vec<ObjectId>,
     },
+    /// CR 709.5f-g: A resolving lock/unlock-door effect needs the player to
+    /// choose which door (half) of the targeted Room to act on. `options`
+    /// enumerates each legal (operation, door) pair from `room::eligible_doors`
+    /// — locked halves to unlock (CR 709.5f), unlocked halves to lock (CR
+    /// 709.5g). For a "lock or unlock" effect both operations can appear, so the
+    /// player chooses operation and door together. Answered with
+    /// `GameAction::ChooseRoomDoor { object_id, op, door }`.
+    ChooseRoomDoor {
+        player: PlayerId,
+        object_id: ObjectId,
+        options: Vec<(
+            crate::types::ability::DoorLockOp,
+            crate::game::game_object::RoomDoor,
+        )>,
+    },
     /// CR 701.49a: Player chooses which dungeon to venture into (no active dungeon).
     ChooseDungeon {
         player: PlayerId,
@@ -3792,6 +3842,17 @@ pub enum WaitingFor {
         /// Use [`VoteActor::resolve`] with `player` to get the player
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
+        /// CR 701.38a: How the completed tally maps to effects (the
+        /// strict-majority/tie outcome of `Threshold` is card-defined, not a
+        /// CR subrule). Carried on the WaitingFor (not re-derived from the
+        /// source ability) so the final `resolve_tally` can branch between
+        /// per-vote fan-out (`VoteTally::PerVote`) and single-outcome
+        /// Will-of-the-council resolution (`VoteTally::Threshold`) once the
+        /// voter queue empties.
+        /// Defaults to `PerVote` so pre-existing serialized vote states
+        /// deserialize unchanged.
+        #[serde(default)]
+        tally_mode: super::ability::VoteTally,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -4248,6 +4309,7 @@ impl WaitingFor {
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
             WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
             WaitingFor::ChooseDungeon { .. } => "ChooseDungeon",
             WaitingFor::ChooseDungeonRoom { .. } => "ChooseDungeonRoom",
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
@@ -4372,6 +4434,7 @@ impl WaitingFor {
             | WaitingFor::CastingVariantChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
+            | WaitingFor::ChooseRoomDoor { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
             | WaitingFor::SpecializeColor { player, .. }
@@ -5827,6 +5890,14 @@ pub struct GameState {
     /// set is the authoritative "was exerted this turn" record.
     #[serde(default)]
     pub exerted_this_turn: std::collections::HashSet<ObjectId>,
+    /// CR 701.26 + CR 603.4: Count of times each object became tapped this turn,
+    /// keyed by object id. Populated at the central `GameEvent::PermanentTapped`
+    /// observer (the same sink that records damage), so combat, effect, and crew
+    /// taps all count. Cleared at turn start. A value of 1 means "first time this
+    /// turn" — the count model (not a HashSet) keeps the CR 603.4 resolution-time
+    /// re-check of `FirstTimeObjectTappedThisTurn` correct.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub object_tap_count_this_turn: std::collections::HashMap<ObjectId, u32>,
     /// CR 508.1g + CR 508.2: Declaration events (e.g. `AttackersDeclared`) held
     /// while the active player resolves the optional "exert as it attacks"
     /// sub-step. Because triggers are matched against the per-action event slice
@@ -5904,6 +5975,18 @@ pub struct GameState {
     /// resetting the slot when the source leaves and re-enters play.
     #[serde(default)]
     pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 401.5: Tracks `OncePerTurn`
+    /// `StaticMode::TopOfLibraryCastPermission` sources that have already had a
+    /// spell cast through them this turn (Assemble the Players, Johann,
+    /// Apprentice Sorcerer — "Once each turn, you may cast … from the top of
+    /// your library"). Keyed by the granting permanent's ObjectId. `Unlimited`
+    /// frequency permissions (Realmwalker, Future Sight, Bolas's Citadel) never
+    /// populate this set. Cleared at the start of each turn alongside the other
+    /// per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub top_of_library_cast_permissions_used: HashSet<ObjectId>,
     /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
     /// exiled "with" each linked-exile source during the current turn. Keyed
     /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
@@ -7054,6 +7137,7 @@ impl GameState {
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
+            object_tap_count_this_turn: std::collections::HashMap::new(),
             pending_attack_trigger_events: Vec::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
@@ -7063,6 +7147,7 @@ impl GameState {
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
+            top_of_library_cast_permissions_used: HashSet::new(),
             cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),
@@ -8046,6 +8131,9 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
@@ -8305,7 +8393,7 @@ mod tests {
         // variant here does not lose mid-cast tracking.
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
-            kind: PayCostKind::TapCreatures,
+            kind: PayCostKind::TapCreatures { aggregate: None },
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
@@ -8417,6 +8505,9 @@ mod tests {
         use crate::types::ability::TargetRef;
         let wf = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![
                     TargetRef::Object(ObjectId(1)),

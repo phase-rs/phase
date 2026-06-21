@@ -92,6 +92,7 @@ describe("ActionButton", () => {
       gameState: createGameState(waitingFor),
       waitingFor,
       legalActions: [],
+      isResolvingAll: false,
     });
     useUiStore.setState({
       combatMode: null,
@@ -140,6 +141,38 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeInTheDocument();
+  });
+
+  it("disables resolve controls while Resolve All is draining", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState({
+          type: "Priority",
+          data: { player: 0 },
+        }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+      isResolvingAll: true,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

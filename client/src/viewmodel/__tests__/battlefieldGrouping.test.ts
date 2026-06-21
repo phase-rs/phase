@@ -155,7 +155,7 @@ describe("partitionByType", () => {
     expect(result.support).toEqual([]);
   });
 
-  it("excludes bestowed Aura-creature (Creature + Enchantment core types) when attached", () => {
+  it("excludes attached Aura subtype permanents from main rows", () => {
     // CR 702.103: Bestowed creatures are Auras as long as attached. Their
     // core_types still includes "Creature" — without the attached_to filter
     // running first, they'd land in the creatures row AND the chip row.

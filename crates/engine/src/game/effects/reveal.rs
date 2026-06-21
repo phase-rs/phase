@@ -4,12 +4,12 @@ use crate::types::game_state::GameState;
 
 /// CR 701.20: Reveal a specific object to all players.
 ///
-/// Scope: only `TargetFilter::SelfRef` (resolves to `ability.source_id`) and
-/// pre-resolved `TargetRef::Object` targets are supported. Other filter shapes
-/// (e.g., `TargetFilter::Typed`) would require routing through the general
-/// target-resolution pipeline and are intentionally not handled here — the parser
-/// only emits `Effect::Reveal { target: SelfRef }` today. Extend this resolver
-/// (and add parser coverage) before introducing other target shapes.
+/// Scope: `TargetFilter::SelfRef` (resolves to `ability.source_id`),
+/// `ParentTarget` (chained reveal), and pre-resolved `TargetRef::Object` targets
+/// are supported via the shared 3-tier `resolved_targets` dispatch. "Reveal
+/// target <object>" (Hauntwoods Shrieker) resolves its `Typed` filter through
+/// the targeting pipeline, which populates `ability.targets` before this
+/// resolver runs, so the targeted object is read here as a pre-resolved object.
 ///
 /// Emits a single `GameEvent::CardsRevealed` carrying all revealed card ids and names.
 ///
@@ -45,6 +45,13 @@ pub fn resolve(
             .iter()
             .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
             .collect();
+
+        // CR 700.1 + CR 701.20: a chained rider that inspects the revealed card
+        // ("If it's a creature card, …" — Hauntwoods Shrieker) and an anaphoric
+        // follow-up ("turn it face up") both read `last_revealed_ids`. Record
+        // the revealed objects so the sub-ability's `RevealedHasCardType`
+        // condition and `it` pronoun resolve to the just-revealed permanent.
+        state.last_revealed_ids = object_ids.clone();
 
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
@@ -156,6 +163,48 @@ mod tests {
             card_ids,
             vec![source],
             "SelfRef reveal must reveal the source, not the propagated parent target"
+        );
+    }
+
+    #[test]
+    fn reveal_records_last_revealed_ids_for_chained_riders() {
+        // CR 700.1 + CR 701.20 (Hauntwoods Shrieker class): a targeted reveal
+        // must record the revealed object in `last_revealed_ids` so a chained
+        // "If it's a creature card, turn it face up" rider and the anaphoric
+        // "it" target both resolve to the just-revealed permanent. Reverting the
+        // `last_revealed_ids` write leaves the vec empty and the assertion fails.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hauntwoods Shrieker".to_string(),
+            Zone::Battlefield,
+        );
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Face-Down".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Reveal {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(revealed)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.last_revealed_ids,
+            vec![revealed],
+            "the revealed object must be recorded for chained riders to read"
         );
     }
 

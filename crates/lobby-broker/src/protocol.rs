@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Minimum protocol version accepted at the hello handshake. The window is
 /// "current and previous" by policy, so a release-vs-preview deployment can

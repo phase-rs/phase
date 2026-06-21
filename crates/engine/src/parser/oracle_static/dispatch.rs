@@ -1312,6 +1312,22 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 613.1e + CR 105.2 / CR 105.3: "[subject] is/are [color expression]" for
+    // an ARBITRARY filter subject — Leyline of the Guildpact ("Each nonland
+    // permanent you control is all colors"), Shimmerwilds Growth ("Enchanted land
+    // is the chosen color"). Generalizes `parse_all_subject_are_color` (the "All
+    // ..." quantifier) and adds the "the chosen color" reading. Dispatched AFTER
+    // the specialized color branches so they keep ownership of their cases: the
+    // "All ..." fast path (`parse_all_subject_are_color`, which routes
+    // artifact/land subtypes through `typed_filter_for_subtype`) and the
+    // self-referential color CDA (`parse_self_subject_is_color_cda`, which
+    // marks `~ is colorless` characteristic-defining and declines raw card
+    // names). This branch only claims the residual general-filter subjects those
+    // two leave unparsed.
+    if let Some(def) = parse_subject_is_color(&tp, &text) {
+        return Some(def);
+    }
+
     // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
     //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
     if let Some(def) = parse_cda_pt_equality(tp.lower, tp.original) {
@@ -2178,6 +2194,59 @@ pub(crate) fn parse_static_line_inner(
                 .description(text.to_string()),
             );
         }
+    }
+
+    // --- "<Keyword> abilities of [subject] cost {N} less to activate" ---
+    // CR 601.2f: Class-scoped keyword-ability activation cost reduction keyed on
+    // a tagged activated keyword (CR 602.1). The keyword is the ability tag
+    // ("power-up", "exhaust", "boast", "outlast"); the static runtime gate
+    // (`apply_static_activated_ability_cost_reduction`) matches the activating
+    // ability's `AbilityTag::keyword_str()`. The `<subject>` filter is routed
+    // through `parse_type_phrase`, which handles the "other" self-exclusion.
+    //   - Hulk / Gamma Goliath: "Power-up abilities of other creatures you control…"
+    //   - Boom Scholar: "Exhaust abilities of other permanents you control…"
+    if let Some(((keyword, subject, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, keyword) = parse_taggable_ability_keyword(i)?;
+        let (i, _) = tag(" abilities of ").parse(i)?;
+        let (i, subject) = take_until(" cost ").parse(i)?;
+        let (i, _) = tag(" cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (keyword, subject.to_string(), amount)))
+    }) {
+        let (affected, _rest) = parse_type_phrase(&subject);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: keyword.to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
+    // --- "Each power-up ability of [subject] can be activated an additional time" ---
+    // CR 602.5b: Class-scoped power-up activation-limit raise (Wonder
+    // Man / Hollywood Hero). Power-up's base limit is once-per-game; "an additional
+    // time" with no per-turn qualifier raises the per-game cap to 2.
+    if let Some((subject, _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("each power-up ability of ").parse(i)?;
+        let (i, subject) = take_until(" can be activated an additional time").parse(i)?;
+        let (i, _) = tag(" can be activated an additional time").parse(i)?;
+        Ok((i, subject.to_string()))
+    }) {
+        let (affected, _rest) = parse_type_phrase(&subject);
+        return Some(
+            StaticDefinition::new(StaticMode::ModifyActivationLimit {
+                keyword: "power-up".to_string(),
+                new_limit: 2,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
     }
 
     // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---

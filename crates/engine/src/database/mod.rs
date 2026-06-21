@@ -11,6 +11,7 @@ pub mod meld;
 pub mod mtgjson;
 pub mod oracle_loader;
 pub mod search;
+pub mod set_gating;
 pub mod synthesis;
 pub mod unearth;
 

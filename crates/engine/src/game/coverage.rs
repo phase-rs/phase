@@ -13,13 +13,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
+    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -49,6 +49,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
         // marked damage from permanents matching an active such static's
         // `affected` filter. Not registry-keyed (mirrors the marker cluster).
         StaticMode::DamageNotRemovedDuringCleanup
+            // CR 701.60a + CR 701.60d: nullary marker static — runtime
+            // enforcement is the suspect resolver's `can_become_suspected` gate
+            // (effects/suspect.rs), which refuses to designate a permanent
+            // carrying this static. The `affected` filter scopes the protected
+            // permanents. Not registry-keyed (mirrors the marker cluster).
+            | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
@@ -173,6 +179,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // modifier kind + action list (Giant Ox, Hotshot Mechanic). Runtime
             // enforcement is in static_abilities.rs::object_crew_power_contribution.
             | StaticMode::CrewContribution { .. }
+            // CR 702 + CR 613.1f: CantHaveKeyword carries the denied Keyword
+            // discriminant (Archetype cycle). Runtime enforcement is in
+            // layers.rs::apply_cant_have_keyword_denials (layer 6, ability-
+            // removing effects). Parameterized — no registry entry; coverage
+            // support here.
+            | StaticMode::CantHaveKeyword { .. }
     )
 }
 
@@ -718,6 +730,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
+            FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
             FilterProp::InAnyZone { zones } => {
@@ -762,6 +775,28 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
+            }
+            FilterProp::CountersPutOnThisTurn {
+                actor,
+                counters,
+                comparator,
+                count,
+            } => {
+                let kind = match counters {
+                    CounterMatch::Any => "any".to_string(),
+                    CounterMatch::OfType(ct) => ct.as_str().to_string(),
+                };
+                let cmp = match comparator {
+                    Comparator::GE => "≥",
+                    Comparator::LE => "≤",
+                    Comparator::GT => ">",
+                    Comparator::LT => "<",
+                    Comparator::EQ => "=",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!(
+                    "{actor:?} put {cmp}{count} {kind} counters on this turn"
+                ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
@@ -1865,6 +1900,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::EachDealsDamageEqualToPower { sources, recipient } => {
+            d.push(("sources".into(), fmt_target(sources)));
+            d.push(("recipient".into(), fmt_target(recipient)));
+        }
         Effect::SearchOutsideGame {
             filter,
             count,
@@ -1947,7 +1987,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
-        | Effect::Suspect { target }
+        | Effect::Suspect { target, .. }
+        | Effect::Unsuspect { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
@@ -1956,7 +1997,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
-        | Effect::Regenerate { target } => {
+        | Effect::Regenerate { target }
+        | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
@@ -2014,7 +2056,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Counter {
             target,
             source_rider,
-            ..
+            countered_spell_zone,
         } => {
             d.push(("target".into(), fmt_target(target)));
             match source_rider {
@@ -2023,6 +2065,22 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 }
                 Some(CounterSourceRider::Destroy) => {
                     d.push(("+ destroy".into(), "source".into()));
+                }
+                None => {}
+            }
+            // CR 701.6a + CR 614.1a: countered-spell destination redirect.
+            match countered_spell_zone {
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Top,
+                }) => d.push(("redirect".into(), "library top".into())),
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::Bottom,
+                }) => d.push(("redirect".into(), "library bottom".into())),
+                Some(CounteredSpellDestination::Library {
+                    position: LibraryPosition::NthFromTop { n },
+                }) => d.push(("redirect".into(), format!("library #{n} from top"))),
+                Some(CounteredSpellDestination::Hand) => {
+                    d.push(("redirect".into(), "hand".into()))
                 }
                 None => {}
             }
@@ -2113,12 +2171,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::DoublePT { mode, target } => {
+        Effect::DoublePT {
+            mode,
+            target,
+            factor,
+        } => {
             d.push(("mode".into(), fmt_double_pt_mode(mode).into()));
+            if *factor != 2 {
+                d.push(("factor".into(), factor.to_string()));
+            }
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::DoublePTAll { mode, target } => {
+        Effect::DoublePTAll {
+            mode,
+            target,
+            factor,
+        } => {
             d.push(("mode".into(), fmt_double_pt_mode(mode).into()));
+            if *factor != 2 {
+                d.push(("factor".into(), factor.to_string()));
+            }
             d.push(("filter".into(), fmt_target(target)));
         }
         Effect::DiscardCard { count, target } => {
@@ -2598,9 +2670,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("kept".into(), format!("{:?}", kept_destination)));
             d.push(("rest".into(), format!("{:?}", rest_destination)));
         }
-        Effect::Discover { mana_value_limit } => {
+        Effect::Discover {
+            mana_value_limit,
+            player,
+        } => {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
+            d.push(("player".into(), format!("{player:?}")));
         }
+        // Heist (Arena digital-only): look step records the look count.
+        Effect::Heist { look_count, .. } => {
+            d.push(("look".into(), look_count.to_string()));
+        }
+        // Heist finalizer continuation — no displayable parameter.
+        Effect::HeistExile => {}
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
@@ -2644,6 +2726,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Detain { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::SetRoomDoorLock { op, target } => {
+            d.push((
+                "op".into(),
+                match op {
+                    crate::types::ability::DoorLockOp::Unlock => "unlock".into(),
+                    crate::types::ability::DoorLockOp::Lock => "lock".into(),
+                    crate::types::ability::DoorLockOp::LockOrUnlock => "lock or unlock".into(),
+                },
+            ));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::ExtraTurn { target } => {
@@ -2715,8 +2808,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Endure { amount } => {
             d.push(("amount".into(), amount.to_string()));
         }
-        Effect::BlightEffect { count } => {
+        Effect::BlightEffect { count, player } => {
             d.push(("count".into(), count.to_string()));
+            d.push(("player".into(), format!("{player:?}")));
         }
         Effect::Seek {
             filter,
@@ -2780,6 +2874,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
+        | Effect::BecomeSaddled { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
@@ -2788,6 +2883,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Explore
         | Effect::Investigate
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -5544,6 +5640,7 @@ fn extract_effect_quantity_features(
 ) {
     match effect {
         Effect::DealDamage { amount, .. } => extract_quantity_features(amount, features),
+        Effect::ApplyPostReplacementDamage { .. } => {}
         Effect::Draw { count, .. } => extract_quantity_features(count, features),
         Effect::Mill { count, .. } => extract_quantity_features(count, features),
         Effect::GainLife { amount, .. } => extract_quantity_features(amount, features),
@@ -5919,9 +6016,11 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::Not { .. } => ("Not", Handled),
         StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Unhandled),
         StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
-        StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Unhandled),
-        StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
-        StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
+        // CR 508.1k / 509.1g / 509.1h: runtime-evaluated against the live combat
+        // attacker/blocker sets (conditions.rs:81 / layers.rs:1118 / layers.rs:1123).
+        StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
+        StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Handled),
+        StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Handled),
         StaticCondition::IsMonarch => ("IsMonarch", Handled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
@@ -5937,10 +6036,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
-        StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
-        StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
-        StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
-        StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
+        // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
+        StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
+        // SourceIsEnchanted resolved by layers::evaluate_condition (layers.rs:1066)
+        StaticCondition::SourceIsEnchanted => ("SourceIsEnchanted", Handled),
+        // SourceIsMonstrous resolved by layers::evaluate_condition (layers.rs:1071)
+        StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Handled),
+        // SourceAttachedToCreature resolved by layers::evaluate_condition (layers.rs:1078)
+        StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
+        // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
+        StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
         // object's zone against the specified zone. Runtime-handled.
@@ -7164,6 +7269,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            // CR 701.60a + CR 701.60d: Airtight Alibi's "can't become suspected".
+            StaticMode::CantBecomeSuspected => effective_lower.contains("can't become suspected"),
             StaticMode::CantCrew => {
                 effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
             }
@@ -10821,6 +10928,41 @@ mod tests {
         );
     }
 
+    /// Drift guard for MSH Wave 5a Group I: the five source-state static
+    /// conditions are resolved at runtime by `layers::evaluate_condition`, so the
+    /// classifier must report them `Handled` (their cards — Armed Assailant,
+    /// Fleecemane Lion, Patriot — were falsely flagged unsupported). Pins EXACTLY
+    /// the flipped variants; sibling stubs (UnlessPay, Unrecognized, etc.) are
+    /// intentionally NOT asserted here so a future stub does not silently pass.
+    #[test]
+    fn source_state_static_conditions_are_marked_handled() {
+        let conditions: [(StaticCondition, &str); 5] = [
+            (StaticCondition::SourceIsEquipped, "SourceIsEquipped"),
+            (StaticCondition::SourceIsEnchanted, "SourceIsEnchanted"),
+            (StaticCondition::SourceIsMonstrous, "SourceIsMonstrous"),
+            (
+                StaticCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
+            (
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Any,
+                },
+                "SourceMatchesFilter",
+            ),
+        ];
+
+        for (condition, expected_name) in conditions {
+            let (name, support) = static_condition_feature(&condition);
+            assert_eq!(name, expected_name);
+            assert_eq!(
+                support,
+                FeatureSupport::Handled,
+                "StaticCondition::{expected_name} is resolved by layers::evaluate_condition",
+            );
+        }
+    }
+
     /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by
     /// `is_data_carrying_static` so that cards like Necropotence and
     /// Yawgmoth's Bargain are marked as supported.
@@ -11122,6 +11264,38 @@ mod tests {
         assert!(
             is_static_supported(&supported, &trigger_registry, &static_registry),
             "a plain keyword-grant continuous static must be supported"
+        );
+    }
+
+    /// CR 113.11: CantHaveKeyword is a data-carrying static (parameterized by
+    /// keyword). Archetype of Imagination et al. must be covered once this arm
+    /// is present in `is_data_carrying_static()`.
+    #[test]
+    fn cant_have_keyword_static_has_no_coverage_gap() {
+        let mut face = make_face();
+        let oracle = "Creatures your opponents control lose flying and can't have or gain flying.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantHaveKeyword {
+                keyword: Keyword::Flying,
+            },
+            affected: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent),
+            )),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(oracle.to_string()),
+            attack_defended: None,
+        });
+
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
         );
     }
 }

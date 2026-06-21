@@ -106,6 +106,7 @@ fn countered_spell_under_two_redirects_surfaces_prompt_and_exiles() {
         Effect::Counter {
             target: TargetFilter::Any,
             source_rider: None,
+            countered_spell_zone: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9999),

@@ -336,7 +336,10 @@ fn resolve_choice(
         // behavior — Discard / Sacrifice / Exile / RemoveCounter PayCost kinds
         // fall through to the catch-all below, as their old variants did).
         WaitingFor::PayCost {
-            kind: PayCostKind::ReturnToHand | PayCostKind::Behold { .. } | PayCostKind::TapCreatures,
+            kind:
+                PayCostKind::ReturnToHand
+                | PayCostKind::Behold { .. }
+                | PayCostKind::TapCreatures { .. },
             ..
         }
         | WaitingFor::ManaPayment { .. }

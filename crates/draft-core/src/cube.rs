@@ -13,6 +13,12 @@ use crate::types::{DeckAddableCards, DraftCardInstance, DraftConfig, DraftError,
 pub struct CubeListEntry {
     pub name: String,
     pub count: u32,
+    /// Optional Scryfall oracle id, carried by CubeCobra-fetched lists as a
+    /// trailing `[oracle-id]` annotation. Used as a resolution fallback when the
+    /// source's cached name no longer matches the printed name (e.g. a cube
+    /// snapshotted under a set's pre-reveal placeholder names). Manual paste
+    /// lists omit it.
+    pub oracle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize)]
@@ -41,7 +47,7 @@ pub fn parse_cube_list(text: &str) -> Result<Vec<CubeListEntry>, Vec<CubeImportE
             errors.push(CubeImportError::InvalidLine { line: idx + 1 });
             continue;
         };
-        let name = name.trim();
+        let (name, oracle_id) = split_oracle_id(name.trim());
         if count == 0 || name.is_empty() {
             errors.push(CubeImportError::InvalidLine { line: idx + 1 });
             continue;
@@ -50,6 +56,7 @@ pub fn parse_cube_list(text: &str) -> Result<Vec<CubeListEntry>, Vec<CubeImportE
         entries.push(CubeListEntry {
             name: name.to_string(),
             count,
+            oracle_id,
         });
     }
 
@@ -60,6 +67,29 @@ pub fn parse_cube_list(text: &str) -> Result<Vec<CubeListEntry>, Vec<CubeImportE
     }
 }
 
+/// Split an optional trailing `[oracle-id]` annotation off a cube line's name.
+/// CubeCobra-fetched lists append each card's Scryfall oracle id so imports stay
+/// resilient when the source's cached name drifts from the printed name; manual
+/// paste lists omit it. Only a bracketed UUID-shaped token is treated as an id,
+/// so card names that happen to end in brackets are left intact.
+fn split_oracle_id(name: &str) -> (&str, Option<String>) {
+    if let Some(without_close) = name.strip_suffix(']') {
+        if let Some((before, candidate)) = without_close.rsplit_once('[') {
+            if is_oracle_id(candidate) {
+                return (before.trim_end(), Some(candidate.to_string()));
+            }
+        }
+    }
+    (name, None)
+}
+
+/// A Scryfall oracle id is a UUID: ASCII hex digits and hyphens, with at least
+/// one hyphen. This guard distinguishes ids from any incidental `[...]` suffix
+/// in a real card name.
+fn is_oracle_id(candidate: &str) -> bool {
+    candidate.contains('-') && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
 pub fn cube_cards_from_entries(
     entries: &[CubeListEntry],
     db: &CardDatabase,
@@ -68,7 +98,15 @@ pub fn cube_cards_from_entries(
     let mut errors = Vec::new();
 
     for entry in entries {
-        let Some(face) = db.get_face_by_name(&entry.name) else {
+        // Name first (stable for the vast majority and works for manual paste
+        // lists), oracle id as a fallback for names the source cached wrong.
+        let face = db.get_face_by_name(&entry.name).or_else(|| {
+            entry
+                .oracle_id
+                .as_deref()
+                .and_then(|oracle_id| db.get_face_by_oracle_id(oracle_id))
+        });
+        let Some(face) = face else {
             errors.push(CubeImportError::UnknownCard {
                 name: entry.name.clone(),
             });
@@ -294,6 +332,74 @@ mod tests {
         let unique: HashSet<String> = names.iter().cloned().collect();
         assert_eq!(names.len(), 8);
         assert_eq!(unique.len(), 8);
+    }
+
+    #[test]
+    fn parses_oracle_id_annotation() {
+        let entries = parse_cube_list(
+            "1 Spider-Woman, Stunning Savior [be2b9c6d-4ecb-49ec-b276-4aa93c5dfc00]\n\
+             2 Island\n\
+             1 Weird Card [not-a-uuid!]\n",
+        )
+        .unwrap();
+        // Annotated line: id stripped from the name, captured separately.
+        assert_eq!(entries[0].name, "Spider-Woman, Stunning Savior");
+        assert_eq!(
+            entries[0].oracle_id.as_deref(),
+            Some("be2b9c6d-4ecb-49ec-b276-4aa93c5dfc00")
+        );
+        // Plain manual line: no id.
+        assert_eq!(entries[1].name, "Island");
+        assert_eq!(entries[1].oracle_id, None);
+        // A name that merely ends in brackets (non-UUID) is left intact.
+        assert_eq!(entries[2].name, "Weird Card [not-a-uuid!]");
+        assert_eq!(entries[2].oracle_id, None);
+    }
+
+    #[test]
+    fn cube_cards_resolve_by_oracle_id_when_name_is_stale() {
+        // A card present under its printed name, carrying a known oracle id.
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "spider-woman, stunning savior".to_string(),
+            serde_json::json!({
+                "name": "Spider-Woman, Stunning Savior",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Spider", "Hero"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": "be2b9c6d-4ecb-49ec-b276-4aa93c5dfc00", "legalities": {}
+            }),
+        );
+        let db = CardDatabase::from_json_str(&serde_json::to_string(&map).unwrap()).unwrap();
+
+        // The import names the card by a stale pre-reveal placeholder that no
+        // longer exists, but carries the correct oracle id.
+        let entries = vec![CubeListEntry {
+            name: "Makdee and Itla, Skysnarers".to_string(),
+            count: 1,
+            oracle_id: Some("be2b9c6d-4ecb-49ec-b276-4aa93c5dfc00".to_string()),
+        }];
+        let cards = cube_cards_from_entries(&entries, &db).unwrap();
+        assert_eq!(cards.len(), 1);
+        // Resolved to the real printed card via the oracle-id fallback.
+        assert_eq!(cards[0].name, "Spider-Woman, Stunning Savior");
+    }
+
+    #[test]
+    fn cube_cards_unknown_name_without_oracle_id_still_errors() {
+        let db = CardDatabase::from_json_str("{}").unwrap();
+        let entries = vec![CubeListEntry {
+            name: "Not A Card".to_string(),
+            count: 1,
+            oracle_id: None,
+        }];
+        let errors = cube_cards_from_entries(&entries, &db).unwrap_err();
+        assert!(matches!(
+            &errors[0],
+            CubeImportError::UnknownCard { name } if name == "Not A Card"
+        ));
     }
 
     #[test]

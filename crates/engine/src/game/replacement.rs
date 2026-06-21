@@ -1592,7 +1592,14 @@ fn draw_replacement_count(
 
     match &*execute.effect {
         Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
-            let resolved = resolve_event_replacement_quantity(qty, *count)?;
+            // CR 121.2 + CR 614.11a: "draw N cards instead" replacements
+            // (Teferi's Ageless Insight: Fixed(2)) apply to each card draw
+            // in the draw sequence — Brainsurge drawing four becomes eight,
+            // not two.
+            let resolved = match qty {
+                QuantityExpr::Fixed { value } => value.saturating_mul(*count as i32),
+                _ => resolve_event_replacement_quantity(qty, *count)?,
+            };
             Some(resolved.max(0) as u32)
         }
         _ => None,
@@ -2210,7 +2217,14 @@ fn create_token_applier(
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    let (modification, additional_spec, ensure_specs, owner_redirect, source_controller) = state
+    let (
+        modification,
+        additional_spec,
+        ensure_specs,
+        owner_redirect,
+        substitute_effect,
+        source_controller,
+    ) = state
         .objects
         .get(&rid.source)
         .and_then(|obj| {
@@ -2224,10 +2238,17 @@ fn create_token_applier(
                 def.additional_token_spec.clone(),
                 def.ensure_token_specs.clone(),
                 def.token_owner_redirect.clone(),
+                // CR 614.1a + CR 111.1: Full token-substitution payload
+                // (Divine Visitation) — carried as an Effect::Token in the
+                // existing `execute` field (Approach A, no new field).
+                def.execute
+                    .as_deref()
+                    .map(|ability| (*ability.effect).clone())
+                    .filter(|effect| matches!(effect, Effect::Token { .. })),
                 controller,
             )
         })
-        .unwrap_or((None, None, None, None, PlayerId(0)));
+        .unwrap_or((None, None, None, None, None, PlayerId(0)));
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -2280,6 +2301,27 @@ fn create_token_applier(
             Some(QuantityModification::Prevent) => return ApplyResult::Prevented,
             None => count,
         };
+
+        // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation —
+        // "that many 4/4 white Angel creature tokens … are created instead").
+        // The `execute` Effect::Token describes the substitute token; resolve it
+        // to a TokenSpec and swap it for the proposed spec, keeping the event's
+        // `new_count` ("that many" — same count) and `owner`. The creature-type
+        // gate (`TokenCoreTypeMatches`) already passed in
+        // `find_applicable_replacements`, so non-creature tokens never reach here.
+        if let Some(token_effect) = substitute_effect {
+            let ability = crate::types::ability::ResolvedAbility::new(
+                token_effect,
+                Vec::new(),
+                rid.source,
+                source_controller,
+            );
+            if let Some((substitute_spec, _, _, _)) =
+                crate::game::effects::token::resolve_token_spec(state, &ability)
+            {
+                spec = Box::new(substitute_spec);
+            }
+        }
 
         // CR 614.1a + CR 111.1: "those tokens plus ..." — emit an additional
         // CreateToken for the appended spec class (Chatterfang Squirrels,
@@ -2773,10 +2815,51 @@ fn dealt_damage_matcher(event: &ProposedEvent, source: ObjectId, state: &GameSta
 
 fn dealt_damage_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
+    // CR 614.1a + CR 120.6 + CR 510.2: Wolverine, Fierce Fighter — "instead
+    // that damage is dealt, but all other damage already dealt to him is
+    // healed." The new damage instance is delivered UNCHANGED (we return
+    // `Modified(event)` verbatim, NO prevention); we only clear the receiver's
+    // PRIOR marked damage here, when the replacement carries an
+    // `Effect::RemoveAllDamage` in `execute`.
+    //
+    // COMBAT-BATCH INVARIANT (load-bearing — do not break without updating the
+    // gang-block regression test): this applier runs in **Phase B**
+    // (`replace_combat_damage_batch`, combat_damage.rs:869-871) for EVERY damage
+    // event in the combat step, BEFORE any Phase-C delivery. The SOLE
+    // `damage_marked` increment lives in `apply_damage_after_replacement`
+    // (deal_damage.rs:446), reached only in **Phase C**. Therefore at the
+    // instant this heal runs, `damage_marked` holds exactly the PRE-BATCH value
+    // and ZERO same-batch combat instances are marked yet. Clearing it here
+    // heals only prior damage and preserves all simultaneous same-batch
+    // instances (CR 510.2). A future refactor that interleaves Phase-C delivery
+    // into the Phase-B loop would silently over-heal — the combat-batch test
+    // guards against exactly that.
+    let heals = matches!(
+        &event,
+        ProposedEvent::Damage {
+            target: crate::types::ability::TargetRef::Object(oid),
+            ..
+        } if *oid == rid.source
+    ) && state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref())
+        .is_some_and(|execute| {
+            execute.sub_ability.is_none()
+                && matches!(*execute.effect, Effect::RemoveAllDamage { .. })
+        });
+
+    if heals {
+        if let Some(obj) = state.objects.get_mut(&rid.source) {
+            crate::game::effects::remove_all_damage::heal_marked_damage(obj);
+        }
+    }
+
     ApplyResult::Modified(event)
 }
 
@@ -3628,6 +3711,16 @@ fn evaluate_replacement_condition(
                     .iter()
                     .any(|got| got.eq_ignore_ascii_case(wanted))
             }),
+            _ => false,
+        },
+        // CR 614.1a + CR 111.1: "if one or more <core type> tokens would be
+        // created" — applies iff the proposed CreateToken event's spec core
+        // types overlap any listed core type (Divine Visitation gates on
+        // Creature). Non-CreateToken events never match this condition.
+        ReplacementCondition::TokenCoreTypeMatches { core_types } => match event {
+            ProposedEvent::CreateToken { spec, .. } => core_types
+                .iter()
+                .any(|wanted| spec.characteristics.core_types.contains(wanted)),
             _ => false,
         },
         // CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in

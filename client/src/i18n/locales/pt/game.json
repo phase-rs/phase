@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Resolvendo {{resolved}} / {{total}}"
+    "label": "Resolvendo {{resolved}} / {{total}}",
+    "collapse": "Recolher progresso de resolução",
+    "expand": "Expandir progresso de resolução"
   },
   "card": {
     "faceDownName": "Carta virada para baixo",
@@ -171,6 +173,8 @@
     "copyTooltip": "Cópia em ficha de uma carta real",
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
+    "hiddenAttachments": "+{{count}} more attached",
+    "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -208,6 +212,7 @@
     "allTo": "Todos → <name>{{label}}</name>",
     "creatureFallback": "Criatura #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
+    "objectFallback": "Object #{{id}}",
     "you": "Você",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
@@ -516,6 +521,7 @@
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",
     "chooseTarget": "Escolha um alvo",
+    "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nenhum alvo válido disponível",
     "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "até um {{target}}",
@@ -1296,6 +1302,17 @@
     "red": "Vermelho",
     "green": "Verde"
   },
+  "roomDoor": {
+    "title": "Escolha uma porta",
+    "subtitle": "Escolha em qual porta da Sala agir",
+    "confirm": "Confirmar",
+    "option": "{{op}} {{door}}",
+    "unlock": "Destrancar",
+    "lock": "Trancar",
+    "lockOrUnlock": "Trancar ou destrancar",
+    "left": "porta esquerda",
+    "right": "porta direita"
+  },
   "dialogShell": {
     "eyebrow": "Escolha do Jogo",
     "restoreDialog": "Restaurar diálogo",
@@ -1513,6 +1530,9 @@
     "connectionBody": "phase.rs perdeu o vínculo com o motor do jogo — na maioria das vezes causado por uma atualização em segundo plano ativando-se no meio do jogo. Seu último turno salvo está preservado; recarregue para restaurar o jogo.",
     "diagnostic": "diagnóstico: {{reason}}",
     "showDetails": "Mostrar detalhes",
+    "exportGameState": "Exportar estado do jogo",
+    "exported": "Exportado",
+    "exportFailed": "Falha na exportação",
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "Copiado!",
     "reportOnGithub": "Reportar no GitHub",

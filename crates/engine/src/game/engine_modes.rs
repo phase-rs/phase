@@ -517,6 +517,9 @@ fn handle_triggered_mode_choice(
                 .unwrap_or(player);
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
+                trigger_controller: Some(pending_trigger.controller),
+                trigger_event: pending_trigger.trigger_event.clone(),
+                trigger_events: state.pending_trigger_event_batch.clone(),
                 target_slots,
                 mode_labels,
                 target_constraints,

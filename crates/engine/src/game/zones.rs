@@ -18,6 +18,19 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
     obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
 }
 
+fn has_hand_zone_continuous_effects(state: &GameState) -> bool {
+    state.objects.values().any(|obj| {
+        obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .affected
+                    .as_ref()
+                    .and_then(|filter| filter.extract_in_zone())
+                    == Some(Zone::Hand)
+        })
+    })
+}
+
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
 /// into the `to` zone. The default (CR 122.2) is that counters cease to exist on
 /// any zone change. A `StaticMode::CountersPersistAcrossZones` ability overrides
@@ -668,12 +681,14 @@ pub fn move_to_zone(
         record_descend_on_graveyard_arrival(state, object_id, owner);
     }
 
-    // Mark layers dirty when objects enter the battlefield, or the hand (so
-    // Lorehold-style hand-zone grants re-apply to newly-drawn cards).
-    // Exit-side dirty marking is handled by apply_zone_exit_cleanup.
+    // Mark layers dirty when objects enter the battlefield. Hand-zone moves only
+    // need a layer pass when a hand-zone continuous effect is present; ordinary
+    // spells leaving hand for the stack do not affect battlefield layers.
     // CR 702.94a + CR 400.3: hand-zone continuous effects require re-evaluation
     // when a hand object appears or departs.
-    if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
+    if to == Zone::Battlefield
+        || ((to == Zone::Hand || from == Zone::Hand) && has_hand_zone_continuous_effects(state))
+    {
         crate::game::layers::mark_layers_full(state);
     }
 
@@ -1154,8 +1169,16 @@ fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
+    };
     use crate::types::game_state::GameState;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
@@ -1189,6 +1212,75 @@ mod tests {
             Zone::Hand,
         );
         assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn hand_to_stack_without_hand_zone_static_does_not_dirty_layers() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Hand,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Stack, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Stack);
+        assert_eq!(
+            state.layers_dirty,
+            crate::types::game_state::LayersDirty::Clean,
+            "ordinary hand-to-stack movement must not force a full layer pass"
+        );
+    }
+
+    #[test]
+    fn hand_to_stack_with_hand_zone_static_dirties_layers() {
+        let mut state = setup();
+        let grant_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Instant)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Miracle(ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                }),
+            }]);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "HandGrantSource".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.static_definitions.push(grant_static.clone());
+            src.base_static_definitions = Arc::new(vec![grant_static]);
+        }
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Hand,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Stack, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Stack);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "hand-zone continuous effects must re-evaluate when a hand card departs"
+        );
     }
 
     #[test]

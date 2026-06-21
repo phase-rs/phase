@@ -490,6 +490,37 @@ describe("TargetingOverlay", () => {
     expect(screen.getAllByAltText("U")).toHaveLength(2);
   });
 
+  it("shows the active trigger damage amount during target selection", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          trigger_controller: 0,
+          trigger_event: {
+            type: "DamageDealt",
+            data: { source_id: 9, target: { Object: 7 }, amount: 3, is_combat: true },
+          },
+          target_slots: [{ legal_targets: [{ Object: 7 }], optional: false }],
+          selection: { current_slot: 0, current_legal_targets: [{ Object: 7 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("This trigger: 3 damage")).toBeInTheDocument();
+  });
+
   it("prefixes the prompt with the active slot's mode label when present", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({

@@ -349,6 +349,16 @@ export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless
 export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
 export type RoomDoor = "Left" | "Right";
 
+// CR 709.5f-g: Operation a lock/unlock-door effect performs on a Room door
+// (half). Mirrors the engine `DoorLockOp` enum (`#[serde(tag = "type")]` —
+// internally tagged, so serializes as `{ "type": "Unlock" }`). `LockOrUnlock`
+// is the "lock or unlock a door" disjunction where the player chooses both the
+// operation and the half at resolution (Keys to the House, Marina Vendrell).
+export type DoorLockOp =
+  | { type: "Unlock" }
+  | { type: "Lock" }
+  | { type: "LockOrUnlock" };
+
 /**
  * Display-layer projection of the engine's `ManaProduction` enum. One variant
  * per producer shape so colorless and commander-identity producers reach the
@@ -1164,7 +1174,7 @@ export type WaitingFor =
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
@@ -1317,6 +1327,13 @@ export type WaitingFor =
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
+  // CR 709.5f-g: Resolving lock/unlock-door effect needs the player to choose
+  // which door (half) of the targeted Room to act on. `options` is the engine's
+  // `Vec<(DoorLockOp, RoomDoor)>` — each tuple serializes as a JSON array
+  // `[op, door]`. A fixed-op effect (Unlock / Lock) lists one operation across
+  // eligible doors; a "lock or unlock" effect lists both. Answered with
+  // `GameAction::ChooseRoomDoor`.
+  | { type: "ChooseRoomDoor"; data: { player: PlayerId; object_id: ObjectId; options: [DoorLockOp, RoomDoor][] } }
   | { type: "CategoryChoice"; data: {
       player: PlayerId;
       target_player: PlayerId;
@@ -1622,6 +1639,9 @@ export type GameAction =
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
   | { type: "ChooseSpecializeColor"; data: { color: ManaColor } }
   | { type: "UnlockRoomDoor"; data: { object_id: ObjectId; door: RoomDoor } }
+  // CR 709.5f-g: Answer to WaitingFor::ChooseRoomDoor — the chosen (op, door)
+  // pair, which must be one of the prompt's `options`.
+  | { type: "ChooseRoomDoor"; data: { object_id: ObjectId; op: DoorLockOp; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseX"; data: { value: number } }
@@ -1696,6 +1716,7 @@ export type GameEvent =
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
+  | { type: "DamagePrevented"; data: { source_id: ObjectId; target: TargetRef; amount: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
   | { type: "CounterAdded"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
@@ -1713,6 +1734,10 @@ export type GameEvent =
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
   | { type: "Regenerated"; data: { object_id: ObjectId } }
+  | {
+      type: "CombatDamageDealtToPlayer";
+      data: { player_id: PlayerId; source_amounts?: [ObjectId, number][]; total_damage: number };
+    }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
   | { type: "Detained"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
@@ -2155,7 +2180,7 @@ export function isStateLostMessage(message: string): boolean {
 /**
  * Transport-agnostic interface for communicating with the game engine.
  * Phase 1: WasmAdapter (direct WASM calls)
- * Phase 7: TauriAdapter (IPC to native Rust process)
+ * Tauri desktop uses the same WasmAdapter path as browser local gameplay.
  */
 export interface SubmitResult {
   events: GameEvent[];

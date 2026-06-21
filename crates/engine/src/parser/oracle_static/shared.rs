@@ -1609,7 +1609,8 @@ pub(crate) enum CombatTaxSubject {
 pub(crate) fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
     let lowered = input.trim_end_matches('.').to_lowercase();
-    let quantity = parse_for_each_clause(&lowered).ok_or_else(|| {
+    let (_, quantity) = super::oracle_nom::quantity::parse_for_each_clause_ref_complete(&lowered)
+        .map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
     })?;
     Ok(("", quantity))
@@ -2996,7 +2997,14 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     use crate::types::triggers::AttackTargetFilter;
+    // CR 508.1c + CR 310.5: " you or permanents you control" defends battles too,
+    // so it is a distinct filter from " you or planeswalkers you control". Both
+    // longer phrases precede the bare " you" (nom `alt` is leftmost-match).
     opt(alt((
+        value(
+            AttackTargetFilter::PlayerOrPermanents,
+            tag(" you or permanents you control"),
+        ),
         value(
             AttackTargetFilter::PlayerOrPlaneswalker,
             tag(" you or planeswalkers you control"),

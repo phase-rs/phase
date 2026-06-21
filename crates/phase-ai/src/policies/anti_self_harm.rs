@@ -2526,6 +2526,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackSpell,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             Vec::new(),
             rewind_id,
@@ -3180,6 +3181,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
@@ -3288,6 +3292,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: vec![],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),

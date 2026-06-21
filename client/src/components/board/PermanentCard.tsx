@@ -243,6 +243,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   // any permanent re-renders only the card whose hovered/lifted state actually
   // flips — not every PermanentCard on the board. O(1) per hover, not O(N).
   const isHovered = useUiStore((s) => s.hoveredObjectId === objectId);
+  const isInspected = useUiStore((s) => s.inspectedObjectId === objectId);
   // Lifting a host's attachments only applies to cards that HAVE attachments;
   // for the common (unattached) card this selector is a constant `false`, so it
   // never re-renders on hover. Attached cards re-render only when their lifted
@@ -347,7 +348,13 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const isSelected = selectedObjectId === objectId;
   const attachmentsLifted =
     obj.attachments.length > 0
-    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
+    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected);
+  const attachmentsExpanded = obj.attachments.length <= 1 || attachmentsLifted;
+  const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
+  const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
+  const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
+  const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
+  const hiddenExileCount = exileLinks.length - visibleExileLinks.length;
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
@@ -569,8 +576,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
-          exileLinks.length > 0
-            ? `${exileLinks.length * EXILE_GHOST_OFFSET_PX}px`
+          visibleExileLinks.length > 0
+            ? `${visibleExileLinks.length * EXILE_GHOST_OFFSET_PX}px`
             : undefined,
       }}
       animate={{
@@ -597,7 +604,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           face. While the host or one of its attachment descendants is
           hovered, lift only the outer permanent tree above sibling
           permanents; internal host/attachment ordering stays unchanged. */}
-      {obj.attachments.map((attachId, i) => {
+      {visibleAttachmentIds.map((attachId, i) => {
         const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
         return (
           <div
@@ -614,15 +621,34 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           </div>
         );
       })}
+      {hiddenAttachmentCount > 0 && (
+        <div
+          className="pointer-events-none absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow"
+          title={t("permanent.hiddenAttachments", { count: hiddenAttachmentCount })}
+          aria-label={t("permanent.hiddenAttachments", { count: hiddenAttachmentCount })}
+        >
+          +{hiddenAttachmentCount}
+        </div>
+      )}
 
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
-      {exileLinks.map((link, i) => (
+      {visibleExileLinks.map((link, i) => (
         <ExileGhostCard
           key={link.exiled_id}
           objectId={link.exiled_id}
           offset={(i + 1) * EXILE_GHOST_OFFSET_PX}
         />
       ))}
+      {hiddenExileCount > 0 && (
+        <div
+          className="pointer-events-none absolute left-8 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-purple-300 px-1.5 text-[11px] font-black leading-none text-purple-950 ring-2 ring-purple-950/80 shadow"
+          style={{ bottom: `-${(visibleExileLinks.length + 1) * EXILE_GHOST_OFFSET_PX}px` }}
+          title={t("permanent.hiddenExileCards", { count: hiddenExileCount })}
+          aria-label={t("permanent.hiddenExileCards", { count: hiddenExileCount })}
+        >
+          +{hiddenExileCount}
+        </div>
+      )}
 
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (

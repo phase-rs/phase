@@ -647,7 +647,15 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
-    if (scan_contains(lower, "enters") || scan_contains(lower, "escapes"))
+    // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
+    // forms ("Other creatures you control enter with …", "… creatures escape
+    // with …") use the bare-verb "enter"/"escape" rather than "enters"/"escapes",
+    // so accept both at word boundaries. Gated on "counter" so the bare verb
+    // alone never reclassifies a non-counter line.
+    if (scan_contains(lower, "enters")
+        || scan_contains(lower, "escapes")
+        || scan_contains(lower, "enter with")
+        || scan_contains(lower, "escape with"))
         && scan_contains(lower, "counter")
     {
         return true;
@@ -672,6 +680,29 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
         return true;
     }
     false
+}
+
+/// CR 614.1c + CR 614.12: Recognizer for the *dynamically scaled* distributive
+/// "[Other/each] [type] you control enter(s) with [an additional] [counter] …
+/// for each …" replacement lines (Gev, Scaled Scorch). Used by the Priority 7
+/// (static-pattern) dispatcher to route these counter replacements to the
+/// replacement parser before the static parser claims them — their
+/// "[type] you control …" subject also satisfies `is_static_pattern`.
+///
+/// The " for each " gate is load-bearing: the fixed-count and conditional-tier
+/// distributive forms ("Each other Vehicle … enters with an additional +1/+1
+/// counter on it if its mana value is 4 or less. Otherwise …" — Thunderous
+/// Velocipede) are owned by `StaticMode::EntersWithAdditionalCounters` (which
+/// carries a fixed `count`), so this recognizer must NOT intercept them. Only
+/// the per-each *scaled* count, which the static mode cannot represent, routes
+/// to the dynamic-capable replacement (`PutCounter { count: QuantityExpr }`).
+pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
+    (scan_contains(lower, "enters")
+        || scan_contains(lower, "escapes")
+        || scan_contains(lower, "enter with")
+        || scan_contains(lower, "escape with"))
+        && scan_contains(lower, "counter")
+        && scan_contains(lower, "for each")
 }
 
 fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {

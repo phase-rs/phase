@@ -113,6 +113,12 @@ interface GameStoreState {
    */
   resolutionProgress: { resolved: number; total: number } | null;
   /**
+   * True while the worker is draining a Resolve All batch. Separate from
+   * `resolutionProgress` because small drains may finish without showing the
+   * storm progress overlay, but controls should still be disabled.
+   */
+  isResolvingAll: boolean;
+  /**
    * Pure-data carrier for the starting-player d20 contest (CR 103.1): the
    * game-start `DieRolled` batch plus the engine's authoritative starting
    * player. Set once by `initGame` (null when the starter was chosen
@@ -152,6 +158,7 @@ interface GameStoreActions {
   setGameMode: (mode: GameMode) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
+  setIsResolvingAll: (isResolvingAll: boolean) => void;
   /** Clear the starting-player contest after the overlay has consumed it. */
   clearStartingContest: () => void;
 }
@@ -177,6 +184,7 @@ const initialState: GameStoreState = {
   turnCheckpoints: [],
   lobbyProgress: null,
   resolutionProgress: null,
+  isResolvingAll: false,
   startingContest: null,
 };
 
@@ -381,6 +389,10 @@ export const useGameStore = create<GameStore>()(
 
     setResolutionProgress: (progress) => {
       set({ resolutionProgress: progress });
+    },
+
+    setIsResolvingAll: (isResolvingAll) => {
+      set({ isResolvingAll });
     },
 
     clearStartingContest: () => {

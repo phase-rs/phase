@@ -22,6 +22,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 && turn_control::viewer_controls_active_turn(state, viewer))
     };
 
+    // CR 701.20e: A bare "look at" peek privately reveals card(s) to the looking
+    // player only. `dig.rs` and `reveal_hand.rs` record the looker in
+    // `private_look_player`; surface the peeked cards to that player without
+    // leaking them to opponents.
+    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
+        Some(looker) if can_view_private_for_player(looker) => {
+            state.private_look_ids.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
+
     let opponents = players::opponents(state, viewer);
     let opp_hand_ids: Vec<ObjectId> = opponents
         .iter()
@@ -30,7 +41,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|opp| filtered.players[opp.0 as usize].hand.iter().copied())
         .collect();
     for obj_id in opp_hand_ids {
-        if !is_visible_revealed_card(state, obj_id) {
+        if !is_visible_revealed_card(state, obj_id) && !private_look_visible.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -61,19 +72,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     } else {
         HashSet::new()
-    };
-
-    // CR 701.20e: A bare "look at the top card" peek (Dig with keep_count == 0,
-    // reveal == false) privately reveals the card(s) to the looking player only.
-    // `dig.rs` records the looker in `private_look_player`; surface the peeked
-    // cards to that player so they can see the card while deciding a subsequent
-    // "you may reveal that card" optional (Delver of Secrets), without leaking it
-    // to opponents.
-    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
-        Some(looker) if can_view_private_for_player(looker) => {
-            state.private_look_ids.iter().copied().collect()
-        }
-        _ => HashSet::new(),
     };
 
     let search_visible: HashSet<ObjectId> =
@@ -107,6 +105,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             HashSet::new()
         };
 
+    // Heist (Arena digital-only keyword action) and any future
+    // `ChooseFromZoneChoice` that operates over a hidden zone (library,
+    // opponent's hand) parks candidate object ids on the prompt. The loop
+    // below hides every library object by default; the prompt player is
+    // supposed to *look at* the candidates (Heist reminder: "Look at three
+    // random nonland cards"), so the underlying object identities must be
+    // visible to that player. Opponents and spectators keep seeing redacted
+    // placeholders — `can_view_private_for_player(player)` is the same gate
+    // the manifest/dig/private-look/search prompts use. The cards ARRAY is
+    // also redacted for non-prompt viewers at the bottom of this function
+    // (the `ChooseFromZoneChoice` redact block); the two protections
+    // compose: prompt player sees both the array and the object contents,
+    // everyone else sees neither.
+    let choose_from_zone_hidden_visible: HashSet<ObjectId> =
+        if let WaitingFor::ChooseFromZoneChoice {
+            player, ref cards, ..
+        } = filtered.waiting_for
+        {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
     // Sandbox debug exposure: a viewer who holds debug permission in a sandbox
     // game (CR is silent; this is an out-of-game capability) sees the names of
     // cards in their *own* library, so the debug "move card from library to
@@ -129,6 +154,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || dig_visible.contains(&obj_id)
             || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
+            // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
+            // `choose_from_zone_hidden_visible` above.
+            || choose_from_zone_hidden_visible.contains(&obj_id)
             // CR 701.20b: Revealed cards are visible to all players. For reveal-digs
             // ("reveal the top N"), dig cards are also in revealed_cards and must remain
             // public during DigChoice. For private digs ("look at"), revealed_cards won't
@@ -638,6 +666,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(pending.controller) {
             redact_pending_trigger_for_observer(pending);
             filtered.pending_trigger_event_batch.clear();
+        }
+    }
+
+    if let WaitingFor::TriggerTargetSelection {
+        trigger_controller,
+        trigger_event,
+        trigger_events,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        if trigger_controller.is_some_and(|controller| !can_view_private_for_player(controller)) {
+            *trigger_event = None;
+            trigger_events.clear();
         }
     }
 
@@ -1710,6 +1751,141 @@ mod tests {
                 assert_eq!(cards, vec![ObjectId(0)])
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// Heist (and any `ChooseFromZoneChoice` over a hidden zone like a
+    /// library) must reveal the candidate card identities to the prompt
+    /// player — the look step's reminder text is "Look at three random
+    /// nonland cards", so without this the controller would be forced into
+    /// a blind pick. A regression in the library-hiding loop (e.g. dropping
+    /// the `choose_from_zone_hidden_visible` membership check) redacts the
+    /// underlying object even though the cards ARRAY is still visible, so
+    /// the UI/client reads "Hidden Card" for every candidate. This test
+    /// pins both layers: the prompt-player view sees the real card name,
+    /// and a non-prompt opponent still sees "Hidden Card" (proving the
+    /// reveal is prompt-player-scoped, not a global leak).
+    #[test]
+    fn choose_from_zone_choice_library_cards_visible_to_prompt_player_only() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // P0 will be the heisting controller; P1 owns the library heisted.
+        // Put a named nonland in P1's library and surface it via a
+        // ChooseFromZoneChoice whose prompt player is P0.
+        let card_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Heisted Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .library
+            .push_back(card_id);
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+            player: PlayerId(0),
+            cards: vec![card_id],
+            count: 1,
+            up_to: false,
+            constraint: None,
+            source_id: ObjectId(99),
+        };
+
+        // The prompt player must see the real card identity.
+        let p0_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            p0_view.objects[&card_id].name, "Heisted Bear",
+            "the prompt player must see the Heist candidate's real identity"
+        );
+        // The cards ARRAY is also intact for the prompt player (not redacted
+        // to ObjectId(0) placeholders).
+        match p0_view.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    vec![card_id],
+                    "the prompt player must see the real candidate ids"
+                );
+            }
+            other => panic!("expected ChooseFromZoneChoice for P0, got {other:?}"),
+        }
+
+        // A non-prompt opponent still sees a redacted identity — the reveal
+        // is prompt-player-scoped, not a global leak.
+        let p1_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(
+            p1_view.objects[&card_id].name, "Hidden Card",
+            "the non-prompt opponent must NOT see the Heist candidate identity"
+        );
+        match p1_view.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards,
+                    vec![ObjectId(0)],
+                    "the non-prompt opponent must see redacted placeholder ids"
+                );
+            }
+            other => panic!("expected ChooseFromZoneChoice for P1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_target_selection_event_context_redacts_by_trigger_controller() {
+        let trigger_event = crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(10),
+            target: crate::types::ability::TargetRef::Object(ObjectId(20)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(1),
+            trigger_controller: Some(PlayerId(0)),
+            trigger_event: Some(trigger_event.clone()),
+            trigger_events: vec![trigger_event.clone()],
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
+                optional: false,
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress::default(),
+            source_id: Some(ObjectId(10)),
+            description: Some("private trigger text".to_string()),
+        };
+
+        let controller_view = filter_state_for_viewer(&state, PlayerId(0));
+        match controller_view.waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event: prompt_event,
+                trigger_events,
+                ..
+            } => {
+                assert_eq!(prompt_event, Some(trigger_event.clone()));
+                assert_eq!(trigger_events, vec![trigger_event]);
+            }
+            other => panic!("expected trigger target selection, got {other:?}"),
+        }
+
+        let prompted_non_controller_view = filter_state_for_viewer(&state, PlayerId(1));
+        match prompted_non_controller_view.waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event,
+                trigger_events,
+                description,
+                ..
+            } => {
+                assert!(trigger_event.is_none());
+                assert!(trigger_events.is_empty());
+                assert_eq!(description.as_deref(), Some("private trigger text"));
+            }
+            other => panic!("expected trigger target selection, got {other:?}"),
         }
     }
 

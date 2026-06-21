@@ -1,13 +1,13 @@
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectKind, KeywordAction, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectKind, FilterProp, KeywordAction, ObjectScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, StackEntry,
-    StackEntryKind, StackPaidSnapshot,
+    AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, GameState, MayTriggerAutoChoiceKey,
+    MayTriggerOrigin, PendingCounterPostAction, StackEntry, StackEntryKind, StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -75,21 +75,57 @@ fn has_missing_required_stack_targets(state: &GameState, ability: &ResolvedAbili
     }
 }
 
-fn top_pending_trigger_has_no_legal_required_targets(
-    state: &GameState,
-    pending_id: ObjectId,
-) -> bool {
-    let Some(entry) = state.stack.back().filter(|entry| entry.id == pending_id) else {
-        return false;
-    };
-    let Some(ability) = entry.ability() else {
-        return false;
-    };
+fn has_no_legal_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
     if !flatten_targets_in_chain(ability).is_empty() {
         return false;
     }
 
-    build_target_slots(state, ability).is_err()
+    match build_target_slots(state, ability) {
+        Ok(slots) => slots
+            .iter()
+            .any(|slot| !slot.optional && slot.legal_targets.is_empty()),
+        Err(_) => true,
+    }
+}
+
+fn top_pending_trigger_has_no_legal_required_targets(
+    state: &mut GameState,
+    pending_id: ObjectId,
+) -> bool {
+    let Some((ability, trigger_event, trigger_events, subject_match_count)) = state
+        .stack
+        .back()
+        .filter(|entry| entry.id == pending_id)
+        .and_then(|entry| {
+            let ability = entry.ability()?.clone();
+            let (trigger_event, subject_match_count) = match &entry.kind {
+                StackEntryKind::TriggeredAbility {
+                    trigger_event,
+                    subject_match_count,
+                    ..
+                } => (trigger_event.clone(), *subject_match_count),
+                _ => (None, None),
+            };
+            let trigger_events = state
+                .stack_trigger_event_batches
+                .get(&entry.id)
+                .cloned()
+                .unwrap_or_else(|| trigger_event.iter().cloned().collect());
+            Some((ability, trigger_event, trigger_events, subject_match_count))
+        })
+    else {
+        return false;
+    };
+
+    let context_snapshot = super::triggers::push_trigger_event_context(
+        state,
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+    let missing_required_targets = has_no_legal_required_stack_targets(state, &ability);
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    missing_required_targets
 }
 
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
@@ -1478,21 +1514,10 @@ fn resolve_keyword_action(
             mount_id,
             paid_creature_ids,
         } => {
-            if let Some(mount) = state.objects.get_mut(&mount_id) {
-                if mount.zone == Zone::Battlefield {
-                    mount.is_saddled = true;
-                    // CR 702.171c: record the creatures that saddled this permanent.
-                    for creature_id in &paid_creature_ids {
-                        if !mount.saddled_by.contains(creature_id) {
-                            mount.saddled_by.push(*creature_id);
-                        }
-                    }
-                }
-            }
-            events.push(GameEvent::Saddled {
-                mount_id,
-                creatures: paid_creature_ids,
-            });
+            // CR 702.171b + CR 702.171c: single authority shared with the
+            // effect-level `BecomeSaddled` path — set the designation, record the
+            // saddling creatures, and emit `GameEvent::Saddled`.
+            crate::game::effects::saddle::mark_saddled(state, mount_id, paid_creature_ids, events);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Saddle,
                 source_id: mount_id,
@@ -1567,13 +1592,31 @@ const PROBE_ID: ObjectId = ObjectId(u64::MAX);
 /// one begins at the top. Returns the number of stack entries consumed
 /// (≥ 1) so the caller can correct the auto-pass baseline (§7.2).
 pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
+    resolve_next_with_limit(state, events, None)
+}
+
+pub fn resolve_next_with_limit(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    max_consumed: Option<u32>,
+) -> u32 {
+    let max_consumed = max_consumed.unwrap_or(u32::MAX).max(1);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
         .pending_trigger_entry
         .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
     if !pending_top {
+        if let Some(consumed) = inert_noop_run_len(state) {
+            let consumed = consumed.min(max_consumed);
+            if consumed >= 2 {
+                crate::game::perf_counters::record_stack_inert_noop_batch(consumed);
+                return resolve_inert_noop_batch(state, consumed, events);
+            }
+        }
         if let Some(run_len) = batch_run_len(state) {
+            let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
+                crate::game::perf_counters::record_stack_batch_candidate();
                 // Layer B FIRST: per-handler purity produces the resolved token
                 // spec(s) the Layer C probe needs (HIGH-1) and applies the
                 // §2.2a/§2.3a/§3.4 gates internally.
@@ -1592,20 +1635,24 @@ pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         .take(run_len as usize)
                         .map(|e| e.source_id)
                         .collect();
+                    // CR 603.6a + CR 611.2e: deserialize/imported states can
+                    // carry an empty derived trigger index. Refresh it before
+                    // Layer B so token handlers can cheaply detect broad
+                    // observers that would make Layer C refuse anyway.
+                    if state.trigger_index.by_key.is_empty()
+                        && state.trigger_index.unclassified.is_empty()
+                        && !state.battlefield.is_empty()
+                    {
+                        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+                    }
                     if let Some(plan) =
                         effects::try_resolve_batch(state, &ability, run_len, &run_source_ids)
                     {
-                        // Layer C: lazily refresh the index sentinel (mirrors the
-                        // consult site at triggers.rs:790) before the read-only probe.
-                        if state.trigger_index.by_key.is_empty()
-                            && state.trigger_index.unclassified.is_empty()
-                            && !state.battlefield.is_empty()
-                        {
-                            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
-                        }
+                        crate::game::perf_counters::record_stack_batch_plan();
                         if observers_are_batch_safe(state, &plan) {
                             return resolve_batched(state, &plan, &ability, events);
                         }
+                        crate::game::perf_counters::record_stack_batch_observer_refusal();
                     }
                 }
             }
@@ -1637,6 +1684,7 @@ fn resolve_batched(
     events: &mut Vec<GameEvent>,
 ) -> u32 {
     let consumed = plan.consumed();
+    crate::game::perf_counters::record_stack_batched_entries(consumed);
     state.resolving_stack_entry = None;
 
     // Pop the run's entries (resolution order is back-to-front), cleaning the
@@ -1710,9 +1758,13 @@ fn resolve_batched(
 /// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
 /// emits-exactly gate makes this two-event probe complete by construction for
 /// ALL observer axes.
-fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> bool {
-    for spec in plan.produced_token_specs() {
-        let record = zone_change_record_from_spec(spec);
+fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) -> bool {
+    for (spec, mana_value) in plan
+        .produced_token_specs()
+        .into_iter()
+        .zip(plan.produced_token_mana_values())
+    {
+        let record = zone_change_record_from_spec(spec, mana_value);
         let zc = GameEvent::ZoneChanged {
             object_id: PROBE_ID,
             from: None,
@@ -1733,12 +1785,235 @@ fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> boo
             // CR 603.3: any registered observer (including the run's own source)
             // forces sequential resolution so priority interleaves per-token.
             let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
-            if !candidates.is_empty() {
+            if !candidates.is_empty() && !observer_candidates_are_inert(state, ev, &candidates) {
                 return false;
             }
         }
     }
     true
+}
+
+fn observer_candidates_are_inert(
+    state: &mut GameState,
+    event: &GameEvent,
+    candidates: &[ObjectId],
+) -> bool {
+    let event_keys = crate::game::trigger_index::keys_from_event(event, state);
+    for candidate in candidates.iter().copied() {
+        let Some((controller, triggers)) = state.objects.get(&candidate).map(|obj| {
+            (
+                obj.controller,
+                obj.trigger_definitions
+                    .iter_all()
+                    .cloned()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            continue;
+        };
+
+        for (trigger_index, trigger) in triggers {
+            let (trigger_keys, unclassified) =
+                crate::game::trigger_index::keys_from_trigger_def(&trigger);
+            if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
+                continue;
+            }
+            if trigger.condition.as_ref().is_some_and(|condition| {
+                !super::triggers::check_trigger_condition(
+                    state,
+                    condition,
+                    controller,
+                    Some(candidate),
+                    Some(event),
+                )
+            }) {
+                continue;
+            }
+
+            let mut ability =
+                super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
+            ability.ability_index = Some(trigger_index);
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index });
+            if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn optional_ability_is_inert_under_auto_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if !ability.optional {
+        return false;
+    }
+    let Some(origin) = ability.may_trigger_origin else {
+        return false;
+    };
+    let key = MayTriggerAutoChoiceKey {
+        player: ability.controller,
+        source_id: ability.source_id,
+        origin,
+    };
+    match state.may_trigger_auto_choice(&key) {
+        Some(AutoMayChoice::Decline) => ability.sub_ability.is_none(),
+        Some(AutoMayChoice::Accept) => {
+            ability_has_no_legal_resolution_targets(state, ability, trigger_event)
+        }
+        None => false,
+    }
+}
+
+fn ability_has_no_legal_resolution_targets(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if ability.sub_ability.is_some() {
+        return false;
+    }
+
+    let trigger_events = trigger_event.iter().cloned().cloned().collect::<Vec<_>>();
+    let context_snapshot =
+        super::triggers::push_trigger_event_context(state, trigger_event, &trigger_events, None);
+    let empty = build_target_slots(state, ability).is_ok_and(|slots| {
+        (ability.effect.target_filter().is_some() && slots.is_empty())
+            || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
+    });
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    empty
+}
+
+fn inert_noop_run_len(state: &mut GameState) -> Option<u32> {
+    let top = state.stack.back()?.clone();
+    if !stack_entry_is_inert_noop(state, &top) {
+        return None;
+    }
+    let mut count = 0u32;
+    let entries = state.stack.iter().rev().cloned().collect::<Vec<_>>();
+    for entry in &entries {
+        if count == 0 {
+            count += 1;
+            continue;
+        }
+        if !same_inert_noop_run_member(&top, entry) {
+            break;
+        }
+        count += 1;
+    }
+    Some(count)
+}
+
+fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool {
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        condition,
+        trigger_event,
+        ..
+    } = &entry.kind
+    else {
+        return false;
+    };
+
+    if condition.is_some() {
+        return false;
+    }
+
+    optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
+}
+
+fn same_inert_noop_run_member(top: &StackEntry, entry: &StackEntry) -> bool {
+    let StackEntryKind::TriggeredAbility {
+        ability: top_ability,
+        condition: top_condition,
+        trigger_event: top_event,
+        ..
+    } = &top.kind
+    else {
+        return false;
+    };
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        condition,
+        trigger_event,
+        ..
+    } = &entry.kind
+    else {
+        return false;
+    };
+
+    top.source_id == entry.source_id
+        && top.controller == entry.controller
+        && top_ability == ability
+        && top_condition == condition
+        && trigger_events_are_equivalent_for_inert_target(top_ability, top_event, trigger_event)
+}
+
+fn trigger_events_are_equivalent_for_inert_target(
+    ability: &ResolvedAbility,
+    a: &Option<GameEvent>,
+    b: &Option<GameEvent>,
+) -> bool {
+    if a == b {
+        return true;
+    }
+    if !change_zone_target_depends_only_on_cost_paid_mana_value(ability) {
+        return false;
+    }
+    zone_changed_mana_context(a.as_ref()) == zone_changed_mana_context(b.as_ref())
+}
+
+fn change_zone_target_depends_only_on_cost_paid_mana_value(ability: &ResolvedAbility) -> bool {
+    let Effect::ChangeZone { target, .. } = &ability.effect else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = target else {
+        return false;
+    };
+    typed.properties.iter().all(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone { .. }
+                | FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    },
+                    ..
+                }
+        )
+    })
+}
+
+fn zone_changed_mana_context(event: Option<&GameEvent>) -> Option<(u32, PlayerId)> {
+    match event {
+        Some(GameEvent::ZoneChanged { record, .. }) => Some((record.mana_value, record.controller)),
+        _ => None,
+    }
+}
+
+fn resolve_inert_noop_batch(
+    state: &mut GameState,
+    consumed: u32,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    state.resolving_stack_entry = None;
+    for _ in 0..consumed {
+        let Some(entry) = state.stack.pop_back() else {
+            break;
+        };
+        state.stack_paid_facts.remove(&entry.id);
+        state.stack_trigger_event_batches.remove(&entry.id);
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+    }
+    consumed
 }
 
 /// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
@@ -1747,6 +2022,7 @@ fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> boo
 /// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
 fn zone_change_record_from_spec(
     spec: &crate::types::proposed_event::TokenSpec,
+    mana_value: u32,
 ) -> crate::types::game_state::ZoneChangeRecord {
     let ch = &spec.characteristics;
     crate::types::game_state::ZoneChangeRecord {
@@ -1762,7 +2038,7 @@ fn zone_change_record_from_spec(
         base_power: ch.power,
         base_toughness: ch.toughness,
         colors: ch.colors.clone(),
-        mana_value: 0,
+        mana_value,
         controller: spec.controller,
         owner: spec.controller,
         from_zone: None,
@@ -2340,6 +2616,20 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Creature);
+        let off_context_artifact = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Off-context Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&off_context_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
 
         let target = TargetFilter::Or {
             filters: vec![
@@ -4160,7 +4450,8 @@ mod tests {
     mod batch_resolve {
         // Driver internals under test (the stack module).
         use super::super::{
-            batch_run_len, effects, observers_are_batch_safe, resolve_next, resolve_top,
+            batch_run_len, effects, observers_are_batch_safe, resolve_next,
+            resolve_next_with_limit, resolve_top,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -4173,6 +4464,7 @@ mod tests {
         };
         use crate::types::card_type::CoreType;
         use crate::types::counter::CounterType;
+        use crate::types::events::GameEvent;
         use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
         use crate::types::identifiers::{CardId, ObjectId};
         use crate::types::mana::ManaColor;
@@ -4278,6 +4570,37 @@ mod tests {
                 obj.base_card_types = crate::types::card_type::CardType {
                     supertypes: vec![],
                     core_types: vec![CoreType::Creature],
+                    subtypes: vec![name.to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = name.to_string();
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Create a plain planeswalker permanent with printed loyalty. A copy
+        /// token of this source enters with loyalty counters (CR 306.5b), so it
+        /// must not pass the copy-token ETB-pair batch gate.
+        fn add_plain_planeswalker_source(
+            state: &mut GameState,
+            name: &str,
+            loyalty: u32,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(911),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_loyalty = Some(loyalty);
+                obj.loyalty = Some(loyalty);
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
                     subtypes: vec![name.to_string()],
                 };
                 obj.card_types = obj.base_card_types.clone();
@@ -4569,6 +4892,28 @@ mod tests {
             }
         }
 
+        #[test]
+        fn resolve_next_with_limit_caps_batch_consumption() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 10);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next_with_limit(&mut state, &mut events, Some(4));
+
+            assert_eq!(consumed, 4);
+            assert_eq!(state.stack.len(), 6);
+            assert_eq!(token_ids(&state).len(), 4);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                4
+            );
+        }
+
         // §9.2 — Layer C reports safe on an observer-free board.
         #[test]
         fn observers_are_batch_safe_true_without_observers() {
@@ -4580,7 +4925,7 @@ mod tests {
             assert_eq!(run_len, 5);
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
-            assert!(observers_are_batch_safe(&state, &plan));
+            assert!(observers_are_batch_safe(&mut state, &plan));
         }
 
         // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
@@ -4634,7 +4979,7 @@ mod tests {
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 let plan = try_batch(&state, &ability, run_len).unwrap();
                 assert!(
-                    !observers_are_batch_safe(&state, &plan),
+                    !observers_are_batch_safe(&mut state, &plan),
                     "creature-ETB observer must force refusal"
                 );
             }
@@ -5443,7 +5788,7 @@ mod tests {
             // exclusion dropped it and this assertion would FAIL (batch allowed);
             // post-fix it must hold (refuse to batch).
             assert!(
-                !observers_are_batch_safe(&state, &plan),
+                !observers_are_batch_safe(&mut state, &plan),
                 "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
             );
 
@@ -5509,15 +5854,13 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
-                !observers_are_batch_safe(&state, &plan),
+                !observers_are_batch_safe(&mut state, &plan),
                 "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
             );
         }
 
-        // §9.4a — Kodama-class broad-ETB observer (valid_card = Permanent) keyed
-        // under EnterBattlefield(None) must force Layer C to refuse. Documents
-        // that the motivating /tmp/gamestate.json board (with Kodama) does NOT
-        // batch (§2.4).
+        // §9.4a — a meaningful broad-ETB observer (valid_card = Permanent) keyed
+        // under EnterBattlefield(None) must still force Layer C to refuse.
         #[test]
         fn kodama_broad_permanent_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -5561,8 +5904,8 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
-                !observers_are_batch_safe(&state, &plan),
-                "broad permanent-ETB observer must force refusal (None bucket)"
+                !observers_are_batch_safe(&mut state, &plan),
+                "meaningful broad permanent-ETB observer must force Layer C refusal"
             );
         }
 
@@ -5720,6 +6063,29 @@ mod tests {
                 token_ids(&batched).len(),
                 token_ids(&sequential).len(),
                 "batched copy count must equal sequential"
+            );
+        }
+
+        #[test]
+        fn copy_token_with_intrinsic_counters_refuses_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+
+            let src = add_plain_planeswalker_source(&mut state, "Jace", 3);
+            let sub = copy_instead_sub(src, 6);
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                3,
+            );
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            assert!(
+                try_batch(&state, &ability, run_len).is_none(),
+                "copy-token batch must refuse values that emit intrinsic CounterAdded events"
             );
         }
 

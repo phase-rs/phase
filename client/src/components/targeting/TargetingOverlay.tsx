@@ -15,7 +15,7 @@ import {
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
-import type { GameObject } from "../../adapter/types.ts";
+import type { GameEvent, GameObject } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -92,6 +92,9 @@ export function TargetingOverlay() {
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection" && waitingFor.data.description
     ? renderDescription(waitingFor.data.description, sourceName ?? "this")
     : undefined;
+  const triggerDamageAmount = waitingFor?.type === "TriggerTargetSelection"
+    ? triggerDamageAmountForPrompt(waitingFor.data.trigger_event, waitingFor.data.trigger_events)
+    : null;
   const spellTargetDescription = waitingFor?.type === "TargetSelection" && waitingFor.data.pending_cast.ability.description
     ? renderDescription(waitingFor.data.pending_cast.ability.description, sourceName ?? "this")
     : undefined;
@@ -199,6 +202,11 @@ export function TargetingOverlay() {
               <RichLabel text={enginePrompt} size="xs" />
             </div>
           )}
+          {triggerDamageAmount != null && (
+            <div className="rounded-md border border-red-400/40 bg-red-950/90 px-3 py-1 text-sm font-semibold text-red-100 shadow">
+              {t("targeting.triggerDamageAmount", { amount: triggerDamageAmount })}
+            </div>
+          )}
         </div>
 
         {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
@@ -274,6 +282,23 @@ export function TargetingOverlay() {
       </motion.div>
     </AnimatePresence>
   );
+}
+
+function triggerDamageAmountForPrompt(
+  triggerEvent: GameEvent | undefined,
+  triggerEvents: GameEvent[] | undefined,
+): number | null {
+  const event = triggerEvent ?? (triggerEvents?.length === 1 ? triggerEvents[0] : undefined);
+  if (!event) return null;
+
+  switch (event.type) {
+    case "DamageDealt":
+      return event.data.amount;
+    case "CombatDamageDealtToPlayer":
+      return event.data.total_damage;
+    default:
+      return null;
+  }
 }
 
 type TargetingPromptParams = {

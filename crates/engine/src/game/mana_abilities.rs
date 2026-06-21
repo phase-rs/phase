@@ -1089,7 +1089,7 @@ pub(super) fn advance_mana_ability_activation(
             }
             return Ok(WaitingFor::PayCost {
                 player: pending.player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { aggregate: None },
                 choices: creatures,
                 count,
                 min_count: 0,
@@ -1608,8 +1608,19 @@ where
                 super::quantity::resolve_quantity(state, amount, player, source_id).max(0) as u32;
             pay_life_cost(state, player, resolved, events)?
         }
-        Some(AbilityCost::TapCreatures { count, filter }) => {
-            for _ in 0..*count {
+        Some(AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        }) => {
+            // CR 605.1a: Mana-ability tap costs (Convoke-style) are fixed-count
+            // only; the aggregate "total power N" form is reserved for
+            // Crew/Saddle/Teamwork, which are never mana abilities.
+            let count = requirement.fixed_count().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Aggregate-power tap cost is not valid for a mana ability".to_string(),
+                )
+            })?;
+            for _ in 0..count {
                 let chosen_id = chosen_tappers.next().ok_or_else(|| {
                     EngineError::InvalidAction(
                         "Missing tapped creature selection for mana ability".to_string(),
@@ -1750,8 +1761,18 @@ where
                                 .max(0) as u32;
                         pay_life_cost(state, player, resolved, events)?
                     }
-                    AbilityCost::TapCreatures { count, filter } => {
-                        for _ in 0..*count {
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    } => {
+                        // CR 605.1a: mana-ability tap costs are fixed-count only.
+                        let count = requirement.fixed_count().ok_or_else(|| {
+                            EngineError::InvalidAction(
+                                "Aggregate-power tap cost is not valid for a mana ability"
+                                    .to_string(),
+                            )
+                        })?;
+                        for _ in 0..count {
                             let chosen_id = chosen_tappers.next().ok_or_else(|| {
                                 EngineError::InvalidAction(
                                     "Missing tapped creature selection for mana ability"
@@ -2221,11 +2242,15 @@ fn pay_mana_sub_cost(
 ) -> Result<(), EngineError> {
     if hybrid_plan.is_none() {
         let excluded_sources = std::collections::HashSet::from([source_id]);
+        // CR 605.1a: A mana ability never carries a power-up tag (power-up
+        // abilities can't produce mana), so the tag-scoped activation context is
+        // `None` here — Quinjet's {R}{R} must not pay another mana ability's cost.
         return super::casting::pay_ability_mana_cost_excluding(
             state,
             player,
             source_id,
             cost,
+            None,
             events,
             &excluded_sources,
         );
@@ -2238,9 +2263,12 @@ fn pay_mana_sub_cost(
     // mana (e.g. Heart of Ramos) would silently pay through for the {R} half
     // of a hypothetical "{R}: Add {G}{G}" mana ability.
     let (source_types, source_subtypes) = super::casting::activation_source_types(state, source_id);
+    // CR 605.1a: Mana abilities never carry a power-up tag, so `ability_tag` is
+    // `None` for the mana-ability sub-cost activation context.
     let ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag: None,
     };
     let pool = &mut state.players[player.0 as usize].mana_pool;
     let (spent, _life) = match hybrid_plan {
@@ -2407,7 +2435,9 @@ fn tap_creature_cost_choice(
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = super::casting::find_tap_creatures_cost(cost.as_ref()?)?;
+    let (requirement, filter) = super::casting::find_tap_creatures_cost(cost.as_ref()?)?;
+    // CR 605.1a: mana-ability tap costs (Convoke-style) are fixed-count only.
+    let count = requirement.fixed_count()?;
     let creatures = state
         .battlefield
         .iter()
@@ -3384,6 +3414,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            has_x_in_cost: false,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin_spell);
         let mut pool_clone = pool.clone();
@@ -3401,6 +3432,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            has_x_in_cost: false,
         };
         let elemental_ctx = PaymentContext::Spell(&elemental_spell);
         assert!(
@@ -3416,6 +3448,7 @@ mod tests {
         let non_elemental_activation = PaymentContext::Activation {
             source_types: &non_elemental_types,
             source_subtypes: &non_elemental_subtypes,
+            ability_tag: None,
         };
         let mut pool_clone2 = pool.clone();
         assert!(
@@ -3429,6 +3462,7 @@ mod tests {
         let elemental_activation = PaymentContext::Activation {
             source_types: &non_elemental_types,
             source_subtypes: &elemental_subtypes,
+            ability_tag: None,
         };
         assert!(
             pool_clone2

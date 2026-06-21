@@ -185,17 +185,25 @@ export function MenuSelect({
     if (!trigger) return;
 
     const rect = trigger.getBoundingClientRect();
-    const viewportWidth = window.innerWidth;
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
     const viewportTop = getViewportTop();
     const viewportBottom = getViewportBottom();
-    const width = Math.min(
-      rect.width,
-      viewportWidth - MENU_VIEWPORT_PADDING_PX * 2,
-    );
-    const left = Math.max(
-      MENU_VIEWPORT_PADDING_PX,
-      Math.min(rect.left, viewportWidth - width - MENU_VIEWPORT_PADDING_PX),
-    );
+
+    // Pin the menu to the trigger's box; only nudge when the menu would clip.
+    let width = rect.width;
+    let left = rect.left;
+    const minLeft = viewportLeft + MENU_VIEWPORT_PADDING_PX;
+    const maxRight = viewportLeft + viewportWidth - MENU_VIEWPORT_PADDING_PX;
+
+    if (left + width > maxRight) {
+      left = Math.max(minLeft, maxRight - width);
+    }
+    if (left < minLeft) {
+      left = minLeft;
+      width = Math.min(width, maxRight - minLeft);
+    }
     const spaceBelow = Math.max(0, viewportBottom - rect.bottom - MENU_GAP_PX);
     const spaceAbove = Math.max(0, rect.top - viewportTop - MENU_GAP_PX);
     const openUp = spaceBelow < MENU_MAX_HEIGHT_PX && spaceAbove > spaceBelow;

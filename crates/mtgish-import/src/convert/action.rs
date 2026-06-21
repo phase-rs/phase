@@ -2315,6 +2315,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::DiscardCard {
                     count: 1,
@@ -2344,6 +2345,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::ChangeZone {
                     origin: Some(Zone::Hand),
@@ -2933,6 +2935,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.
@@ -3612,6 +3615,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
@@ -5518,6 +5522,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
             ..
         } => Effect::RevealHand {
             target: target_filter,
@@ -5525,6 +5530,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
@@ -7574,5 +7580,33 @@ mod tests {
         };
         assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    #[test]
+    fn apply_player_target_preserves_private_reveal_hand_flag() {
+        let private_look = Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::None,
+            count: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: false,
+        };
+        let rebound = apply_player_target(private_look, TargetFilter::Player).unwrap();
+        let Effect::RevealHand {
+            target,
+            reveal,
+            card_filter,
+            ..
+        } = rebound
+        else {
+            panic!("expected RevealHand, got {rebound:?}");
+        };
+        assert_eq!(target, TargetFilter::Player);
+        assert_eq!(card_filter, TargetFilter::None);
+        assert!(
+            !reveal,
+            "apply_player_target must preserve reveal:false for private looks"
+        );
     }
 }

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
@@ -213,6 +213,92 @@ describe("PermanentCard attachments", () => {
     fireEvent.mouseEnter(nestedAttachment);
 
     expect(host.style.zIndex).toBe("80");
+  });
+
+  it("collapses multiple direct attachments until the host is hovered", () => {
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
+    expect(container.querySelector('[data-object-id="4"]')).toBeNull();
+    expect(container.textContent).toContain("+1");
+
+    act(() => {
+      useUiStore.setState({ inspectedObjectId: 1 });
+    });
+    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+
+    act(() => {
+      useUiStore.setState({ inspectedObjectId: null });
+    });
+    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("collapses multiple exiled cards hosted by one permanent until hover", () => {
+    const exiledOne = makeObject({
+      id: 10,
+      card_id: 1000,
+      zone: "Exile",
+      name: "Exiled One",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+    });
+    const exiledTwo = makeObject({
+      id: 11,
+      card_id: 1001,
+      zone: "Exile",
+      name: "Exiled Two",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+    });
+    const gameState = {
+      ...makeState(),
+      objects: {
+        ...makeState().objects,
+        10: exiledOne,
+        11: exiledTwo,
+      },
+      exile: [10, 11],
+      exile_links: [
+        { exiled_id: 10, source_id: 1, kind: "TrackedBySource" },
+        { exiled_id: 11, source_id: 1, kind: "TrackedBySource" },
+      ],
+    } as unknown as GameState;
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container, queryByLabelText } = renderPermanent();
+
+    expect(queryByLabelText("Exiled One")).not.toBeNull();
+    expect(queryByLabelText("Exiled Two")).toBeNull();
+    expect(container.textContent).toContain("+1");
+
+    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(queryByLabelText("Exiled Two")).not.toBeNull();
   });
 
   it("restores host preview when moving from an attachment back to its host", () => {

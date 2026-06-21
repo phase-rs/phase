@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
     "spend",
     "double",
+    "triple",
     "destroy",
     "prevent",
     "attach",

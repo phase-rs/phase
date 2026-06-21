@@ -158,6 +158,9 @@ pub enum TriggerEventKey {
     DiscoverResolved,
     /// CR 701.46a: An adapt resolution.
     AdaptResolved,
+    /// CR 701.50b: A permanent connived (the connive process — draw, discard,
+    /// maybe +1/+1 — completed).
+    ConniveResolved,
     /// CR 701.43d: A creature was exerted.
     Exerted,
     /// CR 702.154c: A creature enlisted another creature.
@@ -187,6 +190,12 @@ pub enum AttackTargetFilter {
     /// controls" restricts attacks against the owning player and planeswalkers
     /// that player controls.
     OwnerOrPlaneswalker,
+    /// CR 508.1c + CR 508.5 + CR 109.4: "you or permanents you control" defends
+    /// you plus every attackable permanent you control — planeswalkers AND
+    /// battles (CR 310.5: battles can be attacked). Distinct from
+    /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
+    /// planeswalker/battle is compared per CR 109.4.
+    PlayerOrPermanents,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).
@@ -428,6 +437,9 @@ pub enum TriggerMode {
     // Adapt / amass / learn / venture
     /// CR 701.46: Triggers when a creature adapts.
     Adapt,
+    /// CR 701.50b: Triggers when a permanent connives (after the connive process
+    /// completes).
+    Connives,
     /// CR 702.143: Triggers when a card is foretold.
     Foretell,
     /// CR 701.16: Triggers when a player investigates.
@@ -593,6 +605,7 @@ impl FromStr for TriggerMode {
             "ClassLevelGained" => TriggerMode::ClassLevelGained,
             "CommitCrime" => TriggerMode::CommitCrime,
             "ConjureAll" => TriggerMode::ConjureAll,
+            "Connives" => TriggerMode::Connives,
             "CollectEvidence" => TriggerMode::CollectEvidence,
             "CounterAdded" => TriggerMode::CounterAdded,
             "CounterAddedOnce" => TriggerMode::CounterAddedOnce,
@@ -862,6 +875,7 @@ mod tests {
             "ClassLevelGained",
             "CommitCrime",
             "ConjureAll",
+            "Connives",
             "CollectEvidence",
             "CounterAdded",
             "CounterAddedOnce",
@@ -996,8 +1010,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 146,
-            "Expected 146+ known trigger modes, got {known_count}"
+            known_count >= 147,
+            "Expected 147+ known trigger modes, got {known_count}"
         );
     }
 }

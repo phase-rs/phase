@@ -190,6 +190,7 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
         Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
         vec![TargetRef::Object(spell_id)],
         mana_drain_source,

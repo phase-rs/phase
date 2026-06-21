@@ -20,23 +20,30 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let count = match &ability.effect {
-        Effect::BlightEffect { count } => *count,
+    let (count, blighting_player) = match &ability.effect {
+        Effect::BlightEffect { count, player } => {
+            // CR 701.68a: the blighting player puts the counters on a creature
+            // *they* control. Default `TargetFilter::Controller` keeps "you
+            // blight"; Champion of the Weird redirects to the targeted opponent
+            // ("Target opponent blights 2").
+            let blighting_player =
+                crate::game::effects::resolve_player_for_context_ref(state, ability, player);
+            (*count, blighting_player)
+        }
         _ => return Ok(()),
     };
 
-    let controller = ability.controller;
     let source_id = ability.source_id;
 
-    // CR 701.68a: Eligible creatures are those the controller of this ability
-    // controls on the battlefield.
+    // CR 701.68a: Eligible creatures are those the blighting player controls on
+    // the battlefield.
     let eligible: Vec<ObjectId> = state
         .battlefield
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
-                obj.controller == controller
+                obj.controller == blighting_player
                     && !obj.is_emblem
                     && obj.card_types.core_types.contains(&CoreType::Creature)
             })
@@ -54,11 +61,11 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 701.68a: The controller chooses exactly one creature they control.
+    // CR 701.68a: The blighting player chooses exactly one creature they control.
     // `count` (in EffectZoneChoice) is the number of creatures chosen (1);
     // `count_param` carries N — the number of -1/-1 counters to place.
     state.waiting_for = WaitingFor::EffectZoneChoice {
-        player: controller,
+        player: blighting_player,
         cards: eligible,
         count: 1,
         min_count: 1,
@@ -113,7 +120,10 @@ mod tests {
 
     fn blight_ability(source_id: ObjectId, controller: PlayerId, count: u32) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::BlightEffect { count },
+            Effect::BlightEffect {
+                count,
+                player: TargetFilter::Controller,
+            },
             vec![],
             source_id,
             controller,
@@ -252,10 +262,18 @@ mod tests {
             Some(1),
             "blight ignores hexproof — it is a choice, not a target"
         );
-        // target_filter() must return None for BlightEffect.
+        // CR 701.68a: a default-controller blight surfaces NO real target slot.
+        // `target_filter()` returns `Some(Controller)` (mirroring the other
+        // player-axis effects), but `extract_target_filter_from_effect` drops the
+        // context ref via its final `is_context_ref()` guard, so the controller's
+        // creature choice is never declared as a target (hexproof is irrelevant).
         assert!(
-            Effect::BlightEffect { count: 1 }.target_filter().is_none(),
-            "BlightEffect must be non-targeted"
+            crate::game::triggers::extract_target_filter_from_effect(&Effect::BlightEffect {
+                count: 1,
+                player: TargetFilter::Controller,
+            })
+            .is_none(),
+            "default 'you blight' must surface no target slot"
         );
         let _ = TargetFilter::Any; // keep import used across cfg
     }
@@ -305,6 +323,95 @@ mod tests {
             obj.counters.get(&CounterType::Minus1Minus1).copied(),
             Some(2),
             "counter-doubling replacement (CR 614.1a) must double blight's counters"
+        );
+    }
+
+    /// Discriminator 6 (player-redirect): CR 701.68a — "Target opponent blights
+    /// N" (Champion of the Weird) makes the *targeted player*, not the
+    /// controller, blight. The prompt goes to the opponent and only the
+    /// opponent's creatures are eligible. Reverting the `player` plumbing (back
+    /// to `ability.controller`) flips both assertions: the prompt would address
+    /// PlayerId(0) and scope eligibility to PlayerId(0)'s creature.
+    #[test]
+    fn blight_redirects_to_targeted_opponent() {
+        use crate::types::ability::{ControllerRef, TargetRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(7);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        // Controller has a creature too — it must NOT be eligible when the
+        // opponent is the blighting player.
+        let mine = make_creature(&mut state, 1, controller);
+        let theirs = make_creature(&mut state, 2, opponent);
+
+        // Mirror the exact parser output for "Target opponent blights 2": an
+        // Opponent player filter carried in `player` (a non-context-ref target),
+        // with the chosen opponent in `targets` (declared at announcement).
+        let ability = ResolvedAbility::new(
+            Effect::BlightEffect {
+                count: 2,
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![TargetRef::Player(opponent)],
+            mine, // source is the controller's permanent
+            controller,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count_param,
+                ..
+            } => {
+                assert_eq!(
+                    *player, opponent,
+                    "the targeted opponent (not the controller) must be prompted to blight"
+                );
+                assert_eq!(
+                    cards,
+                    &[theirs],
+                    "only the opponent's creatures are eligible to be blighted"
+                );
+                assert_eq!(*count_param, 2);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+
+        // Drive the opponent's choice through the real handler.
+        apply(
+            &mut state,
+            opponent,
+            GameAction::SelectCards {
+                cards: vec![theirs],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state
+                .objects
+                .get(&theirs)
+                .unwrap()
+                .counters
+                .get(&CounterType::Minus1Minus1)
+                .copied(),
+            Some(2),
+            "the opponent's chosen creature receives the 2 -1/-1 counters"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&mine)
+                .unwrap()
+                .counters
+                .contains_key(&CounterType::Minus1Minus1),
+            "the controller's creature is untouched when the opponent blights"
         );
     }
 }

@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Resolviendo {{resolved}} / {{total}}"
+    "label": "Resolviendo {{resolved}} / {{total}}",
+    "collapse": "Contraer progreso de resolución",
+    "expand": "Expandir progreso de resolución"
   },
   "card": {
     "faceDownName": "Carta boca abajo",
@@ -171,6 +173,8 @@
     "copyTooltip": "Ficha copia de una carta real",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
+    "hiddenAttachments": "+{{count}} more attached",
+    "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -208,6 +212,7 @@
     "allTo": "Todas → <name>{{label}}</name>",
     "creatureFallback": "Criatura n.º {{id}}",
     "planeswalkerFallback": "Planeswalker n.º {{id}}",
+    "objectFallback": "Object #{{id}}",
     "you": "Tú",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
@@ -516,6 +521,7 @@
     "tapUntappedCreatures_other": "Gira {{count}} criaturas sin girar",
     "chooseTargetOf": "Elige el objetivo {{current}} de {{total}}",
     "chooseTarget": "Elige un objetivo",
+    "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "No hay objetivos legales disponibles",
     "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "hasta un(a) {{target}}",
@@ -1296,6 +1302,17 @@
     "red": "Rojo",
     "green": "Verde"
   },
+  "roomDoor": {
+    "title": "Elige una puerta",
+    "subtitle": "Elige sobre qué puerta de la Sala actuar",
+    "confirm": "Confirmar",
+    "option": "{{op}} {{door}}",
+    "unlock": "Abrir",
+    "lock": "Cerrar",
+    "lockOrUnlock": "Abrir o cerrar",
+    "left": "puerta izquierda",
+    "right": "puerta derecha"
+  },
   "dialogShell": {
     "eyebrow": "Elección de la partida",
     "restoreDialog": "Restaurar diálogo",
@@ -1513,6 +1530,9 @@
     "connectionBody": "phase.rs perdió su enlace con el motor de la partida — lo más habitual es que lo cause una actualización en segundo plano activándose a mitad de partida. Tu último turno guardado se conserva; recarga para restaurar la partida.",
     "diagnostic": "diagnóstico: {{reason}}",
     "showDetails": "Mostrar detalles",
+    "exportGameState": "Exportar estado de la partida",
+    "exported": "Exportado",
+    "exportFailed": "Error al exportar",
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "¡Copiado!",
     "reportOnGithub": "Informar en GitHub",

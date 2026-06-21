@@ -159,6 +159,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
         | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
@@ -315,6 +316,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.165a: Backup is a triggered ability — it never emits a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Backup => " activates backup: ",
+                // CR 602.5b: Power-up activation.
+                AbilityTag::PowerUp => " activates power-up: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -708,6 +711,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::CreatureSuspected { object_id } => {
             vec![card_seg(state, *object_id), text(" becomes suspected")]
+        }
+
+        GameEvent::CreatureNoLongerSuspected { object_id } => {
+            vec![card_seg(state, *object_id), text(" is no longer suspected")]
         }
 
         GameEvent::Detained { object_id } => {

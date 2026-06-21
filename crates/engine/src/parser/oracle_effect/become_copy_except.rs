@@ -212,6 +212,9 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, modifications)) = parse_it_has_quoted_ability(input) {
         return Some((rest, modifications));
     }
+    if let Some((rest, modifications)) = parse_it_has_keywords_then_quoted_ability(input) {
+        return Some((rest, modifications));
+    }
     if let Some((rest, keywords)) = parse_it_has_keywords(input) {
         return Some((rest, keywords));
     }
@@ -794,6 +797,53 @@ fn parse_it_has_quoted_ability(input: &str) -> Option<(&str, Vec<ContinuousModif
     }
 }
 
+/// CR 707.9a + CR 707.2: `"except it has <keyword>[, <keyword>…] and
+/// \"<quoted ability>\""` — a copy exception that grants one or more keywords
+/// AND a quoted ability joined by " and ". Chandra, Flameshaper is the canonical
+/// case ("…except it has haste and \"At the beginning of the end step, sacrifice
+/// this token.\"") and the same shape recurs across "haste-and-end-step-sac"
+/// token-copy effects (Choreographed Sparks' creature-copy mode, Twinflame
+/// Strike class). `parse_it_has_keywords` alone consumes the whole tail as a
+/// keyword list and silently drops the quoted ability; this arm peels the
+/// quoted-ability suffix off at ` and "` so both the keyword(s) and the quoted
+/// ability reach the modification set.
+fn parse_it_has_keywords_then_quoted_ability(
+    input: &str,
+) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it has "),
+        tag("he has "),
+        tag("she has "),
+        tag("they have "),
+    ))
+    .parse(input)
+    .ok()?;
+    // Split the keyword segment from the trailing ` and "<quoted>"` suffix.
+    // `take_until(" and \"")` anchors the boundary on the quoted-ability join
+    // (a bare ` and ` could appear inside a keyword phrase such as protection
+    // "from white and from blue"), then `tag(" and ")` consumes only the join
+    // words — leaving the opening quote at the head of the remainder so
+    // `quoted_region` is a well-formed `"…"` token with no index math.
+    let (quoted_region, keyword_text) =
+        (take_until(" and \""), tag::<_, _, OracleError<'_>>(" and "))
+            .map(|(keywords, _)| keywords)
+            .parse(rest)
+            .ok()?;
+    let (quoted_text, remainder) = split_single_quoted_ability(quoted_region)?;
+
+    let mut modifications = Vec::new();
+    for part in split_keyword_list(keyword_text) {
+        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+            modifications.push(ContinuousModification::AddKeyword { keyword });
+        }
+    }
+    modifications.extend(parse_quoted_ability_modifications(quoted_text));
+    if modifications.is_empty() {
+        return None;
+    }
+    Some((remainder, modifications))
+}
+
 fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
     let trimmed = input.trim_start();
     let leading_ws = input.len() - trimmed.len();
@@ -1167,6 +1217,32 @@ mod tests {
                 keyword: Keyword::Vanishing(3),
             }),
             "expected AddKeyword{{Vanishing(3)}}, got {mods:?}"
+        );
+    }
+
+    /// CR 707.9a + CR 603.1 + CR 707.2: "except it has <keyword> and
+    /// \"<quoted triggered ability>\"" (Chandra, Flameshaper [+1]) must emit BOTH
+    /// the keyword grant and the quoted-ability modification. Before the
+    /// `parse_it_has_keywords_then_quoted_ability` arm, the keyword list parser
+    /// consumed the whole tail and the quoted ability was silently dropped.
+    #[test]
+    fn except_it_has_keyword_and_quoted_ability_emits_both() {
+        let (_, mods) = parse_except_clause(
+            ", except it has haste and \"at the beginning of the end step, sacrifice ~.\"",
+            "Chandra, Flameshaper",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }),
+            "expected AddKeyword{{Haste}}, got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+            "expected a GrantTrigger for the quoted sacrifice ability, got {mods:?}"
         );
     }
 

@@ -6,9 +6,10 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(
@@ -21,6 +22,10 @@ pub fn resolve(
         Effect::Attach { attachment, target } => (attachment, target),
         _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
     };
+
+    if prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
+        return Ok(());
+    }
 
     // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
     // battlefield/LKI unless they are explicit player-chosen targets.
@@ -131,6 +136,100 @@ fn current_attachment_target(state: &GameState, attachment_id: ObjectId) -> Opti
         .map(target_ref_from_attach_target)
 }
 
+/// CR 608.2d + CR 601.2c: Optional or activation-deferred attach sub-instructions
+/// (Nahiri, the Lithomancer +2) choose the Equipment only after the controller
+/// accepts at resolution. When multiple Equipment match, prompt instead of
+/// auto-attaching the first battlefield scan result.
+fn prompt_resolution_attachment_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
+        return Ok(false);
+    }
+    if explicit_attachment_target_chosen(state, ability, attachment_filter) {
+        return Ok(false);
+    }
+
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(ability, attachment_filter);
+    let eligible: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| matches_target_filter(state, *id, &effective, &ctx))
+        .collect();
+
+    match eligible.len() {
+        0 => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id: ability.source_id,
+            });
+            Ok(true)
+        }
+        1 => Ok(false),
+        _ => {
+            // Replace any stale continuation (e.g. a deferred optional sub stashed
+            // by the parent chain walker) with this exact attach instruction.
+            state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+                Box::new(ability.clone()),
+            ));
+            state.waiting_for = WaitingFor::EffectZoneChoice {
+                player: ability.controller,
+                cards: eligible,
+                count: 1,
+                min_count: 1,
+                up_to: false,
+                source_id: ability.source_id,
+                effect_kind: EffectKind::Attach,
+                zone: Zone::Battlefield,
+                destination: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_under_player: None,
+                enters_attacking: false,
+                owner_library: false,
+                track_exiled_by_source: false,
+                face_down_profile: None,
+                count_param: 0,
+                library_position: None,
+                is_cost_payment: false,
+            };
+            Ok(true)
+        }
+    }
+}
+
+/// Resume an attach sub-instruction paused on `EffectZoneChoice`.
+pub(crate) fn complete_resolution_attachment_choice(
+    state: &mut GameState,
+    mut ability: ResolvedAbility,
+    attachment_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    ability.sub_ability = None;
+    ability.targets.push(TargetRef::Object(attachment_id));
+    resolve(state, &ability, events)
+}
+
+fn explicit_attachment_target_chosen(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+) -> bool {
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(ability, attachment_filter);
+    ability.targets.iter().any(|target| {
+        matches!(
+            target,
+            TargetRef::Object(id) if matches_target_filter(state, *id, &effective, &ctx)
+        )
+    })
+}
+
 /// Only explicit attachment choices consume player-chosen target slots.
 /// Scan-based filters (e.g. "Equipment that was attached to ~") resolve from
 /// the battlefield or LKI and must not steal `ParentTarget` slots.
@@ -174,17 +273,22 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
-        _ => target_slots
-            .find_map(|target| match target {
-                TargetRef::Object(id) => Some(*id),
-                TargetRef::Player(_) => None,
-            })
-            .or_else(|| {
-                resolved_object_ids_for_filter(state, ability, filter)
-                    .into_iter()
-                    .next()
-            })
-            .or_else(|| resolve_attached_to_source_lki_attachment(state, ability, filter)),
+        _ => {
+            let ctx = FilterContext::from_ability(ability);
+            target_slots
+                .find_map(|target| match target {
+                    TargetRef::Object(id) if matches_target_filter(state, *id, filter, &ctx) => {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    resolved_object_ids_for_filter(state, ability, filter)
+                        .into_iter()
+                        .next()
+                })
+                .or_else(|| resolve_attached_to_source_lki_attachment(state, ability, filter))
+        }
     }
 }
 
@@ -568,6 +672,21 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// Build Equipment on the battlefield (Artifact + Equipment subtype).
+    fn spawn_equipment(state: &mut GameState, name: &str, card_id: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
     }
 
     /// Build a permanent with the given subtype on the battlefield.
@@ -1053,6 +1172,124 @@ mod tests {
         attach_to(&mut state, equipment, victim);
 
         assert_eq!(state.objects.get(&equipment).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn deferred_attach_prompts_when_multiple_equipment_match() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Kor Soldier");
+        state.last_created_token_ids = vec![host];
+        let first = spawn_equipment(&mut state, "Rod A", 10);
+        let second = spawn_equipment(&mut state, "Rod B", 11);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let WaitingFor::EffectZoneChoice {
+            cards, effect_kind, ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected EffectZoneChoice for multiple Equipment, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*effect_kind, EffectKind::Attach);
+        assert_eq!(cards.len(), 2);
+        assert!(cards.contains(&first));
+        assert!(cards.contains(&second));
+        assert!(state.pending_continuation.is_some());
+
+        let cont = state.pending_continuation.take().unwrap();
+        complete_resolution_attachment_choice(&mut state, *cont.chain, second, &mut events)
+            .unwrap();
+
+        assert_eq!(
+            state.objects.get(&second).unwrap().attached_to,
+            Some(AttachTarget::Object(host))
+        );
+        assert!(state.objects.get(&first).unwrap().attached_to.is_none());
+    }
+
+    #[test]
+    fn complete_resolution_attachment_choice_uses_nahiri_subtype_filter() {
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Kor Soldier");
+        state.last_created_token_ids = vec![host];
+        let equipment = spawn_equipment(&mut state, "Skullclamp", 12);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, equipment, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(host))
+        );
+    }
+
+    #[test]
+    fn complete_resolution_attachment_choice_skips_stale_parent_propagated_targets() {
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Kor Soldier");
+        state.last_created_token_ids = vec![host];
+        let first = spawn_equipment(&mut state, "Rod A", 10);
+        let chosen = spawn_equipment(&mut state, "Rod B", 11);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            // Parent chain walkers can propagate the LastCreated bearer into
+            // `targets` before the Equipment pick is appended at resolution.
+            vec![crate::types::ability::TargetRef::Object(host)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, chosen, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&chosen).unwrap().attached_to,
+            Some(AttachTarget::Object(host))
+        );
+        assert!(state.objects.get(&first).unwrap().attached_to.is_none());
     }
 
     #[test]

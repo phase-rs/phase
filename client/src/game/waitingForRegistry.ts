@@ -145,6 +145,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseDungeon",
     "ChooseDungeonRoom",
     "SpecializeColor",
+    // CR 709.5f-g: lock/unlock-door resolution choice (RoomDoorChoiceModal).
+    "ChooseRoomDoor",
     "ChooseLegend",
     "CommanderZoneChoice",
     "BattleProtectorChoice",

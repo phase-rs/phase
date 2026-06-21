@@ -1,20 +1,23 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{all_consuming, map, map_opt, not, opt, rest as nom_rest, value};
-use nom::multi::many1;
+use nom::character::complete::{anychar, char};
+use nom::combinator::{all_consuming, map, map_opt, not, opt, recognize, rest as nom_rest, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, Comparator, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-    ManaSpendRestriction, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
-use crate::types::mana::{AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant};
+use crate::types::mana::{
+    AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant, SpellCostCriterion,
+    ZoneSpend, ZoneSpendPolarity,
+};
 use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -81,6 +84,23 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     let (_, type_text_lower) = take_until::<_, _, OracleError<'_>>(", add one mana of that color")
         .parse(rest)
         .ok()?;
+    // CR 702.167c + CR 105.1: "For each color among the exiled cards used to craft
+    // this creature, add one mana of that color" (Sunbird Effigy) — the iteration
+    // source is the craft-material linked-exile pool, not a battlefield type
+    // phrase. Tried first so the craft noun phrase wins over `parse_type_phrase`.
+    if let Ok((craft_rest, filter)) =
+        crate::parser::oracle_nom::quantity::parse_craft_materials_filter(type_text_lower.trim())
+    {
+        if craft_rest.trim().is_empty() {
+            return Some(Effect::Mana {
+                produced: ManaProduction::DistinctColorsAmongPermanents { filter },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            });
+        }
+    }
     // Recover original-cased slice for parse_type_phrase.
     let offset = lower_trimmed.len() - rest.len();
     let original_trimmed = text.trim_end_matches('.').trim();
@@ -1270,6 +1290,35 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
     )
 }
 
+/// CR 106.6: Parse the negative spend restriction "this mana can't be spent to
+/// cast [a/an] non<TYPE> spell(s)" into a `SpellTypeOrAbilityActivation` whose
+/// `spell_type` is `<TYPE>` (the phrase with the leading "non" stripped) and
+/// whose ability scope is `Any`. The double-negative restricts spell-casting to
+/// `<TYPE>` spells while leaving every ability activation payable (CR 605/602) —
+/// Karn, Legacy Reforged; Hydraulic Helper. Returns `None` for any other
+/// phrasing so the positive-form parser and the existing gap behavior are
+/// untouched.
+fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
+    let (_, rest) = nom_on_lower(lower, lower, |i| {
+        // MTGJSON Oracle text is not apostrophe-normalized, so accept both the
+        // ASCII (') and curly (U+2019) apostrophe forms of "can't".
+        let (i, _) = tag("this mana ca").parse(i)?;
+        let (i, _) = alt((tag("n't"), tag("n\u{2019}t"))).parse(i)?;
+        let (i, _) = tag(" be spent to cast ").parse(i)?;
+        let (i, _) = opt(nom_primitives::parse_article).parse(i)?;
+        value((), alt((tag("non-"), tag("non")))).parse(i)
+    })?;
+    let rest = rest.trim().trim_end_matches(['.', '"']).trim();
+    // `rest` is now "<type> spell(s)" (the article and "non" prefix already
+    // consumed); reuse the shared type-phrase combinator to canonicalize the
+    // spell type.
+    let spell_type = parse_restricted_spell_type_phrase(rest)?;
+    Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+        spell_type,
+        ability: AbilityActivationScope::Any,
+    })
+}
+
 fn normalize_restricted_source_phrase(phrase: &str) -> String {
     phrase
         .split_whitespace()
@@ -1365,11 +1414,37 @@ fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
 pub(crate) fn parse_mana_spend_restriction(
     lower: &str,
 ) -> Option<(ManaSpendRestriction, Vec<ManaSpellGrant>)> {
+    // CR 106.6: Negative spend restriction — "this mana can't be spent to cast
+    // non<TYPE> spells" (Karn, Legacy Reforged). The double negative ("can't
+    // cast non<TYPE>") is the spell-side equivalent of "only to cast <TYPE>",
+    // but — unlike the positive "spend this mana only …" form — it places NO
+    // restriction on ability activation: the clause forbids only the *casting*
+    // of non-<TYPE> spells. Lower it to `SpellTypeOrAbilityActivation` (any
+    // ability stays payable) rather than `SpellType` (spells-only), which would
+    // wrongly forbid paying for abilities.
+    if let Some(restriction) = parse_negative_mana_spend_restriction(lower) {
+        return Some((restriction, vec![]));
+    }
+
     let (_, base) = nom_on_lower(lower, lower, |i| {
         value((), tag("spend this mana only ")).parse(i)
     })?;
     let base = base.trim_end_matches(['.', '"']);
     let base_lower = base.to_lowercase();
+
+    // CR 106.6: "spend this mana only to activate power-up abilities" -- tag-scoped.
+    // Try BEFORE the broader "to activate abilities" arm (more-specific-first) so
+    // Quinjet's {R}{R} does not collapse to ActivateOnly.
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), tag("to activate power-up abilities")).parse(i)
+    })
+    .is_some()
+    {
+        return Some((
+            ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp),
+            vec![],
+        ));
+    }
 
     // "spend this mana only to activate abilities" -- activation-only
     if nom_on_lower(base, &base_lower, |i| {
@@ -1393,11 +1468,53 @@ pub(crate) fn parse_mana_spend_restriction(
         return Some((ManaSpendRestriction::XCostOnly, vec![]));
     }
 
+    // CR 106.6: Activation-first disjunction — "to activate X or cast Y" (Automated
+    // Artificer). The "to cast " prefix check below would reject this ordering, so
+    // detect the activation-first pattern and route through the disjunction parser
+    // with the full base text (stripped of the leading "to ").
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), (tag("to activate "), take_until(" or cast "))).parse(i)
+    })
+    .is_some()
+    {
+        // Strip leading "to " so each clause starts bare for parse_disjunctive_clause.
+        let without_to = nom_on_lower(base, &base_lower, |i| value((), tag("to ")).parse(i))
+            .map_or(base, |(_, rest)| rest);
+        if let Some(restriction) = parse_disjunctive_cast_clauses(without_to.trim()) {
+            return Some((restriction, vec![]));
+        }
+    }
+
     let (_, rest) = nom_on_lower(base, &base_lower, |i| value((), tag("to cast ")).parse(i))?;
     let rest = rest.trim();
 
     // CR 106.6: Extract "and that spell can't be countered" grant before parsing restriction.
     let (rest, grants) = extract_spell_grants(rest);
+    let rest = rest.trim();
+
+    // CR 106.6: Prefer the whole-remainder single-clause reading first, so a
+    // type union inside one clause ("instant or sorcery spells") stays a single
+    // `SpellType` and only genuinely heterogeneous disjunctions fall through to
+    // the multi-clause path below.
+    if let Some(restriction) = parse_single_cast_clause(rest) {
+        return Some((restriction, grants));
+    }
+
+    // CR 106.6: Disjunctive spend restriction ("cast X or Y", "cast X, Y, or
+    // activate Z"). Each top-level clause is parsed independently; only when ≥2
+    // clauses all parse to self-evaluable restrictions do we emit `Any`.
+    if let Some(restriction) = parse_disjunctive_cast_clauses(rest) {
+        return Some((restriction, grants));
+    }
+
+    None
+}
+
+/// CR 106.6: Parse a single post-"to cast " clause (no grant extraction, no
+/// disjunction) into a `ManaSpendRestriction`. This is the body of the legacy
+/// single-clause logic, extracted verbatim so the disjunction path can reuse it
+/// per clause. Returns `None` for any phrase it does not recognize.
+fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
     let rest = rest.trim();
     let rest_lower = rest.to_lowercase();
     if nom_on_lower(rest, &rest_lower, |i| {
@@ -1405,65 +1522,53 @@ pub(crate) fn parse_mana_spend_restriction(
     })
     .is_some()
     {
-        return Some((ManaSpendRestriction::SpellOnly, grants));
+        return Some(ManaSpendRestriction::SpellOnly);
+    }
+
+    // CR 106.6 + CR 107.3 + CR 202.3: "[creature ]spells with mana value N or
+    // greater or [creature ]spells with {X} in their mana costs" — the
+    // disjunctive MV/X reading (Helga, Troyan). Checked before the single
+    // MV-threshold arm because it begins with the same "spells with mana value"
+    // prefix but continues with the " or … {X} …" disjunct.
+    if let Some((spell_type, criteria)) = parse_mv_or_x_cost_criteria(rest) {
+        return Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        });
     }
 
     // CR 106.6: "spells with mana value N or greater" / "a spell with mana
     // value N or less" — parameterized over Comparator by the threshold suffix.
     if let Some((comparator, value)) = parse_mana_value_threshold(rest) {
-        return Some((
-            ManaSpendRestriction::SpellWithManaValue { comparator, value },
-            grants,
-        ));
+        return Some(ManaSpendRestriction::SpellWithManaValue { comparator, value });
     }
 
     // CR 105.2 + CR 106.6: "spells with exactly N colors" / "a spell with N or
     // more colors" — parameterized over Comparator by the color-count suffix.
     if let Some((comparator, count)) = parse_color_count(rest) {
-        return Some((
-            ManaSpendRestriction::SpellWithColorCount { comparator, count },
-            grants,
-        ));
+        return Some(ManaSpendRestriction::SpellWithColorCount { comparator, count });
     }
 
-    if matches!(rest, "spells with flashback" | "a spell with flashback") {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback),
-            grants,
-        ));
+    // CR 106.6 + CR 702: "[a spell|spells] [with|that has|that have] <keyword>"
+    // — keyword-gated spend, optionally with a "from <zone>" tail. Parameterized
+    // over the keyword name so a single arm covers flashback, freerunning, etc.
+    if let Some((kind, zone)) = parse_spell_with_keyword(rest) {
+        return Some(match zone {
+            Some(zone) => ManaSpendRestriction::SpellWithKeywordKindFromZone { kind, zone },
+            None => ManaSpendRestriction::SpellWithKeywordKind(kind),
+        });
     }
 
-    if matches!(
-        rest,
-        "spells with flashback from a graveyard" | "a spell with flashback from a graveyard"
-    ) {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKindFromZone {
-                kind: KeywordKind::Flashback,
-                zone: crate::types::zones::Zone::Graveyard,
-            },
-            grants,
-        ));
-    }
-
-    if matches!(
-        rest,
-        "spells with flashback from your graveyard" | "a spell with flashback from your graveyard"
-    ) {
-        return Some((
-            ManaSpendRestriction::SpellWithKeywordKindFromZone {
-                kind: KeywordKind::Flashback,
-                zone: crate::types::zones::Zone::Graveyard,
-            },
-            grants,
-        ));
-    }
-
-    // CR 106.6 + CR 400.7: "[a spell|spells] from your graveyard" / "from exile"
-    // — zone-gated spend (no keyword required). Checked before the type-phrase
+    // CR 106.6 + CR 400.7: "[a spell|spells] from [your] <zone>" / "from anywhere
+    // other than [your] <zone>" — zone-gated spend (no keyword required), where
+    // the leading "anywhere other than" upgrades the reading to the `NotFrom`
+    // polarity (Mm'menon, the Right Hand). Checked before the type-phrase
     // fallback, which does not recognize a "from <zone>" tail.
-    if let Some(zone) = parse_spell_from_zone(rest) {
-        return Some((ManaSpendRestriction::SpellFromZone(zone), grants));
+    if let Some((zone, polarity)) = parse_spell_from_zone(rest) {
+        return Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            zone,
+            polarity,
+        }));
     }
 
     // CR 106.6: Check for an "or activate …" ability-activation suffix. If
@@ -1472,7 +1577,7 @@ pub(crate) fn parse_mana_spend_restriction(
     let (spell_part, activation_tail) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
-        return Some((ManaSpendRestriction::ChosenCreatureType, grants));
+        return Some(ManaSpendRestriction::ChosenCreatureType);
     }
 
     // "creature spells" / "a creature spell" / "artifact spells" etc.
@@ -1487,45 +1592,238 @@ pub(crate) fn parse_mana_spend_restriction(
         ActivationTail::OfType(source_quality)
             if source_quality.eq_ignore_ascii_case(&type_phrase) =>
         {
-            Some((
-                ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                    spell_type: type_phrase,
-                    ability: AbilityActivationScope::OfSpellType,
-                },
-                grants,
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: type_phrase,
+                ability: AbilityActivationScope::OfSpellType,
+            })
         }
         // A typed activation suffix whose source quality differs from the spell
         // type is an unsupported compound — gap it rather than guess.
         ActivationTail::OfType(_) => None,
-        ActivationTail::Any => Some((
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                spell_type: type_phrase,
-                ability: AbilityActivationScope::Any,
-            },
-            grants,
-        )),
-        ActivationTail::None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
+        ActivationTail::Any => Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            spell_type: type_phrase,
+            ability: AbilityActivationScope::Any,
+        }),
+        ActivationTail::None => Some(ManaSpendRestriction::SpellType(type_phrase)),
     }
 }
 
-/// CR 106.6 + CR 400.7: Parse "[a spell|spells] from <zone>" (the post-"to cast"
-/// remainder of a zone-gated spend restriction) into the origin `Zone`. Handles
-/// graveyard / exile / hand with the usual "your"/"a" determiners. Returns
-/// `None` when the remainder is not a bare spell-from-zone phrase (e.g. it
-/// carries a keyword or type qualifier handled by other arms).
-fn parse_spell_from_zone(rest: &str) -> Option<Zone> {
-    let rest_lower = rest.to_lowercase();
-    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+/// CR 106.6: Parse one clause of a disjunctive spend restriction. A clause is
+/// either a CAST clause (handled by [`parse_single_cast_clause`], tolerating a
+/// leading "to cast "/"cast " that the split may have left on a trailing
+/// clause) or an ACTIVATE clause ("to activate an ability of an X source"),
+/// which is lowered to a `SpellTypeOrAbilityActivation`/`ActivateOnly` reading.
+///
+/// Returns `None` for any clause that does not independently parse — the caller
+/// then drops the whole disjunction rather than guessing.
+/// CR 106.6 + CR 116.2m + CR 709.5e: Recognize the non-cast "unlock [a ]door[s]"
+/// special-action clause of a disjunctive spend restriction (Smoky Lounge: "cast
+/// Room spells and unlock doors"). Tolerates an optional leading "to " (the
+/// split may leave "to unlock ..." on a trailing clause) and the
+/// singular/plural article forms. Returns the `UnlockDoor` leaf, which lowers to
+/// the door-unlock special-action runtime gate. Pure combinator — no string
+/// dispatch.
+fn parse_unlock_door_clause(clause: &str, clause_lower: &str) -> Option<ManaSpendRestriction> {
+    nom_on_lower(clause, clause_lower, |i| {
+        let (i, _) = opt(tag("to ")).parse(i)?;
+        let (i, _) = tag("unlock ").parse(i)?;
+        let (i, _) = opt(alt((tag("a "), tag("an ")))).parse(i)?;
         value(
-            (),
-            (
-                alt((tag("a spell"), tag("spells"))),
-                tag(" from "),
-                opt(alt((tag("your "), tag("a ")))),
-            ),
+            ManaSpendRestriction::UnlockDoor,
+            all_consuming(alt((tag("doors"), tag("door")))),
         )
         .parse(i)
+    })
+    .map(|(restriction, _)| restriction)
+}
+
+fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
+    let clause = clause.trim();
+    let clause_lower = clause.to_lowercase();
+
+    // CR 116.2m + CR 709.5e: Non-cast door-unlock special-action clause — tried
+    // before the cast/activate arms so "unlock doors" isn't mistaken for a cast
+    // clause (it has no " spell" terminator and would otherwise fail to parse).
+    if let Some(restriction) = parse_unlock_door_clause(clause, &clause_lower) {
+        return Some(restriction);
+    }
+
+    // ACTIVATE clause: "to activate an ability of an X source" / "activate an
+    // equip ability" / "to activate an ability". Reuse the existing activation
+    // tail combinator by treating the clause itself as the post-" or " tail.
+    if nom_on_lower(clause, &clause_lower, |i| {
+        value((), alt((tag("to activate "), tag("activate ")))).parse(i)
+    })
+    .is_some()
+    {
+        let (_, source_quality) = all_consuming(parse_activation_tail_after_or)
+            .parse(clause_lower.as_str())
+            .ok()?;
+        return Some(match source_quality {
+            // CR 106.6: "activate an ability of an X source" — abilities of
+            // permanents of type X. There is no pure "activate abilities of type
+            // X" `ManaRestriction`; the closest self-evaluable reading is
+            // `SpellTypeOrAbilityActivation { X, OfSpellType }`, whose activation
+            // half is exactly "abilities of type X" (and whose spell half also
+            // allows X spells — harmless inside a disjunction that already lists
+            // the matching X cast clause, e.g. Brotherhood Headquarters).
+            Some(quality) => ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: quality,
+                ability: AbilityActivationScope::OfSpellType,
+            },
+            // CR 106.6: "to activate an ability" with no qualifier — any ability.
+            None => ManaSpendRestriction::ActivateOnly,
+        });
+    }
+
+    // CAST clause: tolerate a leading "to cast "/"cast " the split may have left.
+    let cast_clause = nom_on_lower(clause, &clause_lower, |i| {
+        value((), alt((tag("to cast "), tag("cast ")))).parse(i)
+    })
+    .map_or(clause, |(_, rest)| rest);
+
+    parse_single_cast_clause(cast_clause)
+}
+
+/// CR 106.6: Split a post-"to cast " remainder into top-level disjunction
+/// clauses and, if every clause parses to a self-evaluable restriction (and
+/// there are ≥2 of them), emit a `ManaSpendRestriction::Any`. Returns `None`
+/// when the remainder is not a multi-clause disjunction or any clause fails to
+/// parse / is an `XCostOnly` (deferred-eval) reading — leaving the restriction
+/// as a known gap rather than guessing.
+///
+/// Splitting is done on " or " and the Oxford-comma forms (", " / ", or "); a
+/// candidate split is only accepted when it yields ≥2 fragments that EACH
+/// independently parse via [`parse_disjunctive_clause`]. Because the caller
+/// already tried the whole remainder as a single clause first, a type union
+/// inside one clause ("instant or sorcery spells") never reaches this path.
+/// CR 106.6: Recognize one disjunction clause — the run of input up to (but not
+/// including) the next clause delimiter (" or " / ", " / ", or ") or end of
+/// input. nom combinator (a `not`-guarded `anychar` repetition) per the
+/// parser-combinator mandate, rather than `str::split`.
+fn parse_one_disjunction_clause(input: &str) -> OracleResult<'_, &str> {
+    recognize(many1(preceded(
+        // CR 106.6: " or ", " and ", and the Oxford-comma forms each separate
+        // distinct acceptable actions in a spend restriction. " and " joins
+        // heterogeneous spend clauses too (Smoky Lounge: "cast Room spells and
+        // unlock doors") — a same-clause type union ("instant and sorcery
+        // spells") never reaches this splitter because the caller tries the
+        // whole remainder as a single clause first.
+        not(alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        ))),
+        anychar,
+    )))
+    .parse(input)
+}
+
+fn parse_disjunctive_cast_clauses(rest: &str) -> Option<ManaSpendRestriction> {
+    // CR 106.6: Split the remainder into top-level disjunction clauses with a nom
+    // separated list — delimiters are " or ", " and ", and the Oxford-comma forms
+    // (", " / ", or " / ", and "). Longest delimiter first so ", or "/", and "
+    // win over their ", " prefix. Each clause is the run of input up to the next
+    // delimiter; a type union inside one clause ("instant or sorcery spells",
+    // "instant and sorcery spells") never reaches here because the caller tries
+    // the whole remainder as a single clause first.
+    let (_, fragments) = all_consuming(separated_list1(
+        alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
+        parse_one_disjunction_clause,
+    ))
+    .parse(rest)
+    .ok()?;
+
+    if fragments.len() < 2 {
+        return None;
+    }
+
+    let mut subs = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        let restriction = parse_disjunctive_clause(fragment)?;
+        // CR 106.6: XCostOnly defers full {X}-cost detection to its call site and
+        // cannot be self-evaluated inside a disjunction — drop the whole thing.
+        if matches!(restriction, ManaSpendRestriction::XCostOnly) {
+            return None;
+        }
+        subs.push(restriction);
+    }
+
+    // Only emit a disjunction for ≥2 successfully-parsed clauses.
+    (subs.len() >= 2).then_some(ManaSpendRestriction::Any(subs))
+}
+
+/// CR 106.6 + CR 702: Parse "[a spell|spells] [with|that has|that have]
+/// <keyword> [from <zone>]" into the keyword kind and optional origin zone.
+/// Parameterized over the keyword name (an `alt` of keyword tags) so one arm
+/// covers every keyword-gated spend filter (flashback, freerunning, …) rather
+/// than a hardcoded per-keyword `matches!`. The optional "from <zone>" tail
+/// upgrades the result to a keyword+zone reading (Flashback from graveyard).
+fn parse_spell_with_keyword(rest: &str) -> Option<(KeywordKind, Option<Zone>)> {
+    let rest_lower = rest.to_lowercase();
+    let (kind, after_kw) = nom_on_lower(rest, &rest_lower, |i| {
+        let (i, _) = alt((tag("spells"), tag("a spell"))).parse(i)?;
+        let (i, _) = alt((tag(" with "), tag(" that has "), tag(" that have "))).parse(i)?;
+        // CR 702: keyword name → KeywordKind. Extend this `alt` per keyword.
+        alt((
+            value(KeywordKind::Flashback, tag("flashback")),
+            value(KeywordKind::Freerunning, tag("freerunning")),
+        ))
+        .parse(i)
+    })?;
+
+    let after_lower = after_kw.to_lowercase();
+    if after_kw.trim().is_empty() {
+        return Some((kind, None));
+    }
+    // Optional "from [your|a] <zone>" tail.
+    let (_, after_from) = nom_on_lower(after_kw, &after_lower, |i| {
+        value((), (tag(" from "), opt(alt((tag("your "), tag("a ")))))).parse(i)
+    })?;
+    let after_from_lower = after_from.to_lowercase();
+    let (zone, _) = nom_on_lower(after_from, &after_from_lower, |i| {
+        all_consuming(alt((
+            value(Zone::Graveyard, tag("graveyard")),
+            value(Zone::Exile, tag("exile")),
+            value(Zone::Hand, tag("hand")),
+        )))
+        .parse(i)
+    })?;
+    Some((kind, Some(zone)))
+}
+
+/// CR 106.6 + CR 400.7: Parse "[a spell|spells] from [anywhere other than ]<zone>"
+/// (the post-"to cast" remainder of a zone-gated spend restriction) into the
+/// origin `Zone` and its inclusion/exclusion polarity. Handles graveyard / exile
+/// / hand with the usual "your"/"a" determiners. The optional "anywhere other
+/// than " prefix flips the reading to [`ZoneSpendPolarity::NotFrom`] (Mm'menon,
+/// the Right Hand — "from anywhere other than your hand"). Returns `None` when
+/// the remainder is not a bare spell-from-zone phrase (e.g. it carries a keyword
+/// or type qualifier handled by other arms).
+fn parse_spell_from_zone(rest: &str) -> Option<(Zone, ZoneSpendPolarity)> {
+    let rest_lower = rest.to_lowercase();
+    // Consume "[a spell|spells] from " then, optionally, the "anywhere other
+    // than " exclusion marker; the determiner ("your"/"a") follows in both
+    // readings. The presence of the exclusion marker selects the polarity.
+    let (polarity, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        let (i, _) = alt((tag("a spell"), tag("spells"))).parse(i)?;
+        let (i, _) = tag(" from ").parse(i)?;
+        let (i, exclusion) = opt(tag("anywhere other than ")).parse(i)?;
+        let polarity = if exclusion.is_some() {
+            ZoneSpendPolarity::NotFrom
+        } else {
+            ZoneSpendPolarity::From
+        };
+        let (i, _) = opt(alt((tag("your "), tag("a ")))).parse(i)?;
+        Ok((i, polarity))
     })?;
     let after_lower = after_prefix.to_lowercase();
     let (zone, _) = nom_on_lower(after_prefix, &after_lower, |i| {
@@ -1536,7 +1834,7 @@ fn parse_spell_from_zone(rest: &str) -> Option<Zone> {
         )))
         .parse(i)
     })?;
-    Some(zone)
+    Some((zone, polarity))
 }
 
 /// CR 106.6: Parse the "[spells|a spell] with mana value N [or greater|or
@@ -1588,6 +1886,95 @@ fn parse_mana_value_threshold(rest: &str) -> Option<(Comparator, u32)> {
         return None;
     };
     Some((comparator, value_n))
+}
+
+/// CR 106.6 + CR 107.3 + CR 202.3: Parse the disjunctive "[<type> ]spells with
+/// mana value N <threshold> or [<type> ]spells with {X} in their mana cost[s]"
+/// spend restriction (Helga, Skittish Seer — `Some("Creature")`; Troyan, Gutsy
+/// Explorer — `None`). Returns `(optional spell type, criteria)` where the
+/// criteria are `[ManaValue { .. }, HasXInCost]` in oracle order.
+///
+/// The optional type word that prefixes "spells" must be identical on both
+/// disjuncts (both "creature spells" or both bare "spells"); a mismatch is an
+/// unsupported compound and yields `None` so the clause stays a loud gap.
+fn parse_mv_or_x_cost_criteria(rest: &str) -> Option<(Option<String>, Vec<SpellCostCriterion>)> {
+    let rest_lower = rest.to_lowercase();
+    nom_on_lower(rest, &rest_lower, |i| {
+        all_consuming(parse_mv_or_x_cost_criteria_inner).parse(i)
+    })
+    .map(|(parsed, _)| parsed)
+}
+
+/// CR 202.3: Comparator suffix shared by mana-value thresholds within the
+/// disjunctive criteria combinator. `or greater`/`or more` → `GE`,
+/// `or less`/`or fewer` → `LE`.
+fn parse_mana_value_comparator(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(Comparator::GE, alt((tag("or greater"), tag("or more")))),
+        value(Comparator::LE, alt((tag("or less"), tag("or fewer")))),
+    ))
+    .parse(input)
+}
+
+/// CR 106.6: Consume the optional article, optional shared type word, and the
+/// "spell(s) with " opener of one disjunct. Returns the captured type word
+/// (`None` for bare "spells with "). Reuses `parse_article` so "a creature spell
+/// with" and "creature spells with" both reduce to the bare type word.
+///
+/// The bare "spell(s) with " opener is tried first; only when it does not match
+/// is a single non-"spell" type word captured ahead of the opener. This keeps a
+/// type-less disjunct from swallowing later " spell" occurrences via `take_until`.
+fn parse_typed_spells_with_opener(input: &str) -> OracleResult<'_, Option<String>> {
+    let (input, _) = opt(nom_primitives::parse_article).parse(input)?;
+    let spells_with = || alt((tag(" spells with "), tag(" spell with ")));
+    // Bare opener (no type word). `take_until` over the empty-type case would
+    // otherwise consume across the disjunct, so handle it explicitly first.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("spells with "),
+        tag("spell with "),
+    ))
+    .parse(input)
+    {
+        return Ok((rest, None));
+    }
+    let (input, type_word) = map(take_until(" spell"), |t: &str| t.to_string()).parse(input)?;
+    let (input, _) = spells_with().parse(input)?;
+    Ok((input, Some(type_word)))
+}
+
+/// CR 106.6 + CR 107.3 + CR 202.3: Inner all-consuming combinator for
+/// [`parse_mv_or_x_cost_criteria`]. Parses both disjuncts and validates that the
+/// optional type prefix matches across them.
+fn parse_mv_or_x_cost_criteria_inner(
+    input: &str,
+) -> OracleResult<'_, (Option<String>, Vec<SpellCostCriterion>)> {
+    // First disjunct: "[<type> ]spell(s) with mana value N <threshold>".
+    let (input, type_a) = parse_typed_spells_with_opener(input)?;
+    let (input, _) = tag("mana value ").parse(input)?;
+    let (input, value) = nom_primitives::parse_number(input)?;
+    let (input, _) = char(' ').parse(input)?;
+    let (input, comparator) = parse_mana_value_comparator(input)?;
+    // Connective.
+    let (input, _) = tag(" or ").parse(input)?;
+    // Second disjunct: "[<type> ]spell(s) with {x} in their mana cost[s]".
+    let (input, type_b) = parse_typed_spells_with_opener(input)?;
+    let (input, _) = (
+        tag("{x} in "),
+        alt((tag("their"), tag("its"))),
+        tag(" mana cost"),
+        opt(tag("s")),
+    )
+        .parse(input)?;
+
+    if type_a != type_b {
+        return Err(oracle_err(input));
+    }
+    let spell_type = type_a.map(|t| super::capitalize(t.trim()));
+    let criteria = vec![
+        SpellCostCriterion::ManaValue { comparator, value },
+        SpellCostCriterion::HasXInCost,
+    ];
+    Ok((input, (spell_type, criteria)))
 }
 
 /// CR 105.2 + CR 106.6: Parse the "[spells|a spell] with [exactly] N [or more|or
@@ -2958,6 +3345,248 @@ mod tests {
                 }
             ),
             "expected ChosenColor with fixed_alternative Black, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn negated_nonartifact_spend_maps_to_artifact_spell_or_ability() {
+        // CR 106.6: Hydraulic Helper — "This mana can't be spent to cast a
+        // nonartifact spell" restricts spell-casting to artifact spells while
+        // leaving ability activation unrestricted, so it lowers to the OR variant
+        // with `ability: Any` (NOT a spells-only `SpellType`, which would wrongly
+        // forbid paying for abilities). ASCII apostrophe form.
+        let (restriction, grants) =
+            parse_mana_spend_restriction("this mana can't be spent to cast a nonartifact spell")
+                .expect("negated nonartifact restriction must parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::Any,
+            }
+        );
+        assert!(grants.is_empty());
+    }
+
+    #[test]
+    fn negated_nonartifact_spend_curly_apostrophe_parses() {
+        // CR 106.6: MTGJSON Oracle text is not apostrophe-normalized — the curly
+        // (U+2019) apostrophe form of "can't" must parse identically to ASCII.
+        let (restriction, _) = parse_mana_spend_restriction(
+            "this mana can\u{2019}t be spent to cast a nonartifact spell",
+        )
+        .expect("curly-apostrophe negated restriction must parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::Any,
+            }
+        );
+    }
+
+    #[test]
+    fn negated_noncreature_spend_maps_to_creature_spell_or_ability() {
+        // CR 106.6: Builds for the class — any non<TYPE> exclusion resolves to
+        // the same OR variant over <TYPE>, not just artifact.
+        let (restriction, _) =
+            parse_mana_spend_restriction("this mana can't be spent to cast a noncreature spell")
+                .expect("negated noncreature restriction must parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Creature".to_string(),
+                ability: AbilityActivationScope::Any,
+            }
+        );
+    }
+
+    // CR 106.6 + CR 107.3 + CR 202.3: Troyan, Gutsy Explorer — any-type
+    // disjunctive MV/X spend restriction.
+    #[test]
+    fn mana_spend_restriction_troyan_mv_or_x_any_type() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater or spells with {x} in their mana costs",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+                spell_type: None,
+                criteria: vec![
+                    SpellCostCriterion::ManaValue {
+                        comparator: Comparator::GE,
+                        value: 5,
+                    },
+                    SpellCostCriterion::HasXInCost,
+                ],
+            })
+        );
+    }
+
+    // CR 106.6 + CR 107.3 + CR 202.3: Helga, Skittish Seer — creature-narrowed
+    // disjunctive MV/X spend restriction.
+    #[test]
+    fn mana_spend_restriction_helga_creature_mv_or_x() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast creature spells with mana value 4 or greater or creature spells with {x} in their mana costs",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+                spell_type: Some("Creature".to_string()),
+                criteria: vec![
+                    SpellCostCriterion::ManaValue {
+                        comparator: Comparator::GE,
+                        value: 4,
+                    },
+                    SpellCostCriterion::HasXInCost,
+                ],
+            })
+        );
+    }
+
+    // A type-mismatched disjunct ("creature spells … or spells with {x}") is an
+    // unsupported compound: the combinator returns None so the clause stays a
+    // loud gap rather than silently dropping the narrowing on one disjunct.
+    #[test]
+    fn mana_spend_restriction_mv_or_x_type_mismatch_is_gap() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast creature spells with mana value 4 or greater or spells with {x} in their mana costs",
+        );
+        assert_eq!(result.map(|(r, _)| r), None);
+    }
+
+    // The single MV-threshold arm must still parse when there is no X disjunct,
+    // confirming the disjunction arm doesn't shadow the plain reading.
+    #[test]
+    fn mana_spend_restriction_plain_mv_threshold_still_parses() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 5,
+            })
+        );
+    }
+
+    // CR 106.6 + CR 400.7: Mm'menon, the Right Hand — "from anywhere other than
+    // your hand" lowers to the `NotFrom` polarity over `Zone::Hand`, while the
+    // existing positive "from your graveyard" reading stays `From`.
+    #[test]
+    fn mana_spend_restriction_not_from_hand() {
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from anywhere other than your hand"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Hand,
+                polarity: ZoneSpendPolarity::NotFrom,
+            }))
+        );
+        // The exclusion marker must not bleed into the inclusion reading.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from your graveyard"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+                zone: Zone::Graveyard,
+                polarity: ZoneSpendPolarity::From,
+            }))
+        );
+    }
+
+    // CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge — "cast Room spells and
+    // unlock doors" is a heterogeneous disjunction joined by " and ". It lowers
+    // to `Any([SpellType("Room"), UnlockDoor])`: the door-unlock leaf is a
+    // non-cast special-action restriction sitting alongside a cast clause.
+    #[test]
+    fn mana_spend_restriction_smoky_lounge_room_or_unlock_doors() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast room spells and unlock doors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Room".to_string()),
+                ManaSpendRestriction::UnlockDoor,
+            ]))
+        );
+    }
+
+    // The door-unlock clause parses with the singular article form too, and on
+    // either side of the connective, so the leaf is order-independent.
+    #[test]
+    fn mana_spend_restriction_unlock_a_door_singular_clause() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast room spells or unlock a door",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Room".to_string()),
+                ManaSpendRestriction::UnlockDoor,
+            ]))
+        );
+    }
+
+    // GUARD: a same-clause type union ("instant and sorcery spells") must still
+    // read as a single `SpellType`, never split by the new " and " delimiter.
+    // The whole-remainder single-clause path consumes it before the splitter.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery_stays_single_type() {
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
+            ))
+        );
+    }
+
+    // HONEST-DEFER GUARD: the four batch-7 members whose disjunction contains a
+    // non-cast leaf with no restriction-aware payment seam (turn-face-up,
+    // activate-equip) must NOT produce a partial `Any` that silently drops the
+    // unenforceable leaf — a partial disjunction would over-restrict the mana
+    // (it could no longer pay the legal non-cast action). They stay an honest
+    // gap (None) until the underlying special-action payment seams exist.
+    #[test]
+    fn mana_spend_restriction_unenforceable_noncast_leaves_stay_gap() {
+        // Creeping Peeper: enchantment-spell, unlock-door, turn-face-up. The
+        // turn-face-up leaf is unenforceable, so the whole thing is deferred.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast an enchantment spell, unlock a door, or turn a permanent face up",
+            )
+            .map(|(r, _)| r),
+            None,
+        );
+        // Freya Crescent: Equipment-spell or activate-an-equip-ability.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast an equipment spell or activate an equip ability",
+            )
+            .map(|(r, _)| r),
+            None,
+        );
+        // Tin Street Gossip: face-down spells or turn creatures face up.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast face-down spells or to turn creatures face up",
+            )
+            .map(|(r, _)| r),
+            None,
+        );
+        // Overgrown Zealot: pure turn-permanents-face-up (no cast clause at all).
+        assert_eq!(
+            parse_mana_spend_restriction("spend this mana only to turn permanents face up")
+                .map(|(r, _)| r),
+            None,
         );
     }
 }

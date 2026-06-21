@@ -15,7 +15,10 @@ use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
 };
-use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
+use crate::game::quantity::{
+    continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
+    QuantityContext,
+};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
@@ -665,6 +668,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
@@ -789,6 +793,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
@@ -958,7 +963,23 @@ fn evaluate_condition_with_context(
         // already constrains source availability before this static is evaluated.
         StaticCondition::ClassLevelGE { level } => eval_class_level_ge(state, source_id, *level),
         StaticCondition::Unrecognized { .. } => true,
-        StaticCondition::DuringYourTurn => state.active_player == controller,
+        // CR 102.1: "during your turn" means the turn of the static's source
+        // controller — never the caster. Most call sites pass the source's
+        // controller as `controller`, but the cost-modification resolver passes
+        // the *caster* (so caster-relative conditions like SpellsCastThisTurn
+        // resolve correctly), which would invert this turn check for an
+        // opponent-affecting tax (Tithe Taker: "During your turn, spells your
+        // opponents cast cost {1} more"). Bind to the source permanent's
+        // controller directly so the gate is correct in every call path; fall
+        // back to `controller` only when the source object is absent.
+        StaticCondition::DuringYourTurn => {
+            let source_controller = state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(controller);
+            state.active_player == source_controller
+        }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
         StaticCondition::WasStartingPlayer { .. } => state.current_starting_player == controller,
@@ -1036,6 +1057,15 @@ fn evaluate_condition_with_context(
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
             obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
                 && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
+        }),
+        // CR 303.4: True when at least one Aura is attached to the source object.
+        // Aura-twin of `SourceIsEquipped` (CR 301.5a); the only delta is the
+        // subtype check ("Aura" vs "Equipment"). An Aura attaches to objects or
+        // players (CR 303.4), but a creature host is always an Object, so
+        // non-Object hosts are rejected by `as_object`.
+        StaticCondition::SourceIsEnchanted => state.objects.values().any(|obj| {
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
+                && obj.card_types.subtypes.iter().any(|s| s == "Aura")
         }),
         // CR 701.37: True when the source permanent is monstrous.
         StaticCondition::SourceIsMonstrous => state
@@ -1236,6 +1266,42 @@ fn rebuild_static_index_at_top() -> bool {
     true
 }
 
+/// CR 701.60c: A suspected permanent has menace and "This creature can't block"
+/// for as long as it's suspected. The suspected designation (`is_suspected`,
+/// CR 701.60b) is the source of truth; the menace + "can't block" abilities are
+/// a continuous effect *derived* from it, not stored on the permanent's copiable
+/// values. Re-deriving them here — directly onto the just-reset live `keywords`
+/// / `static_definitions` (NOT `base_*`) every layers pass — keeps them present
+/// exactly while the designation holds and leaves the permanent's printed
+/// abilities untouched: clearing the designation (Effect::Unsuspect) simply
+/// stops re-deriving them, and a naturally-menace creature keeps its printed
+/// menace when it stops being suspected.
+///
+/// Called from the Step-1 reset of both the full (`evaluate_layers`) and
+/// incremental (`apply_layers_incremental`) passes, immediately after the live
+/// fields are reset to base, so the derived grant rides along with every reset.
+fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
+    if !obj.is_suspected {
+        return;
+    }
+    // CR 701.60c: menace. Skip if the permanent already has it (printed or
+    // otherwise granted) so the derivation is idempotent and a later removal of
+    // the printed copy still leaves exactly the derived one.
+    if !obj.keywords.iter().any(|k| matches!(k, Keyword::Menace)) {
+        obj.keywords.push(Keyword::Menace);
+    }
+    // CR 701.60c: "This creature can't block." Skip if a `CantBlock` static is
+    // already present (printed or otherwise granted).
+    if !obj
+        .static_definitions
+        .iter_all()
+        .any(|s| s.mode == StaticMode::CantBlock)
+    {
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBlock));
+    }
+}
+
 /// Unconditional full layer evaluation (CR 613.1).
 ///
 /// Production code must NOT call this directly — go through [`flush_layers`],
@@ -1331,6 +1397,10 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.assigns_damage_from_toughness = false;
             obj.assigns_damage_as_though_unblocked = false;
             obj.assigns_no_combat_damage = false;
+            // CR 701.60c: re-derive the suspected designation's menace +
+            // "can't block" onto the just-reset live fields (not base), so the
+            // grant lasts exactly as long as the designation.
+            derive_suspected_abilities(obj);
         }
     }
     // CR 702.94a + CR 400.3: Hand-zone continuous effects (Lorehold-style
@@ -1714,7 +1784,7 @@ pub(crate) fn incremental_flush_must_escalate(
     if collect_shared_active_continuous_effects(state)
         .iter()
         .any(|e| {
-            let magnitude = modification_dynamic_quantity(&e.modification);
+            let magnitude = continuous_modification_dynamic_quantity(&e.modification);
             let magnitude_sensitive =
                 magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
             let affected_sensitive =
@@ -2008,6 +2078,10 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             obj.assigns_damage_from_toughness = false;
             obj.assigns_damage_as_though_unblocked = false;
             obj.assigns_no_combat_damage = false;
+            // CR 701.60c: re-derive the suspected designation's menace +
+            // "can't block" onto the just-reset live fields (mirrors the full
+            // pass) so the incremental path agrees with `evaluate_layers`.
+            derive_suspected_abilities(obj);
         }
     }
 
@@ -2144,6 +2218,10 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .into_iter()
         .filter(|effect| effect.layer == layer)
         .collect()
+}
+
+pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
+    !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
 }
 
 /// CR 718.3b: A prototyped spell and the permanent it becomes have only their
@@ -2604,14 +2682,14 @@ fn expand_granted_static_effects(
 
 /// CR 613.1f + CR 113.3: Expand a `GrantAllActivatedAbilitiesOf { source }` host
 /// modification into one `GrantAbility` effect per activated ability of each
-/// object matching `source`. `source` is resolved relative to each recipient
-/// matching the host static's `affected_filter` (so `ExiledBySource` reads the
-/// recipient's own linked exiles). Provider objects are scanned across all zones
-/// — the granted-from cards are typically in exile, not on the battlefield — in
-/// deterministic `ObjectId` order. Both mana and non-mana activated abilities are
-/// granted. Synthesized effects target the recipient via `SelfRef`, reusing the
-/// layer-6 `GrantAbility` apply and its structural dedup, and are recomputed each
-/// pass so the granted set tracks the current `source` membership.
+/// object matching `source`. Object-self references in `source` are resolved
+/// relative to the host static, while controller-relative references use each
+/// recipient's controller. Provider objects are scanned across all zones — the
+/// granted-from cards are typically in exile, not on the battlefield — in
+/// deterministic `ObjectId` order. Both mana and non-mana activated abilities
+/// are granted. Synthesized effects target the recipient via `SelfRef`, reusing
+/// the layer-6 `GrantAbility` apply and its structural dedup, and are recomputed
+/// each pass so the granted set tracks the current `source` membership.
 fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
@@ -2636,9 +2714,23 @@ fn expand_granted_activated_abilities(
             Some(obj) => obj.controller,
             None => continue,
         };
-        // CR 109.5: `source` references like `ExiledBySource` resolve against the
-        // recipient that gained the ability.
-        let provider_ctx = crate::game::filter::FilterContext::from_source(state, recipient_id);
+        // CR 109.5 + CR 113.7a: Split the `source` filter's resolution context.
+        // Object-self references in the named card's text — `ExiledBySource`
+        // ("cards exiled with [this card]") and `SameName` ("the same name as
+        // this creature") — name the object that HAS the static ability, i.e.
+        // the host. Possessive/controller references — `ControllerRef::You`
+        // ("creatures *you* control") — refer to the controller of the object
+        // that *gained* the ability, i.e. the recipient. So resolve against the
+        // host id with the recipient's controller. For self-granting hosts
+        // (Myr Welder, Territory Forge, Marvin) host == recipient and this
+        // coincides with the recipient context; for cross-object grants
+        // (Agatha's Soul Cauldron grants creatures-you-control the abilities of
+        // *its own* exiled creature cards) only the host id finds the exile
+        // links while "you" still tracks the recipient's controller.
+        let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+            host_source_id,
+            recipient_controller,
+        );
         let mut next_mod_index = 0usize;
         for &provider_id in &provider_ids {
             if provider_id == recipient_id {
@@ -3221,7 +3313,8 @@ fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
-        | FilterProp::ToughnessGTPower => true,
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
         // CR 608.2c: Negation reads the inner prop's stats — recurse (mirrors AnyOf).
         FilterProp::Not { prop } => filter_prop_references_pt_stat(prop),
@@ -3374,79 +3467,6 @@ fn record_attribution(
     for &target in affected_ids {
         let attribution = state.attribution.entry(target).or_default();
         attribution.record_layer(effect.layer, effect_ref);
-    }
-}
-
-/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by a
-/// `ContinuousModification`, if any. Both the dynamic-P/T apply site
-/// (`apply_continuous_effect`) and the incremental-flush escalation scan
-/// (`flush_layers`) call this so there is one place that decides which
-/// modifications carry a runtime-resolved magnitude.
-///
-/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
-/// variant that carries a `QuantityExpr` must be classified here at compile
-/// time rather than silently slipping past the escalation scan. `AddCounterOnEnter`
-/// also carries a `QuantityExpr` but is resolution-time-consumed by the
-/// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
-/// (see its doc comment), so it is excluded.
-/// CR 613.1: Dynamic continuous modifications are evaluated while applying
-/// continuous effects through the layer system.
-fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
-    match m {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
-        // Resolution-time-consumed; never an active continuous effect.
-        ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. } => None,
-        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
-        // magnitude. Enumerated explicitly (no wildcard) so a future
-        // QuantityExpr-carrying variant forces a decision here.
-        ContinuousModification::CopyValues { .. }
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::GrantAbility { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantTrigger { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => None,
     }
 }
 
@@ -3634,7 +3654,7 @@ fn apply_continuous_effect_filtered(
     // referent. Recipient-relative quantities ("attached to it", "other",
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
-    let dynamic_pt_expr = modification_dynamic_quantity(&effect.modification);
+    let dynamic_pt_expr = continuous_modification_dynamic_quantity(&effect.modification);
     let effect_controller = state
         .objects
         .get(&effect.source_id)
@@ -4666,6 +4686,93 @@ mod tests {
             PlayerId(0),
             src,
         ));
+    }
+
+    /// Cavernous Maw (std BATCH 12): the `{2}` animation turns the land into a
+    /// 3/3 Elemental creature while "It's still a Cave land" (CR 205.1b, CR 305.7)
+    /// retains the Land card type and Cave subtype. This drives the parsed
+    /// modification set through the real layer engine and asserts the composition
+    /// is runtime-sound: the animated permanent is a 3/3 Creature that is STILL a
+    /// Cave Land (CR 613.1d Layer 4 additive type/subtype ordering). The
+    /// animation's `RemoveAllSubtypes { Creature }` (CR 205.1a) wipes only the
+    /// creature-type set, so the Cave land subtype survives.
+    #[test]
+    fn cavernous_maw_animation_retains_cave_land_through_layers() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Cavernous Maw".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Cave".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+        }
+
+        // The full `{2}` activated-ability animation as parsed: the
+        // "becomes a 3/3 Elemental creature" modifications followed by the
+        // "It's still a Cave land" retention re-assertions.
+        let animation = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::SetPower { value: 3 },
+                ContinuousModification::SetToughness { value: 3 },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                },
+                ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Creature,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Elemental".to_string(),
+                },
+                // "It's still a Cave land" — the clause this batch unblocks.
+                ContinuousModification::AddType {
+                    core_type: CoreType::Land,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Cave".to_string(),
+                },
+            ]);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            Arc::make_mut(&mut obj.base_static_definitions).push(animation.clone());
+            obj.static_definitions.push(animation);
+        }
+
+        evaluate_layers(&mut state);
+
+        let obj = &state.objects[&id];
+        assert_eq!(obj.power, Some(3), "animated to 3 power");
+        assert_eq!(obj.toughness, Some(3), "animated to 3 toughness");
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "must be a creature, got {:?}",
+            obj.card_types.core_types
+        );
+        // CR 205.1b: "still a Cave land" — both the Land card type and the Cave
+        // land subtype must survive the animation.
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Land),
+            "must still be a Land, got {:?}",
+            obj.card_types.core_types
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Cave"),
+            "must still be a Cave, got {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Elemental"),
+            "must gain the Elemental creature type, got {:?}",
+            obj.card_types.subtypes
+        );
     }
 
     /// CR 613.4c + CR 704.5f: A runaway `+X/+X` chain (e.g. from a `ObjectCount`
@@ -6956,6 +7063,201 @@ mod tests {
         );
     }
 
+    /// CR 611.2a + CR 613.1f + CR 613.4b (Azure Beastbinder): drive the REAL
+    /// parser + resolution pipeline. Azure Beastbinder's attack trigger is parsed
+    /// from its printed Oracle text, then resolved (via the same
+    /// `build_resolved_from_def_with_targets` the trigger system uses) against an
+    /// opponent's 5/5 creature that has a keyword and an activated ability. After
+    /// `resolve_ability_chain` registers the transient continuous effects and
+    /// `evaluate_layers` applies them, the target must have:
+    ///   - base power and toughness set to 2/2 (the historical Unimplemented gap),
+    ///   - all abilities and keywords removed.
+    ///
+    /// REVERT-PROOF: reverting either parser fix re-introduces the failure —
+    /// without the "it also" subject strip the base-P/T clause stays
+    /// `Unimplemented` (no SetPower/SetToughness → power/toughness remain 5/5);
+    /// without the `RevealedHasCardType → TargetMatchesFilter` conversion the
+    /// creature-gate evaluates always-false (no revealed card) so the base-P/T
+    /// sub-ability never runs (power/toughness remain 5/5).
+    #[test]
+    fn azure_beastbinder_attack_sets_target_base_pt_and_strips_abilities_e2e() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::TargetRef;
+
+        let mut scenario = GameScenario::new();
+
+        // Source: Azure Beastbinder, parsed from its real Oracle text.
+        let beastbinder = scenario
+            .add_creature(PlayerId(0), "Azure Beastbinder", 3, 3)
+            .from_oracle_text_with_keywords(
+                &["Vigilance"],
+                "Vigilance\n\
+                 This creature can't be blocked by creatures with power 2 or greater.\n\
+                 Whenever this creature attacks, up to one target artifact, creature, or \
+                 planeswalker an opponent controls loses all abilities until your next turn. \
+                 If it's a creature, it also has base power and toughness 2/2 until your next turn.",
+            )
+            .id();
+
+        // Target: an opponent's 5/5 creature with a keyword + an activated ability.
+        let target = {
+            let mut card = scenario.add_creature(PlayerId(1), "Big Beater", 5, 5);
+            card.flying()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            card.id()
+        };
+
+        let mut state = scenario.build().state().clone();
+
+        // Pull the parsed attack-trigger execute body off the source object.
+        let execute = state
+            .objects
+            .get(&beastbinder)
+            .unwrap()
+            .trigger_definitions
+            .iter_all()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .and_then(|t| t.execute.clone())
+            .expect("Azure Beastbinder must have a parsed Attacks trigger with an execute body");
+
+        // Resolve the trigger against the chosen target (the 5/5 creature),
+        // exactly as the trigger system would after target selection.
+        let ability = build_resolved_from_def_with_targets(
+            &execute,
+            beastbinder,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("attack-trigger chain must resolve");
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        // CR 613.4b: base power and toughness set to 2/2.
+        assert_eq!(
+            obj.power,
+            Some(2),
+            "target power must be 2, got {:?}",
+            obj.power
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "target toughness must be 2, got {:?}",
+            obj.toughness
+        );
+        // CR 613.1f: all abilities and keywords removed.
+        assert!(
+            obj.keywords.is_empty(),
+            "target keywords must be stripped, got {:?}",
+            obj.keywords
+        );
+        assert!(
+            obj.abilities.is_empty(),
+            "target abilities must be stripped, got {:?}",
+            obj.abilities
+        );
+    }
+
+    /// CR 109.2 + CR 613.4b: the creature-gate discriminates. When Azure
+    /// Beastbinder's attack targets an opponent's ARTIFACT (non-creature), the
+    /// "if it's a creature" sub-ability must NOT fire — abilities are still
+    /// stripped (head clause) but the base-P/T set does not apply (an artifact
+    /// has no P/T to set). This pins the `TargetMatchesFilter` gate as a real
+    /// discriminator rather than an always-true rider.
+    #[test]
+    fn azure_beastbinder_attack_artifact_target_skips_base_pt() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::TargetRef;
+
+        let mut scenario = GameScenario::new();
+
+        let beastbinder = scenario
+            .add_creature(PlayerId(0), "Azure Beastbinder", 3, 3)
+            .from_oracle_text_with_keywords(
+                &["Vigilance"],
+                "Vigilance\n\
+                 This creature can't be blocked by creatures with power 2 or greater.\n\
+                 Whenever this creature attacks, up to one target artifact, creature, or \
+                 planeswalker an opponent controls loses all abilities until your next turn. \
+                 If it's a creature, it also has base power and toughness 2/2 until your next turn.",
+            )
+            .id();
+
+        // Opponent's noncreature Artifact with an activated ability. `add_creature`
+        // seeds base P/T 0/0; `as_artifact` makes it a noncreature artifact. The
+        // creature-gate must leave its (base) power/toughness at 0 — a fired
+        // base-P/T set would push it to 2.
+        let artifact = {
+            let mut card = scenario.add_creature(PlayerId(1), "Sol Ring", 0, 0);
+            card.as_artifact()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            card.id()
+        };
+
+        let mut state = scenario.build().state().clone();
+
+        let execute = state
+            .objects
+            .get(&beastbinder)
+            .unwrap()
+            .trigger_definitions
+            .iter_all()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .and_then(|t| t.execute.clone())
+            .expect("parsed Attacks trigger");
+
+        let ability = build_resolved_from_def_with_targets(
+            &execute,
+            beastbinder,
+            PlayerId(0),
+            vec![TargetRef::Object(artifact)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("attack-trigger chain must resolve");
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&artifact).unwrap();
+        // Head clause still strips abilities from the artifact target.
+        assert!(
+            obj.abilities.is_empty(),
+            "artifact target abilities must be stripped, got {:?}",
+            obj.abilities
+        );
+        // The creature-gated base-P/T set must NOT fire: the artifact keeps its
+        // base 0/0 (a fired SetPower/SetToughness would make it 2/2).
+        assert_eq!(
+            obj.power,
+            Some(0),
+            "artifact target must not gain power from the creature-gated clause"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(0),
+            "artifact target must not gain toughness from the creature-gated clause"
+        );
+    }
+
     #[test]
     fn muraganda_petroglyphs_buffs_only_abilityless_creatures_e2e() {
         // Drive the REAL parser end-to-end: Muraganda Petroglyphs' Oracle text
@@ -7529,6 +7831,75 @@ mod tests {
         );
     }
 
+    // CR 205.1a (SET replace) + CR 613.1d (Layer 4) + CR 613.7a (intra-static
+    // written order): Conspiracy's "Creatures you control are the chosen type"
+    // REPLACES the existing creature subtypes. The composed static
+    // [RemoveAllSubtypes{Creature}, AddChosenSubtype{CreatureType}] must wipe the
+    // base "Goblin" subtype (membership resolved against state.all_creature_types)
+    // and re-add the chosen "Zombie" type, in written order, so Zombie survives.
+    #[test]
+    fn test_chosen_creature_type_sets_subtype() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+        // RemoveAllSubtypes{Creature} resolves creature-type membership against
+        // state.all_creature_types — both the wiped Goblin and the re-added Zombie
+        // must be known.
+        state.all_creature_types = vec!["Goblin".to_string(), "Zombie".to_string()];
+
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Conspiracy".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types.subtypes.push("Goblin".to_string());
+            // Mirror into base so the layer-evaluation reset (card_types =
+            // base_card_types) doesn't drop the printed Goblin subtype.
+            obj.base_card_types.subtypes.push("Goblin".to_string());
+            obj.timestamp = ts;
+        }
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Zombie".to_string()));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: crate::types::card_type::SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddChosenSubtype {
+                            kind: ChosenSubtypeKind::CreatureType,
+                        },
+                    ]),
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&goblin).unwrap();
+        assert!(
+            obj.card_types.subtypes.contains(&"Zombie".to_string()),
+            "Creature should gain the chosen Zombie subtype: {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            !obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            "SET form must wipe the original Goblin subtype: {:?}",
+            obj.card_types.subtypes
+        );
+    }
+
     // CR 608.2d + CR 613.1f: Urborg's "loses [chosen ability] until end of
     // turn" — the chosen Keyword is stored on the source's `chosen_attributes`
     // and read back by `RemoveChosenKeyword` at layer evaluation time. The
@@ -7918,6 +8289,128 @@ mod tests {
             obj.toughness,
             Some(4),
             "Creature + Instant + Artifact → toughness 4"
+        );
+    }
+
+    /// CR 202.3 + CR 208.2a + CR 604.3 / CR 613.4a: Dragon Man, Reformed Robot's
+    /// CDA power = the greatest mana value among (noncreature permanents you
+    /// control) and (noncreature cards in your graveyard). Drives the real
+    /// parser (`parse_cda_quantity`) to build the AST, then evaluates through the
+    /// live layer system — revert the "A and B" conjunction arm and
+    /// `parse_cda_quantity` returns None, so the static can't be built and the
+    /// test panics. Creature cards are excluded from both arms; empty → 0
+    /// (CR 208.2a); a +1/+1 counter stacks on top of the CDA base (layer 7c).
+    #[test]
+    fn dragon_man_cda_power_greatest_mana_value_across_zones() {
+        use crate::parser::oracle_quantity::parse_cda_quantity;
+
+        let mut state = setup();
+
+        let value = parse_cda_quantity(
+            "the greatest mana value among noncreature permanents you control and noncreature cards in your graveyard",
+        )
+        .expect("conjunction CDA quantity must parse");
+
+        // Dragon Man itself (a creature) carries the self-ref CDA.
+        let dragon_man = make_creature(&mut state, "Dragon Man, Reformed Robot", 0, 4, PlayerId(0));
+        state
+            .objects
+            .get_mut(&dragon_man)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::SetDynamicPower { value }])
+                    .cda(),
+            );
+
+        // Empty board + graveyard → 0 (CR 208.2a "use 0").
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(0),
+            "no noncreature permanents/cards → power 0"
+        );
+
+        // MV-5 noncreature permanent on the battlefield you control.
+        let bf_artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Mox".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bf_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 5,
+            };
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(5),
+            "battlefield-only max → power 5"
+        );
+
+        // MV-7 noncreature card in your graveyard (greater than the bf 5).
+        let gy_artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Spent Relic".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+        }
+        // MV-9 *creature* card in your graveyard — must be excluded (noncreature).
+        let gy_creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Titan".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 9,
+            };
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(7),
+            "graveyard noncreature 7 beats bf 5; creature 9 excluded → power 7"
+        );
+
+        // +1/+1 counter stacks on top of the CDA base (proves CDA is the base).
+        state
+            .objects
+            .get_mut(&dragon_man)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&dragon_man).unwrap().power,
+            Some(8),
+            "CDA 7 + one +1/+1 counter → power 8"
         );
     }
 
@@ -8349,6 +8842,282 @@ mod tests {
             host_obj.abilities.iter().any(|a| a == &granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
+        );
+    }
+
+    /// CR 613.1f + CR 201.2: Marvin, Murderous Mimic — "Marvin has all activated
+    /// abilities of creatures you control that don't have the same name as this
+    /// creature." Built end-to-end through the real parser
+    /// (`parse_oracle_text` → `GrantAllActivatedAbilitiesOf { Typed(creature,
+    /// You, [Not{SameName}]) }`) and the real `evaluate_layers` expansion.
+    ///
+    /// Discriminating: a DIFFERENT-named creature you control donates its
+    /// activated ability to Marvin, while a SAME-named creature's ability is
+    /// excluded by `Not{SameName}` and an OPPONENT's creature is excluded by the
+    /// `controller=You` axis. Reverting the parser's source-set arm (so the grant
+    /// no longer routes to the `Not{SameName}` typed filter) flips the positive
+    /// assertion; dropping the `Not{SameName}` predicate flips the
+    /// same-name-exclusion assertion.
+    #[test]
+    fn marvin_gains_differently_named_creature_abilities_only() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        };
+
+        let mut state = setup();
+
+        // Marvin carries the parser-produced static.
+        let marvin = make_creature(&mut state, "Marvin, Murderous Mimic", 0, 3, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Marvin has all activated abilities of creatures you control that \
+             don't have the same name as this creature.",
+            "Marvin, Murderous Mimic",
+            &[],
+            &["Artifact".into(), "Creature".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Marvin parses to exactly one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&marvin).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // A differently-named creature you control with a {T}: gain 2 life
+        // ability — its ability SHOULD be granted to Marvin.
+        let donor = make_creature(&mut state, "Helpful Donor", 2, 2, PlayerId(0));
+        let donor_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&donor).unwrap().abilities)
+            .push(donor_ability.clone());
+
+        // A SAME-named creature you control with a {T}: gain 5 life ability —
+        // excluded by `Not{SameName}`.
+        let twin = make_creature(&mut state, "Marvin, Murderous Mimic", 0, 3, PlayerId(0));
+        let twin_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&twin).unwrap().abilities)
+            .push(twin_ability.clone());
+
+        // An OPPONENT's creature with a {T}: gain 9 life ability — excluded by
+        // the `controller=You` axis.
+        let foe = make_creature(&mut state, "Opposing Donor", 2, 2, PlayerId(1));
+        let foe_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 9 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&foe).unwrap().abilities)
+            .push(foe_ability.clone());
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let marvin_obj = state.objects.get(&marvin).unwrap();
+        assert!(
+            marvin_obj.abilities.iter().any(|a| a == &donor_ability),
+            "Marvin must gain the differently-named creature's activated \
+             ability; got {:?}",
+            marvin_obj.abilities
+        );
+        assert!(
+            !marvin_obj.abilities.iter().any(|a| a == &twin_ability),
+            "Marvin must NOT gain a same-named creature's ability \
+             (Not{{SameName}}); got {:?}",
+            marvin_obj.abilities
+        );
+        assert!(
+            !marvin_obj.abilities.iter().any(|a| a == &foe_ability),
+            "Marvin must NOT gain an opponent's creature's ability \
+             (controller=You); got {:?}",
+            marvin_obj.abilities
+        );
+    }
+
+    /// CR 613.1f + CR 205.3: Agatha's Soul Cauldron — "Creatures you control with
+    /// +1/+1 counters on them have all activated abilities of all creature cards
+    /// exiled with Agatha's Soul Cauldron." Built end-to-end through the real
+    /// parser (`GrantAllActivatedAbilitiesOf { And[Typed(creature),
+    /// ExiledBySource] }` on a counter-gated affected filter) and the real
+    /// `evaluate_layers` expansion.
+    ///
+    /// Discriminating along two axes the new source-set arm introduces:
+    ///   - source typing: an exiled CREATURE card donates its ability, while a
+    ///     non-creature exiled card (the `And` excludes it) does not;
+    ///   - affected gating: a counter-bearing creature receives the grant, while
+    ///     a counterless creature does not.
+    ///
+    /// Reverting the typed intersection (back to bare `ExiledBySource`) flips the
+    /// non-creature-exclusion assertion. Reverting the host-relative source
+    /// resolution in `expand_granted_activated_abilities` (so `ExiledBySource`
+    /// reads the recipient creature's exile links instead of the cauldron's)
+    /// flips the positive donation assertion — the grant becomes a runtime no-op.
+    #[test]
+    fn agatha_grants_only_creature_card_abilities_to_countered_creatures() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host cauldron carries the parser-produced static.
+        let cauldron = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Agatha's Soul Cauldron".to_string(),
+            Zone::Battlefield,
+        );
+        let parsed = parse_oracle_text(
+            "Creatures you control with +1/+1 counters on them have all \
+             activated abilities of all creature cards exiled with Agatha's \
+             Soul Cauldron.",
+            "Agatha's Soul Cauldron",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Agatha's grant clause parses to one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&cauldron).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // Exiled CREATURE card with {T}: gain 2 life — SHOULD be donated.
+        let exiled_creature = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Exiled Beast".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let creature_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&exiled_creature).unwrap().abilities)
+            .push(creature_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled_creature,
+            source_id: cauldron,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        // Exiled NON-creature (artifact) card with {T}: gain 7 life — excluded by
+        // the `And[Typed(creature), ExiledBySource]` source filter.
+        let exiled_artifact = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(0),
+            "Exiled Relic".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let artifact_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&exiled_artifact).unwrap().abilities)
+            .push(artifact_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled_artifact,
+            source_id: cauldron,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        // A creature you control WITH a +1/+1 counter — SHOULD receive the grant.
+        let countered = make_creature(&mut state, "Countered Creature", 1, 1, PlayerId(0));
+        state
+            .objects
+            .get_mut(&countered)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        // A creature you control WITHOUT counters — excluded by the affected
+        // counter gate.
+        let counterless = make_creature(&mut state, "Plain Creature", 1, 1, PlayerId(0));
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let countered_obj = state.objects.get(&countered).unwrap();
+        assert!(
+            countered_obj
+                .abilities
+                .iter()
+                .any(|a| a == &creature_ability),
+            "A countered creature must gain the exiled creature card's ability; \
+             got {:?}",
+            countered_obj.abilities
+        );
+        assert!(
+            !countered_obj
+                .abilities
+                .iter()
+                .any(|a| a == &artifact_ability),
+            "A countered creature must NOT gain the non-creature exiled card's \
+             ability (And[creature, ExiledBySource]); got {:?}",
+            countered_obj.abilities
+        );
+
+        let counterless_obj = state.objects.get(&counterless).unwrap();
+        assert!(
+            !counterless_obj
+                .abilities
+                .iter()
+                .any(|a| a == &creature_ability),
+            "A counterless creature must NOT receive the grant; got {:?}",
+            counterless_obj.abilities
         );
     }
 
@@ -9134,6 +9903,150 @@ mod tests {
             &StaticCondition::SourceIsSaddled,
             PlayerId(0),
             id,
+        ));
+    }
+
+    // CR 303.4: `SourceIsEnchanted` gates a continuous modification on at least
+    // one Aura being attached to the source. No attachment → false; an Aura
+    // (subtype "Aura") attached → true; an Equipment (subtype "Equipment")
+    // attached → FALSE (negative twin — the matcher keys solely on the "Aura"
+    // subtype, mirroring `SourceIsEquipped`'s "Equipment" check). Discriminating:
+    // if the matcher arm or the new variant is reverted this test fails to
+    // compile / evaluates wrong, re-exposing the always-true `Unrecognized`
+    // fallback (Pillar of War / Thran Golem / Gate Hound / Freewind Equenaut).
+    #[test]
+    fn source_is_enchanted_gates_on_attached_aura() {
+        use crate::game::game_object::AttachTarget;
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Enchanted Bear", 2, 2, PlayerId(0));
+
+        // No Aura attached → condition false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
+        ));
+
+        // Attach an Equipment (NOT an Aura) → still false (negative twin: the
+        // matcher must not treat Equipment as enchanting).
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
+        ));
+
+        // Attach an Aura to the source → condition true.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Holy Strength".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsEnchanted,
+            PlayerId(0),
+            creature,
+        ));
+    }
+
+    // CR 301.5 + CR 303.4: `SourceAttachedToCreature` gates a continuous
+    // modification on the source Aura/Equipment being attached to a CREATURE
+    // host. No attachment → false; attached to a non-creature (e.g. a land) →
+    // false; attached to a creature → true. Discriminating: revert the eval arm
+    // (or the `as_object` / creature-core-type filter) and the negative cases
+    // start reporting true, re-exposing the always-true `Unrecognized` fallback.
+    #[test]
+    fn source_attached_to_creature_gates() {
+        use crate::game::game_object::AttachTarget;
+        let mut state = setup();
+        let aura = make_creature(&mut state, "Roving Aura", 0, 0, PlayerId(0));
+
+        // No attachment → false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+
+        // Attached to a non-creature host (a land) → false.
+        let land = make_land(&mut state, "Forest", PlayerId(0));
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(land));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+
+        // Attached to a creature host → true.
+        let bear = make_creature(&mut state, "Host Bear", 2, 2, PlayerId(0));
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(bear));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+    }
+
+    // CR 608.2c: `SourceMatchesFilter` gates a continuous modification on the
+    // source matching a `TargetFilter` (leveler-style cards). A creature filter
+    // matches a creature source → true; once the source loses its Creature core
+    // type → false. Discriminating: revert the eval arm and the mismatched case
+    // reports true, re-exposing the always-true `Unrecognized` fallback.
+    #[test]
+    fn source_matches_filter_gates() {
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Figure", 2, 2, PlayerId(0));
+        let filter = TargetFilter::Typed(TypedFilter::creature());
+
+        // Source is a creature → matches.
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceMatchesFilter {
+                filter: filter.clone(),
+            },
+            PlayerId(0),
+            creature,
+        ));
+
+        // Strip the Creature core type → no longer matches a creature filter.
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types
+                .core_types
+                .retain(|t| *t != CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceMatchesFilter { filter },
+            PlayerId(0),
+            creature,
         ));
     }
 

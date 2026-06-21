@@ -5,8 +5,8 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, BeholdCostAction,
     CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect, KickerVariant,
     QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SpellCastingOptionKind, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter, EXILE_COST_X,
+    SacrificeRequirement, SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -1772,28 +1772,73 @@ pub(crate) fn handle_blight_choice(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 208.1 + CR 601.2f: A single creature's contribution toward an aggregate
+/// total-power tap cost (Crew/Saddle/Teamwork). Reads the creature's CURRENT,
+/// layer-evaluated power (`GameObject::power`, the post-continuous-effects value
+/// written by the layer system — anthems and +1/+1 counters are already folded
+/// in), and clamps negative power to 0 so a debuffed creature contributes
+/// nothing rather than reducing the total.
+pub(crate) fn tap_creature_power_contribution(state: &GameState, id: ObjectId) -> i32 {
+    state
+        .objects
+        .get(&id)
+        .and_then(|obj| obj.power)
+        .filter(|&p| p > 0)
+        .unwrap_or(0)
+}
+
+/// CR 208.1 + CR 601.2f: Sum the CURRENT positive power of a set of creatures
+/// toward an aggregate total-power tap cost. Single authority shared by the
+/// activation gate, the AI candidate enumerator, and the selection validator so
+/// every seam agrees on which subsets satisfy the threshold.
+pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> i32 {
+    ids.iter()
+        .map(|&id| tap_creature_power_contribution(state, id))
+        .sum()
+}
+
 /// CR 702.34a: Tap creatures cost — complete the tap-creatures cost after player selection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
     player: PlayerId,
     pending: PendingCast,
     count: usize,
+    aggregate: Option<TapCreaturesAggregate>,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != count {
-        return Err(EngineError::InvalidAction(format!(
-            "Must tap exactly {} creature(s), got {}",
-            count,
-            chosen.len()
-        )));
-    }
+    // CR 601.2b: Validate the chosen set against the cost's requirement shape.
+    // `aggregate == None` is fixed-count (tap exactly `count`); `Some(a)` is the
+    // aggregate Crew/Saddle/Teamwork form (tap any number whose total positive
+    // power, CR 208.1, satisfies the advertised comparator vs `a.value`).
     for id in chosen {
         if !legal_creatures.contains(id) {
             return Err(EngineError::InvalidAction(
                 "Selected creature not eligible for tapping".to_string(),
             ));
+        }
+    }
+    match aggregate {
+        None => {
+            if chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must tap exactly {} creature(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+        }
+        Some(aggregate) => {
+            let total_positive_power = tap_creatures_total_power(state, chosen);
+            if !aggregate.satisfied_by(total_positive_power) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Tapped creatures' total power {total_positive_power} does not satisfy the \
+                     required {:?} {}",
+                    aggregate.comparator, aggregate.value
+                )));
+            }
         }
     }
 
@@ -2264,7 +2309,14 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
+            super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                source_id,
+                cost,
+                super::casting::activation_ability_tag(state, source_id, ability_index),
+                events,
+            )?
         {
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
@@ -2874,8 +2926,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 
     // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
     // independently functioning instances are announced through a queue. This
-    // preserves one payment record per Casualty/Offspring/Squad/Replicate
-    // instance while leaving Kicker on its existing `kickers_paid` path.
+    // preserves one payment record per Casualty/Offspring/Squad/Replicate/
+    // Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
     let mut additional_cost_queue = Vec::new();
     additional_cost_queue.extend(effective_casualty_additional_cost_instances(
         state, player, object_id,
@@ -2887,6 +2939,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         state, player, object_id,
     ));
     additional_cost_queue.extend(effective_replicate_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_teamwork_additional_cost_instances(
         state, player, object_id,
     ));
     let obj_additional_matches_instance = obj_additional.as_ref().is_some_and(|cost| {
@@ -4061,9 +4116,12 @@ fn pay_additional_cost_with_source(
                 state, player, amount, pending,
             );
         }
-        AbilityCost::TapCreatures { count, ref filter } => {
-            // CR 702.34a: Tap untapped creatures matching filter as a cost.
-            // The source is eligible unless a {T} cost is also present in the
+        AbilityCost::TapCreatures {
+            ref requirement,
+            ref filter,
+        } => {
+            // CR 601.2b: Tap untapped creatures matching filter as a cost. The
+            // source is eligible unless a {T} cost is also present in the
             // activation cost (in which case the source was already tapped, so
             // !obj.tapped naturally excludes it).
             let eligible: Vec<ObjectId> = state
@@ -4086,17 +4144,59 @@ fn pay_additional_cost_with_source(
                     })
                 })
                 .collect();
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible creatures to tap".into(),
-                ));
-            }
+            // CR 601.2b: The two requirement shapes drive different prompts.
+            // Fixed-count taps exactly `count`; aggregate (Crew/Saddle/Teamwork)
+            // taps any number whose total positive power (CR 208.1) satisfies the
+            // advertised comparator, so the player may select up to every
+            // eligible creature.
+            let (kind, count, min_count) = match requirement {
+                crate::types::ability::TapCreaturesRequirement::Count { count } => {
+                    if eligible.len() < *count as usize {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Not enough eligible creatures to tap".into(),
+                        ));
+                    }
+                    (
+                        PayCostKind::TapCreatures { aggregate: None },
+                        *count as usize,
+                        0,
+                    )
+                }
+                crate::types::ability::TapCreaturesRequirement::Aggregate {
+                    stat,
+                    comparator,
+                    value,
+                } => {
+                    // CR 601.2f + CR 208.1: Snapshot the full constraint so the
+                    // payment validator honors the advertised comparator. The
+                    // precheck below uses the same `satisfied_by` evaluation as
+                    // the candidate enumerator and selection validator.
+                    let aggregate = crate::types::ability::TapCreaturesAggregate {
+                        stat: *stat,
+                        comparator: *comparator,
+                        value: *value,
+                    };
+                    let total_positive_power = tap_creatures_total_power(state, &eligible);
+                    if !aggregate.satisfied_by(total_positive_power) {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Eligible creatures' total power does not satisfy this cost".into(),
+                        ));
+                    }
+                    (
+                        PayCostKind::TapCreatures {
+                            aggregate: Some(aggregate),
+                        },
+                        eligible.len(),
+                        0,
+                    )
+                }
+            };
             return Ok(WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind,
                 choices: eligible,
-                count: count as usize,
-                min_count: 0,
+                count,
+                min_count,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
@@ -4410,7 +4510,7 @@ pub(super) fn effective_conspire_additional_cost(
         .any(|keyword| matches!(keyword, Keyword::Conspire))
         .then(|| AdditionalCost::Optional {
             cost: AbilityCost::TapCreatures {
-                count: 2,
+                requirement: crate::types::ability::TapCreaturesRequirement::count(2),
                 filter: crate::database::synthesis::conspire_tap_filter(),
             },
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
@@ -4428,6 +4528,46 @@ pub(super) fn effective_replicate_additional_cost(
         .into_iter()
         .next()
         .map(|instance| instance.cost)
+}
+
+/// CR 601.2b/f: Return the optional Teamwork additional cost ("tap any number of
+/// creatures you control with total power N or more") as a queue instance
+/// stamped with `AdditionalCostOrigin::Teamwork`. Queuing it (rather than the
+/// generic `face.additional_cost` path, which stamps `Other`) lets "cast using
+/// teamwork" riders test the Teamwork payment specifically and lets Teamwork
+/// compose with another object additional cost. Mirrors
+/// `effective_squad_additional_cost_instances`; the produced cost matches the
+/// `synthesize_teamwork` form so the `obj_additional_matches_instance` dedup
+/// suppresses the legacy `face.additional_cost` copy.
+pub(super) fn effective_teamwork_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Teamwork(n) => Some(n),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(ordinal, n)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Teamwork,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                AdditionalCost::Optional {
+                    cost: AbilityCost::TapCreatures {
+                        requirement:
+                            crate::types::ability::TapCreaturesRequirement::total_power_at_least(
+                                n as i32,
+                            ),
+                        filter: crate::database::synthesis::teamwork_tap_filter(),
+                    },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                },
+            )
+        })
+        .collect()
 }
 
 pub(super) fn effective_offspring_additional_cost_instances(
@@ -5333,6 +5473,19 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     } else {
         None
     };
+    // CR 601.2a + CR 401.5: Capture the *selected* authorizing
+    // `StaticMode::TopOfLibraryCastPermission` source — and its frequency —
+    // BEFORE the card leaves the library for the stack (Assemble the Players,
+    // Johann). The selection prefers an `Unlimited` authorizer when one exists,
+    // so a `OncePerTurn` slot is only spent when the bounded permission is what
+    // actually authorized this cast. The slot is consumed below ONLY when the
+    // captured frequency is `OncePerTurn`; an `Unlimited` selection (Realmwalker,
+    // Future Sight, Bolas's Citadel) never consumes a slot.
+    let top_of_library_permission_source = if source_zone == Zone::Library {
+        super::casting::top_of_library_selected_permission(state, player, object_id)
+    } else {
+        None
+    };
     // CR 601.2a + CR 603.7 + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
     // leaves exile for the stack.
@@ -5537,6 +5690,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         exile_play_permission_source
     {
         state.exile_play_permissions_used.insert(source);
+    }
+    // CR 601.2a + CR 401.5: Consume the per-turn slot ONLY when the *selected*
+    // authorizing top-of-library permission is `OncePerTurn` (Assemble the
+    // Players, Johann). When an `Unlimited` permission (Realmwalker, Future
+    // Sight, Bolas's Citadel) authorized the cast — even if a OncePerTurn
+    // permission also matched the top card — no bounded slot is spent, so a
+    // second matching top spell remains castable this turn.
+    if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
+        top_of_library_permission_source
+    {
+        state.top_of_library_cast_permissions_used.insert(source);
     }
     // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
@@ -6427,6 +6591,7 @@ fn auto_tap_mana_sources_inner(
                     let activation_ctx = PaymentContext::Activation {
                         source_types: &source_types,
                         source_subtypes: &source_subtypes,
+                        ability_tag: ability_def.ability_tag,
                     };
                     auto_tap_mana_sources_inner(
                         state,
@@ -7132,7 +7297,9 @@ pub(super) fn apply_committed_assist(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
-        state.layers_dirty.mark_full();
+        if mana_payment::has_unspent_mana_continuous_effects(state) {
+            state.layers_dirty.mark_full();
+        }
     }
     Ok(())
 }
@@ -7149,7 +7316,7 @@ pub fn finalize_mana_payment(
     if let Some(pending_ref) = state.pending_cast.as_ref() {
         let mana_cost = pending_ref.cost.clone();
         let source_id = pending_ref.object_id;
-        if pending_ref.activation_ability_index.is_some() {
+        if let Some(ability_index) = pending_ref.activation_ability_index {
             let excluded_sources = pending_ref
                 .activation_cost
                 .as_ref()
@@ -7165,6 +7332,11 @@ pub fn finalize_mana_payment(
             let activation_ctx = PaymentContext::Activation {
                 source_types: &source_types,
                 source_subtypes: &source_subtypes,
+                ability_tag: super::casting::activation_ability_tag(
+                    state,
+                    source_id,
+                    ability_index,
+                ),
             };
             if let Some(waiting) = maybe_pause_for_phyrexian_choice(
                 state,
@@ -7212,6 +7384,7 @@ pub fn finalize_mana_payment(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
         )?;
@@ -7376,6 +7549,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             Some(phyrexian_choices),
             events,
             &excluded_sources,
@@ -9118,10 +9292,18 @@ mod tests {
         match waiting {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
                 AdditionalCost::Optional {
-                    cost: AbilityCost::TapCreatures { count, filter },
+                    cost:
+                        AbilityCost::TapCreatures {
+                            requirement,
+                            filter,
+                        },
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 } => {
-                    assert_eq!(count, 2, "conspire taps exactly two creatures");
+                    assert_eq!(
+                        requirement.fixed_count(),
+                        Some(2),
+                        "conspire taps exactly two creatures"
+                    );
                     match filter {
                         TargetFilter::Typed(tf) => {
                             assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -12150,6 +12332,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12275,6 +12458,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12369,6 +12553,7 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12452,6 +12637,7 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,
@@ -12568,6 +12754,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
                 Vec::new(),
                 source_id,

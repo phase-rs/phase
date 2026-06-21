@@ -421,6 +421,7 @@ mod tests {
             abilities: vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             })],
             ..Default::default()
         };

@@ -703,11 +703,15 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    attached-subject statics (an Aura/Equipment whose "it" refers to the
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
-///    typed condition are rewritten. "it" is otherwise overloaded: "it's your
+///    typed condition are rewritten — the tapped/untapped pair plus their
+///    combat-state siblings "attacking"/"blocking"/"blocked"
+///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
 ///    parse paths. Rewriting those would break or mis-bind them, so they are
-///    left untouched.
+///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
+///    trailing word and falls through to `SourceAttackingAlone` rather than
+///    collapsing to `SourceIsAttacking`.
 ///
 /// Returns the condition unchanged when neither guard matches.
 fn rewrite_self_pronoun_subject(condition: &str) -> String {
@@ -715,7 +719,15 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
     if let Some(rest) =
         nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
     {
-        if matches!(rest.trim(), "tapped" | "untapped") {
+        // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
+        // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
+        // for "it's modified" (Obstinate Gargoyle, Skyward Spider). Exact-match
+        // only — "attacking alone" keeps its trailing word and is left for
+        // SourceAttackingAlone; "modified creature" never hits this arm.
+        if matches!(
+            rest.trim(),
+            "tapped" | "untapped" | "attacking" | "blocking" | "blocked" | "modified"
+        ) {
             return format!("~ is {}", rest.trim());
         }
     }
@@ -909,24 +921,57 @@ pub(crate) fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     parse_pt_mod(pt_text)
 }
 
-pub(crate) fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+/// CR 613.4b + CR 208.1: Parse the dynamic base-P/T set value in a
+/// "[base] power and [base] toughness [are] each equal to <quantity>" static
+/// grant (layer 7b). The grammar is factored per the nom mandate into
+/// orthogonal axes — the optional "base " on each characteristic, the optional
+/// "are " copula, and the shared " each equal to " suffix — so the arm count is
+/// the SUM of per-axis choices, not their product. The trailing quantity is
+/// dispatched: "its mana value" reads the recipient's mana value (Animate
+/// Artifact class); any other tail routes through the shared CDA quantity
+/// grammar so the same building block covers "the number of creatures you
+/// control" (Porcelain Gallery) and every other recognized count/aggregate
+/// phrase — not just the one card.
+pub(crate) fn parse_base_pt_each_equal_dynamic(lower: &str) -> Option<QuantityExpr> {
     type VE<'a> = OracleError<'a>;
-    nom_primitives::scan_split_at_phrase(lower, |input| {
-        alt((
-            tag::<_, _, VE<'_>>("base power and base toughness each equal to its mana value"),
-            tag("base power and toughness each equal to its mana value"),
-            tag("power and toughness each equal to its mana value"),
-            tag("base power and base toughness are each equal to its mana value"),
-            tag("base power and toughness are each equal to its mana value"),
-            tag("power and toughness are each equal to its mana value"),
-        ))
-        .parse(input)
+    let (_, _, tail) = nom_primitives::scan_preceded(lower, |input| {
+        // CR 208.1: which characteristics are set. "base power and base
+        // toughness", "base power and toughness", and "power and toughness" are
+        // the three observed surface forms; the "base " on the first noun is the
+        // only one that varies in the corpus.
+        let (input, _) = alt((tag::<_, _, VE<'_>>("base power"), tag("power"))).parse(input)?;
+        let (input, _) = tag(" and ").parse(input)?;
+        let (input, _) = opt(tag("base ")).parse(input)?;
+        let (input, _) = tag("toughness ").parse(input)?;
+        // Optional "are " copula ("… are each equal to …").
+        let (input, _) = opt(tag("are ")).parse(input)?;
+        tag("each equal to ").parse(input)
     })?;
-    Some(QuantityExpr::Ref {
-        qty: QuantityRef::ObjectManaValue {
-            scope: ObjectScope::Recipient,
-        },
-    })
+    let tail = tail.trim().trim_end_matches('.').trim();
+
+    // CR 202.3: "its mana value" reads the recipient's own mana value (the
+    // animation-grant idiom). Kept as a dedicated arm because its `ObjectScope`
+    // is `Recipient` (the granted-to object), which the general CDA grammar does
+    // not produce for a bare "its mana value".
+    if tail == "its mana value" {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        });
+    }
+
+    // Everything else routes through the shared CDA quantity grammar so the
+    // dynamic base-P/T set composes over every count/aggregate phrase the
+    // engine already recognizes (e.g. "the number of creatures you control").
+    parse_cda_quantity(tail)
+}
+
+/// Back-compat shim: the historical name used by callers that only need the
+/// "its mana value" recipient form. Delegates to the generalized parser so the
+/// CDA-quantity tail is also accepted at every existing call site.
+pub(crate) fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+    parse_base_pt_each_equal_dynamic(lower)
 }
 
 pub(crate) fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError<'_>> {

@@ -176,6 +176,11 @@ fn find_eligible_exile_targets(
 pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
+        /// CR 106.6: Keyword tag of the activated ability whose cost is being
+        /// paid. Threaded into `PaymentContext::Activation` so tag-scoped mana
+        /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
+        /// scope never carries a tag (resolution-time costs aren't activations).
+        ability_tag: Option<crate::types::ability::AbilityTag>,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -279,7 +284,7 @@ pub fn pay_ability_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_ability_cost_for_activation(state, player, source_id, cost, events).map(|_| ())
+    pay_ability_cost_for_activation(state, player, source_id, cost, None, events).map(|_| ())
 }
 
 pub(crate) fn pay_ability_cost_for_activation(
@@ -287,6 +292,7 @@ pub(crate) fn pay_ability_cost_for_activation(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -298,6 +304,7 @@ pub(crate) fn pay_ability_cost_for_activation(
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
+            ability_tag,
         },
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
@@ -405,15 +412,19 @@ fn pay_ability_cost_inner(
             // 106.6: restriction enforcement routes through `allows_activation`
             // (not `allows_spell`) via the activation context built from the
             // source permanent's types.
-            PaymentScope::Activation { excluded_sources } => {
+            PaymentScope::Activation {
+                excluded_sources,
+                ability_tag,
+            } => {
                 if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, cost, events)?;
+                    pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
                         player,
                         source_id,
                         cost,
+                        *ability_tag,
                         events,
                         excluded_sources,
                     )?;
@@ -1283,7 +1294,7 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
-        NinjutsuVariant, QuantityExpr, SacrificeCost,
+        NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -1331,7 +1342,7 @@ mod tests {
             },
             AbilityCost::CollectEvidence { .. } => AbilityCost::CollectEvidence { amount: 1 },
             AbilityCost::TapCreatures { .. } => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: TapCreaturesRequirement::count(1),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter { .. } => AbilityCost::RemoveCounter {
@@ -1432,7 +1443,7 @@ mod tests {
             },
             AbilityCost::CollectEvidence { amount: 0 },
             AbilityCost::TapCreatures {
-                count: 0,
+                requirement: TapCreaturesRequirement::count(0),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter {
@@ -1549,6 +1560,7 @@ mod tests {
             let excluded = ability_mana_payment_excluded_sources(&cost, src);
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
+                ability_tag: None,
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -1576,6 +1588,7 @@ mod tests {
         let excluded = ability_mana_payment_excluded_sources(&cost, src);
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
+            ability_tag: None,
         };
         let mut events = Vec::new();
         let outcome =
@@ -1614,6 +1627,7 @@ mod tests {
             P0,
             src,
             &graveyard_cost,
+            None,
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -1629,6 +1643,7 @@ mod tests {
             P0,
             src,
             &battlefield_cost,
+            None,
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -1645,6 +1660,7 @@ mod tests {
             cost,
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
+                ability_tag: None,
             },
         )
     }
@@ -1706,7 +1722,7 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Lord", 2, 2).id();
         let cost = AbilityCost::TapCreatures {
-            count: 2,
+            requirement: TapCreaturesRequirement::count(2),
             filter: TargetFilter::Typed(TypedFilter::creature()),
         };
         // Only the source creature is present (1 < 2).

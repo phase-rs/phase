@@ -65,6 +65,7 @@ fn record_opponent_land_entry(runner: &mut GameRunner, object_id: u64) {
             subtypes: vec![],
             supertypes: vec![],
             colors: vec![],
+            keywords: vec![],
             controller: P1,
         });
 }

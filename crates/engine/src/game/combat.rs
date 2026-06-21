@@ -2183,6 +2183,65 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1c + CR 109.5: Player-scoped temporary attack prohibitions
+    // (`GameRestriction::ProhibitActivity { activity: Attack { defended } }` —
+    // Willie Lumpkin: "that player can't attack you or permanents you control
+    // during their next turn"). Each restriction defends a specific player (the
+    // grant's controller per CR 109.5) against the affected players. Reuse the
+    // SAME `attack_target_matches_defended_scope` authority static `CantAttack`
+    // uses, so both seams share one scope matcher.
+    for (attacker_id, target) in attacks {
+        let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller) else {
+            continue;
+        };
+        for restriction in &state.restrictions {
+            let crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players,
+                activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+                ..
+            } = restriction
+            else {
+                continue;
+            };
+            // CR 109.5: the protected player ("you") is the grant's controller.
+            let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+                continue;
+            };
+            // CR 101.2: only the affected players are prohibited. Targeted scopes
+            // are resolved to `SpecificPlayer` by `add_restriction` before this
+            // gate ever runs.
+            let attacker_is_affected = match affected_players {
+                crate::types::ability::RestrictionPlayerScope::AllPlayers => true,
+                crate::types::ability::RestrictionPlayerScope::SpecificPlayer(p) => {
+                    *p == attacker_controller
+                }
+                crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController => {
+                    attacker_controller != protected
+                }
+                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::DefendingPlayer => false,
+            };
+            if !attacker_is_affected {
+                continue;
+            }
+            // CR 508.5: the defended planeswalker/battle compares on controller,
+            // so pass `protected` as both source-controller and source-owner.
+            if crate::game::restrictions::attack_target_matches_defended_scope(
+                state,
+                Some(target),
+                defended,
+                protected,
+                protected,
+            ) {
+                return Err(format!(
+                    "{attacker_id:?} can't attack {target:?} (CR 508.1c player-scoped attack prohibition)"
+                ));
+            }
+        }
+    }
+
     // CR 701.15b: a goaded creature must attack a player other than the goading
     // player *if able*. "Able" is measured against the players this creature
     // could legally be declared attacking: `get_valid_attack_targets` already
@@ -6427,6 +6486,78 @@ mod tests {
         assert!(
             result.is_err(),
             "transient MustAttack must reach declare_attackers enforcement"
+        );
+    }
+
+    /// CR 508.1d + CR 509.1c: Hustle — "Target creature attacks or blocks this
+    /// turn if able." Drives the *full production parse* of Hustle's Oracle text
+    /// through `resolve` → transient continuous effect → `evaluate_layers` →
+    /// combat enforcement, and asserts BOTH the attack requirement (declaring no
+    /// attackers is illegal on the controller's turn) AND the block requirement
+    /// (declaring no blockers is illegal when the forced creature could block)
+    /// reach `combat.rs`.
+    ///
+    /// Revert-proof: on pre-change code the parser does not recognize "attacks or
+    /// blocks this turn if able" — the whole line lowers to `Effect::Unimplemented`,
+    /// the `let Effect::GenericEffect = ...` destructure panics, and neither
+    /// requirement is granted, so both `is_err()` assertions fail.
+    #[test]
+    fn hustle_attacks_or_blocks_reaches_combat_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        let mut state = setup_combat_phase();
+        // The forced creature is controlled by the same player that will declare
+        // attackers (PlayerId(0)); the spell caster is also PlayerId(0).
+        let forced = create_creature(&mut state, PlayerId(0), "Forced Soldier", 2, 2);
+
+        // Production parse of Hustle's full Oracle text — no hand-built effect.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Target creature attacks or blocks this turn if able.",
+            "Hustle",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "Hustle parses one spell ability");
+        let effect = (*parsed.abilities[0].effect).clone();
+        let Effect::GenericEffect { .. } = &effect else {
+            panic!("Hustle must parse to GenericEffect, got {effect:?}");
+        };
+
+        // Bind the spell to the chosen creature target; `affected: ParentTarget`
+        // resolves against `ability.targets` at registration time.
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(forced)], forced, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // CR 508.1d: declaring no attackers is illegal — the forced creature must attack.
+        assert!(
+            declare_attackers(&mut state, &[], &mut Vec::new()).is_err(),
+            "Hustle MustAttack must reach declare_attackers enforcement"
+        );
+
+        // CR 509.1c: now stage a block scenario. PlayerId(1) attacks PlayerId(0);
+        // the forced creature is an untapped, legal blocker, so declaring no
+        // blockers must be illegal.
+        let attacker = create_creature(&mut state, PlayerId(1), "Aggressor", 2, 2);
+        state.active_player = PlayerId(1);
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "Hustle MustBlock must reach declare_blockers enforcement"
+        );
+        // Sanity: assigning the forced creature as a blocker satisfies the requirement.
+        assert!(
+            validate_blockers(&state, &[(forced, attacker)]).is_ok(),
+            "blocking the attacker should satisfy the MustBlock requirement"
         );
     }
 
