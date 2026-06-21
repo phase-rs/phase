@@ -5498,7 +5498,21 @@ fn is_new_sentence_not_type_continuation(text: &str) -> bool {
     // Skip the first word (the type word itself) and check remaining words.
     lower.split_whitespace().skip(1).any(|w| {
         let normalized = normalize_verb_token(w);
-        PREDICATE_VERBS.contains(&normalized.as_str())
+        if PREDICATE_VERBS.contains(&normalized.as_str()) {
+            return true;
+        }
+        // CR 608.2c: Negated modal verbs ("can't", "don't", "doesn't", "won't")
+        // indicate a restriction predicate — recognize the base verb before the
+        // negation contraction so "creatures you control can't be the targets ..."
+        // is correctly classified as a new subject-predicate sentence rather than
+        // a type-list continuation.
+        if let Some(base) = w.split('\'').next() {
+            if base.len() < w.len() {
+                let base_normalized = normalize_verb_token(base);
+                return PREDICATE_VERBS.contains(&base_normalized.as_str());
+            }
+        }
+        false
     })
 }
 
@@ -31424,6 +31438,30 @@ mod tests {
             matches!(exec.effect.as_ref(), Effect::Draw { .. }),
             "end-step trigger draws cards, got {:?}",
             exec.effect
+        );
+    }
+
+    /// CR 702.11a + CR 603.1: "creatures you control can't be the targets of
+    /// spells or abilities your opponents control this turn" — the effect body
+    /// starts with a type word ("creatures") but the negated modal "can't"
+    /// indicates a new subject-predicate sentence, not a type-list continuation.
+    /// Verify the trigger boundary splits correctly and the Hexproof grant parses.
+    #[test]
+    fn trigger_veilstone_amulet_cant_be_targets() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell, creatures you control can't be the targets of spells or abilities your opponents control this turn.",
+            "Veilstone Amulet",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        let execute = def.execute.as_deref().expect(
+            "Veilstone Amulet trigger execute must not be None — \
+             the boundary splitter should classify 'creatures you control can't ...' \
+             as a new sentence (negated modal 'can't' is a predicate verb)",
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
+            "expected GenericEffect (hexproof grant), got {:?}",
+            execute.effect
         );
     }
 }
