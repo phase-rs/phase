@@ -241,9 +241,13 @@ jobs:
 
           cargo release "$VERSION" --workspace --execute --no-confirm --no-publish --no-push --allow-branch main
 
+          # cargo-release bumps the main workspace but not nested lockfiles whose
+          # path-dependencies it just revved. Resync them so the committed locks
+          # match the new version, then fold them into the release commit + tag.
           cargo update --manifest-path client/src-tauri/Cargo.toml --package phase-tauri
-          if ! git diff --quiet -- client/src-tauri/Cargo.lock; then
-            git add client/src-tauri/Cargo.lock
+          cargo update --manifest-path lobby-worker/broker-wasm/Cargo.toml --package engine --package lobby-broker
+          if ! git diff --quiet -- client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock; then
+            git add client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock
             git commit --amend --no-edit
             git tag -f -a "$TAG" -m "$TAG"
           fi
@@ -307,6 +311,7 @@ jobs:
               client/src-tauri/Cargo.lock \
               client/src-tauri/Cargo.toml \
               client/src-tauri/tauri.conf.json \
+              lobby-worker/broker-wasm/Cargo.lock \
               | sort)
             extra=$(comm -23 <(printf '%s\n' "$changed") <(printf '%s\n' "$allowed"))
             if [ -n "$extra" ]; then
