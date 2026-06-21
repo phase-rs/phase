@@ -6024,11 +6024,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
-        StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
-        StaticCondition::SourceIsEnchanted => ("SourceIsEnchanted", Unhandled),
-        StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
-        StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
-        StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
+        // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
+        StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
+        // SourceIsEnchanted resolved by layers::evaluate_condition (layers.rs:1066)
+        StaticCondition::SourceIsEnchanted => ("SourceIsEnchanted", Handled),
+        // SourceIsMonstrous resolved by layers::evaluate_condition (layers.rs:1071)
+        StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Handled),
+        // SourceAttachedToCreature resolved by layers::evaluate_condition (layers.rs:1078)
+        StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
+        // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
+        StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
         // object's zone against the specified zone. Runtime-handled.
@@ -10907,6 +10912,41 @@ mod tests {
             FeatureSupport::Handled,
             "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
         );
+    }
+
+    /// Drift guard for MSH Wave 5a Group I: the five source-state static
+    /// conditions are resolved at runtime by `layers::evaluate_condition`, so the
+    /// classifier must report them `Handled` (their cards — Armed Assailant,
+    /// Fleecemane Lion, Patriot — were falsely flagged unsupported). Pins EXACTLY
+    /// the flipped variants; sibling stubs (UnlessPay, Unrecognized, etc.) are
+    /// intentionally NOT asserted here so a future stub does not silently pass.
+    #[test]
+    fn source_state_static_conditions_are_marked_handled() {
+        let conditions: [(StaticCondition, &str); 5] = [
+            (StaticCondition::SourceIsEquipped, "SourceIsEquipped"),
+            (StaticCondition::SourceIsEnchanted, "SourceIsEnchanted"),
+            (StaticCondition::SourceIsMonstrous, "SourceIsMonstrous"),
+            (
+                StaticCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
+            (
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Any,
+                },
+                "SourceMatchesFilter",
+            ),
+        ];
+
+        for (condition, expected_name) in conditions {
+            let (name, support) = static_condition_feature(&condition);
+            assert_eq!(name, expected_name);
+            assert_eq!(
+                support,
+                FeatureSupport::Handled,
+                "StaticCondition::{expected_name} is resolved by layers::evaluate_condition",
+            );
+        }
     }
 
     /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by

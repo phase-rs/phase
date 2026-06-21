@@ -1047,6 +1047,9 @@ fn parse_self_source_subject(input: &str) -> OracleResult<'_, &str> {
         tag("this land "),
         tag("this artifact "),
         tag("this enchantment "),
+        // CR 611.3a: bound "it" in a self-referential static binds to the source
+        // permanent (Intrepid Ace "as long as it isn't attacking or blocking").
+        tag("it "),
     ))
     .parse(input)
 }
@@ -1419,7 +1422,15 @@ fn parse_has_counters_axes(
     ))
     .parse(rest)?;
 
-    let (rest, _) = tag(" on it").parse(rest)?;
+    // CR 122.1: "on him/her/them" — animate/gendered possessive of the
+    // counter-bearing source, identical semantics to "on it". Marvel cards use
+    // gendered pronouns (Captain America "a shield counter on him"); the layer
+    // system never inspects the pronoun, only the counter-bearing object.
+    let (rest, _) = preceded(
+        tag(" on "),
+        alt((tag("it"), tag("him"), tag("her"), tag("them"))),
+    )
+    .parse(rest)?;
 
     Ok((rest, (subject, counters, minimum, maximum)))
 }
@@ -13077,5 +13088,78 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             }
         );
+    }
+
+    /// CR 122.1: the gendered/animate possessive "on him/her/them" is the
+    /// semantic twin of "on it" for the counter-bearing source — Captain America,
+    /// Super-Soldier's static "as long as ~ has a shield counter on him" must
+    /// parse to `HasCounters`, not fall through to the always-true `Unrecognized`
+    /// stub. Discriminating: revert the `" on him/her/them"` arm in
+    /// `parse_has_counters_axes` and the source pronouns no longer match, so this
+    /// parses to `Unrecognized` (or fails) instead of `HasCounters`.
+    #[test]
+    fn parse_source_has_counters_accepts_gendered_pronouns() {
+        let expected = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Shield),
+            minimum: 1,
+            maximum: None,
+        };
+        for text in [
+            "~ has a shield counter on it",
+            "~ has a shield counter on him",
+            "~ has a shield counter on her",
+            "~ has a shield counter on them",
+        ] {
+            let (rest, cond) = parse_source_has_counters(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            assert_eq!(cond, expected, "wrong condition for {text:?}");
+        }
+    }
+
+    /// CR 122.1: the recipient-side counter path (`parse_recipient_has_counters`,
+    /// used by `Duration::ForAsLongAs` clauses) shares `parse_has_counters_axes`,
+    /// so it also gains the gendered pronoun. Positive: "it has a shield counter
+    /// on him" → `RecipientHasCounters`. Negative: a non-pronoun tail ("on the
+    /// battlefield") still fails to match, proving the `alt()` did not widen into
+    /// arbitrary suffixes.
+    #[test]
+    fn parse_recipient_has_counters_accepts_gendered_pronouns() {
+        let expected = StaticCondition::RecipientHasCounters {
+            counters: CounterMatch::OfType(CounterType::Shield),
+            minimum: 1,
+            maximum: None,
+        };
+        let (rest, cond) = parse_recipient_has_counters("it has a shield counter on him")
+            .expect("recipient pronoun counter clause should parse");
+        assert_eq!(rest, "");
+        assert_eq!(cond, expected);
+
+        // Negative: the pronoun axis must not swallow an arbitrary tail.
+        assert!(
+            parse_recipient_has_counters("it has a shield counter on the battlefield").is_err(),
+            "non-pronoun suffix must not match the counter axis"
+        );
+    }
+
+    /// CR 611.3a: the bound pronoun "it" in a self-referential combat-state gate
+    /// binds to the source permanent. Intrepid Ace's "it isn't attacking or
+    /// blocking" must parse to `Not(Or[SourceIsAttacking, SourceIsBlocking])`,
+    /// not the always-true `Unrecognized` stub. Discriminating: revert the
+    /// `tag("it ")` arm in `parse_self_source_subject` and this no longer parses.
+    #[test]
+    fn parse_self_source_combat_state_accepts_bound_it() {
+        let expected = StaticCondition::Not {
+            condition: Box::new(StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::SourceIsAttacking,
+                    StaticCondition::SourceIsBlocking,
+                ],
+            }),
+        };
+        let (rest, cond) = parse_inner_condition("it isn't attacking or blocking")
+            .expect("bound-it combat-state gate should parse");
+        assert_eq!(rest, "");
+        assert_eq!(cond, expected);
     }
 }

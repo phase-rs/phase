@@ -9839,6 +9839,86 @@ mod tests {
         ));
     }
 
+    // CR 301.5 + CR 303.4: `SourceAttachedToCreature` gates a continuous
+    // modification on the source Aura/Equipment being attached to a CREATURE
+    // host. No attachment → false; attached to a non-creature (e.g. a land) →
+    // false; attached to a creature → true. Discriminating: revert the eval arm
+    // (or the `as_object` / creature-core-type filter) and the negative cases
+    // start reporting true, re-exposing the always-true `Unrecognized` fallback.
+    #[test]
+    fn source_attached_to_creature_gates() {
+        use crate::game::game_object::AttachTarget;
+        let mut state = setup();
+        let aura = make_creature(&mut state, "Roving Aura", 0, 0, PlayerId(0));
+
+        // No attachment → false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+
+        // Attached to a non-creature host (a land) → false.
+        let land = make_land(&mut state, "Forest", PlayerId(0));
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(land));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+
+        // Attached to a creature host → true.
+        let bear = make_creature(&mut state, "Host Bear", 2, 2, PlayerId(0));
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(bear));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceAttachedToCreature,
+            PlayerId(0),
+            aura,
+        ));
+    }
+
+    // CR 608.2c: `SourceMatchesFilter` gates a continuous modification on the
+    // source matching a `TargetFilter` (leveler-style cards). A creature filter
+    // matches a creature source → true; once the source loses its Creature core
+    // type → false. Discriminating: revert the eval arm and the mismatched case
+    // reports true, re-exposing the always-true `Unrecognized` fallback.
+    #[test]
+    fn source_matches_filter_gates() {
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Figure", 2, 2, PlayerId(0));
+        let filter = TargetFilter::Typed(TypedFilter::creature());
+
+        // Source is a creature → matches.
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceMatchesFilter {
+                filter: filter.clone(),
+            },
+            PlayerId(0),
+            creature,
+        ));
+
+        // Strip the Creature core type → no longer matches a creature filter.
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types
+                .core_types
+                .retain(|t| *t != CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceMatchesFilter { filter },
+            PlayerId(0),
+            creature,
+        ));
+    }
+
     // --- CR 305.7: SetBasicLandType tests ---
 
     fn make_land(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
