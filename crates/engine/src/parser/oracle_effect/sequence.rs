@@ -1179,6 +1179,11 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("if not"),
         tag("the next time "),
         tag("at the beginning "),
+        // CR 511.2 + CR 603.7a: bare "at end of combat, …" delayed-trigger prefix
+        // — companion of the suffix form. Keep the deferred body attached so it
+        // reaches `strip_temporal_prefix` instead of splitting at the comma
+        // (Fortune, Loyal Steed: "at end of combat, exile it and …").
+        tag("at end of combat"),
         tag("for as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the

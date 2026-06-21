@@ -2208,12 +2208,22 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
-    // Check "of the chosen type" suffix (Cavern of Souls, Metallic Mimic, etc.)
+    // Check "of the chosen type" / "of that type" suffix (Cavern of Souls,
+    // Metallic Mimic; Selfless Safewright). CR 205.3m + CR 608.2c: "of that
+    // type" is the anaphor form of "of the chosen type" — same typed reference,
+    // same runtime resolution against the source's chosen creature type — so
+    // both surface forms route to one suffix arm. Mirrors the dual recognition
+    // in `parse_chosen_qualifier_subject` (oracle_static/keyword_grant.rs).
     let remaining = lower[pos..].trim_start();
     let remaining_offset = lower[pos..].len() - remaining.len();
-    if tag::<_, _, OracleError<'_>>("of the chosen type")
-        .parse(remaining)
-        .is_ok()
+    if let Ok((_, of_chosen_len)) = alt((
+        value(
+            "of the chosen type".len(),
+            tag::<_, _, OracleError<'_>>("of the chosen type"),
+        ),
+        value("of that type".len(), tag("of that type")),
+    ))
+    .parse(remaining)
     {
         // CR 205.2a: Disambiguate which "chosen type" axis this refers to by the
         // base type, mirroring the static cost-mod path in
@@ -2245,7 +2255,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
             FilterProp::IsChosenCreatureType
         };
         properties.push(chosen_prop);
-        pos += remaining_offset + "of the chosen type".len();
+        pos += remaining_offset + of_chosen_len;
     }
 
     let mut exclude_chosen_type = false;
@@ -3410,8 +3420,23 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// CR 508.1b: Postnominal "attacking you" / "attacking your opponents" on a
 /// typed phrase ("target creature attacking you"). The prefix form emits
 /// `Attacking { defender: None }`; this suffix scopes the defending player.
+///
+/// An optional "that's "/"that is "/"that are " relative-clause intro before
+/// "attacking" is consumed first (CR 608.2c). "Each creature that's attacking
+/// one of your opponents" (Oviya) is the relative-clause form of the bare
+/// postnominal "creature attacking your opponents"; both resolve to the same
+/// `Attacking { defender }` property, so the intro is stripped here rather than
+/// forking a second attacking grammar in the `that's`-clause path.
 fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
-    let trimmed = text.trim_start();
+    let trimmed_outer = text.trim_start();
+    let trimmed = opt(alt((
+        tag::<_, _, OracleError<'_>>("that's "),
+        tag("that is "),
+        tag("that are "),
+    )))
+    .parse(trimmed_outer)
+    .map(|(rest, _)| rest)
+    .unwrap_or(trimmed_outer);
     for (pattern, defender) in [
         (
             "attacking you or a planeswalker you control",
@@ -3427,6 +3452,13 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             ControllerRef::Opponent,
         ),
         ("attacking your opponents", ControllerRef::Opponent),
+        // CR 508.1b: "attacking one of your opponents" — in a multiplayer
+        // attack-multiple-players game each attacker is assigned one defending
+        // player; "one of your opponents" scopes the defender to any of the
+        // controller's opponents (Oviya, Automech Artisan). Same defender scope
+        // as the plural "your opponents" form; the singular phrasing only
+        // changes the surface text, not the `ControllerRef::Opponent` mapping.
+        ("attacking one of your opponents", ControllerRef::Opponent),
     ] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(trimmed) {
             let rest_trim = rest.trim_start();
@@ -13214,5 +13246,45 @@ mod tests {
         assert!(parse_counters_put_this_turn_clause("attacked this turn").is_none());
         // Missing the "on this turn" terminator → not this clause.
         assert!(parse_counters_put_this_turn_clause("you've put a +1/+1 counter on it").is_none());
+    }
+
+    /// CR 508.1b (Oviya, Automech Artisan): the relative-clause attacking suffix
+    /// "that's attacking one of your opponents" must fully consume and emit
+    /// `Attacking { defender: Some(Opponent) }`.
+    #[test]
+    fn that_s_attacking_one_of_your_opponents_suffix() {
+        let (filter, rest) = parse_target("each creature that's attacking one of your opponents");
+        assert!(
+            rest.trim().is_empty(),
+            "suffix must be fully consumed: {rest:?}"
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert!(
+            tf.properties.contains(&FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent),
+            }),
+            "must carry Attacking{{defender: Opponent}}, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 205.3m + CR 608.2c (Selfless Safewright): the anaphor suffix "of that
+    /// type" must be recognized identically to "of the chosen type" and emit
+    /// `IsChosenCreatureType` for a non-card-typed base.
+    #[test]
+    fn of_that_type_anaphor_suffix_equals_of_the_chosen_type() {
+        let (filter, rest) = parse_target("other permanents you control of that type");
+        assert!(
+            rest.trim().is_empty(),
+            "suffix must be fully consumed: {rest:?}"
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert!(
+            tf.properties.contains(&FilterProp::IsChosenCreatureType),
+            "must carry IsChosenCreatureType, got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
     }
 }

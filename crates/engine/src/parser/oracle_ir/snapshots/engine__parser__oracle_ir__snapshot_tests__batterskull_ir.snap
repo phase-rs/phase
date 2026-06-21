@@ -63,6 +63,9 @@ expression: "&ir"
             "type": "AsSorcery"
           }
         ],
+        "ability_tag": {
+          "type": "Equip"
+        },
         "condition": null,
         "optional_targeting": false,
         "optional": false,

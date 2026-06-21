@@ -6588,6 +6588,18 @@ pub(super) fn parse_imperative_family_ast(
             count: parse_additional_phase_count(lower),
         }));
     }
+    // CR 500.8 + CR 513.1: "there is an additional end step after this step"
+    // (Y'shtola Rhul). The extra end step is anchored to `Phase::End` so the
+    // LIFO `advance_phase` scan inserts it as the current end step completes.
+    if nom_primitives::scan_contains(lower, "additional end step") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::End,
+            after: Phase::End,
+            followed_by: vec![],
+            count: parse_additional_phase_count(lower),
+        }));
+    }
 
     // CR 606.3: "activate each planeswalker's loyalty ability an additional
     // time this turn" — The Chain Veil class. The outer "you may" is

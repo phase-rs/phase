@@ -3967,6 +3967,7 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         }
     }
     ability.cost_reduction = cost_reduction;
+    ability.ability_tag = Some(AbilityTag::Equip);
     Some(ability)
 }
 
@@ -6253,24 +6254,16 @@ mod tests {
         );
     }
 
-    /// CR 702.6a + CR 106.6: Ronin, Shadow Stalker. Its second ability
-    /// ("{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4
-    /// until end of turn. Activate only as a sorcery.") is fully supported with
-    /// no Unimplemented parts: a `Pump` effect, a `Composite[Tap, Sacrifice
-    /// Equipment]` cost, and an `AsSorcery` activation restriction.
-    ///
-    /// Its first ability's spend restriction ("Spend this mana only to cast
-    /// Equipment spells or activate equip abilities") is an honest, documented
-    /// gap (an Unimplemented "spend" marker): "equip abilities" (a
-    /// specific keyword ability per CR 702.6a) cannot be modeled by the existing
-    /// `AbilityActivationScope` (`OfSpellType` over-permits any Equipment
-    /// ability; `Any` over-permits any ability), and a categorically-correct
-    /// `EquipAbility` scope would require threading the activated ability's
-    /// identity through `PaymentContext::Activation` and the cost-payment
-    /// authority — out of scope for this change. This test pins both facts so a
-    /// future fix knows exactly what to flip.
+    /// CR 702.6a + CR 106.6: Ronin, Shadow Stalker. Both abilities are fully
+    /// supported:
+    /// - First ability: mana production with `Any([SpellType("Equipment"),
+    ///   ActivateTagged(Equip)])` spend restriction and `OnlyOnceEachTurn`
+    ///   activation restriction.
+    /// - Second ability: -4/-4 Pump effect, Composite[Tap, Sacrifice Equipment]
+    ///   cost, and `AsSorcery` activation restriction.
     #[test]
-    fn ronin_second_ability_supported_first_ability_spend_restriction_deferred() {
+    fn ronin_both_abilities_fully_supported() {
+        use crate::types::ability::{AbilityTag, ManaSpendRestriction};
         let r = parse_oracle_text(
             "Pay 2 life: Add two mana of any one color. Spend this mana only to cast Equipment spells or activate equip abilities. Activate only once each turn.\n{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4 until end of turn. Activate only as a sorcery.",
             "Ronin, Shadow Stalker",
@@ -6306,12 +6299,29 @@ mod tests {
             second.activation_restrictions
         );
 
-        // First ability: mana production + once-each-turn parse, but the spend
-        // restriction's "equip abilities" half is a documented gap.
+        // First ability: mana production with equip-ability spend restriction.
         let first = &r.abilities[0];
         assert!(
-            has_unimplemented(first),
-            "first ability's equip-ability spend restriction is a known gap: {first:#?}"
+            !has_unimplemented(first),
+            "first ability must now be fully supported: {first:#?}"
+        );
+        let Effect::Mana { restrictions, .. } = &*first.effect else {
+            panic!("expected Effect::Mana, got {:?}", first.effect);
+        };
+        assert_eq!(
+            restrictions,
+            &[ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Equipment".to_string()),
+                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
+            ])],
+            "equip-ability spend restriction must be keyword-precise"
+        );
+        assert!(
+            first
+                .activation_restrictions
+                .contains(&crate::types::ability::ActivationRestriction::OnlyOnceEachTurn),
+            "once-each-turn restriction must be present: {:?}",
+            first.activation_restrictions
         );
     }
 
@@ -12021,6 +12031,37 @@ mod tests {
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
         assert!(trigger.valid_card.is_some());
         assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn spell_temporal_phase_line_builds_delayed_trigger() {
+        // CR 603.7b: Full Throttle's second line. A *phase-based* inline delayed
+        // trigger on a sorcery ("At the beginning of each combat this turn, ...")
+        // must lower to a multi-fire WheneverEvent wrapping a Phase(BeginCombat)
+        // trigger — NOT a printed battlefield trigger, which would never fire for
+        // an instant/sorcery.
+        let r = parse(
+            "At the beginning of each combat this turn, untap all creatures that attacked this turn.",
+            "Full Throttle Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.triggers.is_empty(),
+            "phase-form delayed trigger must not emit a printed trigger: {:?}",
+            r.triggers
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
+            panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
+        };
+        let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+        else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::Phase);
+        assert_eq!(trigger.phase, Some(Phase::BeginCombat));
     }
 
     #[test]

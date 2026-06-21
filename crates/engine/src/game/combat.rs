@@ -7981,4 +7981,77 @@ mod tests {
             "placing a creature already attacking must mark layers dirty"
         );
     }
+
+    /// CR 508.1b + CR 702.19a (Oviya, Automech Artisan): the static
+    /// "Each creature that's attacking one of your opponents has trample" must
+    /// parse to a `Continuous` static whose affected filter carries
+    /// `Attacking { defender: Some(Opponent) }` and grant Trample only to
+    /// creatures attacking the controller's opponent — not to a creature that
+    /// isn't attacking. Drives the REAL static parser (`parse_static_line`) →
+    /// `evaluate_layers`.
+    ///
+    /// REVERT-PROOF: reverting the `parse_attacking_defender_suffix` "that's
+    /// attacking one of your opponents" extension leaves the static line at
+    /// `Effect::Unimplemented` (no `StaticDefinition` produced), so
+    /// `parse_static_line` returns `None`, the `.expect` below panics, and the
+    /// grant never reaches the attacker.
+    #[test]
+    fn oviya_grants_trample_only_to_creatures_attacking_an_opponent() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Oviya on the battlefield, controlled by PlayerId(0). Static parsed
+        // from its printed Oracle text.
+        let oviya = create_creature(&mut state, PlayerId(0), "Oviya, Automech Artisan", 2, 2);
+        let def =
+            parse_static_line("Each creature that's attacking one of your opponents has trample.")
+                .expect("Oviya static line must parse to a StaticDefinition");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                }]
+            ))),
+            "affected filter must scope to creatures attacking an opponent"
+        );
+        state
+            .objects
+            .get_mut(&oviya)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // An attacker controlled by PlayerId(0) attacking the opponent.
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // A second creature that is NOT attacking — the negative control.
+        let idle = create_creature(&mut state, PlayerId(0), "Wall", 0, 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .has_keyword(&Keyword::Trample),
+            "a creature attacking the controller's opponent must gain trample"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&idle)
+                .unwrap()
+                .has_keyword(&Keyword::Trample),
+            "a creature that isn't attacking must NOT gain trample"
+        );
+    }
 }

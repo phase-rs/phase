@@ -318,6 +318,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::Backup => " activates backup: ",
                 // CR 602.5b: Power-up activation.
                 AbilityTag::PowerUp => " activates power-up: ",
+                // CR 702.6a: Equip activation.
+                AbilityTag::Equip => " activates equip: ",
             };
             vec![
                 player_seg(state, *player_id),

@@ -6083,6 +6083,12 @@ pub struct GameState {
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub combat_phases_started_this_turn: u32,
+    /// CR 500.8 + CR 513.1: Number of end steps that have begun this turn.
+    /// Mirrors `combat_phases_started_this_turn` for the end-step axis; used by
+    /// conditions that gate a follow-up only during the first end step
+    /// (Y'shtola Rhul's "if it's the first end step of the turn" loop guard).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub end_steps_started_this_turn: u32,
     /// CR 508.1a: Object IDs of creatures declared as attackers this turn.
     /// Persists after combat ends for post-combat filtering.
     #[serde(default)]
@@ -7165,6 +7171,7 @@ impl GameState {
             attacked_defenders_this_turn: HashMap::new(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
+            end_steps_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             attacker_declarations_this_turn: Vec::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -7621,6 +7628,7 @@ impl PartialEq for GameState {
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
+            && self.end_steps_started_this_turn == other.end_steps_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.attacker_declarations_this_turn == other.attacker_declarations_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-20T00:00:00Z",
+  "updated": "2026-06-21T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -162,12 +162,24 @@
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
           "count": 1,
           "name": "Den of the Bugbear"
         },
         {
           "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
           "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 2,
+          "name": "Hexing Squelcher"
         },
         {
           "count": 4,
@@ -178,12 +190,8 @@
           "name": "Monstrous Rage"
         },
         {
-          "count": 15,
+          "count": 1,
           "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
         },
         {
           "count": 2,
@@ -194,7 +202,7 @@
           "name": "Reckless Rage"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Screaming Nemesis"
         },
         {
@@ -202,23 +210,39 @@
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Sunspine Lynx"
         },
         {
-          "count": 4,
-          "name": "Burst Lightning"
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 9,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Screaming Nemesis"
         },
         {
           "count": 4,
           "name": "Mutavault"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "The Legend of Roku"
         }
       ],
@@ -228,24 +252,28 @@
           "name": "Flowstone Infusion"
         },
         {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 3,
-          "name": "Hexing Squelcher"
+          "count": 2,
+          "name": "Scorching Shot"
         },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
-          "count": 2,
-          "name": "Scorching Shot"
+          "count": 1,
+          "name": "Sunspine Lynx"
         },
         {
           "count": 2,
-          "name": "Weathered Runestone"
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
         }
       ]
     },
@@ -809,8 +837,8 @@
       "name": "Orzhov Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "W"
+        "W",
+        "B"
       ],
       "tags": [
         "metagame"
@@ -818,71 +846,47 @@
       "main": [
         {
           "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Geier Reach Sanitarium"
-        },
-        {
-          "count": 2,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
+          "name": "Bleachbone Verge"
         },
         {
           "count": 2,
           "name": "Brightclimb Pathway"
         },
         {
-          "count": 2,
-          "name": "Vanishing Verse"
-        },
-        {
           "count": 4,
-          "name": "Fleeting Spirit"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
+          "name": "Fatal Push"
         },
         {
           "count": 1,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
+          "count": 3,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 4,
+          "name": "Fleeting Spirit"
+        },
+        {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Geier Reach Sanitarium"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
         },
         {
           "count": 3,
           "name": "Guardian of New Benalia"
         },
         {
-          "count": 3,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 1,
-          "name": "Lively Dirge"
+          "count": 4,
+          "name": "Iron-Shield Elf"
         },
         {
           "count": 2,
@@ -893,42 +897,62 @@
           "name": "Monument to Endurance"
         },
         {
-          "count": 2,
-          "name": "Bleachbone Verge"
-        },
-        {
           "count": 4,
-          "name": "Iron-Shield Elf"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
+          "name": "Parhelion II"
         },
         {
           "count": 1,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
+          "name": "Plains"
         },
         {
           "count": 2,
           "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 1,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 1,
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 4,
+          "name": "The Mycosynth Gardens"
+        },
+        {
+          "count": 2,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Lively Dirge"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Duress"
+          "count": 2,
+          "name": "Pest Control"
         },
         {
-          "count": 1,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
+          "count": 2,
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
@@ -936,27 +960,19 @@
         },
         {
           "count": 2,
+          "name": "Loran of the Third Path"
+        },
+        {
+          "count": 4,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 2,
           "name": "Bitter Triumph"
         },
         {
           "count": 2,
-          "name": "Pest Control"
-        },
-        {
-          "count": 1,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 1,
           "name": "Ral Zarek, Guest Lecturer"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 3,
-          "name": "Doorkeeper Thrull"
         }
       ]
     },
