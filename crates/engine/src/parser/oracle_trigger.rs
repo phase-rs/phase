@@ -12315,12 +12315,43 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
 }
 
 fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint>) {
-    match nom_primitives::split_once_on(input, " during ") {
-        Ok((_, (before, after))) => match parse_turn_constraint(after) {
-            Some(constraint) => (before.trim(), Some(constraint)),
-            None => (input, None),
-        },
-        Err(_) => (input, None),
+    let mut remaining = input.trim();
+    loop {
+        if let Ok((_, constraint)) = preceded(
+            tag::<_, _, OracleError<'_>>("during "),
+            all_consuming(alt((
+                value(
+                    TriggerConstraint::OnlyDuringOpponentsTurn,
+                    alt((
+                        tag("an opponent's turn"),
+                        tag("each opponent's turn"),
+                        tag("each opponents\u{2019} turn"),
+                        tag("each opponents' turn"),
+                        tag("your opponent's turn"),
+                        tag("your opponents\u{2019} turn"),
+                        tag("your opponents' turn"),
+                        tag("each of your opponents\u{2019} turn"),
+                        tag("each of your opponents' turn"),
+                    )),
+                ),
+                value(
+                    TriggerConstraint::OnlyDuringYourTurn,
+                    alt((tag("your turn"), tag("each of your turns"))),
+                ),
+            ))),
+        )
+        .parse(remaining)
+        {
+            let split_at = input.len() - remaining.len();
+            return (input[..split_at].trim(), Some(constraint));
+        }
+
+        // allow-noncombinator: word-boundary scan to find a trailing "during <turn>" suffix;
+        // the candidate suffix itself is parsed by nom above.
+        let Some(idx) = remaining.find(' ') else {
+            return (input, None);
+        };
+        remaining = remaining[idx + 1..].trim_start();
     }
 }
 
@@ -17953,6 +17984,14 @@ mod tests {
             def.constraint,
             Some(TriggerConstraint::OnlyDuringOpponentsTurn)
         );
+    }
+
+    #[test]
+    fn spell_cast_turn_constraint_peel_rejects_phase_or_step_tails() {
+        let (payload, constraint) =
+            peel_trailing_turn_constraint("spell during an opponent's end step");
+        assert_eq!(payload, "spell during an opponent's end step");
+        assert!(constraint.is_none());
     }
 
     // CR 601.1a + CR 701.18b: "Whenever you play a card" fires on playing a land
