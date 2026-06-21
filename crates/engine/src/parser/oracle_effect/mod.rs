@@ -499,10 +499,23 @@ const DELAYED_TRIGGER_WINDOWS: [&str; 2] = [" this turn, ", " this combat, "];
 /// (Also "whenever [trigger condition] this combat, [effect]".)
 /// These create multi-fire delayed triggers that persist until end of turn.
 /// Example: "whenever a creature you control deals combat damage to a player this turn, draw a card"
+///
+/// CR 603.7b: A spell may also introduce a *phase-based* inline delayed trigger,
+/// "at the beginning of [phase] this turn, [effect]" (Full Throttle: "At the
+/// beginning of each combat this turn, untap all creatures that attacked this
+/// turn."). This is the same multi-fire, end-of-turn-purged delayed trigger; its
+/// embedded `TriggerDefinition` is a Phase trigger, so it fires at the start of
+/// each matching phase for the rest of the turn. Without this path it would fall
+/// through to printed-trigger dispatch and become a battlefield Phase trigger that
+/// never fires for an instant/sorcery.
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    if tag::<_, _, OracleError<'_>>("whenever ")
+    let is_phase_form = tag::<_, _, OracleError<'_>>("at the beginning of ")
         .parse(tp.lower)
-        .is_err()
+        .is_ok();
+    if !is_phase_form
+        && tag::<_, _, OracleError<'_>>("whenever ")
+            .parse(tp.lower)
+            .is_err()
     {
         return None;
     }
@@ -541,11 +554,22 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // trigger clause.
     let (before, after) = match window_split {
         Some(split) => split,
+        // CR 603.7b: The phase form is a delayed trigger ONLY when scoped by an
+        // explicit "this turn"/"this combat" window. Without it, "at the beginning
+        // of [phase]" is a printed trigger and must not be intercepted here.
+        None if is_phase_form => return None,
         None => tp.split_around(", ")?,
     };
 
-    // Condition is between "whenever " and the split boundary.
-    let condition_text = &before.lower[9..];
+    // Condition spans the keyword through the split boundary. The "whenever "
+    // keyword is stripped (the trigger parser decomposes the event without it);
+    // the "at the beginning of " keyword is retained because the phase-trigger
+    // parser (`try_parse_phase_trigger`) dispatches on it.
+    let condition_text = if is_phase_form {
+        before.lower
+    } else {
+        &before.lower[9..]
+    };
     // Effect is the remainder after the split boundary.
     let effect_text = after.original;
 
