@@ -1900,9 +1900,27 @@ pub(crate) fn condition_text_is_rehomeable(condition_text: &str) -> bool {
     // list (the verbatim pre-existing `excluded_prefixes` set), not parser
     // dispatch. The actual condition parsing is done downstream by
     // `parse_inner_condition` / `parse_condition_text`.
-    !NON_REHOMEABLE_CONDITION_PREFIXES
-        .iter()
-        .any(|prefix| condition_text.starts_with(prefix))
+    //
+    // Each prefix must match on a word boundary: a bare `starts_with` lets the
+    // reflexive predicate `"you do"` swallow the control-presence condition
+    // `"you don't control a Snail"` (Wick, the Whorled Mind) — the latter is
+    // re-homeable as `Not(IsPresent)`, the former is the no-`AbilityCondition`
+    // optional-effect signal. The check only applies to prefixes whose last
+    // character is alphanumeric (e.g. "you do"): there the *following* character
+    // in the text must not be alphanumeric, so "you do**n't**" (continues with
+    // 'n') is rejected. Prefixes already ending in a space ("its power is ",
+    // "it has ") carry their own boundary, so they exclude on a plain prefix
+    // match and must NOT impose an extra boundary on the alphanumeric residual.
+    !NON_REHOMEABLE_CONDITION_PREFIXES.iter().any(|prefix| {
+        let prefix_ends_alnum = prefix
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric());
+        // allow-noncombinator: word-boundary membership test against a fixed exclusion list, not parsing dispatch (parsing happens downstream in parse_inner_condition)
+        condition_text.strip_prefix(prefix).is_some_and(|rest| {
+            !prefix_ends_alnum || !rest.chars().next().is_some_and(|c| c.is_alphanumeric())
+        })
+    })
 }
 
 /// CR 707.10c: When a suffix condition is immediately followed by a copy-retarget
@@ -3495,6 +3513,15 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(AbilityCondition::EventOutcomeWon);
     }
 
+    // CR 603.12 + CR 608.2c: reflexive "you don't" / "you do not" / "you didn't"
+    // / "you did not" — the verb anaphors back to the immediately preceding
+    // optional action ("you didn't put a card into your hand this way"), so the
+    // fragment is the optional-effect signal, NOT a game-state condition. But a
+    // trailing game-state predicate ("you don't *control a Snail*", Wick) is a
+    // genuine control-presence gate. Disambiguate by deferring to the typed
+    // condition parser first: when `parse_inner_condition` consumes the whole
+    // fragment, it is a real game-state condition (re-homed below); only when it
+    // cannot is this the reflexive optional-effect signal.
     if alt((
         tag::<_, _, OracleError<'_>>("you don't"),
         tag("you do not"),
@@ -3503,6 +3530,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     ))
     .parse(lower.as_str())
     .is_ok()
+        && !parse_inner_condition(&lower).is_ok_and(|(rest, _)| rest.trim().is_empty())
     {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),

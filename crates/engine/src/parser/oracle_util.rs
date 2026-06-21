@@ -2016,6 +2016,17 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         // E.g. "Merfolk Mistbinder" → "Other Merfolk you control get +1/+1."
                         // would become "Other ~ you control..." without this guard.
                         || replaced.contains("~ you control")
+                        // CR 111.10 + CR 303.7: Named token guard. A card-name first word
+                        // immediately followed by a token-subtype noun ("Role"/"Aura") is the
+                        // *token's* name, not a self-reference — the named-Role/Aura-token class
+                        // is "<Name> Role token attached to ..." (Royal Treatment's "Royal Role",
+                        // Cursed/Monster/Wicked/Sorcerer/Virtuous Roles). Replacing the first
+                        // word there ("Royal" → "~") destroys the token name and the token
+                        // parser can no longer recognize it.
+                        // allow-noncombinator: structural guard on already-normalized output (mirrors the "~ creatures"/"~ you control" guards above), not parsing dispatch
+                        || replaced.contains("~ Role")
+                        // allow-noncombinator: structural guard on already-normalized output, not parsing dispatch
+                        || replaced.contains("~ Aura")
                     {
                         continue;
                     }
