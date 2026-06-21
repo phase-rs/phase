@@ -67,27 +67,30 @@ jobs:
 
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
 
-          latest_patch=$(gh release list --limit 100 --json tagName \
-            | jq -r --arg major "$major" --arg minor "$minor" '
+          # Each nightly bumps the MINOR version (patch always resets to 0). Find
+          # the highest minor already released for this major and take the next
+          # one; never go backwards relative to Cargo.toml's own minor.
+          latest_minor=$(gh release list --limit 100 --json tagName \
+            | jq -r --arg major "$major" '
                 [
                   .[].tagName
                   | capture("^v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$")?
-                  | select(.major == $major and .minor == $minor)
-                  | .patch | tonumber
+                  | select(.major == $major)
+                  | .minor | tonumber
                 ]
                 | max // empty
               ')
 
-          next_patch=0
-          if [ -n "$latest_patch" ]; then
-            next_patch=$((latest_patch + 1))
+          next_minor=0
+          if [ -n "$latest_minor" ]; then
+            next_minor=$((latest_minor + 1))
           fi
 
-          if [ "$patch" -lt "$next_patch" ]; then
-            patch="$next_patch"
+          if [ "$minor" -lt "$next_minor" ]; then
+            minor="$next_minor"
           fi
+          patch=0
 
           if [ "$major" -gt 255 ] || [ "$minor" -gt 255 ] || [ "$patch" -gt 65535 ]; then
             echo "::error::Version $major.$minor.$patch is not valid for the Windows MSI ProductVersion"
