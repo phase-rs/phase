@@ -529,6 +529,13 @@ pub fn resume_begin_game_abilities(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     while let Some(pending) = state.pending_begin_game_abilities.pop() {
+        // CR 103.6: Beginning-game abilities resolve after mulligans and
+        // before the first turn receives priority. Seed a priority sentinel so
+        // skipped or noninteractive abilities cannot leave the stale
+        // MulliganDecision state as the apparent pause point.
+        state.waiting_for = WaitingFor::Priority {
+            player: pending.ability.controller,
+        };
         let _ = resolve_ability_chain(state, &pending.ability, events, 0);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return state.waiting_for.clone();

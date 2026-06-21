@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, CostReduction, DelayedTriggerCondition, Effect,
-    FilterProp, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
+    DelayedTriggerCondition, Effect, FilterProp, ManaProduction, ModalChoice, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -542,7 +543,6 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
     // CR 103.1: the starting player is determined before mulligans. Gemstone
     // Caverns gates its begin-game ability on NOT being the starting player.
     if not_starting_player {
-        use crate::types::ability::ControllerRef;
         def = def.condition(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::WasStartingPlayer {
                 controller: ControllerRef::You,
