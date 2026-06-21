@@ -2442,7 +2442,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
 pub(super) fn parse_hand_reveal_ast(
     text: &str,
     lower: &str,
-    _ctx: &mut ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<HandRevealImperativeAst> {
     // CR 406.6: Private look at source-linked exile (Scroll Rack) — no "hand" in phrase.
     if let Some((_, after_look_at)) =
@@ -2556,7 +2556,8 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
-        let (target, card_filter) = parse_hand_reveal_target_and_card_filter(after_reveal_lower);
+        let (target, card_filter) =
+            parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
@@ -2568,7 +2569,30 @@ pub(super) fn parse_hand_reveal_ast(
 
 fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
+    ctx: &mut ParseContext,
 ) -> (TargetFilter, TargetFilter) {
+    // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
+    // card from it" names the revealing player's hand directly, then the
+    // controller chooses a filtered card from it (Biting-Palm Ninja: "that player
+    // reveals their hand and you choose a nonland card from it."). The fused choose
+    // clause must populate `card_filter`; an empty `None` filter matches nothing, so
+    // without it the RevealHand chooses and exiles nothing (a silent no-op).
+    if let Ok((rest, target)) = parse_hand_possessive_target(after_reveal_lower) {
+        if let Some(choose) = rest
+            .trim_start()
+            .strip_prefix("and ")
+            .map(str::trim_start)
+            .filter(|clause| {
+                nom_primitives::scan_contains(clause, "card from it")
+                    && alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
+                        .parse(*clause)
+                        .is_ok()
+            })
+        {
+            return (target, super::parse_choose_filter(choose, ctx));
+        }
+    }
+
     if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
         let Ok((hand_phrase, descriptor)) = terminated(
             take_until::<_, _, OracleError<'_>>(" cards"),

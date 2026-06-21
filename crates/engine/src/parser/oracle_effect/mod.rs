@@ -38511,6 +38511,42 @@ mod tests {
     }
 
     #[test]
+    fn fused_reveal_hand_and_choose_populates_card_filter() {
+        // Biting-Palm Ninja (#842): the choose clause is fused to the reveal
+        // sentence with "and" ("that player reveals their hand and you choose a
+        // nonland card from it"), so the separate-sentence RevealHandFilter
+        // continuation never fires. The fused choose must still populate the
+        // RevealHand `card_filter` — otherwise the empty `None` filter matches no
+        // cards and the reveal/choose/exile silently does nothing.
+        let def = parse_effect_chain(
+            "That player reveals their hand and you choose a nonland card from it. Exile that card.",
+            AbilityKind::Spell,
+        );
+
+        fn reveal_hand_parts(def: &AbilityDefinition) -> Option<(&TargetFilter, &TargetFilter)> {
+            match def.effect.as_ref() {
+                Effect::RevealHand {
+                    target,
+                    card_filter,
+                    ..
+                } => Some((target, card_filter)),
+                _ => def.sub_ability.as_deref().and_then(reveal_hand_parts),
+            }
+        }
+
+        let (target, card_filter) = reveal_hand_parts(&def).expect("RevealHand in chain");
+        assert_eq!(*target, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(
+                card_filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+            ),
+            "expected nonland reveal-choice filter, got {card_filter:?}"
+        );
+    }
+
+    #[test]
     fn parse_optional_reveal_hand_choice_marks_choice_optional() {
         let def = parse_effect_chain(
             "Look at target player's hand. You may choose a nonland card from it. That player discards that card.",
