@@ -5506,14 +5506,34 @@ fn is_new_sentence_not_type_continuation(text: &str) -> bool {
         // negation contraction so "creatures you control can't be the targets ..."
         // is correctly classified as a new subject-predicate sentence rather than
         // a type-list continuation.
-        if let Some(base) = w.split('\'').next() {
-            if base.len() < w.len() {
-                let base_normalized = normalize_verb_token(base);
-                return PREDICATE_VERBS.contains(&base_normalized.as_str());
-            }
+        if is_negated_auxiliary_predicate_token(w) {
+            return true;
         }
         false
     })
+}
+
+fn is_negated_auxiliary_predicate_token(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| !c.is_alphabetic() && c != '\'');
+    // allow-noncombinator: verb-morphology suffix check on pre-tokenized word
+    let Some(base) = token.strip_suffix("n't") else {
+        return false;
+    };
+    matches!(
+        base,
+        "ca" | "do"
+            | "does"
+            | "did"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "wo"
+            | "sha"
+            | "have"
+            | "has"
+            | "had"
+    )
 }
 
 fn make_base() -> TriggerDefinition {
@@ -26877,6 +26897,22 @@ mod tests {
         // Non-type word should not match
         assert!(!continues_player_action_list("draw a card"));
         assert!(!continues_player_action_list("you gain 1 life"));
+    }
+
+    #[test]
+    fn continues_player_action_list_rejects_negated_auxiliary_effect_sentences() {
+        assert!(!continues_player_action_list(
+            "creatures you control can't be the targets of spells or abilities"
+        ));
+        assert!(!continues_player_action_list(
+            "creatures you control don't untap during their controllers' untap steps"
+        ));
+        assert!(!continues_player_action_list(
+            "creature doesn't untap during its controller's next untap step"
+        ));
+        assert!(!continues_player_action_list("creatures won't untap"));
+        assert!(!continues_player_action_list("creature isn't tapped"));
+        assert!(!continues_player_action_list("creatures aren't attacking"));
     }
 
     // --- Fix 2: missing event verbs ---
