@@ -622,6 +622,29 @@ fn drain_pending_repeat_until(state: &mut GameState) {
             let mut events = Vec::new();
             let _ = resolve_ability_chain(state, &ability, &mut events, 1);
         }
+        // CR 608.2c: resume a paused `WhileCondition` loop after the iteration's
+        // interactive choice (Claim Jumper's library search) has drained. The
+        // stashed ability carries the remaining cap on its own `repeat_until`;
+        // re-evaluate the condition and re-enter `resolve_ability_chain` (which
+        // re-runs the body and re-checks the loop) only when both gates hold.
+        Some(RepeatContinuation::WhileCondition {
+            condition,
+            max_iterations,
+        }) => {
+            let mut remaining = *max_iterations;
+            if !should_repeat_while_condition(state, &ability, condition, &mut remaining) {
+                return;
+            }
+            // Thread the decremented cap into the re-entered loop so a bounded
+            // "once" repeat is not granted an extra iteration on resume.
+            let mut next = (*ability).clone();
+            next.repeat_until = Some(RepeatContinuation::WhileCondition {
+                condition: condition.clone(),
+                max_iterations: remaining,
+            });
+            let mut events = Vec::new();
+            let _ = resolve_ability_chain(state, &next, &mut events, 1);
+        }
         None => {}
     }
 }
@@ -1894,6 +1917,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::WasStartingPlayer { .. }
             | AbilityCondition::SpellCastWithVariantThisTurn { .. }
             | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
             | AbilityCondition::ZoneChangedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::SourceIsTapped
@@ -4528,7 +4552,71 @@ pub fn resolve_ability_chain(
                 return Ok(());
             }
         },
+        // CR 608.2c: "[if <condition>,] repeat this process [once]" — re-follow
+        // the whole chain while `condition` holds against the just-resolved
+        // state, capped by `max_iterations` additional repeats. Iterates the
+        // same `resolve_chain_body` as `UntilStopConditions`, stashing on an
+        // inner pause so `drain_pending_repeat_until` resumes the loop.
+        Some(RepeatContinuation::WhileCondition {
+            condition,
+            max_iterations,
+        }) => {
+            let mut remaining = max_iterations;
+            loop {
+                // CR 608.2c: each repeated process is a FRESH execution of the
+                // instructions, so its "that card"/"those cards" tracked set must
+                // not extend the prior iteration's. Reset the chain-local
+                // tracked-set identity before every iteration so a producer→copy
+                // chain (Sin: exile a card, then copy THAT card) binds only to the
+                // current iteration's object — otherwise the set accumulates and
+                // the copy multiplies (and the loop never terminates once the
+                // accumulated set keeps the predicate true).
+                state.chain_tracked_set_id = None;
+                let initial_waiting_for = state.waiting_for.clone();
+                resolve_chain_body(state, ability, events, depth)?;
+                if state.waiting_for != initial_waiting_for {
+                    // Inner pause: stash the loop ability with its remaining cap
+                    // so the drain re-evaluates the condition after the choice.
+                    let mut paused = ability.clone();
+                    paused.repeat_until = Some(RepeatContinuation::WhileCondition {
+                        condition: condition.clone(),
+                        max_iterations: remaining,
+                    });
+                    state.pending_repeat_until =
+                        Some(crate::types::game_state::PendingRepeatUntil {
+                            ability: Box::new(paused),
+                        });
+                    return Ok(());
+                }
+                if !should_repeat_while_condition(state, ability, &condition, &mut remaining) {
+                    return Ok(());
+                }
+            }
+        }
     }
+}
+
+/// CR 608.2c: Loop-continuation predicate for `RepeatContinuation::WhileCondition`.
+/// Returns `true` when another iteration must run: the game-state `condition`
+/// holds against the just-resolved state AND the remaining additional-iteration
+/// cap (if any) is not exhausted. When a cap is present it is decremented on each
+/// `true` return so callers thread the running count by re-passing `remaining`.
+fn should_repeat_while_condition(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    condition: &AbilityCondition,
+    remaining: &mut Option<u32>,
+) -> bool {
+    if matches!(remaining, Some(0)) {
+        return false;
+    }
+    if !evaluate_condition(condition, state, ability) {
+        return false;
+    }
+    if let Some(n) = remaining.as_mut() {
+        *n -= 1;
+    }
+    true
 }
 
 /// One full pass of an ability's resolution chain — the parent effect (with its
@@ -6900,6 +6988,10 @@ pub(crate) fn evaluate_condition(
         // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
         // of the turn" gates follow-up effects such as additional combats.
         AbilityCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
+        // CR 500.8 + CR 513.1 + CR 608.2c: "if it's the first end step of the
+        // turn" gates the additional-end-step follow-up (Y'shtola Rhul); only
+        // the first end step schedules another, preventing an infinite loop.
+        AbilityCondition::FirstEndStepOfTurn => state.end_steps_started_this_turn == 1,
         // CR 608.2c: "If a [noun] was [verb]ed this way" — check if any zone-changed
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.

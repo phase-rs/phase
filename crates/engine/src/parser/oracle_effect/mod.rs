@@ -499,10 +499,23 @@ const DELAYED_TRIGGER_WINDOWS: [&str; 2] = [" this turn, ", " this combat, "];
 /// (Also "whenever [trigger condition] this combat, [effect]".)
 /// These create multi-fire delayed triggers that persist until end of turn.
 /// Example: "whenever a creature you control deals combat damage to a player this turn, draw a card"
+///
+/// CR 603.7b: A spell may also introduce a *phase-based* inline delayed trigger,
+/// "at the beginning of [phase] this turn, [effect]" (Full Throttle: "At the
+/// beginning of each combat this turn, untap all creatures that attacked this
+/// turn."). This is the same multi-fire, end-of-turn-purged delayed trigger; its
+/// embedded `TriggerDefinition` is a Phase trigger, so it fires at the start of
+/// each matching phase for the rest of the turn. Without this path it would fall
+/// through to printed-trigger dispatch and become a battlefield Phase trigger that
+/// never fires for an instant/sorcery.
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    if tag::<_, _, OracleError<'_>>("whenever ")
+    let is_phase_form = tag::<_, _, OracleError<'_>>("at the beginning of ")
         .parse(tp.lower)
-        .is_err()
+        .is_ok();
+    if !is_phase_form
+        && tag::<_, _, OracleError<'_>>("whenever ")
+            .parse(tp.lower)
+            .is_err()
     {
         return None;
     }
@@ -541,11 +554,22 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // trigger clause.
     let (before, after) = match window_split {
         Some(split) => split,
+        // CR 603.7b: The phase form is a delayed trigger ONLY when scoped by an
+        // explicit "this turn"/"this combat" window. Without it, "at the beginning
+        // of [phase]" is a printed trigger and must not be intercepted here.
+        None if is_phase_form => return None,
         None => tp.split_around(", ")?,
     };
 
-    // Condition is between "whenever " and the split boundary.
-    let condition_text = &before.lower[9..];
+    // Condition spans the keyword through the split boundary. The "whenever "
+    // keyword is stripped (the trigger parser decomposes the event without it);
+    // the "at the beginning of " keyword is retained because the phase-trigger
+    // parser (`try_parse_phase_trigger`) dispatches on it.
+    let condition_text = if is_phase_form {
+        before.lower
+    } else {
+        &before.lower[9..]
+    };
     // Effect is the remainder after the split boundary.
     let effect_text = after.original;
 
@@ -726,7 +750,14 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     // Article choice depends on the payload — "a creature spell" vs "an instant or sorcery spell".
     let article_result: nom::IResult<&str, &str, OracleError<'_>> =
         alt((tag("when you next cast a "), tag("when you next cast an "))).parse(tp.lower);
-    let (_, matched_prefix) = article_result.ok()?;
+    let Ok((_, matched_prefix)) = article_result else {
+        // CR 603.7: non-cast "when you next <event> this turn" one-shot delayed
+        // triggers (e.g. All-Out Assault "When you next attack this turn, ...").
+        // The spell-cast arm above owns the rich spell-filter / disjunction
+        // grammar; this generic fallback reuses the trigger-condition parser so
+        // the whole "when you next <condition>" class is covered, not one card.
+        return try_parse_when_next_generic_event(tp);
+    };
 
     // Must contain "this turn, " to delimit condition from effect
     let (before_this_turn, after) = tp.rsplit_around(" this turn, ")?;
@@ -767,6 +798,70 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     trigger_def.valid_card = Some(combined_filter);
     // "when YOU next cast" — scope to the source's controller.
     trigger_def.valid_target = Some(TargetFilter::Controller);
+
+    Some(ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trigger_def),
+                or_trigger: None,
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 603.7: Parse a generic non-cast "when you next <condition> this turn,
+/// <effect>" one-shot delayed trigger. Delegates condition recognition to the
+/// shared trigger-condition parser (`parse_trigger_condition`) so the whole
+/// class is covered — "When you next attack this turn" (All-Out Assault),
+/// "When you next <other matchable event> this turn", etc. — rather than a
+/// single card.
+///
+/// The cast-spell variant (`try_parse_when_next_event`) keeps its dedicated
+/// spell-filter / disjunction grammar; this fallback runs only when the cast
+/// prefix did not match. Builds a `WhenNextEvent` delayed trigger (one-shot),
+/// mirroring `try_parse_whenever_this_turn`'s `WheneverEvent` (multi-fire)
+/// construction but with one-shot semantics.
+fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause> {
+    // The condition is bounded by " this turn, " — the same delimiter the
+    // spell-cast arm uses. Everything between "when you next " and the
+    // delimiter is the matchable trigger condition.
+    let (before_this_turn, after) = tp.rsplit_around(" this turn, ")?;
+    // Consume the "when you next " prefix with the combinator; the remainder is
+    // the bare trigger condition (e.g. "attack").
+    let (condition_text, _) = tag::<_, _, OracleError<'_>>("when you next ")
+        .parse(before_this_turn.lower)
+        .ok()?;
+    if condition_text.is_empty() {
+        return None;
+    }
+
+    // Reuse the shared trigger-condition parser. Re-prefix "you " so the bare
+    // condition (e.g. "attack") matches the "you attack" production; the parser
+    // accepts an optional "whenever "/"when " prefix but expects the subject.
+    let mut inner_ctx = ParseContext::default();
+    let condition_for_parser = format!("you {condition_text}");
+    let (mode, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
+        &condition_for_parser,
+        &mut inner_ctx,
+    );
+    // Only accept conditions the trigger matcher registry actually supports as a
+    // delayed event; an unrecognized condition lowers to Unknown and must not
+    // silently produce a never-firing delayed trigger.
+    if matches!(mode, crate::types::triggers::TriggerMode::Unknown(_)) {
+        return None;
+    }
+    trigger_def.execute = None;
+
+    let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
@@ -10947,8 +11042,15 @@ fn parse_bare_damage_continuation<'a>(
                 },
                 consumed,
             )
-        } else if let Ok((rest, _)) =
-            tag::<_, _, OracleError<'_>>("that much damage").parse(lower.as_str())
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("that much damage"),
+            // CR 120.1: "that amount of damage" is the synonym used when the
+            // antecedent is "N damage" (Fear of Burning Alive's "deals that
+            // amount of damage to target creature that player controls"). Both
+            // anaphors resolve to the just-dealt damage amount.
+            tag("that amount of damage"),
+        ))
+        .parse(lower.as_str())
         {
             let consumed = lower.len() - rest.len();
             (
@@ -17170,6 +17272,94 @@ fn try_parse_repeat_until_stop_conditions(
     )
 }
 
+/// Outcome of recognizing a trailing "repeat this process" directive chunk.
+///
+/// Distinguishes the three back-reference forms so the chunk loop can both
+/// CONSUME the directive (it never produces an independent effect) and apply the
+/// right chain-level `repeat_until`:
+/// - `Continuation(c)` — a loop predicate was recognized; set `pending_repeat_until`.
+/// - `ConsumeOnly` — the bare / "if you do" form (Primal Surge) is recognized so
+///   the directive is consumed rather than producing an `Unimplemented` gap, but
+///   it sets no predicate (its game-state-predicate semantics stay deferred).
+#[derive(Debug)]
+enum RepeatProcessOutcome {
+    Continuation(crate::types::ability::RepeatContinuation),
+    ConsumeOnly,
+}
+
+/// CR 608.2c: Recognize a trailing "[if <condition>,] [you may] repeat this
+/// process [once | N times]" directive and map it to a `RepeatContinuation`.
+///
+/// The directive is a chain back-reference, not an independent effect, so the
+/// chunk loop consumes it. A leading game-state condition ("then if an opponent
+/// controls more lands than you," / "if the exiled card is a land card,") is
+/// stripped via the shared condition helpers and threaded into a
+/// `WhileCondition` predicate; the trailing "once"/"N times" sets its
+/// `max_iterations` cap. With no condition, "you may repeat …" maps to
+/// `ControllerChoice` and the bare / "if you do" forms are consumed only.
+fn try_parse_repeat_process_directive(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<RepeatProcessOutcome> {
+    use crate::types::ability::RepeatContinuation;
+
+    // Strip a leading game-state condition, if any. The card-type strippers
+    // ("if the exiled card is a land card") run alongside the general inner-
+    // condition path ("then if an opponent controls more lands than you").
+    let (condition, body) = {
+        let (general, rest) = strip_leading_general_conditional(text, ctx);
+        if general.is_some() {
+            (general, rest)
+        } else {
+            let (card_type, rest2) = strip_card_type_conditional(text);
+            (card_type, rest2)
+        }
+    };
+
+    let body_lower = body.to_lowercase();
+    let (max_iterations, _) = nom_on_lower(body.as_str(), &body_lower, |i| {
+        let (i, you_may) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+        // The bare/"if you do" forms have no condition and no "you may" — keep
+        // them recognized (consume-only) so they don't leak Unimplemented gaps.
+        let (i, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag("if you do "),
+        )))
+        .parse(i)?;
+        let (i, _) = tag("repeat this process").parse(i)?;
+        // Trailing iteration cap: "once" → 1, "twice" → 2, "three times" → 3,
+        // bare / "any number of times" → unbounded (the latter only meaningful
+        // for the controller-choice form).
+        let (i, cap) = opt(alt((
+            value(Some(1u32), tag(" once")),
+            value(Some(2u32), tag(" twice")),
+            value(Some(3u32), tag(" three times")),
+            value(None, tag(" any number of times")),
+        )))
+        .parse(i)?;
+        let cap = cap.flatten();
+        let (i, _) = opt(tag(".")).parse(i)?;
+        eof(i)?;
+        Ok((i, (cap, you_may.is_some())))
+    })?;
+
+    let (cap, you_may) = max_iterations;
+    if let Some(condition) = condition {
+        return Some(RepeatProcessOutcome::Continuation(
+            RepeatContinuation::WhileCondition {
+                condition: Box::new(condition),
+                max_iterations: cap,
+            },
+        ));
+    }
+    if you_may {
+        return Some(RepeatProcessOutcome::Continuation(
+            RepeatContinuation::ControllerChoice,
+        ));
+    }
+    Some(RepeatProcessOutcome::ConsumeOnly)
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -18078,28 +18268,17 @@ pub(crate) fn parse_effect_chain_ir(
         // directive that doesn't produce an independent effect. It is a
         // back-reference applying to the process (chain) built so far.
         //
+        //   - "[if <condition>,] repeat this process [once | N times]" → a
+        //     game-state-predicate loop (`WhileCondition`): re-follow the chain
+        //     while the leading condition holds, capped by the trailing count.
         //   - "you may repeat this process [any number of times]" → a
-        //     per-iteration controller decision; recorded chain-level in
-        //     `pending_repeat_until` and applied to the root
-        //     `AbilityDefinition` during lowering (`ControllerChoice`).
-        //   - "[if you do, ]repeat this process" — the game-state-predicate
-        //     form (Primal Surge) is a deferred unit. It is still recognized
-        //     here so the directive is consumed rather than producing an
-        //     Unimplemented gap, but it sets no `repeat_until` predicate.
-        if let Some((continuation, _)) = nom_on_lower(normalized_text, &lower_check, |i| {
-            let (i, prefix) = nom::combinator::opt(alt((
-                tag::<_, _, OracleError<'_>>("you may "),
-                tag("if you do, "),
-                tag("if you do "),
-            )))
-            .parse(i)?;
-            let (i, _) = value((), tag("repeat this process")).parse(i)?;
-            let continuation = (prefix == Some("you may "))
-                .then_some(crate::types::ability::RepeatContinuation::ControllerChoice);
-            Ok((i, continuation))
-        }) {
-            if continuation.is_some() {
-                pending_repeat_until = continuation;
+        //     per-iteration controller decision (`ControllerChoice`).
+        //   - bare / "if you do, repeat this process" — recognized and consumed
+        //     so the directive doesn't leak an `Unimplemented` gap, but it sets
+        //     no predicate (its game-state-predicate form stays deferred).
+        if let Some(outcome) = try_parse_repeat_process_directive(normalized_text, ctx) {
+            if let RepeatProcessOutcome::Continuation(continuation) = outcome {
+                pending_repeat_until = Some(continuation);
             }
             continue;
         }
@@ -54229,6 +54408,149 @@ mod tests {
         assert_eq!(parse_zone_word("a library").unwrap().1, Zone::Library);
         assert_eq!(parse_zone_word("their library").unwrap().1, Zone::Library);
         assert_eq!(parse_zone_word("the stack").unwrap().1, Zone::Stack);
+    }
+
+    /// CR 608.2c: the `WhileCondition` repeat directive — bare "if <type> card,
+    /// repeat this process" with no count → unbounded `max_iterations: None`.
+    /// Building-block coverage: exercises `try_parse_repeat_process_directive`'s
+    /// card-type leading-condition path independent of any one card.
+    #[test]
+    fn repeat_process_directive_exiled_card_type_unbounded_while_condition() {
+        use crate::types::ability::RepeatContinuation;
+        let mut ctx = ParseContext::default();
+        let outcome = try_parse_repeat_process_directive(
+            "if the exiled card is a land card, repeat this process",
+            &mut ctx,
+        );
+        match outcome {
+            Some(RepeatProcessOutcome::Continuation(RepeatContinuation::WhileCondition {
+                condition,
+                max_iterations,
+            })) => {
+                assert!(
+                    matches!(
+                        *condition,
+                        AbilityCondition::RevealedHasCardType { ref card_types, .. }
+                            if card_types == &[CoreType::Land]
+                    ),
+                    "condition must gate on a revealed/exiled Land card, got {condition:?}"
+                );
+                assert_eq!(max_iterations, None, "bare repeat is unbounded");
+            }
+            other => panic!("expected unbounded WhileCondition, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: the bounded form — leading quantity comparison + trailing
+    /// "once" → `WhileCondition` with `max_iterations: Some(1)`.
+    #[test]
+    fn repeat_process_directive_once_caps_iterations() {
+        use crate::types::ability::RepeatContinuation;
+        let mut ctx = ParseContext::default();
+        let outcome = try_parse_repeat_process_directive(
+            "then if an opponent controls more lands than you, repeat this process once",
+            &mut ctx,
+        );
+        match outcome {
+            Some(RepeatProcessOutcome::Continuation(RepeatContinuation::WhileCondition {
+                condition,
+                max_iterations,
+            })) => {
+                assert!(
+                    matches!(*condition, AbilityCondition::QuantityCheck { .. }),
+                    "condition must be a quantity comparison, got {condition:?}"
+                );
+                assert_eq!(max_iterations, Some(1), "\"once\" caps at one extra repeat");
+            }
+            other => panic!("expected bounded WhileCondition, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1c: with no leading condition, "you may repeat this process" stays
+    /// the controller-decision form — the new directive parser must not absorb it
+    /// into a `WhileCondition`.
+    #[test]
+    fn repeat_process_directive_you_may_stays_controller_choice() {
+        use crate::types::ability::RepeatContinuation;
+        let mut ctx = ParseContext::default();
+        assert!(matches!(
+            try_parse_repeat_process_directive("you may repeat this process", &mut ctx),
+            Some(RepeatProcessOutcome::Continuation(
+                RepeatContinuation::ControllerChoice
+            ))
+        ));
+    }
+
+    /// Sin, Spira's Punishment — full-card parse drops zero `Unimplemented` nodes
+    /// and the trigger's root carries the unbounded `WhileCondition` repeat.
+    #[test]
+    fn sin_spiras_punishment_parses_repeat_while_land() {
+        use crate::types::ability::RepeatContinuation;
+        let parsed = parse_oracle_text(
+            "Flying\nWhenever Sin enters or attacks, exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card. If the exiled card is a land card, repeat this process.",
+            "Sin, Spira's Punishment",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &[],
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"Unimplemented\""),
+            "Sin must parse with zero Unimplemented nodes"
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .expect("enters-or-attacks trigger with an execute body");
+        assert!(
+            matches!(
+                trigger.repeat_until,
+                Some(RepeatContinuation::WhileCondition {
+                    max_iterations: None,
+                    ..
+                })
+            ),
+            "Sin's repeat is an unbounded WhileCondition, got {:?}",
+            trigger.repeat_until
+        );
+    }
+
+    /// Claim Jumper — full-card parse drops zero `Unimplemented` nodes and the
+    /// trigger's root carries the bounded ("once") `WhileCondition` repeat.
+    #[test]
+    fn claim_jumper_parses_repeat_once_while_opponent_lands() {
+        use crate::types::ability::RepeatContinuation;
+        let parsed = parse_oracle_text(
+            "Vigilance\nWhen this creature enters, if an opponent controls more lands than you, you may search your library for a Plains card and put it onto the battlefield tapped. Then if an opponent controls more lands than you, repeat this process once. If you search your library this way, shuffle.",
+            "Claim Jumper",
+            &["Vigilance".to_string()],
+            &["Creature".to_string()],
+            &[],
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"Unimplemented\""),
+            "Claim Jumper must parse with zero Unimplemented nodes"
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .expect("enters trigger with an execute body");
+        assert!(
+            matches!(
+                trigger.repeat_until,
+                Some(RepeatContinuation::WhileCondition {
+                    max_iterations: Some(1),
+                    ..
+                })
+            ),
+            "Claim Jumper repeats once, got {:?}",
+            trigger.repeat_until
+        );
     }
 }
 

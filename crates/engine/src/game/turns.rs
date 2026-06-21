@@ -149,6 +149,13 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
         state.combat_phases_started_this_turn =
             state.combat_phases_started_this_turn.saturating_add(1);
     }
+    // CR 500.8 + CR 513.1: track end-step occurrences for "first end step of the
+    // turn" gates (Y'shtola Rhul). Counts every End step begun this turn,
+    // including extra end steps scheduled via AdditionalPhase, so the gate only
+    // holds for the first.
+    if next == Phase::End {
+        state.end_steps_started_this_turn = state.end_steps_started_this_turn.saturating_add(1);
+    }
 
     // CR 500.5: Mana pools empty between phases/steps.
     // Firebending mana (EndOfCombat expiry) persists within combat steps.
@@ -593,6 +600,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.attacked_defenders_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
+    state.end_steps_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.attacker_declarations_this_turn.clear();
     state.creatures_blocked_this_turn.clear();

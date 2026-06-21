@@ -2825,4 +2825,74 @@ mod tests {
         colorless_only.add_unit(&ManaUnit::new(ManaType::Colorless, source, false, vec![]));
         assert!(colorless_only.is_empty());
     }
+
+    // CR 702.6a: Ronin, Shadow Stalker — the disjunction
+    // `OnlyForAny([OnlyForSpellType("Equipment"), OnlyForTaggedActivation(Equip)])`
+    // must allow equip-tagged activations and Equipment spell casting, but reject
+    // non-equip activated abilities on Equipment permanents.
+    #[test]
+    fn restriction_equip_tagged_allows_equip_activation() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Equipment".to_string()),
+            ManaRestriction::OnlyForTaggedActivation(AbilityTag::Equip),
+        ]);
+        // Equip-tagged activation on an Equipment source: ALLOWED.
+        assert!(restriction.allows_activation(
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+            Some(AbilityTag::Equip),
+        ));
+    }
+
+    // CR 702.6a: Non-equip activated ability on an Equipment permanent must be
+    // REJECTED — the restriction is keyword-precise, not source-type-permissive.
+    #[test]
+    fn restriction_equip_tagged_rejects_non_equip_ability_on_equipment() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Equipment".to_string()),
+            ManaRestriction::OnlyForTaggedActivation(AbilityTag::Equip),
+        ]);
+        // Non-equip activation on an Equipment source: REJECTED.
+        assert!(!restriction.allows_activation(
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+            None,
+        ));
+        // Non-equip activation with a different tag: also REJECTED.
+        assert!(!restriction.allows_activation(
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+            Some(AbilityTag::Boast),
+        ));
+    }
+
+    // CR 702.6a: Equipment spell casting is still allowed by the spell-type branch.
+    #[test]
+    fn restriction_equip_tagged_allows_equipment_spell() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Equipment".to_string()),
+            ManaRestriction::OnlyForTaggedActivation(AbilityTag::Equip),
+        ]);
+        let equipment_spell = SpellMeta {
+            types: vec!["Artifact".to_string()],
+            subtypes: vec!["Equipment".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+            has_x_in_cost: false,
+        };
+        assert!(restriction.allows_spell(&equipment_spell));
+        // Non-Equipment artifact spell: REJECTED.
+        let artifact_spell = SpellMeta {
+            types: vec!["Artifact".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+            has_x_in_cost: false,
+        };
+        assert!(!restriction.allows_spell(&artifact_spell));
+    }
 }
