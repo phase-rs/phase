@@ -4,7 +4,8 @@ use crate::types::ability::{
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
     Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
     PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TapCreaturesRequirement,
+    TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -343,6 +344,16 @@ fn restriction_scope_matches_player(
             );
             false
         }
+        RestrictionPlayerScope::DefendingPlayer => {
+            // CR 508.5a: resolved to `SpecificPlayer` by `add_restriction` when
+            // the restriction is created. An unresolved scope here means the
+            // source was not attacking, so it restricts no one.
+            debug_assert!(
+                false,
+                "DefendingPlayer should be resolved by add_restriction"
+            );
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
@@ -456,12 +467,26 @@ fn is_blocked_by_cant_activate_abilities(
         let GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            activity: ProhibitedActivity::ActivateAbilities { exemption },
-            ..
+            expiry,
+            activity:
+                ProhibitedActivity::ActivateAbilities {
+                    exemption,
+                    only_tag,
+                },
         } = restriction
         else {
             return false;
         };
+        // CR 514.2 + CR 500.7: A `UntilEndOfNextTurnOf` prohibition (Kang's "during
+        // that turn, power-up abilities can't be activated") is created PRE-ARMED and
+        // only takes force during the granted extra turn. It stays dormant on the
+        // creating turn until that player's next untap step CONVERTS it to
+        // `EndOfTurn` (turns.rs). While still pre-armed it is not yet in force, so it
+        // must not block activations on the creation turn — the expiry variant is the
+        // single source of truth shared with the untap-step arming.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            return false;
+        }
         let source_controller = state
             .objects
             .get(source)
@@ -470,6 +495,14 @@ fn is_blocked_by_cant_activate_abilities(
             restriction_scope_matches_player(source_controller, affected_players, caster);
         if !caster_affected {
             return false;
+        }
+        // CR 101.2 + CR 602.5: A tag-scoped prohibition (Kang → power-up) applies
+        // only to abilities carrying that keyword tag; every other activation is
+        // still legal. `None` prohibits all activations (legacy behavior).
+        if let Some(required_tag) = only_tag {
+            if activating_ability.ability_tag != Some(*required_tag) {
+                return false;
+            }
         }
         match exemption {
             ActivationExemption::None => true,
@@ -566,7 +599,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // in `Zone::Library` until `finalize_cast` performs the standard zone-
     // change to `Zone::Stack` — there is NO exile step (CR 601.2a:
     // "moves that card from where it is to the stack").
-    if let Some((top_id, _src, _alt)) =
+    if let Some((top_id, _src, _freq, _alt)) =
         top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
     {
         // Only non-land cards reach the cast path; lands flow through the
@@ -1348,6 +1381,10 @@ pub(super) fn build_spell_meta(
         cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
         mana_value: Some(obj.mana_cost.mana_value()),
         color_count: Some(obj.color.len() as u32),
+        // CR 107.3 + CR 202.3e: structural "has {X}" property of the printed cost,
+        // detected from shards (mana value alone can't reveal it — X contributes 0
+        // off the stack).
+        has_x_in_cost: obj.mana_cost.has_x(),
     })
 }
 
@@ -1782,6 +1819,13 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
                     )
                 })
             })
+        // CR 609.4b: A battlefield `StaticMode::ExileCastPermission` static may
+        // grant "mana of any type can be spent to cast those spells" (Azula,
+        // Cunning Usurper) for the cards in its exile pool. Unlike the per-card
+        // `PlayFromExile` grant above, the concession lives on the static, so it
+        // is re-derived from the source's pool + filter at spend time.
+        || source_id
+            .is_some_and(|id| exile_static_permission_grants_any_color(state, player, id))
 }
 
 pub(super) fn player_can_spend_as_any_color_for_payment(
@@ -1898,6 +1942,13 @@ struct ExilePermissionSource<'a> {
     pool: ExileCardPool,
     /// CR 117.1c: When the permission functions — `AnyTime` or `YourTurnOnly`.
     timing: ExileCastTiming,
+    /// CR 609.4b: Optional any-type-mana spend concession riding alongside the
+    /// permission (Azula, Cunning Usurper). `Some(AnyTypeOrColor)` lets the
+    /// controller spend mana of any type to cast a spell offered by this source.
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    /// CR 601.3b + CR 702.8a: When `true`, spells cast via this permission may
+    /// be cast as though they had flash (Azula, Cunning Usurper).
+    grants_flash: bool,
 }
 
 /// CR 113.6b + CR 406.6: The set of exiled object ids this source's permission
@@ -1964,6 +2015,8 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     cost,
                     pool,
                     timing,
+                    mana_spend_permission,
+                    grants_flash,
                 } => definition
                     .affected
                     .as_ref()
@@ -1975,6 +2028,8 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                         play_mode,
                         pool,
                         timing,
+                        mana_spend_permission,
+                        grants_flash,
                     }),
                 _ => None,
             })
@@ -2101,6 +2156,75 @@ pub(crate) fn exile_cast_permission_source(
         }
         Some((source.source_id, source.frequency, source.cost))
     })
+}
+
+/// CR 601.2a + CR 113.6b: Find the full `ExileCastPermission` source authorizing
+/// `player` to cast `exiled_id`, including its payment/timing concessions
+/// (`mana_spend_permission`, `grants_flash`). Shares the gating logic with
+/// `exile_cast_permission_source` (frequency slot, your-turn timing, pool
+/// membership, affected filter) but surfaces the concession fields so the
+/// any-type-mana and flash wiring can consult them. Returns `None` when no
+/// functioning static authorizes the cast.
+fn exile_cast_permission_source_full(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> Option<ExilePermissionSource<'_>> {
+    let obj = state.objects.get(&exiled_id)?;
+    if !exile_object_can_enter_cast_path(obj) {
+        return None;
+    }
+    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+        return None;
+    }
+    let sources = exile_permission_sources(state, player);
+    sources.into_iter().find(|source| {
+        if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
+            return false;
+        }
+        if !exile_permission_timing_active(state, source, player) {
+            return false;
+        }
+        let pool = exile_permission_pool(state, source);
+        if !pool.contains(&exiled_id) {
+            return false;
+        }
+        let ctx =
+            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx)
+    })
+}
+
+/// CR 609.4b: True when an `ExileCastPermission` static granting "mana of any
+/// type can be spent to cast those spells" (Azula, Cunning Usurper) authorizes
+/// `player` to cast `exiled_id`. Consulted by
+/// `player_can_spend_as_any_color_for_spell` so the any-type-mana concession is
+/// scoped to spells offered by that static, mirroring the per-card
+/// `CastingPermission::PlayFromExile.mana_spend_permission` path.
+pub(crate) fn exile_static_permission_grants_any_color(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> bool {
+    exile_cast_permission_source_full(state, player, exiled_id).is_some_and(|source| {
+        matches!(
+            source.mana_spend_permission,
+            Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor)
+        )
+    })
+}
+
+/// CR 601.3b + CR 702.8a: True when an `ExileCastPermission` static granting
+/// "you may cast them as though they had flash" (Azula, Cunning Usurper)
+/// authorizes `player` to cast `exiled_id`. Consulted by the cast-timing check
+/// in `prepare_spell_cast` so the spell may be cast at instant speed.
+pub(crate) fn exile_static_permission_grants_flash(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> bool {
+    exile_cast_permission_source_full(state, player, exiled_id)
+        .is_some_and(|source| source.grants_flash)
 }
 
 fn graveyard_permission_sources(
@@ -2313,7 +2437,20 @@ fn has_graveyard_cast_permission_without_keyword_constraint(
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
 /// library if a battlefield static grants `TopOfLibraryCastPermission` whose
-/// `affected` filter matches it. Returns `(top_card_id, source_id, alt_cost)`.
+/// `affected` filter matches it. Returns
+/// `(top_card_id, source_id, frequency, alt_cost)` for the *selected*
+/// authorizing permission.
+///
+/// CR 601.2a: When more than one permission can authorize the same top-of-
+/// library cast, an `Unlimited` authorizer (Realmwalker, Future Sight, Bolas's
+/// Citadel) is preferred over a bounded `OncePerTurn` one (Assemble the
+/// Players, Johann). The unlimited permission alone suffices, so the player is
+/// not forced to spend a once-per-turn slot — selecting it preserves the
+/// bounded slot for a later cast this turn. The `frequency` of the selected
+/// source is what drives per-turn-slot consumption at `finalize_cast`; the
+/// selected source/frequency is threaded through the casting context rather
+/// than independently rescanned, so availability and consumption agree on the
+/// single authorizing permission.
 ///
 /// Filter eligibility is re-evaluated each call because the top of library
 /// changes between priority windows; callers (`spell_objects_available_to_cast`,
@@ -2328,19 +2465,31 @@ pub(crate) fn top_of_library_permission_source(
 ) -> Option<(
     ObjectId,
     ObjectId,
+    CastFrequency,
     Option<crate::types::ability::AbilityCost>,
 )> {
     let player_data = state.players.iter().find(|p| p.id == player)?;
     let &top_id = player_data.library.front()?;
-    state.battlefield.iter().find_map(|&src_id| {
-        let obj = state.objects.get(&src_id)?;
+    // CR 601.2a: Collect every permission that can authorize this cast, then
+    // prefer an `Unlimited` authorizer so a bounded `OncePerTurn` slot is only
+    // spent when nothing else authorizes the cast.
+    let mut selected: Option<(
+        ObjectId,
+        CastFrequency,
+        Option<crate::types::ability::AbilityCost>,
+    )> = None;
+    for &src_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&src_id) else {
+            continue;
+        };
         if obj.controller != player {
-            return None;
+            continue;
         }
-        let (filter, alt_cost) =
-            active_static_definitions(state, obj).find_map(|s| match &s.mode {
+        let Some((frequency, alt_cost)) = active_static_definitions(state, obj)
+            .find_map(|s| match &s.mode {
                 StaticMode::TopOfLibraryCastPermission {
                     play_mode,
+                    frequency,
                     alt_cost,
                 } => {
                     // Gate by play_mode: Cast permissions cover only spells;
@@ -2355,21 +2504,48 @@ pub(crate) fn top_of_library_permission_source(
                     if !mode_matches {
                         return None;
                     }
-                    s.affected.as_ref().map(|f| (f, alt_cost.clone()))
+                    // CR 601.2a: A `OncePerTurn` permission winks out for the rest
+                    // of the turn once a spell has been cast through this source
+                    // (Assemble the Players, Johann). `Unlimited` permissions
+                    // (Realmwalker, Future Sight, Bolas's Citadel) never consult
+                    // the used-set.
+                    if matches!(frequency, CastFrequency::OncePerTurn)
+                        && state.top_of_library_cast_permissions_used.contains(&src_id)
+                    {
+                        return None;
+                    }
+                    s.affected
+                        .as_ref()
+                        .map(|f| (f, *frequency, alt_cost.clone()))
                 }
                 _ => None,
-            })?;
-        if super::filter::matches_target_filter(
-            state,
-            top_id,
-            filter,
-            &super::filter::FilterContext::from_source_with_controller(src_id, player),
-        ) {
-            Some((top_id, src_id, alt_cost))
-        } else {
-            None
+            })
+            .and_then(|(filter, frequency, alt_cost)| {
+                super::filter::matches_target_filter(
+                    state,
+                    top_id,
+                    filter,
+                    &super::filter::FilterContext::from_source_with_controller(src_id, player),
+                )
+                .then_some((frequency, alt_cost))
+            })
+        else {
+            continue;
+        };
+        // CR 601.2a: An `Unlimited` authorizer always wins — it preserves any
+        // bounded slot. Otherwise keep the first match found.
+        let prefer = frequency.is_unlimited()
+            || selected
+                .as_ref()
+                .is_none_or(|(_, sel_freq, _)| !sel_freq.is_unlimited());
+        if prefer {
+            selected = Some((src_id, frequency, alt_cost));
         }
-    })
+        if frequency.is_unlimited() {
+            break;
+        }
+    }
+    selected.map(|(src_id, frequency, alt_cost)| (top_id, src_id, frequency, alt_cost))
 }
 
 /// CR 401.5 + CR 305.1: Return the top-of-library land + source pair when a
@@ -2385,7 +2561,7 @@ pub fn top_of_library_land_playable_by_permission(
     state: &GameState,
     player: PlayerId,
 ) -> Option<(ObjectId, ObjectId)> {
-    let (top_id, src_id, _alt) =
+    let (top_id, src_id, _freq, _alt) =
         top_of_library_permission_source(state, player, Some(CardPlayMode::Play))?;
     let obj = state.objects.get(&top_id)?;
     // CR 305.1: Only lands reach this path; non-land cards under the same
@@ -2414,12 +2590,39 @@ pub(crate) fn top_of_library_alt_ability_cost_for_object(
         return None;
     }
     top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
-        |(top_id, _src, alt)| {
+        |(top_id, _src, _freq, alt)| {
             if top_id == object_id {
                 alt
             } else {
                 None
             }
+        },
+    )
+}
+
+/// CR 601.2a + CR 401.5: When `object_id` is the current top of `player`'s
+/// library, return the `(source, frequency)` of the `TopOfLibraryCastPermission`
+/// static that the cast pipeline *selects* to authorize the cast. This is the
+/// single authority threaded through the casting context to drive per-turn-slot
+/// consumption — it mirrors how `CastingVariant::ExilePermission` /
+/// `GraveyardPermission` carry their authorizing source through `finalize_cast`.
+///
+/// Delegates to [`top_of_library_permission_source`], which prefers an
+/// `Unlimited` authorizer when one exists (CR 601.2a: an unlimited permission
+/// alone suffices, so a bounded `OncePerTurn` slot must not be spent when an
+/// unlimited one also matches). `finalize_cast` stamps
+/// `top_of_library_cast_permissions_used` ONLY when the returned `frequency` is
+/// `OncePerTurn` — an `Unlimited` selection never consumes a slot. Returns
+/// `None` when no top-of-library permission authorizes casting `object_id`.
+pub(crate) fn top_of_library_selected_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<(ObjectId, CastFrequency)> {
+    top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
+        |(top_id, src_id, frequency, _alt)| {
+            // CR 401.5: only the actual top card is authorized by the permission.
+            (top_id == object_id).then_some((src_id, frequency))
         },
     )
 }
@@ -3221,7 +3424,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // alt-cost branch below, mirroring `ExileWithAltAbilityCost` semantics.
     let top_of_library_permission_src = if obj.zone == Zone::Library && obj.owner == player {
         top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
-            .filter(|(top_id, _, _)| *top_id == object_id)
+            .filter(|(top_id, _, _, _)| *top_id == object_id)
     } else {
         None
     };
@@ -3356,7 +3559,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else if obj.zone == Zone::Library
         && top_of_library_permission_src
             .as_ref()
-            .is_some_and(|(_, _, alt)| alt.is_some())
+            .is_some_and(|(_, _, _, alt)| alt.is_some())
     {
         // CR 401.5 + CR 118.9: Bolas's Citadel — alt-cost rider on the static
         // grant zeros the spell's mana cost; the `AbilityCost` body is paid
@@ -4013,8 +4216,13 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(surge_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
-    let has_granted_flash =
-        effective_spell_keyword_kinds(state, player, object_id).contains(&KeywordKind::Flash);
+    // CR 601.3b + CR 702.8a: A spell has effective flash from its own keywords
+    // OR from a battlefield `StaticMode::ExileCastPermission` static granting
+    // "you may cast them as though they had flash" (Azula, Cunning Usurper) for
+    // the cards in its exile pool.
+    let has_granted_flash = effective_spell_keyword_kinds(state, player, object_id)
+        .contains(&KeywordKind::Flash)
+        || exile_static_permission_grants_flash(state, player, object_id);
     let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
@@ -4804,6 +5012,40 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
+/// CR 601.2f + CR 109.5: Cost-mod static conditions mix two player scopes.
+/// `DuringYourTurn` binds to the source permanent's controller (Paladin Class),
+/// while `SpellsCastThisTurn` / first-spell quantity gates bind to the spell
+/// caster (Heartwood Storyteller Avatar's opponent-first tax).
+fn evaluate_cost_mod_static_condition(
+    state: &GameState,
+    condition: &crate::types::ability::StaticCondition,
+    caster: PlayerId,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    use crate::types::ability::StaticCondition;
+
+    match condition {
+        StaticCondition::DuringYourTurn => {
+            super::layers::evaluate_condition(state, condition, source_controller, source_id)
+        }
+        StaticCondition::And { conditions } => conditions.iter().all(|c| {
+            evaluate_cost_mod_static_condition(state, c, caster, source_controller, source_id)
+        }),
+        StaticCondition::Or { conditions } => conditions.iter().any(|c| {
+            evaluate_cost_mod_static_condition(state, c, caster, source_controller, source_id)
+        }),
+        StaticCondition::Not { condition } => !evaluate_cost_mod_static_condition(
+            state,
+            condition,
+            caster,
+            source_controller,
+            source_id,
+        ),
+        _ => super::layers::evaluate_condition(state, condition, caster, source_id),
+    }
+}
+
 fn collect_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -4816,10 +5058,8 @@ fn collect_battlefield_cost_modifiers(
     // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
     // command-zone with Eminence-style opt-in) owned by
     // `game_functioning_statics`. We deliberately use the non-condition-
-    // filtered helper here — CR 604.1 condition evaluation must run against
-    // `caster` (so `SpellsCastThisTurn`-style conditions resolve against the
-    // casting player's history), not against the static's controller. The
-    // inline `evaluate_condition(... caster, ...)` call below does that work.
+    // filtered helper here — CR 604.1 condition evaluation uses per-clause player
+    // scope via `evaluate_cost_mod_static_condition`.
     //
     // CR 113.6b: cost-reduction statics that opt into the command zone via
     // `active_zones.contains(Command)` (Eminence — The Ur-Dragon, Edgar Markov)
@@ -4894,10 +5134,17 @@ fn collect_battlefield_cost_modifiers(
                 }
             }
 
-            // CR 601.2f: Check static condition — "as long as" clauses gate cost modification.
-            // Uses `caster` so SpellsCastThisTurn resolves against the casting player's history.
+            // CR 601.2f: Check static condition — "as long as" / "during your turn"
+            // clauses gate cost modification. `DuringYourTurn` uses the source
+            // controller; spell-history quantity gates use the caster.
             if let Some(ref cond) = def.condition {
-                if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
+                if !evaluate_cost_mod_static_condition(
+                    state,
+                    cond,
+                    caster,
+                    source_controller,
+                    bf_id,
+                ) {
                     continue;
                 }
             }
@@ -6013,11 +6260,9 @@ pub fn handle_prototype_cost_choice_with_payment_mode(
 /// `bestow_form` is set to `Some(BestowFormState)` to mark the object as in
 /// bestow form; `revert_bestow_aura_form` is the inverse operation.
 ///
-/// Idempotent: a no-op if the object is already in bestow form.
-fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
-    if obj.bestow_form.is_some() {
-        return;
-    }
+/// Idempotent: safe to re-run after printed-face rehydration or layer resets
+/// re-anchor `card_types` from a refreshed `base_card_types`.
+pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
     use crate::types::card_type::CoreType;
     // CR 702.103b: Remove the Creature core type while bestowed.
     obj.card_types
@@ -10136,9 +10381,15 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     super::layers::flush_layers(&mut simulated);
 
     let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
+    // CR 106.6: All current callers of this preview path are tag-`None`
+    // activations (mana abilities, ninjutsu, AI affordability). The real
+    // tag-scoped gate (Quinjet power-up restriction) runs at payment time in
+    // `pay_ability_mana_cost_*`, since `is_payable` defers mana affordability to
+    // the payment step (CR 601.2g).
     let activation_ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag: None,
     };
 
     can_pay_mana_cost_after_auto_tap_with_context(
@@ -10399,9 +10650,18 @@ pub(super) fn pay_ability_mana_cost(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_ability_mana_cost_excluding(state, player, source_id, cost, events, &HashSet::new())
+    pay_ability_mana_cost_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_tag,
+        events,
+        &HashSet::new(),
+    )
 }
 
 pub(super) fn pay_ability_mana_cost_excluding(
@@ -10409,6 +10669,7 @@ pub(super) fn pay_ability_mana_cost_excluding(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
@@ -10417,17 +10678,20 @@ pub(super) fn pay_ability_mana_cost_excluding(
         player,
         source_id,
         cost,
+        ability_tag,
         None,
         events,
         excluded_sources,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
@@ -10438,6 +10702,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     let activation_ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
+        ability_tag,
     };
 
     let _spent_units = auto_tap_and_pay_cost_excluding(
@@ -10464,9 +10729,53 @@ pub(super) fn pay_effect_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    pay_non_cast_mana_cost(
+        state,
+        player,
+        source_id,
+        cost,
+        PaymentContext::Effect,
+        events,
+    )
+}
+
+/// CR 116.2m + CR 709.5e: Pay a special action's mana cost (e.g. a Room's unlock
+/// cost) through a `PaymentContext::SpecialAction`, so CR 106.6 special-action
+/// spend restrictions (Smoky Lounge's "spend this mana only to … unlock doors")
+/// gate which restricted mana is eligible. Routes through the same single
+/// authority as effect-time payments, differing only in the payment context.
+pub(super) fn pay_special_action_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    action: crate::types::mana::SpecialAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    pay_non_cast_mana_cost(
+        state,
+        player,
+        source_id,
+        cost,
+        PaymentContext::SpecialAction(action),
+        events,
+    )
+}
+
+/// CR 106.6: Single-authority core for non-cast, non-activation mana payments
+/// (effect-resolution costs and special-action costs). Auto-taps sources,
+/// validates affordability, and executes the spend with the given payment
+/// context so restriction gating routes through the correct rules category.
+fn pay_non_cast_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: PaymentContext<'_>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
-    let effect_ctx = PaymentContext::Effect;
     let events_before = events.len();
     super::casting_costs::auto_tap_mana_sources_with_context(
         state,
@@ -10474,7 +10783,7 @@ pub(super) fn pay_effect_mana_cost(
         cost,
         events,
         Some(source_id),
-        Some(&effect_ctx),
+        Some(&ctx),
     );
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
     // so their bonus mana is in the pool before the affordability check.
@@ -10490,12 +10799,7 @@ pub(super) fn pay_effect_mana_cost(
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        if !mana_payment::can_pay_for_spell(
-            &player_data.mana_pool,
-            cost,
-            Some(&effect_ctx),
-            permissions,
-        ) {
+        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, Some(&ctx), permissions) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
@@ -10511,13 +10815,13 @@ pub(super) fn pay_effect_mana_cost(
         &mut player_data.mana_pool,
         cost,
         None,
-        Some(&effect_ctx),
+        Some(&ctx),
         permissions.any_color,
         None,
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 
@@ -10625,7 +10929,7 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
-    if !spent_units.is_empty() {
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
 
@@ -10666,6 +10970,22 @@ pub(super) fn activation_source_types(
             (types, subtypes)
         })
         .unwrap_or_default()
+}
+
+/// CR 106.6: Read the keyword tag of the ability at `ability_index` on
+/// `source_id`. Threaded into `PaymentContext::Activation` so tag-scoped mana
+/// spend restrictions (Quinjet: "spend this mana only to activate power-up
+/// abilities") can gate which mana is eligible for the activation being paid.
+pub(super) fn activation_ability_tag(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<crate::types::ability::AbilityTag> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag)
 }
 
 /// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
@@ -10941,9 +11261,14 @@ fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(CostObjectCount, &Ta
     }
 }
 
-pub(super) fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+pub(super) fn find_tap_creatures_cost(
+    cost: &AbilityCost,
+) -> Option<(&TapCreaturesRequirement, &TargetFilter)> {
     match cost {
-        AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
+        AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        } => Some((requirement, filter)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
         _ => None,
     }
@@ -11377,6 +11702,7 @@ fn can_pay_ability_cost_now(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
 ) -> bool {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     super::costs::can_pay(
@@ -11386,6 +11712,7 @@ fn can_pay_ability_cost_now(
         cost,
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
+            ability_tag,
         },
     )
 }
@@ -11503,11 +11830,9 @@ pub fn can_activate_ability_now(
     }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
     apply_cost_reduction(state, &mut ability_def, player, source_id);
-    if ability_def
-        .cost
-        .as_ref()
-        .is_some_and(|cost| !can_pay_ability_cost_now(state, player, source_id, cost))
-    {
+    if ability_def.cost.as_ref().is_some_and(|cost| {
+        !can_pay_ability_cost_now(state, player, source_id, cost, ability_def.ability_tag)
+    }) {
         return false;
     }
 
@@ -12127,7 +12452,15 @@ pub fn handle_activate_ability(
         // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
         // activated abilities use the same WaitingFor flow as flashback tap
         // costs; completion resumes through `finish_pending_cost_or_cast`.
-        if let Some((count, filter)) = find_tap_creatures_cost(cost) {
+        if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
+            // CR 602.1a: Activated-ability tap costs are fixed-count today
+            // (Convoke-style). The aggregate "total power N" form is reserved for
+            // Crew/Saddle/Teamwork, which are not dispatched through this path.
+            let count = requirement.fixed_count().ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Aggregate-power tap cost is not valid for this activation".into(),
+                )
+            })?;
             let eligible =
                 find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
             if eligible.len() < count as usize {
@@ -12141,7 +12474,7 @@ pub fn handle_activate_ability(
             pending_tap.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { aggregate: None },
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
@@ -12187,9 +12520,14 @@ pub fn handle_activate_ability(
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-                if let PaymentOutcome::Paused { remaining_cost } =
-                    pay_ability_cost_for_activation(state, player, source_id, cost, events)?
-                {
+                if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    activation_ability_tag(state, source_id, ability_index),
+                    events,
+                )? {
                     state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
                         source_id,
                         resolved.clone(),
@@ -12277,9 +12615,14 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        if let PaymentOutcome::Paused { remaining_cost } =
-            pay_ability_cost_for_activation(state, player, source_id, cost, events)?
-        {
+        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
+            state,
+            player,
+            source_id,
+            cost,
+            activation_ability_tag(state, source_id, ability_index),
+            events,
+        )? {
             state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
@@ -12527,6 +12870,14 @@ fn apply_static_activated_ability_cost_reduction(
     ability_def: &mut AbilityDefinition,
     source_id: ObjectId,
 ) {
+    // CR 601.2f: A `ReduceAbilityCost` static keyed on a keyword (e.g. "power-up")
+    // also reduces a tagged activated ability whose tag matches that keyword
+    // (Hulk reduces other creatures' power-up abilities). Read the activating
+    // ability's tag keyword before the mutable borrow of its cost below.
+    let active_keyword = ability_def
+        .ability_tag
+        .map(crate::types::ability::AbilityTag::keyword_str);
+
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
     };
@@ -12541,7 +12892,7 @@ fn apply_static_activated_ability_cost_reduction(
         else {
             continue;
         };
-        if keyword != "activated" || *amount == 0 {
+        if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
             continue;
         }
         if def.affected.as_ref().is_some_and(|filter| {
@@ -13243,7 +13594,15 @@ mod tests {
         ));
 
         let mut events = Vec::new();
-        pay_ability_mana_cost(&mut state, PlayerId(0), ability_source, &cost, &mut events).unwrap();
+        pay_ability_mana_cost(
+            &mut state,
+            PlayerId(0),
+            ability_source,
+            &cost,
+            None,
+            &mut events,
+        )
+        .unwrap();
 
         assert!(state.objects.get(&restricted_source).unwrap().tapped);
         assert_eq!(state.players[0].mana_pool.mana.len(), 0);
@@ -15301,6 +15660,7 @@ mod tests {
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::ActivateAbilities {
                 exemption: ActivationExemption::ManaAbilities,
+                only_tag: None,
             },
         });
 
@@ -20463,6 +20823,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackSpell,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(opposing_bolt)],
             spell_id,
@@ -20512,6 +20873,7 @@ mod tests {
                     kind: None,
                 },
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(stack_ability_id)],
             spell_id,
@@ -28503,7 +28865,7 @@ mod tests {
             obj.modal.as_mut().unwrap().max_choices = 3;
             obj.keywords
                 .push(Keyword::Escalate(AbilityCost::TapCreatures {
-                    count: 1,
+                    requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                 }));
         }
@@ -28517,7 +28879,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::PayCost {
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::Spell { .. },
@@ -30653,7 +31015,13 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature()),
             1,
         ));
-        assert!(can_pay_ability_cost_now(&state, PlayerId(0), source, &cost));
+        assert!(can_pay_ability_cost_now(
+            &state,
+            PlayerId(0),
+            source,
+            &cost,
+            None
+        ));
     }
 
     #[test]
@@ -30677,7 +31045,8 @@ mod tests {
             &state,
             PlayerId(0),
             source,
-            &cost
+            &cost,
+            None
         ));
     }
 
@@ -31776,6 +32145,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -36839,7 +37209,7 @@ mod tests {
                 "cost must be unpayable when the source has no +1/+1 counters"
             );
             assert!(
-                !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost),
+                !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, None),
                 "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
             );
         }
@@ -40239,7 +40609,7 @@ mod tests {
             CardPlayMode, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
         };
         use crate::types::card_type::CoreType;
-        use crate::types::statics::StaticMode;
+        use crate::types::statics::{CastFrequency, StaticMode};
 
         fn put_creature_on_top_of_library(
             state: &mut GameState,
@@ -40266,7 +40636,11 @@ mod tests {
             obj_id
         }
 
-        fn install_realmwalker_static(state: &mut GameState, controller: PlayerId, subtype: &str) {
+        fn install_realmwalker_static(
+            state: &mut GameState,
+            controller: PlayerId,
+            subtype: &str,
+        ) -> ObjectId {
             // Synthesize a Realmwalker permanent on the battlefield carrying
             // the `TopOfLibraryCastPermission` static; affected filter is
             // creature spells of the chosen creature type (modeled via a
@@ -40281,6 +40655,7 @@ mod tests {
             );
             let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
                 play_mode: CardPlayMode::Cast,
+                frequency: CastFrequency::Unlimited,
                 alt_cost: None,
             })
             .affected(TargetFilter::Typed(TypedFilter {
@@ -40297,6 +40672,7 @@ mod tests {
                 .unwrap()
                 .static_definitions
                 .push(def);
+            src
         }
 
         #[test]
@@ -40361,6 +40737,188 @@ mod tests {
             let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(903));
             let available = spell_objects_available_to_cast(&state, PlayerId(0));
             assert!(!available.contains(&top));
+        }
+
+        /// Install a `OncePerTurn` top-of-library permission (Assemble the
+        /// Players / Johann shape) whose `affected` filter admits any creature.
+        fn install_once_per_turn_creature_static(
+            state: &mut GameState,
+            controller: PlayerId,
+        ) -> ObjectId {
+            let src = create_object(
+                state,
+                CardId(8811),
+                controller,
+                "Assemble (test)".to_string(),
+                Zone::Battlefield,
+            );
+            let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                play_mode: CardPlayMode::Cast,
+                frequency: CastFrequency::OncePerTurn,
+                alt_cost: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }));
+            state
+                .objects
+                .get_mut(&src)
+                .unwrap()
+                .static_definitions
+                .push(def);
+            src
+        }
+
+        /// CR 601.2a + CR 401.5: A `OncePerTurn` top-of-library permission
+        /// (Assemble the Players, Johann) prunes its offer from
+        /// `spell_objects_available_to_cast` once its per-turn slot is consumed,
+        /// and comes back at turn cleanup. This is the discriminating test for
+        /// the new `frequency` axis: reverting the frequency gate in
+        /// `top_of_library_permission_source` makes the `after_consumed`
+        /// assertion fail (the slot would never be honored, so the card stays
+        /// castable). Mirrors the Maralen exile-permission frequency test.
+        #[test]
+        fn once_per_turn_top_of_library_frequency_gates_offer() {
+            let mut state = setup_game_at_main_phase();
+            let player = PlayerId(0);
+            let src = install_once_per_turn_creature_static(&mut state, player);
+            let top = put_creature_on_top_of_library(&mut state, player, CardId(904));
+
+            let before = spell_objects_available_to_cast(&state, player);
+            assert!(
+                before.contains(&top),
+                "OncePerTurn permission must surface the top card before its slot is consumed"
+            );
+
+            // Consume the OncePerTurn slot for this source.
+            state.top_of_library_cast_permissions_used.insert(src);
+            let after_consumed = spell_objects_available_to_cast(&state, player);
+            assert!(
+                !after_consumed.contains(&top),
+                "card must be pruned once the OncePerTurn slot is consumed"
+            );
+
+            // Turn cleanup resets the slot — top card castable again.
+            state.top_of_library_cast_permissions_used.clear();
+            let after_reset = spell_objects_available_to_cast(&state, player);
+            assert!(
+                after_reset.contains(&top),
+                "card returns after the per-turn slot resets at turn cleanup"
+            );
+        }
+
+        /// CR 601.2a: An `Unlimited` top-of-library permission (Realmwalker,
+        /// Future Sight, Mm'menon, Vizier) NEVER consults the per-turn used-set,
+        /// so it keeps offering the top card even after the set is polluted with
+        /// its source id. Guards against accidentally gating the Unlimited shape.
+        #[test]
+        fn unlimited_top_of_library_ignores_used_set() {
+            let mut state = setup_game_at_main_phase();
+            install_realmwalker_static(&mut state, PlayerId(0), "Elf");
+            let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(905));
+
+            // Pollute the used-set with the (Unlimited) source — must be ignored.
+            for &bf in &state.battlefield {
+                state.top_of_library_cast_permissions_used.insert(bf);
+            }
+            let available = spell_objects_available_to_cast(&state, PlayerId(0));
+            assert!(
+                available.contains(&top),
+                "Unlimited permission must ignore the per-turn used-set"
+            );
+        }
+
+        /// CR 601.2a + CR 401.5: The cast-time selection helper
+        /// `top_of_library_selected_permission` returns the granting source AND
+        /// its frequency for a `OncePerTurn` permission (so `finalize_cast`
+        /// stamps the slot) and an `Unlimited` frequency for the Realmwalker
+        /// shape (which never consumes a slot). This is the discriminating test
+        /// for the recording seam: reverting the `OncePerTurn`-only finalize
+        /// guard would consume a slot for the Unlimited case, but the helper
+        /// faithfully reports the selected frequency so the guard can decide.
+        #[test]
+        fn selected_permission_helper_reports_source_and_frequency() {
+            // OncePerTurn source is reported with its OncePerTurn frequency.
+            let mut state = setup_game_at_main_phase();
+            let player = PlayerId(0);
+            let src = install_once_per_turn_creature_static(&mut state, player);
+            let top = put_creature_on_top_of_library(&mut state, player, CardId(906));
+            assert_eq!(
+                top_of_library_selected_permission(&state, player, top),
+                Some((src, CastFrequency::OncePerTurn)),
+                "OncePerTurn permission must be selected with its OncePerTurn frequency"
+            );
+
+            // Unlimited source is reported with Unlimited frequency (never a slot).
+            let mut state2 = setup_game_at_main_phase();
+            let unlimited_src = install_realmwalker_static(&mut state2, player, "Elf");
+            let top2 = put_creature_on_top_of_library(&mut state2, player, CardId(907));
+            assert_eq!(
+                top_of_library_selected_permission(&state2, player, top2),
+                Some((unlimited_src, CastFrequency::Unlimited)),
+                "Unlimited permission must be selected with Unlimited frequency — never consumes a slot"
+            );
+
+            // Selection only applies to the actual top card. Place a second
+            // creature BELOW the top so it is in the library but not on top.
+            let below = create_object(
+                &mut state,
+                CardId(908),
+                player,
+                "Below Top".to_string(),
+                Zone::Library,
+            );
+            {
+                let obj = state.objects.get_mut(&below).unwrap();
+                obj.card_types.core_types = vec![CoreType::Creature];
+            }
+            let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+            pd.library.retain(|id| *id != below);
+            pd.library.push_back(below);
+            assert_eq!(
+                top_of_library_selected_permission(&state, player, below),
+                None,
+                "only the current top card is authorized by the top-of-library permission"
+            );
+        }
+
+        /// CR 601.2a: When BOTH an `Unlimited` and a `OncePerTurn`
+        /// top-of-library permission match the same top card, the selection
+        /// helper PREFERS the `Unlimited` authorizer so the bounded slot is
+        /// preserved. This is the discriminating test for the
+        /// preserve-bounded-slot fix: reverting the Unlimited-preference in
+        /// `top_of_library_permission_source` (back to "first match wins") lets
+        /// a battlefield-ordering that puts the OncePerTurn source first report
+        /// `OncePerTurn`, flipping this assertion. The cast-path consumption is
+        /// driven by the reported frequency, so reporting `Unlimited` here is
+        /// what prevents the bounded slot from being spent.
+        #[test]
+        fn selection_prefers_unlimited_over_once_per_turn() {
+            // Install the OncePerTurn permission FIRST so it is earlier in
+            // battlefield iteration order — a naive first-match selection would
+            // return it. The Unlimited-preference must still win.
+            let mut state = setup_game_at_main_phase();
+            let player = PlayerId(0);
+            let once_src = install_once_per_turn_creature_static(&mut state, player);
+            let unlimited_src = install_realmwalker_static(&mut state, player, "Elf");
+            // Top card is an Elf creature so BOTH permissions' filters match.
+            let top = put_creature_on_top_of_library(&mut state, player, CardId(909));
+            {
+                let obj = state.objects.get_mut(&top).unwrap();
+                obj.card_types.subtypes = vec!["Elf".to_string()];
+            }
+
+            assert!(
+                once_src != unlimited_src,
+                "test sanity: the two permission sources must be distinct"
+            );
+            assert_eq!(
+                top_of_library_selected_permission(&state, player, top),
+                Some((unlimited_src, CastFrequency::Unlimited)),
+                "Unlimited authorizer must be preferred so the OncePerTurn slot is preserved"
+            );
         }
     }
 
@@ -42918,6 +43476,8 @@ mod tests {
             cost,
             pool,
             timing,
+            mana_spend_permission: None,
+            grants_flash: false,
         })
         .affected(affected);
         let obj = state.objects.get_mut(&source).unwrap();
@@ -43472,6 +44032,152 @@ mod tests {
         let obj = state.objects.get(&land).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
         assert_eq!(obj.played_from_zone, Some(Zone::Exile));
+    }
+
+    /// Build a persistent, your-turn-only, Cast-mode `ExileCastPermission`
+    /// source carrying the Azula, Cunning Usurper concessions: any-type-mana
+    /// spend (CR 609.4b) and flash-grant (CR 702.8a).
+    fn add_azula_exile_cast_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(
+            state,
+            card_id,
+            player,
+            "Azula, Cunning Usurper".to_string(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: true,
+        })
+        .affected(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        source
+    }
+
+    /// Add a single-blue sorcery linked to `source_id` in the persistent
+    /// `exile_links` pool. Returns the exiled spell's object id.
+    fn add_linked_blue_sorcery(
+        state: &mut GameState,
+        player: PlayerId,
+        source_id: ObjectId,
+        name: &str,
+    ) -> ObjectId {
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let object_id = create_object(state, card_id, player, name.to_string(), Zone::Exile);
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Sorcery];
+            // Single blue pip — provably uncastable from a red-only pool unless
+            // the any-type-mana concession is in force.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        link_exiled_to_source(state, object_id, source_id);
+        object_id
+    }
+
+    /// CR 609.4b: Azula's "Mana of any type can be spent to cast those spells"
+    /// concession lets the controller pay a blue sorcery's {U} from a red-only
+    /// pool. DISCRIMINATING: if `mana_spend_permission` is reverted to `None`,
+    /// `player_can_spend_as_any_color_for_spell` flips to false and
+    /// `can_pay_cost_after_auto_tap` fails — the spell becomes unpayable.
+    #[test]
+    fn azula_exile_static_grants_any_type_mana_spend() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source = add_azula_exile_cast_source(&mut state, player);
+        let spell = add_linked_blue_sorcery(&mut state, player, source, "Exiled Blue Bolt");
+        // Only RED mana available — a {U} cost is unpayable without the
+        // any-type-mana concession.
+        add_mana(&mut state, player, ManaType::Red, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, player).contains(&spell),
+            "Azula's persistent Cast permission must surface the linked spell"
+        );
+        assert!(
+            player_can_spend_as_any_color_for_spell(&state, player, spell),
+            "the static must grant any-type-mana spend for spells in its pool"
+        );
+        assert!(
+            can_pay_cost_after_auto_tap(&state, player, spell, &state.objects[&spell].mana_cost),
+            "a {{U}} cost must be payable from a red-only pool under the concession"
+        );
+    }
+
+    /// CR 601.3b + CR 702.8a: Azula's "you may cast them as though they had
+    /// flash" concession lets a sorcery be cast at instant speed (here: P0's
+    /// main phase with a non-empty stack, so the window is NOT sorcery-speed).
+    /// DISCRIMINATING: if `grants_flash` is reverted to `false`,
+    /// `exile_static_permission_grants_flash` returns false, `has_granted_flash`
+    /// is false, and `handle_cast_spell` rejects the sorcery for sorcery-speed
+    /// timing.
+    #[test]
+    fn azula_exile_static_grants_flash_timing() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source = add_azula_exile_cast_source(&mut state, player);
+        let spell = add_linked_blue_sorcery(&mut state, player, source, "Exiled Blue Bolt");
+        // Mana that pays the {U} cost via the any-type concession, so the cast
+        // clears payment and the timing gate (the behavior under test) is what
+        // decides the outcome.
+        add_mana(&mut state, player, ManaType::Red, 1);
+
+        // Force a non-sorcery-speed window: P0 is active in PreCombatMain, so the
+        // only missing precondition is the empty stack.
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(9000),
+            source_id: ObjectId(9000),
+            controller: player,
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(9000),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        assert!(
+            !restrictions::is_sorcery_speed_window(&state, player),
+            "test setup must be outside the sorcery-speed window"
+        );
+        assert!(
+            exile_static_permission_grants_flash(&state, player, spell),
+            "the static must report a flash grant for spells in its pool"
+        );
+
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, player, spell, card_id, &mut events);
+        assert!(
+            result.is_ok(),
+            "flash-granted exiled sorcery must be castable outside the sorcery window: {result:?}"
+        );
+        assert_eq!(
+            state.objects.get(&spell).unwrap().zone,
+            Zone::Stack,
+            "the cast spell must move to the stack"
+        );
     }
 
     /// PR #1441: Teferi, Time Raveler's +1 ("you may cast sorcery spells as
@@ -44075,6 +44781,387 @@ mod tests {
             generic_of(&def_b),
             3,
             "legendary creature present → cost reduced by {{3}}"
+        );
+    }
+
+    /// CR 602.2b + CR 601.2f + CR 102.1: Hylda's Crown of Winter —
+    /// "{1}, {T}: Tap target creature. This ability costs {1} less to activate
+    /// during your turn." The {1} mana component reduces to {0} on the
+    /// controller's turn and stays {1} on an opponent's turn. The reduction is
+    /// parsed from the real Oracle clause and applied through the production
+    /// `apply_cost_reduction` seam reached by `can_activate_ability` / activation.
+    ///
+    /// Discriminating assertion: `generic_of(&def)` flips 0 ↔ 1 with
+    /// `state.active_player`. Reverting the "during your turn" parser arm yields
+    /// `condition: None` (`try_parse_cost_reduction` returns None → no reduction
+    /// node), so the on-turn case would read {1} and this assertion fails.
+    #[test]
+    fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
+        use crate::parser::oracle_cost::try_parse_cost_reduction;
+        use crate::types::ability::{Effect, ParsedCondition};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        let reduction =
+            try_parse_cost_reduction("this ability costs {1} less to activate during your turn")
+                .expect("Hylda's Crown cost-reduction clause must parse");
+        assert_eq!(
+            reduction.condition,
+            Some(ParsedCondition::IsYourTurn),
+            "during-your-turn clause must gate on IsYourTurn"
+        );
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "tap".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            });
+            def.cost_reduction = Some(reduction.clone());
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hylda's Crown of Winter".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller's turn → {1} reduces to {0}.
+        state.active_player = PlayerId(0);
+        let mut def_on = make_def();
+        apply_cost_reduction(&state, &mut def_on, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_on),
+            0,
+            "on your turn the {{1}} generic reduces to {{0}}"
+        );
+
+        // Opponent's turn → no reduction, stays {1}.
+        state.active_player = PlayerId(1);
+        let mut def_off = make_def();
+        apply_cost_reduction(&state, &mut def_off, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_off),
+            1,
+            "on an opponent's turn the reduction does not apply"
+        );
+    }
+
+    /// CR 602.2b + CR 601.2f + CR 508.1a: Thaumaton Torpedo —
+    /// "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. This
+    /// ability costs {3} less to activate if you attacked with a Spacecraft this
+    /// turn." The {6} component reduces to {3} only when the controller declared a
+    /// Spacecraft attacker this turn. Parsed from the real Oracle clause (the
+    /// "this turn" is stripped upstream as a duration before the cost-reduction
+    /// reparse, mirroring production) and applied through `apply_cost_reduction`.
+    ///
+    /// Discriminating assertion: `generic_of(&def)` is 3 with a Spacecraft
+    /// attacker declaration present and 6 without. Reverting the
+    /// `YouAttackedWithAtLeast { filter }` parser arm leaves `condition: None`
+    /// (try_parse_cost_reduction returns None), so the positive case would read
+    /// {6} and this assertion fails. Reverting the runtime filter arm in
+    /// `restrictions::evaluate_condition` would treat the filtered count as the
+    /// unfiltered count (no Spacecraft tracking), failing the negative case.
+    #[test]
+    fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
+        use crate::parser::oracle_cost::try_parse_cost_reduction;
+        use crate::types::ability::{Effect, ParsedCondition};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        // Mirror the production text reaching the reducer: the activated-ability
+        // duration parser peels the trailing " this turn" before the
+        // cost-reduction clause is reparsed from its Unimplemented description.
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {3} less to activate if you attacked with a spacecraft",
+        )
+        .expect("Thaumaton Torpedo cost-reduction clause must parse");
+        assert!(
+            matches!(
+                reduction.condition,
+                Some(ParsedCondition::YouAttackedWithAtLeast {
+                    count: 1,
+                    filter: Some(_)
+                })
+            ),
+            "must gate on a filtered attacked-with condition, got {:?}",
+            reduction.condition
+        );
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "destroy".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 6,
+                },
+            });
+            def.cost_reduction = Some(reduction.clone());
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(9);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Thaumaton Torpedo".to_string(),
+            Zone::Battlefield,
+        );
+
+        // No attackers declared → no reduction, stays {6}.
+        let mut def_none = make_def();
+        apply_cost_reduction(&state, &mut def_none, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_none),
+            6,
+            "no Spacecraft attacker → full {{6}} cost"
+        );
+
+        // Controller declared a non-Spacecraft creature attacker → still no reduction.
+        let goblin = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&goblin).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+        }
+        state.attacker_declarations_this_turn = vec![state
+            .objects
+            .get(&goblin)
+            .unwrap()
+            .snapshot_for_attack_declaration(goblin)];
+        let mut def_wrong = make_def();
+        apply_cost_reduction(&state, &mut def_wrong, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_wrong),
+            6,
+            "a non-Spacecraft attacker must not satisfy the Spacecraft gate"
+        );
+
+        // Controller declared a Spacecraft attacker → {3} reduction applies.
+        let craft = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Some Ship".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&craft).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+            o.card_types.subtypes.push("Spacecraft".to_string());
+        }
+        state.attacker_declarations_this_turn.push(
+            state
+                .objects
+                .get(&craft)
+                .unwrap()
+                .snapshot_for_attack_declaration(craft),
+        );
+        let mut def_ok = make_def();
+        apply_cost_reduction(&state, &mut def_ok, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_ok),
+            3,
+            "Spacecraft attacker present → cost reduced by {{3}}"
+        );
+
+        // Negative: an OPPONENT's Spacecraft attacker must not satisfy "you attacked".
+        let mut state_opp = GameState::new_two_player(11);
+        let src2 = create_object(
+            &mut state_opp,
+            CardId(1),
+            PlayerId(0),
+            "Thaumaton Torpedo".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_ship = create_object(
+            &mut state_opp,
+            CardId(5),
+            PlayerId(1),
+            "Enemy Ship".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state_opp.objects.get_mut(&opp_ship).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+            o.card_types.subtypes.push("Spacecraft".to_string());
+        }
+        state_opp.attacker_declarations_this_turn = vec![state_opp
+            .objects
+            .get(&opp_ship)
+            .unwrap()
+            .snapshot_for_attack_declaration(opp_ship)];
+        let mut def_opp = make_def();
+        apply_cost_reduction(&state_opp, &mut def_opp, PlayerId(0), src2);
+        assert_eq!(
+            generic_of(&def_opp),
+            6,
+            "an opponent's Spacecraft attacker must not satisfy 'you attacked with a Spacecraft'"
+        );
+    }
+
+    /// CR 601.2f + CR 602.1 + CR 109.5: Boom Scholar — "Exhaust abilities of
+    /// other permanents you control cost {2} less to activate." The generalized
+    /// "<keyword> abilities of [subject]" static parser keys the reduction on the
+    /// "exhaust" `AbilityTag` (`ReduceAbilityCost { keyword: "exhaust" }`), and
+    /// the runtime gate `apply_static_activated_ability_cost_reduction` matches it
+    /// against the activating ability's `AbilityTag::keyword_str()`.
+    ///
+    /// Drives the production seam `apply_cost_reduction` (reached by
+    /// `can_activate_ability`). Discriminating assertions:
+    ///   - Another permanent's exhaust ability ({6} generic) reduces to {4}.
+    ///   - A non-exhaust activated ability on that permanent is NOT reduced
+    ///     (keyword mismatch — `active_keyword != "exhaust"`).
+    ///   - Boom Scholar's OWN exhaust ability is NOT reduced (FilterProp::Another
+    ///     self-exclusion).
+    ///
+    /// Reverting the generalized parser arm yields no static (the line stays
+    /// Unimplemented), so the first assertion would read {6} and fail. Reverting
+    /// the "exhaust"-keyword match would leave every assertion at full cost.
+    #[test]
+    fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
+        use crate::types::ability::{
+            AbilityTag, Effect, FilterProp, StaticDefinition, TypedFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(7);
+
+        // Boom Scholar carries the parsed reduction static.
+        let scholar = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Boom Scholar".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&scholar).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "exhaust".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ))]
+            .into();
+        }
+
+        // A second permanent the same player controls, holding an exhaust ability.
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exhaust Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let make_exhaust_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "exhaust-effect".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 6,
+                },
+            });
+            def.ability_tag = Some(AbilityTag::Exhaust);
+            def
+        };
+        let make_plain_def = || {
+            let mut def = make_exhaust_def();
+            def.ability_tag = None; // untagged activated ability
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        // Other permanent's exhaust ability: {6} → {4}.
+        let mut def_other = make_exhaust_def();
+        apply_cost_reduction(&state, &mut def_other, PlayerId(0), other);
+        assert_eq!(
+            generic_of(&def_other),
+            4,
+            "another permanent's exhaust ability must be reduced by {{2}}"
+        );
+
+        // Same permanent, but a non-exhaust (untagged) activated ability: unchanged.
+        let mut def_plain = make_plain_def();
+        apply_cost_reduction(&state, &mut def_plain, PlayerId(0), other);
+        assert_eq!(
+            generic_of(&def_plain),
+            6,
+            "a non-exhaust activated ability must not be reduced by the exhaust-keyed static"
+        );
+
+        // Boom Scholar's OWN exhaust ability: self-excluded by FilterProp::Another.
+        let mut def_self = make_exhaust_def();
+        apply_cost_reduction(&state, &mut def_self, PlayerId(0), scholar);
+        assert_eq!(
+            generic_of(&def_self),
+            6,
+            "\"other permanents\" must exclude the static's own source"
         );
     }
 

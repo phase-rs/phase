@@ -703,11 +703,15 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    attached-subject statics (an Aura/Equipment whose "it" refers to the
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
-///    typed condition are rewritten. "it" is otherwise overloaded: "it's your
+///    typed condition are rewritten — the tapped/untapped pair plus their
+///    combat-state siblings "attacking"/"blocking"/"blocked"
+///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
 ///    parse paths. Rewriting those would break or mis-bind them, so they are
-///    left untouched.
+///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
+///    trailing word and falls through to `SourceAttackingAlone` rather than
+///    collapsing to `SourceIsAttacking`.
 ///
 /// Returns the condition unchanged when neither guard matches.
 fn rewrite_self_pronoun_subject(condition: &str) -> String {
@@ -715,7 +719,15 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
     if let Some(rest) =
         nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
     {
-        if matches!(rest.trim(), "tapped" | "untapped") {
+        // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
+        // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
+        // for "it's modified" (Obstinate Gargoyle, Skyward Spider). Exact-match
+        // only — "attacking alone" keeps its trailing word and is left for
+        // SourceAttackingAlone; "modified creature" never hits this arm.
+        if matches!(
+            rest.trim(),
+            "tapped" | "untapped" | "attacking" | "blocking" | "blocked" | "modified"
+        ) {
             return format!("~ is {}", rest.trim());
         }
     }

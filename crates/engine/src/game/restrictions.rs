@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
-    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
+    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
+    TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -337,6 +337,10 @@ pub fn record_battlefield_entry(
         subtypes: obj.card_types.subtypes.clone(),
         supertypes: obj.card_types.supertypes.clone(),
         colors: obj.color.clone(),
+        // CR 403.3: snapshot the object's keywords at entry time. This is the
+        // printed/base + counter-granted keyword set (pre-layer; see the field doc
+        // on BattlefieldEntryRecord.keywords for the documented Layer-6 limitation).
+        keywords: obj.keywords.clone(),
         controller: obj.controller,
     };
     state.battlefield_entries_this_turn.push(record);
@@ -394,6 +398,11 @@ pub(crate) fn battlefield_entry_matches_filter(
     record: &BattlefieldEntryRecord,
     filter: &TargetFilter,
     player: PlayerId,
+    // CR 109.1: the ability source for the "another" exclusion. `None` on the
+    // player-attribute count paths that carry no ability source — there
+    // `FilterProp::Another` excludes nothing it could match (stays `false`),
+    // preserving the prior `_ => false` behavior.
+    source_id: Option<ObjectId>,
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -413,6 +422,17 @@ pub(crate) fn battlefield_entry_matches_filter(
             typed.properties.iter().all(|prop| match prop {
                 FilterProp::HasColor { color } => entry_color_matches(record, color),
                 FilterProp::InZone { zone } => *zone == Zone::Battlefield,
+                // CR 702.9b: keyword presence is read from the entry-time snapshot
+                // (record.keywords) — "a creature with flying entered this turn".
+                // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
+                FilterProp::WithKeyword { value } => record.keywords.contains(value),
+                // CR 109.1: "another [type]" is a same-object identity check —
+                // excludes the ability's own source object (e.g. Flying Drone's
+                // "another creature with flying entered this turn"). Mirrors the
+                // existing record-based Another check in game/filter.rs. With no
+                // source context the predicate cannot exclude self, so it stays
+                // false (the prior behavior for this prop on these paths).
+                FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
                 _ => false,
             })
         }
@@ -574,20 +594,20 @@ fn effective_activation_limit(
     let Some(tag) = ability_tag else {
         return 1; // No tag → default once-per-turn
     };
-    let keyword = match tag {
-        AbilityTag::Boast => "boast",
-        AbilityTag::Evolve => "evolve",
-        AbilityTag::Exhaust => "exhaust",
-        AbilityTag::Outlast => "outlast",
-        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
-        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
-        // restriction, which the synthesized cycling ability never has.
-        AbilityTag::Cycling => "cycling",
-        // CR 702.165a: Backup is a triggered ability — it is never activated, so
-        // it carries no activation limit and this arm is unreachable here.
-        AbilityTag::Backup => "backup",
-    };
-    // Scan battlefield for ModifyActivationLimit statics that affect this keyword
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
+}
+
+/// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
+/// raise the activation cap for `keyword`-tagged abilities on `source_id`. The
+/// static is scope-agnostic (it reads no per-turn/per-game counter), so both the
+/// per-turn (`effective_activation_limit`) and per-game
+/// (`effective_activation_limit_per_game`) paths share this scan. Base limit 1.
+fn activation_limit_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    keyword: &str,
+) -> u32 {
     let mut limit: u32 = 1;
     for (bf_obj, static_def) in
         crate::game::functioning_abilities::battlefield_active_statics(state)
@@ -619,6 +639,28 @@ fn effective_activation_limit(
         }
     }
     limit
+}
+
+/// CR 602.5b: Compute the effective per-game activation limit for
+/// an ability carrying `ActivationRestriction::OnlyOnce`. Base limit 1, raised by
+/// `ModifyActivationLimit` statics (Wonder Man / Hollywood Hero). Returns only
+/// the cap — the per-game counter comparison stays in the `OnlyOnce` consult arm,
+/// so the per-game and per-turn counters/scopes are never conflated.
+fn effective_activation_limit_per_game(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> u32 {
+    let ability_tag = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag);
+    let Some(tag) = ability_tag else {
+        return 1; // No tag → default once-per-game
+    };
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
 }
 
 fn has_activate_as_instant_permission(
@@ -722,13 +764,15 @@ fn activation_restriction_applies(
         }
         // CR 602.5b: Per-object activation limit. `zones::move_to_zone` clears
         // this count when CR 400.7 makes the stored id represent a new object.
+        // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
+        // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            state
+            let count = state
                 .activated_abilities_this_game
                 .get(&key)
                 .copied()
-                .unwrap_or(0)
-                == 0
+                .unwrap_or(0);
+            count < effective_activation_limit_per_game(state, player, source_id, ability_index)
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
@@ -1094,14 +1138,38 @@ pub(crate) fn evaluate_condition(
             }) == 0
         }
         ParsedCondition::YouAttackedThisTurn => state.players_attacked_this_turn.contains(&player),
-        ParsedCondition::YouAttackedWithAtLeast { count } => {
-            state
-                .attacking_creatures_this_turn
-                .get(&player)
-                .copied()
-                .unwrap_or(0)
-                >= *count
-        }
+        // CR 508.1a: "you attacked with N+ [filter] this turn". Unfiltered uses
+        // the fast per-player count; filtered scans declaration-time snapshots so
+        // attackers that have left the battlefield still count.
+        ParsedCondition::YouAttackedWithAtLeast { count, filter } => match filter {
+            None => {
+                state
+                    .attacking_creatures_this_turn
+                    .get(&player)
+                    .copied()
+                    .unwrap_or(0)
+                    >= *count
+            }
+            Some(filter) => {
+                let filter_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    source_id, player,
+                );
+                state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.lki.controller == player
+                            && crate::game::filter::matches_target_filter_on_attack_declaration_record(
+                                state,
+                                record,
+                                filter,
+                                &filter_ctx,
+                            )
+                    })
+                    .count() as u32
+                    >= *count
+            }
+        },
         ParsedCondition::YouPlayedLandThisTurn => state
             .players
             .get(usize::from(player.0))
@@ -1177,7 +1245,9 @@ pub(crate) fn evaluate_condition(
             state
                 .battlefield_entries_this_turn
                 .iter()
-                .filter(|record| battlefield_entry_matches_filter(record, filter, player))
+                .filter(|record| {
+                    battlefield_entry_matches_filter(record, filter, player, Some(source_id))
+                })
                 .count() as u32
                 >= *count
         }
@@ -1979,6 +2049,136 @@ mod tests {
         ));
     }
 
+    /// MSH Wave 2 (Flying Drone): `BattlefieldEntriesThisTurn` with a filter
+    /// carrying `FilterProp::Another` + `FilterProp::WithKeyword { Flying }` must
+    /// evaluate against the entry-time keyword snapshot, excluding the source.
+    /// Drives the production `evaluate_condition` → `battlefield_entry_matches_filter`
+    /// seam used by `apply_cost_reduction`.
+    #[test]
+    fn another_flyer_entered_condition_uses_keyword_snapshot_and_excludes_source() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Flying Drone".to_string(),
+            Zone::Battlefield,
+        );
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Creature)
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::Another,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                ]),
+        );
+        let condition = ParsedCondition::BattlefieldEntriesThisTurn { filter, count: 1 };
+
+        // Helper: create a creature, give it the listed keywords, and record its entry.
+        let enter_creature = |state: &mut crate::types::game_state::GameState,
+                              card: u64,
+                              controller: PlayerId,
+                              keywords: &[Keyword]| {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                "Helper".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords = keywords.to_vec();
+            record_battlefield_entry(state, id);
+            id
+        };
+
+        // No entries yet ⇒ condition false.
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Another creature with flying enters under your control ⇒ true.
+        enter_creature(&mut state, 2, player, &[Keyword::Flying]);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: only the source itself "enters" (Another excludes it).
+        state.battlefield_entries_this_turn.clear();
+        state.objects.get_mut(&source_id).unwrap().keywords = vec![Keyword::Flying];
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        record_battlefield_entry(&mut state, source_id);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: another creature WITHOUT flying ⇒ WithKeyword fails.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 3, player, &[]);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: another flyer controlled by an opponent ⇒ controller fails.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 4, opponent, &[Keyword::Flying]);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// MSH Wave 2 (Fixer, Techno Terror): the elided "[type] entered under your
+    /// control this turn" templating (no "the battlefield") must parse and gate
+    /// the activation restriction. Drives the production
+    /// `parse_restriction_condition` → `evaluate_condition` path. Reverting the
+    /// `opt(" the battlefield")` leaves the condition unparsed (None), which
+    /// `parse_and_evaluate_condition` treats as permissive `true` — so the no-entry
+    /// assertion below flips and fails.
+    #[test]
+    fn fixer_artifact_entered_elided_battlefield_parses_and_gates() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let text = "an artifact entered under your control this turn";
+
+        // No artifact has entered ⇒ restriction must NOT hold (requires the
+        // elided form to parse; otherwise the helper returns permissive `true`).
+        assert!(!parse_and_evaluate_condition(
+            &state, player, source_id, text
+        ));
+
+        // An artifact enters under your control ⇒ restriction holds.
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        record_battlefield_entry(&mut state, artifact);
+        assert!(parse_and_evaluate_condition(
+            &state, player, source_id, text
+        ));
+
+        // The full "the battlefield" form still parses and gates identically.
+        let full = "an artifact entered the battlefield under your control this turn";
+        assert!(parse_and_evaluate_condition(
+            &state, player, source_id, full
+        ));
+    }
+
     #[test]
     fn source_attached_to_condition_checks_host_type() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2186,6 +2386,7 @@ mod tests {
                 subtypes: vec![],
                 supertypes: vec![],
                 colors: vec![ManaColor::Green],
+                keywords: vec![],
                 controller: PlayerId(1),
             });
         let mut filter = crate::types::ability::TypedFilter::creature();

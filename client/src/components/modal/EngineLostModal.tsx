@@ -3,7 +3,9 @@ import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
 
 import { onEngineLost } from "../../game/engineRecovery";
+import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
+import type { GameState } from "../../adapter/types";
 
 /**
  * Layer 3 fallback for engine state loss — the user-facing prompt.
@@ -34,6 +36,7 @@ interface EngineLostSnapshot {
   panic: string | null;
   gameId: string | null;
   gameMode: string | null;
+  gameState: GameState | null;
 }
 
 export function EngineLostModal() {
@@ -41,6 +44,8 @@ export function EngineLostModal() {
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [exported, setExported] = useState(false);
+  const [exportFailed, setExportFailed] = useState(false);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -54,12 +59,13 @@ export function EngineLostModal() {
       // Snapshot store fields right now — recovery / cleanup paths may
       // null these before the user interacts with the modal, which would
       // leave the diagnostic blank exactly when it matters most.
-      const { gameId, gameMode } = useGameStore.getState();
+      const { gameId, gameMode, gameState } = useGameStore.getState();
       setSnapshot({
         reason: event.reason,
         panic: event.panic ?? null,
         gameId,
         gameMode,
+        gameState,
       });
     });
   }, []);
@@ -84,6 +90,21 @@ export function EngineLostModal() {
       // a prompt so the user can copy manually rather than leaving them
       // stuck — the whole point of this modal is making the report easy.
       window.prompt(t("engineLost.copyPrompt"), diagnostic);
+    }
+  };
+
+  const handleExport = async () => {
+    if (!snapshot.gameState) return;
+    setExported(false);
+    setExportFailed(false);
+    try {
+      await exportGameStateDebugZip(snapshot.gameState);
+      setExported(true);
+      window.setTimeout(() => setExported(false), 2000);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setExportFailed(true);
+      window.setTimeout(() => setExportFailed(false), 2000);
     }
   };
 
@@ -136,6 +157,18 @@ export function EngineLostModal() {
           </button>
         )}
         <div className="flex flex-wrap justify-end gap-3">
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={!snapshot.gameState}
+            className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exportFailed
+              ? t("engineLost.exportFailed")
+              : exported
+                ? t("engineLost.exported")
+                : t("engineLost.exportGameState")}
+          </button>
           {isPanic && (
             <>
               <button

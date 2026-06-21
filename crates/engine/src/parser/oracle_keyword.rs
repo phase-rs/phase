@@ -1508,6 +1508,10 @@ fn is_numeric_count_keyword(name: &str) -> bool {
             tag("devour"),
             tag("toxic"),
             tag("saddle"),
+            // Teamwork N — leading integer is the total-power threshold (mirrors
+            // Crew/Saddle). The "(As an additional cost ...)" reminder text is
+            // stripped before keyword parsing.
+            tag("teamwork"),
             tag("soulshift"),
             tag("backup"),
             tag("firebending"),
@@ -1533,7 +1537,7 @@ fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
                 scope: EffectScope::Single,
                 state: TapStateChange::Tap,
             } => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                 filter: target,
             },
             effect => AbilityCost::EffectCost {
@@ -1671,6 +1675,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Devour(_) => "devour".to_string(),
         Keyword::Toxic(_) => "toxic".to_string(),
         Keyword::Saddle(_) => "saddle".to_string(),
+        Keyword::Teamwork(_) => "teamwork".to_string(),
         Keyword::Soulshift(_) => "soulshift".to_string(),
         Keyword::Backup(_) => "backup".to_string(),
         Keyword::Squad(_) => "squad".to_string(),
@@ -1990,6 +1995,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "entwine",
         "toxic",
         "saddle",
+        "teamwork",
         "soulshift",
         "backup",
         "squad",
@@ -3578,12 +3584,14 @@ mod tests {
             "flashback\u{2014}tap three untapped white creatures you control",
         )
         .unwrap();
-        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::TapCreatures { count, .. })) =
-            kw
+        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::TapCreatures {
+            requirement,
+            ..
+        })) = kw
         else {
             panic!("expected NonMana(TapCreatures), got {:?}", kw);
         };
-        assert_eq!(count, 3);
+        assert_eq!(requirement.fixed_count(), Some(3));
     }
 
     /// CR 702.34a regression: simple `Flashback {cost}` (Cackling Counterpart,
@@ -3660,10 +3668,10 @@ mod tests {
     fn parse_keyword_from_oracle_escalate_tap_creature_cost() {
         let kw = parse_keyword_from_oracle("escalate\u{2014}tap an untapped creature you control")
             .unwrap();
-        let Keyword::Escalate(AbilityCost::TapCreatures { count, .. }) = kw else {
+        let Keyword::Escalate(AbilityCost::TapCreatures { requirement, .. }) = kw else {
             panic!("expected Escalate(TapCreatures), got {:?}", kw);
         };
-        assert_eq!(count, 1);
+        assert_eq!(requirement.fixed_count(), Some(1));
     }
 
     /// CR 303.4a + CR 702.5: "Enchant creature, land, or planeswalker"

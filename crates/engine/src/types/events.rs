@@ -568,6 +568,12 @@ pub enum GameEvent {
     CreatureSuspected {
         object_id: ObjectId,
     },
+    /// CR 701.60a: A creature is no longer suspected — the un-designation
+    /// transition. Emitted only when the toggle actually flips (idempotent
+    /// resolver). Mirrors `BecameUnprepared`.
+    CreatureNoLongerSuspected {
+        object_id: ObjectId,
+    },
     /// CR 701.35a: A permanent was detained — until the detaining player's next
     /// turn it can't attack or block and its activated abilities can't be
     /// activated. Display-relevant for mana sources: detaining a mana dork

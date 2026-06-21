@@ -1013,10 +1013,12 @@ pub(crate) fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> Qua
 /// Resolve the `QuantityRef` that X binds to for a dynamic base-P/T effect.
 /// Spell-cast contexts (Biomass Mutation) have no explicit "where X is" clause:
 /// X is the cost X paid when the spell was cast, so fall back to `CostXPaid`.
-/// When a "where X is …" expression is present, parse it via `parse_quantity_ref`.
+/// When a "where X is …" expression is present, parse it via the nom quantity grammar.
 pub(crate) fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
     if let Some(expr) = where_x_expression {
-        return parse_quantity_ref(expr);
+        return super::oracle_nom::quantity::parse_quantity_ref_complete(expr)
+            .ok()
+            .map(|(_, qty)| qty);
     }
     // CR 107.3m: In a spell-cast context, X refers to the value paid for {X}.
     Some(QuantityRef::CostXPaid)

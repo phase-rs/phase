@@ -753,7 +753,7 @@ fn error(message: &str) -> Outbound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::LobbyClientMessage;
+    use crate::protocol::{LobbyClientMessage, PROTOCOL_VERSION};
     use std::cell::Cell;
 
     /// Deterministic env: monotonic codes/tokens so sequence assertions are
@@ -803,7 +803,7 @@ mod tests {
             LobbyClientMessage::ClientHello {
                 client_version: "0.1.0".into(),
                 build_commit: "abc".into(),
-                protocol_version: 7,
+                protocol_version: PROTOCOL_VERSION,
             },
             env,
         );

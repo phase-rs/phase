@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Risoluzione {{resolved}} / {{total}}"
+    "label": "Risoluzione {{resolved}} / {{total}}",
+    "collapse": "Comprimi avanzamento risoluzione",
+    "expand": "Espandi avanzamento risoluzione"
   },
   "card": {
     "faceDownName": "Carta coperta",
@@ -171,6 +173,8 @@
     "copyTooltip": "Copia pedina di una carta reale",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
+    "hiddenAttachments": "+{{count}} more attached",
+    "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -208,6 +212,7 @@
     "allTo": "Tutti → <name>{{label}}</name>",
     "creatureFallback": "Creatura #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
+    "objectFallback": "Object #{{id}}",
     "you": "Tu",
     "ally": "Alleato",
     "restoreDialog": "Ripristina finestra",
@@ -516,6 +521,7 @@
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
     "chooseTarget": "Scegli un bersaglio",
+    "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nessun bersaglio legale disponibile",
     "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "fino a un {{target}}",
@@ -1296,6 +1302,17 @@
     "red": "Rosso",
     "green": "Verde"
   },
+  "roomDoor": {
+    "title": "Scegli una porta",
+    "subtitle": "Scegli su quale porta della Stanza agire",
+    "confirm": "Conferma",
+    "option": "{{op}} {{door}}",
+    "unlock": "Sblocca",
+    "lock": "Blocca",
+    "lockOrUnlock": "Blocca o sblocca",
+    "left": "porta sinistra",
+    "right": "porta destra"
+  },
   "dialogShell": {
     "eyebrow": "Scelta di gioco",
     "restoreDialog": "Ripristina finestra",
@@ -1513,6 +1530,9 @@
     "connectionBody": "phase.rs ha perso il collegamento con il motore di gioco — più spesso causato da un aggiornamento in background attivatosi a metà partita. Il tuo ultimo turno salvato è preservato; ricarica per ripristinare la partita.",
     "diagnostic": "diagnostica: {{reason}}",
     "showDetails": "Mostra dettagli",
+    "exportGameState": "Esporta stato partita",
+    "exported": "Esportato",
+    "exportFailed": "Esportazione non riuscita",
     "copyDiagnostic": "Copia diagnostica",
     "copied": "Copiato!",
     "reportOnGithub": "Segnala su GitHub",

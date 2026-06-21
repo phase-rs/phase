@@ -48,6 +48,7 @@ pub(crate) mod engine_payment_choices;
 pub(crate) mod engine_priority;
 pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
+pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
 pub(crate) mod exile_links;
 pub mod filter;
@@ -159,6 +160,9 @@ pub use engine::{
     start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::route_debug_create_to_battlefield;
+pub use engine_resolve_batch::{
+    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+};
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};

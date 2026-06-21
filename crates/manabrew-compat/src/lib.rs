@@ -2001,7 +2001,7 @@ mod tests {
             choosable_objects(
                 &WaitingFor::PayCost {
                     player: PlayerId(0),
-                    kind: PayCostKind::TapCreatures,
+                    kind: PayCostKind::TapCreatures { aggregate: None },
                     choices: vec![ObjectId(30)],
                     count: 1,
                     min_count: 0,
@@ -2160,6 +2160,9 @@ mod tests {
                 "chooseTargetCard",
                 WaitingFor::TriggerTargetSelection {
                     player: PlayerId(0),
+                    trigger_controller: None,
+                    trigger_event: None,
+                    trigger_events: Vec::new(),
                     target_slots: vec![TargetSelectionSlot {
                         legal_targets: vec![TargetRef::Object(ObjectId(1))],
                         optional: false,

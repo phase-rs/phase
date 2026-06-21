@@ -507,6 +507,7 @@ fn counterspell_entry(count: u32) -> DeckEntry {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             )],
             ..Default::default()

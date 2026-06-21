@@ -1634,6 +1634,121 @@ mod tests {
             .contains(&Keyword::Flying));
     }
 
+    /// CR 608.2c + CR 611.2a + CR 702.7: Gallant Fowlknight ETB end-to-end —
+    /// "creatures you control get +1/+0 until end of turn. Kithkin creatures you
+    /// control also gain first strike until end of turn." After resolving the
+    /// full parsed chain (PumpAll + the subtype-filtered first-strike grant)
+    /// through the production effect resolver and layer evaluation, BOTH
+    /// controlled creatures gain +1/+0, but ONLY the Kithkin gains first strike.
+    /// Reverting `strip_trailing_additive_adverb` drops the second sentence to
+    /// `Effect::Unimplemented`, leaving the non-Kithkin and the Kithkin alike
+    /// without first strike — the Kithkin first-strike assertion then fails.
+    #[test]
+    fn gallant_fowlknight_first_strike_only_on_kithkin_after_resolution() {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gallant Fowlknight".to_string(),
+            Zone::Battlefield,
+        );
+        let kithkin = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Kithkin Ally".to_string(),
+            Zone::Battlefield,
+        );
+        let non_kithkin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [kithkin, non_kithkin] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        // Only the first creature is a Kithkin.
+        state
+            .objects
+            .get_mut(&kithkin)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Kithkin".to_string());
+
+        // Parse the real ETB effect body (the two chained sentences).
+        let parsed = parse_effect_chain(
+            "creatures you control get +1/+0 until end of turn. Kithkin creatures \
+             you control also gain first strike until end of turn.",
+            AbilityKind::Spell,
+        );
+
+        // Resolve every clause in the chain through the production resolver.
+        let mut node: Option<&crate::types::ability::AbilityDefinition> = Some(&parsed);
+        let mut resolved_any_unimplemented = false;
+        while let Some(def) = node {
+            if matches!(*def.effect, Effect::Unimplemented { .. }) {
+                resolved_any_unimplemented = true;
+            }
+            let ability = ResolvedAbility::new((*def.effect).clone(), vec![], source, PlayerId(0))
+                .duration(def.duration.clone().unwrap_or(Duration::UntilEndOfTurn));
+            let mut events = Vec::new();
+            // Drive through the top-level effect dispatcher so `PumpAll` routes to
+            // `pump::resolve_all` and the `GenericEffect` first-strike grant
+            // routes to `effect::resolve` — the same dispatch the stack uses.
+            crate::game::effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            !resolved_any_unimplemented,
+            "the parsed chain must not contain Unimplemented clauses"
+        );
+
+        evaluate_layers(&mut state);
+
+        // Both controlled creatures gain +1/+0 from the PumpAll clause.
+        assert_eq!(
+            state.objects.get(&kithkin).unwrap().power,
+            Some(3),
+            "Kithkin must get +1/+0"
+        );
+        assert_eq!(
+            state.objects.get(&non_kithkin).unwrap().power,
+            Some(3),
+            "non-Kithkin must also get +1/+0"
+        );
+
+        // Only the Kithkin gains first strike from the subtype-filtered grant.
+        assert!(
+            state
+                .objects
+                .get(&kithkin)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "Kithkin must gain first strike"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&non_kithkin)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "non-Kithkin must NOT gain first strike"
+        );
+    }
+
     // CR 305.1 + CR 611.1 + CR 611.2c + CR 115.1: A `GenericEffect` whose target
     // slot resolves to a player (Pardic Miner: "Target player can't play lands
     // this turn") must register a transient continuous effect bound to
@@ -2182,6 +2297,115 @@ mod tests {
             modification,
             ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
         )));
+    }
+
+    /// CR 305.6 + CR 305.7 + CR 611.2a: Energybending end-to-end. Parsing the
+    /// full Oracle text and resolving the land-type clause against a Forest must
+    /// give that Forest all five basic land subtypes AND the intrinsic mana
+    /// ability for every color (CR 305.6). Drives the real parse → lower →
+    /// resolve → layer pipeline: the `GenericEffect { AddAllBasicLandTypes }`
+    /// over "lands you control" binds a transient continuous effect to the
+    /// Forest, and `apply_intrinsic_basic_land_mana_abilities` grants the five
+    /// `{T}: Add <color>` abilities during layer evaluation.
+    ///
+    /// Revert guard: without the parser change the land-type clause lowers to
+    /// `Effect::Unimplemented`, no GenericEffect is found, and the subtype /
+    /// per-color mana-ability assertions below all fail.
+    #[test]
+    fn energybending_grants_a_forest_all_basic_land_types_and_mana() {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{AbilityCost, AbilityKind, BasicLandType, ManaProduction};
+        use crate::types::mana::ManaColor;
+
+        let parsed = parse_oracle_text(
+            "Lands you control gain all basic land types until end of turn.\nDraw a card.",
+            "Energybending",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let land_type_effect = parsed
+            .abilities
+            .iter()
+            .map(|ability| (*ability.effect).clone())
+            .find(|effect| {
+                matches!(
+                    effect,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities.iter().any(|sd| sd
+                            .modifications
+                            .iter()
+                            .any(|m| matches!(m, ContinuousModification::AddAllBasicLandTypes)))
+                )
+            })
+            .expect("Energybending must lower to a GenericEffect adding all basic land types");
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+
+        // A single basic Forest under the spell controller's control.
+        let forest = create_object(
+            &mut state,
+            CardId(0),
+            p0,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Energybending".to_string(),
+            Zone::Stack,
+        );
+
+        let ability = ResolvedAbility::new(land_type_effect, vec![], source, p0);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&forest).unwrap();
+        for land_type in BasicLandType::all() {
+            let subtype = land_type.as_subtype_str().to_string();
+            assert!(
+                obj.card_types.subtypes.contains(&subtype),
+                "Forest must gain the {subtype} basic land type, got {:?}",
+                obj.card_types.subtypes
+            );
+        }
+
+        // CR 305.6: each basic land type grants its intrinsic `{T}: Add <color>`.
+        for color in ManaColor::ALL {
+            let count = obj
+                .abilities
+                .iter()
+                .filter(|a| {
+                    matches!(a.kind, AbilityKind::Activated)
+                        && matches!(a.cost, Some(AbilityCost::Tap))
+                        && matches!(
+                            &*a.effect,
+                            Effect::Mana {
+                                produced: ManaProduction::Fixed { colors, .. },
+                                ..
+                            } if colors.as_slice() == [color]
+                        )
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "Forest must produce {color:?} via its intrinsic mana ability after gaining all basic land types"
+            );
+        }
     }
 
     // ── Issue #444: in-effect "if" gate on GenericEffect StaticDefinitions ──

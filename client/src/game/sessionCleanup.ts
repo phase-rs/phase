@@ -15,6 +15,7 @@ export function clearPromptOverlayState(): void {
     spellCosts: {},
     legalActionsByObject: {},
     resolutionProgress: null,
+    isResolvingAll: false,
   });
   useUiStore.getState().setPendingAbilityChoice(null);
   useUiStore.getState().setEnchantmentsDialogPlayer(null);

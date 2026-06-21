@@ -111,6 +111,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CastingVariantChoice { .. }
         | WaitingFor::ChoosePermanentTypeSlot { .. }
         | WaitingFor::ChooseRingBearer { .. }
+        | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
         | WaitingFor::SpecializeColor { .. }

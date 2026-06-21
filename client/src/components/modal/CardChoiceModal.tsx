@@ -36,6 +36,7 @@ import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
+import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
 import {
   SeparatePilesChoiceModal,
   SeparatePilesPartitionModal,
@@ -322,6 +323,9 @@ export function CardChoiceModal() {
     case "SpecializeColor":
       if (!canActForWaitingState) return null;
       return <SpecializeColorModal data={waitingFor.data} />;
+    case "ChooseRoomDoor":
+      if (!canActForWaitingState) return null;
+      return <RoomDoorChoiceModal data={waitingFor.data} />;
     default:
       return null;
   }

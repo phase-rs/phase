@@ -3,10 +3,11 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
-    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider,
+    CounteredSpellDestination, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -225,6 +226,13 @@ pub(crate) enum ContinuationAst {
     /// permanent." — patches `source_rider = Some(CounterSourceRider::Destroy)`
     /// on the preceding `Effect::Counter` (Teferi's Response, Green Slime).
     CounterSourceRiderDestroy,
+    /// CR 701.6a + CR 614.1a: "If that spell is countered this way, put it
+    /// <zone> instead of into that player's graveyard." — patches
+    /// `countered_spell_zone = Some(destination)` on the preceding
+    /// `Effect::Counter` (Memory Lapse, Remand, Spell Crumple).
+    CounterSpellZoneRedirect {
+        destination: CounteredSpellDestination,
+    },
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
@@ -342,7 +350,15 @@ pub(crate) enum ContinuationAst {
         /// CR 508.4: the kept card enters the battlefield attacking
         /// ("tapped and attacking"). Absorbs into `enters_attacking`.
         enters_attacking: bool,
+        /// CR 701.20a + CR 608.2c: `true` when the disposition is "put any number
+        /// of those [filter] cards onto [destination]" over the *set* of matched
+        /// cards (Aurora Awakener), absorbing into
+        /// `RevealUntilDisposition::ChooseAnyNumber`. `false` is the single-hit
+        /// "put that card …" form (`KeepEach`).
+        any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 110.2a: "under your control" on the kept-card clause.
+        enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`
         /// is then the accept zone and `decline_zone` is where the kept card
@@ -724,6 +740,14 @@ pub(crate) enum TargetedImperativeAst {
     GoadAll {
         target: TargetFilter,
     },
+    /// CR 709.5f-g + CR 709.5j: "lock"/"unlock"/"lock or unlock" a door of a
+    /// target Room permanent. The eligible half is chosen at resolution from the
+    /// Room's runtime unlock state, so only the operation and the target Room
+    /// filter are captured here. Lowers to `Effect::SetRoomDoorLock`.
+    SetRoomDoorLock {
+        op: DoorLockOp,
+        target: TargetFilter,
+    },
     Sacrifice {
         target: TargetFilter,
         /// CR 701.16a: Number of permanents to sacrifice. Defaults to
@@ -1009,6 +1033,12 @@ pub(crate) enum HandRevealImperativeAst {
     /// effect's affected IDs (e.g. "look at top → reveal it" patterns).
     /// Lowers to `Effect::Reveal { target: ParentTarget }`.
     RevealBackRef,
+    /// CR 701.20: Reveal a specific object selected by a target phrase —
+    /// "Reveal target face-down permanent" (Hauntwoods Shrieker). Lowers to
+    /// `Effect::Reveal { target }`. Distinct from `RevealBackRef` (anaphoric
+    /// "it"/"that card") and `RevealAll`/`RevealPartial` (hand reveals): this
+    /// reveals a battlefield/zone object chosen via the targeting pipeline.
+    RevealObject { target: TargetFilter },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1372,7 +1402,7 @@ pub(crate) fn with_clause_duration(
                 },
             ..
         } => {
-            *perm_dur = duration;
+            *perm_dur = normalize_play_from_exile_duration(duration);
         }
         Effect::CastFromZone {
             duration: ref mut effect_duration,
@@ -1389,6 +1419,27 @@ pub(crate) fn with_clause_duration(
         _ => {}
     }
     clause
+}
+
+fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+    match duration {
+        Duration::ForAsLongAs {
+            condition: StaticCondition::Unrecognized { text },
+        } if matches!(
+            text.as_str(),
+            "it remains exiled"
+                | "that card remains exiled"
+                | "those cards remain exiled"
+                | "they remain exiled"
+        ) =>
+        {
+            // CR 400.7i + CR 611.2a: exile-play permissions persist until the
+            // referenced object leaves exile; zone-exit cleanup removes the
+            // object-tagged permission.
+            Duration::Permanent
+        }
+        other => other,
+    }
 }
 
 // --- Modal types (moved from oracle_modal.rs) ---

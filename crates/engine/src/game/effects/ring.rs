@@ -430,4 +430,42 @@ mod tests {
             }
         ));
     }
+
+    const SMEAGOL_RING_TRIGGER: &str = "Whenever the Ring tempts you, target opponent reveals cards from the top of their library until they reveal a land card. Put that card onto the battlefield tapped under your control and the rest into their graveyard.";
+
+    #[test]
+    fn ring_tempts_you_smeagol_observer_collects_with_opponent_target() {
+        use crate::game::trigger_index;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::ability::{TargetFilter, TargetRef};
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let smeagol = make_creature(&mut state, 10, PlayerId(0));
+        let trigger_def = parse_trigger_line(SMEAGOL_RING_TRIGGER, "Sméagol, Helpful Guide");
+        assert_eq!(trigger_def.valid_target, Some(TargetFilter::Player));
+        {
+            let obj = state.objects.get_mut(&smeagol).unwrap();
+            obj.trigger_definitions.push(trigger_def);
+        }
+        trigger_index::reindex_object_triggers(&mut state, smeagol);
+
+        let mut events = Vec::new();
+        let ability =
+            ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(99), PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        triggers::process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Sméagol's RingTemptsYou trigger must reach the stack"
+        );
+        let reveal = state.stack.last().unwrap().ability().unwrap();
+        assert!(matches!(reveal.effect, Effect::RevealUntil { .. }));
+        assert_eq!(reveal.targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
 }

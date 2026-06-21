@@ -509,6 +509,8 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     Ok(Effect::Counter {
         target,
         source_rider: None,
+        // CR 701.6a: Forge import uses the default graveyard destination.
+        countered_spell_zone: None,
     })
 }
 

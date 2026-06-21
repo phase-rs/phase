@@ -24,15 +24,17 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    CastFromZoneDriver, Comparator, ContinuousModification, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CastFromZoneDriver, CastingPermission, Comparator, ContinuousModification, ControllerRef,
+    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -45,14 +47,14 @@ use super::{
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
-    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, has_explicit_player_target,
-    mark_uses_tracked_set, parse_effect_clause, parse_event_context_ref_with_ctx,
-    parse_for_each_object_copy_parts, publishes_tracked_set_from_resolution,
-    refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
-    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
-    rewrite_rounding_mode, rewrite_that_type_mana_instead, scan_contains_phrase,
-    stamp_delayed_returns, target_filter_controller_ref, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback,
+    contains_implicit_tracked_set_pronoun, each_target_filter_mut, fold_cast_copy_of_card_defs,
+    has_explicit_player_target, mark_uses_tracked_set, parse_effect_clause,
+    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    publishes_tracked_set_from_resolution, refine_damage_target_remainder,
+    replace_player_anaphor_with_parent_target, retarget_counter_additional_cost_to_target,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -62,6 +64,226 @@ fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     }
     if let Some(else_ability) = def.else_ability.as_deref_mut() {
         rewrite_player_anaphor_targets_in_definition(else_ability);
+    }
+}
+
+/// CR 608.2c: True when an ability's primary effect acts on the ability's own
+/// source permanent (`TargetFilter::SelfRef`). Self-targeting "If <self status>,
+/// A on it. Otherwise, B it." abilities (Repeat Offender) lower the "if" body's
+/// "it" to `SelfRef`, which the runtime resolves to `source_id`; the "otherwise"
+/// body's "it" is the SAME anaphor (the source), so — applying the rules of
+/// English to the whole text (CR 608.2c) — it must resolve the same way.
+fn definition_targets_self_source(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.target_filter(), Some(TargetFilter::SelfRef))
+}
+
+/// CR 608.2c: True when a `QuantityExpr` is a bare reference to the
+/// immediately-preceding instruction's amount (`EventContextAmount`) — the
+/// runtime binding for the "that much" / "that many" anaphor. Used to detect a
+/// dangling "that much" in an else branch whose antecedent instruction is
+/// skipped on that branch.
+fn is_event_context_amount(expr: &QuantityExpr) -> bool {
+    matches!(
+        expr,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    )
+}
+
+/// CR 608.2c: A "stable" antecedent amount is one whose resolution does NOT
+/// depend on which conditional branch ran — i.e. it is bound to an object or
+/// fixed value established before the branch (e.g. the revealed card's mana
+/// value, `ObjectManaValue { Demonstrative }`), not the per-instruction
+/// `EventContextAmount` channel. Only such an amount may be propagated into an
+/// else branch's "that much" anaphor.
+fn is_stable_branch_amount(expr: &QuantityExpr) -> bool {
+    !is_event_context_amount(expr)
+}
+
+/// CR 608.2c: Replace every `EventContextAmount` reference in an else-branch
+/// definition tree with the stable antecedent amount `stable`. Applied when the
+/// gated ("if") clause's magnitude is a stable quantity (e.g. the revealed
+/// card's mana value) and the else branch's "that much" anaphor would otherwise
+/// read the per-instruction `EventContextAmount` channel — which is 0 on the
+/// else branch because the antecedent instruction was skipped (Caustic Bronco:
+/// "You lose life equal to that card's mana value if ~ isn't saddled. Otherwise,
+/// each opponent loses that much life."). "That much" refers to the SAME printed
+/// quantity as the if branch, so it must resolve to that stable amount on both
+/// branches. Recurses through `count_expr` plus `sub_ability` / `else_ability`.
+fn rewrite_else_event_context_to_stable(def: &mut AbilityDefinition, stable: &QuantityExpr) {
+    if let Some(expr) = def.effect.count_expr_mut() {
+        if is_event_context_amount(expr) {
+            *expr = stable.clone();
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_else_event_context_to_stable(sub, stable);
+    }
+    if let Some(else_ability) = def.else_ability.as_deref_mut() {
+        rewrite_else_event_context_to_stable(else_ability, stable);
+    }
+}
+
+/// CR 608.2c: Rewrite an anaphoric `TargetFilter::ParentTarget` to
+/// `TargetFilter::SelfRef` throughout an else-branch definition tree. Used when
+/// the gated ("if") clause acts on the source (`SelfRef`) but the lowered
+/// else-branch defaulted its "it" anaphor to `ParentTarget`. For a self-targeting
+/// activated ability that announces no chosen target, `ParentTarget` resolves
+/// against an empty target list (a no-op); the antecedent of the else's "it" is
+/// the same source the "if" body acted on, so `SelfRef` is the correct binding
+/// (the runtime rewrites `SelfRef` to `source_id`). Only `ParentTarget` is
+/// rewritten — every other anaphor (already-resolved targets, `LastCreated`,
+/// player anaphors) is left untouched.
+fn rewrite_else_parent_target_to_self_ref(def: &mut AbilityDefinition) {
+    each_target_filter_mut(def.effect.as_mut(), &mut |filter| {
+        if matches!(filter, TargetFilter::ParentTarget) {
+            *filter = TargetFilter::SelfRef;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_else_parent_target_to_self_ref(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_deref_mut() {
+        rewrite_else_parent_target_to_self_ref(else_ability);
+    }
+}
+
+/// CR 608.2c + CR 401.4: After an optional `CastFromZone` from a linked-exile
+/// pool (Sanwell, Chaos Wand class), a trailing "put the rest / put the exiled
+/// cards … on the bottom" clause must route uncards still linked to the source
+/// through `ExiledBySource`, not a `TrackedSet` of library cards.
+pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
+    if let Effect::PutAtLibraryPosition {
+        ref mut target,
+        ref mut count,
+        position,
+    } = effect
+    {
+        if matches!(position, LibraryPosition::Bottom) {
+            *target = TargetFilter::ExiledBySource;
+            *count = QuantityExpr::Fixed { value: 0 };
+        }
+    }
+}
+
+fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &clause.parsed.effect
+    else {
+        return false;
+    };
+    if static_abilities.len() != 1 || static_abilities[0].mode != StaticMode::SpendManaAsAnyColor {
+        return false;
+    }
+
+    let lower = clause.source_text.to_ascii_lowercase();
+    let parsed = all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
+            tag("if you cast it this way, "),
+        ))),
+        tag("you may spend mana as though it were mana of any "),
+        alt((tag("color"), tag("type"))),
+        tag(" to cast "),
+        alt((
+            tag("it"),
+            tag("that spell"),
+            tag("a spell this way"),
+            tag("spells this way"),
+            tag("those spells"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok();
+    parsed
+}
+
+fn attach_any_color_mana_rider_to_previous_play_from_exile(defs: &mut [AbilityDefinition]) -> bool {
+    let Some(previous) = defs.last_mut() else {
+        return false;
+    };
+    let Effect::GrantCastingPermission {
+        permission:
+            CastingPermission::PlayFromExile {
+                mana_spend_permission,
+                ..
+            },
+        ..
+    } = previous.effect.as_mut()
+    else {
+        return false;
+    };
+
+    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
+    true
+}
+
+pub(super) fn is_linked_exile_cast_bottom_cleanup(
+    cast_effect: &Effect,
+    cleanup_effect: &Effect,
+) -> bool {
+    let Effect::CastFromZone { target, .. } = cast_effect else {
+        return false;
+    };
+    let Effect::PutAtLibraryPosition {
+        target: cleanup_target,
+        position,
+        ..
+    } = cleanup_effect
+    else {
+        return false;
+    };
+    matches!(position, LibraryPosition::Bottom)
+        && (target.references_exiled_by_source() || cleanup_target.references_exiled_by_source())
+}
+
+#[cfg(test)]
+mod linked_exile_cleanup_tests {
+    use super::*;
+
+    fn cast_from_zone(target: TargetFilter) -> Effect {
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost: false,
+            mode: crate::types::ability::CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+        }
+    }
+
+    fn bottom_cleanup() -> Effect {
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+        }
+    }
+
+    #[test]
+    fn linked_exile_cleanup_accepts_cast_target_or_cleanup_target_exile_link() {
+        let mut cleanup = bottom_cleanup();
+
+        assert!(is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::ExiledBySource),
+            &cleanup
+        ));
+        if let Effect::PutAtLibraryPosition { ref mut target, .. } = cleanup {
+            *target = TargetFilter::ExiledBySource;
+        }
+        assert!(is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::ParentTarget),
+            &cleanup
+        ));
+        assert!(!is_linked_exile_cast_bottom_cleanup(
+            &cast_from_zone(TargetFilter::Any),
+            &bottom_cleanup()
+        ));
     }
 }
 
@@ -99,7 +321,35 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         let mut attached = false;
                         for d in defs.iter_mut().rev() {
                             if d.condition.is_some() {
-                                d.else_ability = Some(else_def.clone());
+                                let mut else_def = else_def.clone();
+                                // CR 608.2c: when the gated clause acts on the
+                                // source (`SelfRef`), the else clause's "it" anaphor
+                                // is the same source — rebind its `ParentTarget`
+                                // default to `SelfRef` so a self-targeting ability's
+                                // else branch is not a no-op against an empty target
+                                // list (Repeat Offender's "Otherwise, suspect it").
+                                if definition_targets_self_source(d) {
+                                    rewrite_else_parent_target_to_self_ref(&mut else_def);
+                                }
+                                // CR 608.2c: bind the else branch's "that much"
+                                // anaphor (`EventContextAmount`) to the if branch's
+                                // stable magnitude. The if branch's amount is the
+                                // same printed quantity "that much" refers to; on
+                                // the else branch the antecedent instruction was
+                                // skipped, so the per-instruction `EventContextAmount`
+                                // channel reads 0 (Caustic Bronco: "each opponent
+                                // loses that much life"). Only a stable antecedent
+                                // amount (object-/fixed-bound, not itself
+                                // `EventContextAmount`) is propagated.
+                                if let Some(stable) = d
+                                    .effect
+                                    .count_expr()
+                                    .filter(|e| is_stable_branch_amount(e))
+                                    .cloned()
+                                {
+                                    rewrite_else_event_context_to_stable(&mut else_def, &stable);
+                                }
+                                d.else_ability = Some(else_def);
                                 attached = true;
                                 break;
                             }
@@ -385,6 +635,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             continue;
         }
 
+        // CR 609.4b + CR 608.2c: Brainstealer/Daxos-class any-color mana
+        // riders may be split into their own sentence or comma sibling after a
+        // `PlayFromExile` grant. They scope the existing exile-play
+        // permission, so fold the rider into the prior grant instead of
+        // emitting a broad standalone `SpendManaAsAnyColor` effect.
+        if is_spend_mana_as_any_color_rider(clause_ir)
+            && attach_any_color_mana_rider_to_previous_play_from_exile(&mut defs)
+        {
+            prev_boundary = clause_ir.boundary;
+            continue;
+        }
+
         // Non-absorbed, non-special followup continuation — apply it to the
         // previous defs before building this clause's def.
         if let Some(ref continuation) = clause_ir.followup_continuation {
@@ -454,6 +716,22 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 ..
             }
         );
+        // CR 107.1b/c + CR 117.1d: Join Forces' "each player may pay any
+        // amount of mana" is NOT an OptionalEffectChoice — the "may" only
+        // means each player may pay zero. PayAmountChoice (min=0) handles
+        // that; flagging the PayCost as optional would let a decline skip the
+        // mill/draw body.
+        let is_join_forces_pay_any_amount_mana_cost = clause_ir.player_scope
+            == Some(PlayerFilter::All)
+            && clause_ir.starting_with == Some(ControllerRef::You)
+            && matches!(
+                &clause_ir.parsed.effect,
+                Effect::PayCost {
+                    cost: AbilityCost::Mana { cost },
+                    scale: None,
+                    ..
+                } if crate::game::casting_costs::cost_has_x(cost)
+            );
         if clause_ir.is_optional
             && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
             && !matches!(
@@ -461,6 +739,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 Effect::GrantCastingPermission { .. }
             )
             && !is_lingering_cast_from_zone
+            && !is_join_forces_pay_any_amount_mana_cost
         {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
@@ -472,6 +751,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 Effect::GrantCastingPermission { .. }
             )
             && !is_lingering_cast_from_zone
+            && !is_join_forces_pay_any_amount_mana_cost
         {
             def.optional = true;
         }
@@ -524,6 +804,39 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             .condition
             .as_ref()
             .or(clause_ir.parsed.condition.as_ref());
+        // CR 608.2c + CR 109.2: When a "if it's a [type], it ..." card-type gate
+        // sits on a clause whose effect acts on the parent target (the anaphoric
+        // "it" resolved to the previously-targeted object — e.g. Azure Beastbinder's
+        // "If it's a creature, it also has base power and toughness 2/2"), the
+        // type description refers to that *permanent*, not a revealed card. The
+        // chunk parser emits `RevealedHasCardType` for every "if it's a [type]"
+        // head, but that variant evaluates against the last revealed/zone-changed
+        // card and would be ALWAYS-FALSE here (no reveal context), silently
+        // dropping the rider. Convert it to `TargetMatchesFilter` (the same
+        // conversion the Disintegrate/Carbonize damage-rider path performs via
+        // `card_type_condition_as_target_match`) so the gate evaluates against the
+        // bound parent target.
+        //
+        // Two guards keep genuine reveal-context gates (Goblin Guide:
+        // "defending player reveals the top card of their library. If it's a
+        // land card, that player puts it into their hand."; Delver-class)
+        // untouched:
+        //   1. The gated effect must target `ParentTarget` (the "it" anaphor).
+        //   2. No prior clause in the chain may publish a revealed/zone-changed
+        //      subject — that is exactly the source `RevealedHasCardType` reads
+        //      at resolution (`last_revealed_ids` / `last_zone_changed_ids`), so
+        //      when such a publisher exists the "it" really is the revealed card
+        //      and the original variant is correct.
+        let chain_has_revealed_subject = defs
+            .iter()
+            .any(|d| effect_publishes_revealed_subject(&d.effect));
+        let converted_condition = effective_condition.and_then(|cond| {
+            (!chain_has_revealed_subject
+                && matches!(def.effect.target_filter(), Some(TargetFilter::ParentTarget)))
+            .then(|| super::conditions::card_type_condition_as_target_match(cond))
+            .flatten()
+        });
+        let effective_condition = converted_condition.as_ref().or(effective_condition);
         if let Some(cond) = effective_condition {
             // CR 603.4 + CR 608.2h: An in-effect `if` on a continuous
             // keyword-grant clause (Odric, Lunarch Marshal) must gate each
@@ -807,16 +1120,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             // dedicated clause builders that construct sub-abilities directly
             // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
             chain.kind = AbilityKind::Spell;
-            if prev.optional
-                && matches!(*prev.effect, Effect::CastFromZone { .. })
-                && matches!(
-                    *chain.effect,
-                    Effect::PutAtLibraryPosition {
-                        target: TargetFilter::ExiledBySource,
-                        ..
-                    }
-                )
-            {
+            if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
+                normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
                 prev.else_ability = Some(Box::new(chain.clone()));
             }
             if prev.sub_ability.is_some() {
@@ -885,6 +1190,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
     rewire_cross_sentence_token_counter_attach(&mut result);
+    rewire_token_attach_sibling(&mut result);
+    fold_token_it_has_grants_into_token_statics(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
@@ -1351,6 +1658,123 @@ fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
     def.sub_ability = Some(Box::new(put_sub));
 }
 
+/// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
+/// ("create a Kor Soldier token. You may attach an Equipment you control to
+/// it") — the bare-"it" host anaphor must target `LastCreated`, not
+/// `ParentTarget` (the token-creating effect has no parent target slot).
+fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(attach_sub) = def.sub_ability.as_mut() else {
+        return;
+    };
+    // Token → PutCounter → Attach is owned by `rewire_cross_sentence_token_counter_attach`.
+    if matches!(&*attach_sub.effect, Effect::PutCounter { .. }) {
+        return;
+    }
+    let Effect::Attach { target, .. } = attach_sub.effect.as_mut() else {
+        return;
+    };
+    if matches!(
+        target,
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+    ) {
+        *target = TargetFilter::LastCreated;
+    }
+}
+
+/// CR 111.3 + CR 702.6a: Intrinsic token statics (Equipment tokens with Equip,
+/// Urza's Saga Construct-style explicit permanent grants) belong on the token's
+/// own `static_abilities`. Transient resolution-time grants — keyword pumps and
+/// `GrantTrigger` installs such as Rite of the Raging Storm (#3297) — must
+/// remain sibling `GenericEffect`s targeting `LastCreated`.
+fn token_it_has_grant_should_fold_into_statics(
+    token_effect: &Effect,
+    static_abilities: &[StaticDefinition],
+    duration: &Option<Duration>,
+) -> bool {
+    if static_abilities.iter().any(|static_def| {
+        static_def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. }))
+    }) {
+        return false;
+    }
+
+    if matches!(duration, Some(Duration::Permanent)) {
+        return true;
+    }
+
+    matches!(
+        token_effect,
+        Effect::Token { types, .. }
+            if types
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("equipment"))
+    )
+}
+
+fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(grant_box) = def.sub_ability.take() else {
+        return;
+    };
+    let grant = *grant_box;
+    if grant.sub_link != SubAbilityLink::SequentialSibling {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    }
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+    } = grant.effect.as_ref()
+    else {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    };
+    let token_scoped = target.as_ref().is_none_or(|t| {
+        matches!(
+            t,
+            TargetFilter::LastCreated | TargetFilter::ParentTarget | TargetFilter::SelfRef
+        )
+    });
+    if !token_scoped
+        || !token_it_has_grant_should_fold_into_statics(
+            def.effect.as_ref(),
+            static_abilities,
+            duration,
+        )
+    {
+        def.sub_ability = Some(Box::new(grant));
+        return;
+    }
+
+    if let Effect::Token {
+        static_abilities: token_statics,
+        ..
+    } = &mut *def.effect
+    {
+        for mut static_def in static_abilities.clone() {
+            if matches!(
+                static_def.affected,
+                Some(
+                    TargetFilter::LastCreated | TargetFilter::ParentTarget | TargetFilter::SelfRef
+                )
+            ) {
+                static_def.affected = Some(TargetFilter::SelfRef);
+            }
+            token_statics.push(static_def);
+        }
+    }
+
+    def.sub_ability = grant.sub_ability;
+}
+
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
 /// it appears. Recurses into `CreateDelayedTrigger.effect` so the "sacrifice
 /// it" pattern inside a delayed trigger also rewrites.
@@ -1432,6 +1856,36 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
             .or(Some(Duration::UntilEndOfTurn)),
         target: Some(TargetFilter::LastCreated),
     })
+}
+
+/// CR 608.2c + CR 701.20: True when this effect publishes a revealed or
+/// zone-changed subject at resolution — i.e. it populates the
+/// `last_revealed_ids` / `last_zone_changed_ids` trackers that
+/// `AbilityCondition::RevealedHasCardType` reads. When a prior clause in a
+/// chain is such a publisher, a following "if it's a [type]" gate refers to
+/// THAT card (Goblin Guide: reveal-then-conditional-recall), so the
+/// `RevealedHasCardType` reading is correct and must not be rewritten to a
+/// `TargetMatchesFilter` parent-target reading. Reveal-class effects populate
+/// `last_revealed_ids` directly; zone-change-class effects emit `ZoneChanged`
+/// events that populate `last_zone_changed_ids`.
+fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        // Reveal-class (populate last_revealed_ids).
+        Effect::Reveal { .. }
+            | Effect::RevealTop { .. }
+            | Effect::RevealHand { .. }
+            | Effect::Dig { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::Clash
+            | Effect::TurnFaceUp { .. }
+            // Zone-change-class (emit ZoneChanged → last_zone_changed_ids).
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::ExileTop { .. }
+            | Effect::Mill { .. }
+            | Effect::SearchLibrary { .. }
+    )
 }
 
 /// Rewrite any `TargetFilter::ParentTarget` sitting in the target slot of
@@ -1965,6 +2419,12 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
             value(PlayerFilter::Opponent, tag("each other player ")),
             value(PlayerFilter::Opponent, tag("each opponent ")),
             value(PlayerFilter::All, tag("each player ")),
+            // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
+            // "For each player, <imperative> ... that player controls" (Curse of
+            // Fenric I). The more-specific "for each player, you choose"/"choose
+            // ... in that player's zone" handlers run earlier in the dispatcher,
+            // so only the bare imperative residual reaches here.
+            value(PlayerFilter::All, tag("for each player, ")),
         ))
         .parse(i)
     });
@@ -1978,6 +2438,20 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     // misroutes to `Effect::CastFromZone` instead of `GrantCastingPermission`.
     let rest_lower = rest.trim_start().to_lowercase();
     if alt((tag::<_, _, OracleError<'_>>("may play "), tag("may cast ")))
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
+
+    // CR 700.2 + CR 701.21a + CR 608.2c: "for each player, you choose …" (Tragic
+    // Arrogance → CategoryChooserScope::ControllerForAll) and "for each player,
+    // choose … in that player's graveyard/zone" (Breach the Multiverse →
+    // ChooseFromZone { zone_owner: EachPlayer }) have DEDICATED dispatchers that
+    // must own these shapes. The chunk-loop cascade can reach this subject-strip
+    // before those dispatchers, so a "choose"-headed residual must survive as
+    // `(None, full_text)` for the dedicated handler. Ordering invariant.
+    if alt((tag::<_, _, OracleError<'_>>("choose "), tag("you choose ")))
         .parse(rest_lower.as_str())
         .is_ok()
     {
@@ -2458,6 +2932,19 @@ fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String
             value(
                 PlayerFilter::OwnersOfCardsExiledBySource,
                 tag("the exiled cards' owners "),
+            ),
+            // CR 406.2 + CR 610.3: "the owner of each card exiled with <source> "
+            // — the source-linked exile cleanup subject (Trial of a Time Lord IV:
+            // "the owner of each card exiled with ~ puts that card on the bottom
+            // of their library"). The self-ref token is `~` after normalization,
+            // or the literal "this saga" pre-normalization; compose the prefix
+            // with the source token rather than verbatim-matching the card name.
+            value(
+                PlayerFilter::OwnersOfCardsExiledBySource,
+                preceded(
+                    tag("the owner of each card exiled with "),
+                    (alt((tag("~"), tag("this saga"))), tag(" ")),
+                ),
             ),
         ))
         .parse(i)
@@ -4380,6 +4867,25 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             .parse(amount_lower.as_str())
             .ok()?;
         let qty_text = amount_text[..before_to.len()].trim();
+        // CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Multi-source per-power
+        // damage — "(each) deal damage equal to their power to <recipient>". The
+        // plural possessive "their power" (vs. the singular "its power" handled by
+        // the single-source one-sided-fight path) marks the variable-count source
+        // set established by the subject ("up to N / any number of target
+        // creatures you control") or by the prior sentence ("They each ..."). Each
+        // source deals damage equal to ITS OWN power (CR 208.1 modifiable
+        // characteristic, CR 608.2 read at resolution), so the amount is the
+        // per-object `Power{Anaphoric}` (rebound to `Target` by
+        // `wrap_target_subject_damage` for the direct subject form, or by the
+        // one-sided-fight prepend for the "They each ..." back-reference) and the
+        // source is `EachTarget`. Allies at Last, Coordinated Clobbering, Terrific
+        // Team-Up. (Graceful Takedown's compound source set is deferred — see
+        // `is_compound_source_each_power_damage`.)
+        if let Some(clause) =
+            try_parse_each_source_power_damage(qty_text, amount_text, before_to, ctx)
+        {
+            return Some(clause);
+        }
         // CR 120.1: The amount of a "deals damage equal to <qty>" clause may be a
         // dynamic count ("the number of creatures you control" — Ajani, Nacatl
         // Avenger). Mirror the sibling "damage to <target> equal to <amount>"
@@ -4606,6 +5112,95 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             amount,
             target,
             damage_source: None,
+        },
+        rem,
+    ))
+}
+
+/// CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Parse the multi-source per-power
+/// damage tail "their power to <recipient>" (plural possessive). Returns a
+/// `DealDamage` whose source is `DamageSource::EachTarget` — every leading object
+/// target (the source set chosen by the subject / prior sentence) deals damage
+/// equal to ITS OWN power to the shared recipient. The amount is `Power{Anaphoric}`,
+/// rebound to `Target` downstream (`wrap_target_subject_damage` for the direct
+/// subject form; the one-sided-fight prepend for the "They each ..." back-ref).
+///
+/// Returns `None` for the singular "its power" form (handled by the existing
+/// single-source one-sided-fight path) and for any non-power amount, so the
+/// caller's general quantity dispatch is untouched.
+///
+/// `amount_text` is the original-case slice immediately following "damage equal
+/// to "; `before_to` is the lowercase amount slice up to the " to " preposition.
+/// The recipient phrase is the original-case tail past `before_to`, with the
+/// " to " separator consumed by a `tag` combinator (mirroring the caller's
+/// `take_until(" to ")` split) rather than a hard-coded byte offset.
+fn try_parse_each_source_power_damage<'a>(
+    qty_text: &str,
+    amount_text: &'a str,
+    before_to: &str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str)> {
+    // CR 208.1 + CR 608.2: "their power" / "their toughness" — the per-object
+    // characteristic (modifiable, read at resolution) of each source in the set.
+    // Bound directly to `ObjectScope::Target`: the `EachTarget` resolver
+    // re-resolves the amount against a single-element target slice per source, so
+    // `Power{Target}` reads each member's OWN value. This is
+    // correct for both the direct subject form (sources prepended ahead of the
+    // recipient) and the "They each ..." back-reference (the prior sentence's
+    // chosen set is prepended at resolution) — neither needs the anaphoric
+    // pronoun rebind the single-source one-sided-fight path relies on.
+    let qty = nom_parse_lower(qty_text, |i| {
+        all_consuming(alt((
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                tag("their power"),
+            ),
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                tag("their toughness"),
+            ),
+        )))
+        .parse(i)
+    })?;
+
+    // `before_to` is the lowercase length-equivalent of the amount prefix, so
+    // `amount_text[before_to.len()..]` is the original-case tail beginning at the
+    // " to " preposition. Consume that separator with a `tag` combinator (the
+    // recipient is the parse remainder) instead of a hard-coded byte offset.
+    let (_, recipient_tail) = preceded(tag::<_, _, OracleError<'_>>(" to "), rest)
+        .parse(&amount_text[before_to.len()..])
+        .ok()?;
+    let recipient_text = recipient_tail.trim();
+    if recipient_text.is_empty() {
+        return None;
+    }
+
+    // CR 115.1: The shared recipient is a single targeted object ("target
+    // creature an opponent controls" / "target creature you don't control").
+    // Event-context refs first (mirrors the single-source path), then the
+    // general target parser.
+    let (target, rem) =
+        if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(recipient_text, ctx) {
+            refine_damage_target_remainder(target, ecr_rem)
+        } else {
+            let (target, rem) = parse_target_with_ctx(recipient_text, ctx);
+            refine_damage_target_remainder(target, rem)
+        };
+    let rem = trim_dangling_target_word(rem);
+
+    Some((
+        Effect::DealDamage {
+            amount: qty,
+            target,
+            damage_source: Some(DamageSource::EachTarget),
         },
         rem,
     ))
@@ -4992,6 +5587,9 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
 
     // Try to strip a leading sequence connector using nom alt().
     // Mixed case requires explicit variants since nom tag() is exact-match.
+    // CR 608.2c: "Also" is an additive sequence connector at clause start
+    // (Beast Mode); strip like "then"/"and". Position-0 only — mid-sentence
+    // "also" (e.g. Repulsor Blast's "it also deals") is never reached here.
     match alt((
         tag::<_, _, OracleError<'_>>("Then, "),
         tag("Then "),
@@ -4999,6 +5597,10 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
         tag("then "),
         tag("and "),
         tag("And "),
+        tag("Also, "),
+        tag("Also "),
+        tag("also, "),
+        tag("also "),
     ))
     .parse(trimmed)
     {
@@ -5359,6 +5961,7 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
+            ..
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
@@ -6012,8 +6615,16 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     // "number of <type>" as the counter-type token. The dynamic arm gates on the
     // longer, more specific `tag("a number of ")`. A future `alt()` refactor
     // MUST keep dynamic before fixed for the same reason.
-    if let Ok((rest, body)) = parse_dynamic_counter_suffix_body(input) {
-        return Ok((rest, body));
+    match parse_dynamic_counter_suffix_body(input) {
+        Ok((rest, body)) => return Ok((rest, body)),
+        Err(err) => {
+            if tag::<_, _, OracleError<'_>>("a number of ")
+                .parse(input)
+                .is_ok()
+            {
+                return Err(err);
+            }
+        }
     }
 
     // Count: digits, English word, or article ("a"/"an").
@@ -6099,10 +6710,7 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
     let (rest, _) = tag(" on it equal to ").parse(rest)?;
     // Quantity: delegate to the shared quantity-ref combinator. Consume the
     // full clause (including any trailing period) so callers see it consumed.
-    let qty_text = rest.trim_end_matches('.').trim_end();
-    let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text).ok_or(
-        nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Verify)),
-    )?;
+    let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
     Ok(("", (counter_type, QuantityExpr::Ref { qty })))
 }
 
@@ -6123,6 +6731,61 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    // CR 101.4 + CR 608.2c: the comma-prefixed per-player imperative scope ("for
+    // each player, <imperative> ... that player controls") strips to PlayerFilter::All
+    // plus the bare imperative residual. Building block for The Curse of Fenric I.
+    #[test]
+    fn for_each_player_comma_prefix_strips_to_all_scope() {
+        use crate::types::ability::PlayerFilter;
+        let (scope, residual) = super::strip_each_player_subject(
+            "for each player, destroy up to one target creature that player controls",
+        );
+        assert_eq!(scope, Some(PlayerFilter::All));
+        assert_eq!(
+            residual, "destroy up to one target creature that player controls",
+            "residual must be the bare imperative"
+        );
+    }
+
+    // CR 406.2 + CR 610.3: "the owner of each card exiled with ~ " strips to the
+    // OwnersOfCardsExiledBySource player scope. Building block for Trial of a Time
+    // Lord IV (and unblocks the Possibility Storm owner-of-exiled sibling).
+    #[test]
+    fn owner_of_each_card_exiled_with_source_strips_scope() {
+        use crate::types::ability::PlayerFilter;
+        let (scope, residual) = super::strip_player_scope_subject(
+            "the owner of each card exiled with ~ puts that card on the bottom of their library",
+        );
+        assert_eq!(scope, Some(PlayerFilter::OwnersOfCardsExiledBySource));
+        assert_eq!(
+            residual, "put that card on the bottom of their library",
+            "residual must be the deconjugated imperative"
+        );
+    }
+
+    // CR 406.2 + CR 610.3: end-to-end — the owner-of-exiled return clause lowers
+    // to PutAtLibraryPosition with target ExiledBySource and Bottom position (the
+    // "that card" anaphor rebinds to the source-linked exile pool).
+    #[test]
+    fn owner_of_each_card_exiled_lowers_to_bottom_of_library() {
+        use crate::types::ability::{LibraryPosition, TargetFilter};
+        let def = super::super::parse_effect_chain(
+            "the owner of each card exiled with ~ puts that card on the bottom of their library",
+            AbilityKind::Spell,
+        );
+        match *def.effect {
+            Effect::PutAtLibraryPosition {
+                ref target,
+                position: LibraryPosition::Bottom,
+                ..
+            } => assert!(
+                matches!(target, TargetFilter::ExiledBySource),
+                "expected ExiledBySource target, got {target:?}"
+            ),
+            ref other => panic!("expected PutAtLibraryPosition(Bottom), got {other:?}"),
+        }
+    }
 
     #[test]
     fn extract_optional_target_multi_target_recovers_tap_up_to_four() {

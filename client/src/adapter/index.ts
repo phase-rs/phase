@@ -1,6 +1,4 @@
-import type { EngineAdapter } from "./types";
 import { AdapterError } from "./types";
-import { WasmAdapter } from "./wasm-adapter";
 
 export { WasmAdapter } from "./wasm-adapter";
 export { P2PHostAdapter, P2PGuestAdapter } from "./p2p-adapter";
@@ -14,13 +12,6 @@ export type { P2PAdapterEvent } from "./p2p-adapter";
 export type { DraftPodHostEvent, DraftPodHostConfig, DraftPodHostStatus } from "./draftPodHostAdapter";
 export type { DraftPodGuestEvent, DraftPodGuestConfig, DraftPodGuestStatus } from "./draftPodGuestAdapter";
 export type { ServerDraftAdapterEvent, CreateDraftSettings, DraftPhase } from "./server-draft-adapter";
-
-/** Tauri v2 detection: present when running inside a Tauri webview. */
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
 
 /**
  * Validates that the adapter type is allowed for the given player count.
@@ -37,17 +28,4 @@ export function validateAdapterForPlayerCount(
       false,
     );
   }
-}
-
-/**
- * Creates the appropriate EngineAdapter based on platform detection.
- * - Tauri v2 detected: returns TauriAdapter (dynamic import to avoid bundling)
- * - Browser: returns WasmAdapter
- */
-export async function createAdapter(): Promise<EngineAdapter> {
-  if (typeof window !== "undefined" && window.__TAURI_INTERNALS__) {
-    const { TauriAdapter } = await import("./tauri-adapter");
-    return new TauriAdapter();
-  }
-  return new WasmAdapter();
 }

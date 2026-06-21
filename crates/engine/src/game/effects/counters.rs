@@ -1353,6 +1353,29 @@ fn resolve_defined_or_targets(
         _ => None,
     };
 
+    // Whether the ability carries any chosen *object* target. The branch
+    // resolver in `choose_one_of::resolve_branch` injects a bookkeeping
+    // `TargetRef::Player(chooser)` into `ability.targets`, so a plain
+    // `is_empty()` check would miss the "no object target was chosen" case for a
+    // `ChooseOneOf` branch. Counter placement targets objects, so the
+    // source-fallback below keys off the absence of object targets, not raw
+    // emptiness.
+    let has_object_target = ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Object(_)));
+
+    // True only for a `ChooseOneOf` branch: `choose_one_of::resolve_branch`
+    // injects a bookkeeping `TargetRef::Player(chooser)` into `ability.targets`.
+    // This is the signature that distinguishes a branch lifted under a `SelfRef`
+    // parent (which surfaces no object target slot) from a chain element whose
+    // optional object target slot was offered and skipped (whose `targets` is
+    // truly empty). See the `ParentTarget` arm below.
+    let has_choice_bookkeeping_player = ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Player(_)));
+
     // CR 608.2c: SelfRef is the printed-name anaphor — always resolves to the
     // source object regardless of `ability.targets`. Mirrors the post-#323
     // short-circuit in `targeting::resolved_targets`. Without this, a chained
@@ -1362,15 +1385,35 @@ fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
-    // CR 603.10a (tier 2 of `resolved_targets`): `None` falls back to source
-    // only when no chosen targets were supplied — preserves the LTB
-    // self-trigger anaphor ("put a +1/+1 counter on it") while letting chain
-    // propagation populate the target slot for legitimately targeted
-    // sub-abilities.
-    if let Some(TargetFilter::None) = target_spec {
-        if ability.targets.is_empty() {
-            return vec![ability.source_id];
-        }
+    // CR 608.2c (tier 2 of `resolved_targets`): `None` falls back to the source
+    // object when no chosen targets were supplied — preserves the LTB
+    // self-trigger anaphor ("put a +1/+1 counter on it"). Chain propagation
+    // populates the slot for legitimately targeted sub-abilities, which never
+    // reach this arm.
+    if matches!(target_spec, Some(TargetFilter::None)) && ability.targets.is_empty() {
+        return vec![ability.source_id];
+    }
+
+    // CR 608.2c: A `ParentTarget` with no object target slot resolves to the
+    // source ONLY for a `ChooseOneOf` of `PutCounter` branches lifted under a
+    // `TargetOnly { target: SelfRef }` parent (Reluctant Role Model: "put a
+    // flying, lifelink, or +1/+1 counter on it"). The SelfRef parent surfaces
+    // no target slot, so the branch's propagated `ability.targets` carries only
+    // the bookkeeping `TargetRef::Player(chooser)` that `resolve_branch` injects
+    // — the signature that proves no object target was ever offered.
+    //
+    // CR 608.2b: This must NOT fire when an optional ("up to one target") object
+    // slot WAS offered and the controller chose no target (Abigale: "up to one
+    // other target creature ... Put ... counters ... on that creature"). There
+    // the anaphor "that creature" has no referent, so this part of the effect
+    // doesn't happen and no counters are placed. That case leaves `targets`
+    // truly empty (no chosen object, no injected chooser), so falling through to
+    // the no-op return below is correct — the source must not gain counters.
+    if matches!(target_spec, Some(TargetFilter::ParentTarget))
+        && !has_object_target
+        && has_choice_bookkeeping_player
+    {
+        return vec![ability.source_id];
     }
 
     // CR 608.2k: "the exiled card" — an untargeted reference to the object

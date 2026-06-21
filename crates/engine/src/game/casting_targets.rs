@@ -484,6 +484,7 @@ fn pay_activation_costs_after_target_selection(
             player,
             pending.object_id,
             &pending.cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
         )?;
@@ -538,6 +539,7 @@ fn pay_activation_costs_after_target_selection(
                 player,
                 pending.object_id,
                 activation_cost,
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index),
                 events,
             )?
         {

@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Resolving {{resolved}} / {{total}}"
+    "label": "Resolving {{resolved}} / {{total}}",
+    "collapse": "Collapse resolving progress",
+    "expand": "Expand resolving progress"
   },
   "card": {
     "faceDownName": "Face-down card",
@@ -172,6 +174,8 @@
     "copyTooltip": "Token copy of a real card",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
+    "hiddenAttachments": "+{{count}} more attached",
+    "hiddenExileCards": "+{{count}} more exiled",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
       "return": "Return",
@@ -237,6 +241,7 @@
     "allTo": "All → <name>{{label}}</name>",
     "creatureFallback": "Creature #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
+    "objectFallback": "Object #{{id}}",
     "you": "You",
     "ally": "Ally",
     "restoreDialog": "Restore dialog",
@@ -553,6 +558,7 @@
     "sacrificeRange_other": "Sacrifice {{min}}-{{count}} permanents",
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
     "chooseTarget": "Choose a target",
+    "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "No legal targets available",
     "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "up to one {{target}}",
@@ -1330,6 +1336,17 @@
     "red": "Red",
     "green": "Green"
   },
+  "roomDoor": {
+    "title": "Choose a Door",
+    "subtitle": "Pick which door of the Room to act on",
+    "confirm": "Confirm",
+    "option": "{{op}} {{door}}",
+    "unlock": "Unlock",
+    "lock": "Lock",
+    "lockOrUnlock": "Lock or unlock",
+    "left": "left door",
+    "right": "right door"
+  },
   "dialogShell": {
     "eyebrow": "Game Choice",
     "restoreDialog": "Restore dialog",
@@ -1547,6 +1564,9 @@
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
+    "exportGameState": "Export Game State",
+    "exported": "Exported",
+    "exportFailed": "Export failed",
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",

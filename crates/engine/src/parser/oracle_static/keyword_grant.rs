@@ -79,7 +79,8 @@ pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option
     let (_, qty_text) = preceded(tag::<_, _, VE<'_>>(", where x is "), nom::combinator::rest)
         .parse(rest)
         .ok()?;
-    let qty = parse_quantity_ref(qty_text.trim())?;
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_quantity_ref_complete(qty_text.trim()).ok()?;
     Some((keyword, Some(qty)))
 }
 
@@ -605,28 +606,162 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
     Some(TargetFilter::Typed(typed))
 }
 
-/// CR 613.1f + CR 113.3: Recognize the exact `ExiledBySource` forms of "all
-/// activated abilities of [source]" and return the provider `source` filter.
-/// Returns `None` for forms not yet supported (typed "creature cards exiled with
-/// it", counter-gated exile, battlefield filters) so they stay a loud gap rather
-/// than over-granting. `lower` is the already-lowercased predicate.
+/// CR 613.1f + CR 113.3: Recognize "[~ has] all activated abilities of [source]"
+/// and return the provider `source` filter for `GrantAllActivatedAbilitiesOf`.
+///
+/// The source-set axis is parameterized as a `TargetFilter` and composed from
+/// nom combinators along three independent dimensions: the optional leading verb
+/// (`has`/`have`, present in the real card path `"~ has all activated abilities
+/// of …"` but absent in the bare-predicate building-block path), the
+/// "all activated abilities of" grant phrase, and the source-set noun phrase:
+///
+/// - `the exiled card` / `all [creature] cards exiled with it/~` →
+///   `ExiledBySource`, narrowed to `And { [Typed(creature), ExiledBySource] }`
+///   when a card-type qualifies the exiled cards (Agatha's Soul Cauldron grants
+///   only *creature* cards' abilities; Myr Welder / Territory Forge are untyped).
+/// - `creatures you control that don't have the same name as it/~` →
+///   `Typed(creature, controller=You, [Not { SameName }])` (Marvin, Murderous
+///   Mimic). `SameName` reads the recipient's name at expansion time, so
+///   `Not { SameName }` excludes same-named creatures per Marvin's wording.
+///
+/// Returns `None` for forms still needing extra infrastructure ("the last chosen
+/// card" — needs persistent chosen-object tracking; counter-gated exile sets) so
+/// they stay a loud gap rather than over-granting.
 fn parse_grant_all_activated_abilities_source(
     lower: &str,
 ) -> Option<crate::types::ability::TargetFilter> {
     let p = lower.trim().trim_end_matches('.').trim();
     all_consuming(preceded(
-        tag::<_, _, OracleError<'_>>("all activated abilities of "),
-        alt((
-            value(TargetFilter::ExiledBySource, tag("the exiled card")),
-            value(
-                TargetFilter::ExiledBySource,
-                (tag("all cards exiled with "), alt((tag("it"), tag("~")))),
-            ),
-        )),
+        (
+            opt(alt((tag::<_, _, OracleError<'_>>("has "), tag("have ")))),
+            tag("all activated abilities of "),
+        ),
+        grant_source_noun_phrase,
     ))
     .parse(p)
     .ok()
     .map(|(_, source)| source)
+}
+
+/// CR 613.1f + CR 607.2a + CR 201.2: The source-set noun phrase of an
+/// ability-grant-by-reference static. Each arm is a leaf of the source-set axis;
+/// adding a new referenced set is one more `alt` arm here, never a new variant.
+fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::ability::TargetFilter> {
+    alt((
+        // CR 607.2a: cards exiled with the host. Optional card-type qualifier
+        // narrows the granted set (Agatha grants creature cards only).
+        grant_exiled_source,
+        // CR 201.2: "creatures you control that don't have the same name as
+        // it/~" (Marvin) — battlefield creatures you control, excluding ones
+        // sharing the recipient's name.
+        value(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Not {
+                        prop: Box::new(FilterProp::SameName),
+                    }]),
+            ),
+            (
+                tag("creatures you control that don't have the same name as "),
+                alt((tag("it"), tag("~"))),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 607.2a: "[the exiled card] | all [<card type>] cards exiled with it/~".
+/// The optional card-type qualifier intersects `ExiledBySource` with a typed
+/// filter so the grant tracks only matching exiled cards.
+fn grant_exiled_source(input: &str) -> OracleResult<'_, crate::types::ability::TargetFilter> {
+    alt((
+        value(TargetFilter::ExiledBySource, tag("the exiled card")),
+        // "all [creature] cards exiled with it/~". The optional "creature"
+        // qualifier intersects `ExiledBySource` with the Creature type filter
+        // (CR 205.3 — a creature card is type Creature in exile) so Agatha grants
+        // only creature cards' abilities; the untyped form (Myr Welder, Territory
+        // Forge) stays a bare `ExiledBySource`.
+        (
+            tag("all "),
+            opt(tag("creature ")),
+            tag("cards exiled with "),
+            alt((tag("it"), tag("~"))),
+        )
+            .map(|(_, creature_qualifier, _, _)| match creature_qualifier {
+                Some(_) => TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                None => TargetFilter::ExiledBySource,
+            }),
+    ))
+    .parse(input)
+}
+
+/// CR 613.1d: Parse a layer-4 type-removal predicate `"isn't a/an <core type>"`
+/// (e.g. `"isn't a creature"`). Scans at word boundaries so the predicate can
+/// appear anywhere in the modification text (the subject and any trailing
+/// duration are stripped by the caller). Returns the removed [`CoreType`], or
+/// `None` when no such predicate is present.
+fn parse_isnt_a_core_type(lower: &str) -> Option<CoreType> {
+    fn core_type_word(input: &str) -> OracleResult<'_, CoreType> {
+        alt((
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Battle, tag("battle")),
+            value(CoreType::Creature, tag("creature")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(input)
+    }
+    fn predicate(input: &str) -> OracleResult<'_, CoreType> {
+        preceded(alt((tag("isn't an "), tag("isn't a "))), core_type_word).parse(input)
+    }
+    nom_primitives::scan_split_at_phrase(lower, |i| predicate(i))
+        .and_then(|(_, clause)| predicate(clause).ok().map(|(_, ct)| ct))
+}
+
+/// CR 305.6 + CR 305.7 + CR 205.3i: Recognize a "gain all basic land types" /
+/// "gain all land types" predicate (and the `has`/`have`/`are`/`is` copula
+/// variants) and map it to the matching all-land-type continuous modification.
+///
+/// `AddAllBasicLandTypes` adds the five basic land subtypes (Plains, Island,
+/// Swamp, Mountain, Forest — CR 305.6) in addition to a land's existing types;
+/// each grants its intrinsic mana ability per CR 305.6 / CR 305.7.
+/// `AddAllLandTypes` adds every one of the 17 land subtypes (CR 205.3i). Built
+/// for the whole "[lands you control] gain all basic land types until <duration>"
+/// class (Energybending), not a single card. The verb/copula is matched but
+/// otherwise discarded — the affected filter and duration are owned by the
+/// caller (`build_continuous_clause` / the static/anthem parsers).
+fn parse_all_land_types_modification(text: &str) -> Option<ContinuousModification> {
+    let lower = text.trim().trim_end_matches('.').trim().to_lowercase();
+    super::oracle_nom::bridge::nom_parse_lower(&lower, |i| {
+        let (i, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+            tag("are "),
+            tag("is "),
+        )))
+        .parse(i)?;
+        // Longer phrase first so "all basic land types" wins over "all land types".
+        all_consuming(alt((
+            value(
+                ContinuousModification::AddAllBasicLandTypes,
+                tag("all basic land types"),
+            ),
+            value(
+                ContinuousModification::AddAllLandTypes,
+                tag("all land types"),
+            ),
+        )))
+        .parse(i)
+    })
 }
 
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
@@ -653,6 +788,14 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // it"), counter-gated, and battlefield sources stay a gap (follow-ups).
     if let Some(source) = parse_grant_all_activated_abilities_source(unquoted_tp.lower) {
         return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source }];
+    }
+
+    // CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" / "gain all
+    // land types" (and the copula variants) — the whole predicate maps to a
+    // single all-land-type modification. Checked early so the trailing "types"
+    // noun is never mistaken for a P/T or keyword token by the parsers below.
+    if let Some(modification) = parse_all_land_types_modification(unquoted_tp.original) {
+        return vec![modification];
     }
 
     let mut modifications = Vec::new();
@@ -698,6 +841,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         });
     }
 
+    // CR 613.1d: Layer 4 type removal — "isn't a/an <core type>" (e.g. Blink's
+    // Alien Angel token: "this token isn't a creature until end of turn"). The
+    // duration is already stripped by the caller. This is the building-block
+    // analogue of the static-dispatch "~ isn't a <type> as long as <cond>" arm,
+    // so the same removal works as a one-shot continuous effect on a token.
+    if let Some(core_type) = parse_isnt_a_core_type(unquoted_tp.lower) {
+        modifications.push(ContinuousModification::RemoveType { core_type });
+    }
+
     // CR 510.1c: Aura/Equipment-style compound statics can attach the
     // toughness-combat-damage rule to the same affected object as a P/T
     // modification ("Enchanted creature gets +0/+2 and assigns...").
@@ -716,6 +868,19 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     {
         modifications.push(ContinuousModification::AddStaticMode {
             mode: StaticMode::Goaded,
+        });
+    }
+
+    // CR 701.60a + CR 701.60d: "can't become suspected" prohibition riding on a
+    // compound static (Airtight Alibi: "Enchanted creature gets +2/+2 and can't
+    // become suspected"). Confers a `CantBecomeSuspected` static onto the
+    // affected creature; the suspect resolver gates on it. Mirrors the goaded
+    // designation rider above.
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "can't become suspected")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "cant become suspected")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::CantBecomeSuspected,
         });
     }
 
@@ -914,8 +1079,8 @@ pub(crate) fn push_grant_clause_modifications(
         .parse(part_lower.as_str())
         {
             if let Some(kind) = crate::types::keywords::DynamicKeywordKind::from_name(kw_name) {
-                if let Some(qty_ref) =
-                    crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
+                if let Ok((_, qty_ref)) =
+                    super::oracle_nom::quantity::parse_quantity_ref_complete(where_expr)
                 {
                     modifications.push(ContinuousModification::AddDynamicKeyword {
                         kind,
@@ -948,6 +1113,18 @@ pub(crate) fn push_grant_clause_modifications(
     {
         modifications.push(ContinuousModification::AddChosenKeyword);
         return;
+    }
+
+    // CR 702.6a: bare "equip {N}" in a keyword list ("has indestructible and
+    // equip {0}") is the equip activated ability — not an inert AddKeyword.
+    // Mirrors `classify_quoted_inner`'s pre-keyword equip dispatch.
+    if nom_tag_lower(&part_lower, &part_lower, "equip").is_some() {
+        if let Some(ability) = super::oracle::try_parse_equip(part_trimmed) {
+            modifications.push(ContinuousModification::GrantAbility {
+                definition: Box::new(ability),
+            });
+            return;
+        }
     }
 
     if let Some(kw) = map_keyword(part_trimmed) {

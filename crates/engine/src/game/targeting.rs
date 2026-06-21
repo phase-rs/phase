@@ -966,6 +966,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
         GameEvent::CreatureSuspected { object_id } => Some(*object_id),
+        GameEvent::CreatureNoLongerSuspected { object_id } => Some(*object_id),
         GameEvent::Detained { object_id } => Some(*object_id),
         GameEvent::CaseSolved { object_id } => Some(*object_id),
         GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1 => {

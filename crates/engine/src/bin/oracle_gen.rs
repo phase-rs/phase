@@ -9,7 +9,7 @@ use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
-use engine::database::{BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -869,6 +869,34 @@ fn main() {
         }
     }
 
+    // Release-gate (hybrid): keep cards available ONLY through gated sets in
+    // card-data so they stay browsable, but mark them Banned in every format so
+    // they are excluded from every format-scoped deck-builder pool. The gated
+    // sets are separately hidden from the draft/picker/deck-builder UIs below
+    // (the `is_set_gated` filter on the set list), so the sets remain
+    // un-draftable. Reprint-aware. No-op when GATED_SETS is unset/empty. See
+    // `database::set_gating`.
+    let gated_sets = set_gating::gated_sets_from_env();
+    if !gated_sets.is_empty() {
+        let banned = legalities_to_export_map(&set_gating::all_formats_banned());
+        let mut gated_count = 0usize;
+        for entry in face_index.values_mut() {
+            if set_gating::is_card_gated(&entry.printings, &gated_sets) {
+                entry.legalities = banned.clone();
+                gated_count += 1;
+            }
+        }
+        eprintln!(
+            "Set gating active ({}): marked {} card face(s) Banned in all formats (available only via gated sets)",
+            {
+                let mut codes: Vec<&str> = gated_sets.iter().map(String::as_str).collect();
+                codes.sort_unstable();
+                codes.join(",")
+            },
+            gated_count
+        );
+    }
+
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
     if let Some(ref out_path) = output {
         std::fs::write(out_path, &json)
@@ -1112,9 +1140,13 @@ fn run_set_list(remaining_args: &[String]) {
     let raw: SetListFile = serde_json::from_str(&contents)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", input.display()));
 
+    // Release-gate: hide gated sets from the picker / draft / deck-builder UIs.
+    // No-op when GATED_SETS is unset/empty. See `database::set_gating`.
+    let gated_sets = set_gating::gated_sets_from_env();
     let projected: BTreeMap<String, SetListEntry> = raw
         .data
         .into_iter()
+        .filter(|s| !set_gating::is_set_gated(&s.code, &gated_sets))
         .map(|s| {
             (
                 s.code.clone(),

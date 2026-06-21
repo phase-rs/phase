@@ -36,7 +36,7 @@ where
     Some((result, &text[consumed..]))
 }
 
-pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
+pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
 

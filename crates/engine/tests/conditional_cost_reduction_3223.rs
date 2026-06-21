@@ -142,6 +142,23 @@ This ability costs {4} less to activate if an opponent controls four or more non
     );
 }
 
+#[test]
+fn thaumaton_torpedo_cost_reduction_carries_spacecraft_attacker_condition() {
+    // #3223 follow-up: this gap is now filled by PR #3950, which models the
+    // "if you attacked with a <filter> this turn" gate as a filtered
+    // `YouAttackedWithAtLeast { count: 1, filter: Some(Spacecraft) }` condition.
+    let card = "Thaumaton Torpedo";
+    let oracle = "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. \
+This ability costs {3} less to activate if you attacked with a Spacecraft this turn.";
+    let ability = ability_with_cost_reduction(oracle, card);
+    let reduction = find_cost_reduction(&ability).unwrap();
+    assert_flat_conditional(reduction, 3, card);
+    assert!(
+        !has_surviving_cost_reduction_gap(&ability),
+        "{card}: no Unimplemented 'less to activate' node should survive"
+    );
+}
+
 // --- Coverage-honesty negatives: unmodeled conditions MUST stay a loud gap. ---
 
 /// Asserts no ability in the parse captured a cost reduction, and that an
@@ -182,14 +199,5 @@ fn wayta_trainer_prodigy_cost_reduction_stays_gapped() {
 {2}{G}, {T}: Target creature you control fights another target creature. \
 This ability costs {2} less to activate if it targets two creatures you control.\n\
 If a creature you control being dealt damage causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
-    assert_cost_reduction_stays_gapped(oracle, card);
-}
-
-#[test]
-fn thaumaton_torpedo_cost_reduction_stays_gapped() {
-    // Unmodeled condition: "if you attacked with a Spacecraft this turn."
-    let card = "Thaumaton Torpedo";
-    let oracle = "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. \
-This ability costs {3} less to activate if you attacked with a Spacecraft this turn.";
     assert_cost_reduction_stays_gapped(oracle, card);
 }

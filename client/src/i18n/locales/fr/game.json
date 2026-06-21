@@ -1,6 +1,8 @@
 {
   "resolutionProgress": {
-    "label": "Résolution {{resolved}} / {{total}}"
+    "label": "Résolution {{resolved}} / {{total}}",
+    "collapse": "Réduire la progression de résolution",
+    "expand": "Développer la progression de résolution"
   },
   "card": {
     "faceDownName": "Carte face cachée",
@@ -171,6 +173,8 @@
     "copyTooltip": "Jeton-copie d'une vraie carte",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
+    "hiddenAttachments": "+{{count}} more attached",
+    "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -208,6 +212,7 @@
     "allTo": "Tous → <name>{{label}}</name>",
     "creatureFallback": "Créature n°{{id}}",
     "planeswalkerFallback": "Planeswalker n°{{id}}",
+    "objectFallback": "Object #{{id}}",
     "you": "Vous",
     "ally": "Allié",
     "restoreDialog": "Restaurer la boîte de dialogue",
@@ -516,6 +521,7 @@
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",
     "chooseTarget": "Choisissez une cible",
+    "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Aucune cible légale disponible",
     "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "jusqu'à un(e) {{target}}",
@@ -1296,6 +1302,17 @@
     "red": "Rouge",
     "green": "Vert"
   },
+  "roomDoor": {
+    "title": "Choisir une porte",
+    "subtitle": "Choisissez la porte de la Salle sur laquelle agir",
+    "confirm": "Confirmer",
+    "option": "{{op}} {{door}}",
+    "unlock": "Déverrouiller",
+    "lock": "Verrouiller",
+    "lockOrUnlock": "Verrouiller ou déverrouiller",
+    "left": "porte gauche",
+    "right": "porte droite"
+  },
   "dialogShell": {
     "eyebrow": "Choix de partie",
     "restoreDialog": "Restaurer la boîte de dialogue",
@@ -1513,6 +1530,9 @@
     "connectionBody": "phase.rs a perdu son lien avec le moteur de jeu — le plus souvent à cause d'une mise à jour en arrière-plan activée en cours de partie. Votre dernier tour enregistré est préservé ; rechargez pour restaurer la partie.",
     "diagnostic": "diagnostic : {{reason}}",
     "showDetails": "Afficher les détails",
+    "exportGameState": "Exporter l'état de la partie",
+    "exported": "Exporté",
+    "exportFailed": "Échec de l'exportation",
     "copyDiagnostic": "Copier le diagnostic",
     "copied": "Copié !",
     "reportOnGithub": "Signaler sur GitHub",

@@ -7,12 +7,12 @@ use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
     quantity_expr_uses_recipient, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets_and_recipient, resolve_quantity_with_targets_slice,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageSource, Effect, EffectError, EffectKind, PlayerFilter, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef,
+    DamageContextSnapshot, DamageSource, Effect, EffectError, EffectKind, PlayerFilter,
+    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -25,6 +25,7 @@ use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
+#[derive(Clone, Copy)]
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
     pub(crate) controller: PlayerId,
@@ -142,6 +143,36 @@ impl DamageContext {
             has_wither: false,
             has_infect: false,
             combat_damage_poison: 0,
+        }
+    }
+}
+
+impl From<DamageContextSnapshot> for DamageContext {
+    fn from(snapshot: DamageContextSnapshot) -> Self {
+        Self {
+            source_id: snapshot.source_id,
+            controller: snapshot.controller,
+            source_is_creature: snapshot.source_is_creature,
+            has_deathtouch: snapshot.has_deathtouch,
+            has_lifelink: snapshot.has_lifelink,
+            has_wither: snapshot.has_wither,
+            has_infect: snapshot.has_infect,
+            combat_damage_poison: snapshot.combat_damage_poison,
+        }
+    }
+}
+
+impl From<&DamageContext> for DamageContextSnapshot {
+    fn from(ctx: &DamageContext) -> Self {
+        Self {
+            source_id: ctx.source_id,
+            controller: ctx.controller,
+            source_is_creature: ctx.source_is_creature,
+            has_deathtouch: ctx.has_deathtouch,
+            has_lifelink: ctx.has_lifelink,
+            has_wither: ctx.has_wither,
+            has_infect: ctx.has_infect,
+            combat_damage_poison: ctx.combat_damage_poison,
         }
     }
 }
@@ -642,6 +673,63 @@ fn build_remaining_damage_node(
     )
 }
 
+/// CR 120.4b: Build a one-shot continuation that applies an already-replaced
+/// damage event. Unlike `build_remaining_damage_node`, this does not route back
+/// through the replacement pipeline.
+fn build_post_replacement_damage_node(
+    ctx: &DamageContext,
+    event: &ProposedEvent,
+) -> Option<ResolvedAbility> {
+    let ProposedEvent::Damage {
+        target,
+        amount,
+        is_combat,
+        ..
+    } = event
+    else {
+        return None;
+    };
+
+    Some(ResolvedAbility::new(
+        Effect::ApplyPostReplacementDamage {
+            context: DamageContextSnapshot::from(ctx),
+            target: target.clone(),
+            amount: *amount,
+            is_combat: *is_combat,
+        },
+        Vec::new(),
+        ctx.source_id,
+        ctx.controller,
+    ))
+}
+
+/// CR 120.4b + CR 616.1e: Stash remaining already-replaced damage survivors so
+/// a nested life/lifelink replacement choice can resolve before Phase C
+/// continues, without re-running damage replacement/prevention selection.
+fn stash_remaining_post_replacement_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining: &[(&DamageContext, ProposedEvent)],
+) {
+    let mut iter = remaining
+        .iter()
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+    let Some(mut head) = iter.next() else {
+        if let Some(sub) = ability.sub_ability.as_ref() {
+            append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+        }
+        return;
+    };
+
+    for node in iter {
+        append_to_sub_chain(&mut head, node);
+    }
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        append_to_sub_chain(&mut head, sub.as_ref().clone());
+    }
+    append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
 /// CR 120.3 + CR 616.1e: Build a linked sub_ability chain from a sequence of
 /// (target, amount) pairs and stash it as `pending_continuation`. If the parent
 /// ability has an existing `sub_ability` chain, it is appended to the tail so
@@ -676,6 +764,42 @@ fn stash_remaining_damage_chain(
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
+/// CR 120.1 + CR 616.1e: Stash a remaining-source damage continuation where each
+/// node carries its OWN damage-source id. Unlike `stash_remaining_damage_chain`
+/// (single source for every node), this preserves PER-SOURCE identity through a
+/// replacement pause in the `EachTarget` simultaneous batch: each resumed
+/// `DealDamage` node reproduces its own source's keywords/LKI via
+/// `DamageContext::from_source` (CR 120.1: each source is independent), so a
+/// granted deathtouch/lifelink/wither/infect on one paused source is not lost or
+/// mis-attributed to another source on resume.
+fn stash_remaining_each_source_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+) {
+    let controller = ability.controller;
+    let mut iter = remaining.into_iter();
+    let Some((first_source, first_target, first_amount)) = iter.next() else {
+        // No remaining batch work — forward the parent's sub_ability so the
+        // downstream chain resumes after the pending replacement choice resolves.
+        if let Some(sub) = ability.sub_ability.as_ref() {
+            append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+        }
+        return;
+    };
+
+    let mut head =
+        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    for (source_id, target, amount) in iter {
+        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        append_to_sub_chain(&mut head, node);
+    }
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        append_to_sub_chain(&mut head, sub.as_ref().clone());
+    }
+    append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
@@ -696,6 +820,19 @@ pub fn resolve(
             ),
             _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
         };
+
+    // CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Multi-source per-power damage —
+    // "up to N / any number of target creatures you control each deal damage
+    // equal to their power to <recipient>". Every leading object target is an
+    // independent source; the LAST object target is the shared recipient. Each
+    // source deals damage equal to its OWN power (CR 208.1: power is a modifiable
+    // characteristic; CR 608.2: read as the effect resolves), re-resolved against
+    // a single-source target slice so `Power{Target}` reads that member, not the
+    // first slot. Diverges from the single-source `Target` path (which reads
+    // `targets[0]` and damages `targets[1..]`), so it is handled separately.
+    if matches!(damage_source, Some(DamageSource::EachTarget)) {
+        return resolve_each_target_power_damage(state, ability, target_filter, events);
+    }
 
     // CR 120.3: Determine damage source.
     let ctx = match damage_source {
@@ -719,6 +856,12 @@ pub fn resolve(
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         None => DamageContext::from_source(state, ability.source_id)
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        // CR 120.1: multi-source per-power damage is dispatched to
+        // `resolve_each_target_power_damage` above (each source has its own
+        // `DamageContext`), so this single-source `ctx` match is never reached.
+        Some(DamageSource::EachTarget) => {
+            unreachable!("EachTarget handled by resolve_each_target_power_damage")
+        }
     };
 
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
@@ -792,6 +935,259 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 120.3 + CR 120.4b: Resume applying a damage event that already completed
+/// replacement/prevention selection. Used by internal continuations only.
+pub fn resolve_post_replacement(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (context, target, amount, is_combat) = match &ability.effect {
+        Effect::ApplyPostReplacementDamage {
+            context,
+            target,
+            amount,
+            is_combat,
+        } => (*context, target.clone(), *amount, *is_combat),
+        _ => {
+            return Err(EffectError::MissingParam(
+                "ApplyPostReplacementDamage".to_string(),
+            ));
+        }
+    };
+    let ctx = DamageContext::from(context);
+    let event = ProposedEvent::Damage {
+        source_id: ctx.source_id,
+        target,
+        amount,
+        is_combat,
+        applied: HashSet::new(),
+    };
+
+    if matches!(
+        apply_damage_after_replacement(state, &ctx, event, is_combat, events),
+        DamageResult::NeedsChoice
+    ) {
+        return Ok(());
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Resolve "each [of N target
+/// creatures] deals damage equal to their power to <recipient>"
+/// (`DamageSource::EachTarget`).
+///
+/// `ability.targets` is laid out `[source_0, …, source_{n-1}, recipient]` — the
+/// variable-count source set (chosen via `multi_target` on the `TargetOnly`
+/// picker or the prior sentence) followed by the single shared recipient slot.
+/// Every source object deals damage equal to ITS OWN power: the amount is
+/// re-resolved for each source against a one-element target slice so the
+/// `Power{Target}` ref reads that member (CR 208.1: power is a modifiable
+/// characteristic; CR 608.2: current value at resolution), then routed through
+/// the full replacement/prevention pipeline against the recipient (CR 120.4b).
+///
+/// CR 120.1: each member is an independent damage source, so each builds its own
+/// `DamageContext` (its own deathtouch/wither/infect/lifelink keywords apply).
+///
+/// SIMULTANEOUS BATCH (CR 120.4a + CR 120.6 + CR 120.10). All sources deal their
+/// damage as one event set, mirroring the combat simultaneous-damage primitive
+/// (`combat_damage.rs` `apply_combat_damage`, CR 510.2) but for a non-combat
+/// spell effect, reusing its decomposed primitives directly:
+///
+/// - Every source's own-power amount is resolved up front, BEFORE any damage is
+///   marked, so all amounts read the same pre-batch power (CR 608.2).
+/// - **Phase A (Collect):** each source builds its own `DamageContext` and a
+///   `ProposedEvent::Damage` through `pre_replacement_damage_gate` (0-damage,
+///   protection, prohibition gates) without applying anything yet.
+/// - **Phase B (Replace):** each proposed event runs `replacement::replace_event`
+///   (the non-combat pipeline). A `NeedsChoice` here means a replacement on the
+///   recipient needs a player ordering choice — the batch pauses and the
+///   remaining sources (this paused source first) are stashed with PER-SOURCE
+///   identity so each resumes through its OWN source id's keywords/LKI.
+/// - **Phase C (Apply):** each surviving post-replacement event is applied via
+///   `apply_damage_after_replacement` with that source's context. Because all
+///   marks accumulate onto the one recipient before SBAs run (CR 704), combined
+///   marked damage (CR 120.6 lethal) and combined excess (CR 120.10) are
+///   correct, and deathtouch/wither/lifelink/infect apply per source.
+fn resolve_each_target_power_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let amount = match &ability.effect {
+        Effect::DealDamage { amount, .. } => amount,
+        _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
+    };
+
+    // Partition the object targets into sources (all but the last) and the
+    // shared recipient (the last object target). A non-object implicit recipient
+    // (e.g. "deal damage to <player>") is resolved via `player_context_target`.
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    let (recipient, source_ids): (TargetRef, &[ObjectId]) =
+        if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
+            // CR 120.3a: implicit/context player recipient (damage to a player
+            // causes life loss) — every object target is a source.
+            (player_recipient, object_targets.as_slice())
+        } else if let Some((last, sources)) = object_targets.split_last() {
+            (TargetRef::Object(*last), sources)
+        } else {
+            // No targets chosen ("up to N" with zero chosen) — nothing happens.
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        };
+
+    // CR 608.2 + CR 208.1: read every source's own power up front, before any
+    // damage is marked, so the simultaneous batch reads the pre-batch power for
+    // each member (one source dealing damage must not change another's power, and
+    // marking damage on the recipient must not change source powers).
+    let batch: Vec<(ObjectId, DamageContext, u32)> = source_ids
+        .iter()
+        .map(|&source_id| {
+            let ctx = DamageContext::from_source(state, source_id)
+                .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+            // Resolve the amount against a single-element slice so `Power{Target}`
+            // binds to THIS source (CR 120.1: each is an independent source).
+            let source_slice = [TargetRef::Object(source_id)];
+            let amt = resolve_quantity_with_targets_slice(
+                state,
+                amount,
+                ability.controller,
+                source_id,
+                &source_slice,
+            )
+            .max(0) as u32;
+            (source_id, ctx, amt)
+        })
+        .collect();
+
+    // --- Phase A: Collect proposed damage events (no application yet). ---
+    // CR 120.8 / CR 702.16: per-source pre-replacement gate. Fully gated sources
+    // (0 damage, protection, prohibition) contribute nothing; the gate already
+    // emitted any required DamagePrevented.
+    let mut entries: Vec<(usize, &DamageContext)> = Vec::with_capacity(batch.len());
+    let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(batch.len());
+    for (idx, (_, ctx, amt)) in batch.iter().enumerate() {
+        if let Some(proposed) =
+            pre_replacement_damage_gate(state, ctx, &recipient, *amt, false, events)
+        {
+            entries.push((idx, ctx));
+            proposed_events.push(proposed);
+        }
+    }
+
+    // --- Phase B: Replacement (per-event, non-combat pipeline). ---
+    // CR 120.4b + CR 614 + CR 615. Collected so Phase C applies all survivors
+    // only after every replacement has resolved (true simultaneity from the
+    // replacement perspective, matching the combat batch's two-pass structure).
+    let mut survivors: Vec<(&DamageContext, ProposedEvent)> = Vec::with_capacity(entries.len());
+    for (&(idx, ctx), proposed) in entries.iter().zip(proposed_events) {
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => survivors.push((ctx, event)),
+            ReplacementResult::Prevented => {
+                // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
+                // this way") resolves immediately afterward for non-combat damage.
+                if state.post_replacement_continuation.is_some() {
+                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    );
+                }
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 120.4b + CR 616.1e: A replacement on THIS source's damage to
+                // the recipient needs a player ordering choice — pause the batch.
+                // The paused source's own damage event lives in `pending_replacement`
+                // and resumes through `handle_replacement_choice` (which rebuilds
+                // its `DamageContext` from the event's own `source_id`). Apply the
+                // survivors already chosen this pass, then stash only the sources
+                // AFTER this one (`batch[idx + 1..]`) — each with PER-SOURCE
+                // identity so it resumes through its OWN source id's keywords/LKI,
+                // never flattened to a single source (the exact defect this batch
+                // replaces). Including `idx` would double-deal the paused source.
+                apply_batch_survivors_before_replacement_pause(state, &survivors, events);
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                let remaining = batch
+                    .iter()
+                    .skip(idx + 1)
+                    .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
+                stash_remaining_each_source_damage(state, ability, remaining);
+                return Ok(());
+            }
+        }
+    }
+
+    // --- Phase C: Apply survivors + record per-source identity (CR 120.3). ---
+    if !apply_batch_survivors(state, ability, &survivors, events) {
+        return Ok(());
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// Apply each surviving post-replacement `Damage` event with its source's own
+/// context. CR 120.6 + CR 120.10: marks accumulate onto the shared recipient so
+/// combined lethal/excess is computed correctly once all sources have marked.
+fn apply_batch_survivors(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    survivors: &[(&DamageContext, ProposedEvent)],
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    for (idx, (ctx, event)) in survivors.iter().enumerate() {
+        // CR 120.3 + CR 120.4b: apply the post-replacement event WITHOUT
+        // re-running the replacement pipeline. If damage application itself
+        // pauses on a nested life/lifelink replacement choice, park the remaining
+        // post-replacement survivors so the resume path does not consult CR
+        // 614/615 damage replacements a second time.
+        if matches!(
+            apply_damage_after_replacement(state, ctx, event.clone(), false, events),
+            DamageResult::NeedsChoice
+        ) {
+            stash_remaining_post_replacement_damage(state, ability, &survivors[idx + 1..]);
+            return false;
+        }
+    }
+    true
+}
+
+/// CR 120.4b + CR 616.1e: Apply already-selected survivors before surfacing a
+/// Phase B replacement ordering choice. That choice is already parked in
+/// `state.pending_replacement`, so this path must not allow a nested Phase C
+/// life/lifelink prompt to overwrite it. The terminal Phase C path uses
+/// `apply_batch_survivors` and preserves nested pauses with post-replacement
+/// continuations.
+fn apply_batch_survivors_before_replacement_pause(
+    state: &mut GameState,
+    survivors: &[(&DamageContext, ProposedEvent)],
+    events: &mut Vec<GameEvent>,
+) {
+    for (ctx, event) in survivors {
+        let _ = apply_damage_after_replacement(state, ctx, event.clone(), false, events);
+    }
 }
 
 /// Deal uniform damage to every matching object and (optionally) every matching
@@ -888,6 +1284,12 @@ pub fn resolve_all(
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         None => DamageContext::from_source(state, ability.source_id)
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        // CR 120.1: `EachTarget` (multi-source per-power) is only produced by the
+        // parser for the single-recipient `DealDamage` shape; the batch
+        // `DamageAll` form is never constructed with it.
+        Some(DamageSource::EachTarget) => {
+            unreachable!("EachTarget is only produced for DealDamage, not DamageAll")
+        }
     };
 
     // CR 120.3 + CR 609.7: Assemble the full simultaneous recipient list as a
@@ -1375,6 +1777,155 @@ pub fn resolve_each_player(
     Ok(())
 }
 
+/// CR 120.1 + CR 120.3: "Up to two target creatures you control each deal damage
+/// equal to their power to target creature" (Band Together, Allies at Last,
+/// Friendly Rivalry, Graceful Takedown). Combo Attack's "your team controls"
+/// (Two-Headed Giant team scope, CR 810) is out of scope and fails closed.
+///
+/// Each chosen source creature deals damage equal to ITS OWN power to the single
+/// recipient, with that source creature as the damage source (CR 120.1). The
+/// per-source `DamageContext` is built from each source object so its keywords
+/// (deathtouch, lifelink, …) and identity travel with its damage. Power is read
+/// from the live object, falling back to last known information (CR 113.7a) when
+/// a source has left the battlefield between announcement and resolution.
+///
+/// Target layout: the source slots are surfaced first (0..=2) and the recipient
+/// slot last by `ability_utils::collect_target_slots`, so `ability.targets` is
+/// `[source.., recipient]`. The recipient is the final object target; every
+/// earlier object target is a source.
+pub fn resolve_each_deals_equal_to_power(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
+        return Err(EffectError::MissingParam(
+            "EachDealsDamageEqualToPower".to_string(),
+        ));
+    }
+
+    // CR 115.1: collect the chosen object targets in declaration order.
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    // The recipient is the last object target; the sources are the rest. With
+    // zero sources chosen ("up to two" → 0) there is exactly one object target
+    // (the recipient) and no damage is dealt. Fewer than one object target means
+    // the recipient became illegal and the spell did nothing (CR 608.2b).
+    let Some((&recipient_id, source_ids)) = object_targets.split_last() else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+
+    for (i, &source_id) in source_ids.iter().enumerate() {
+        // CR 113.7a + CR 208.3: power from the live object, falling back to LKI
+        // when the source left the battlefield after targets were chosen.
+        let power = object_power_with_lki(state, source_id);
+        if power <= 0 {
+            continue;
+        }
+        // CR 120.1: each source creature is the source of its own damage.
+        let ctx = DamageContext::from_source(state, source_id)
+            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        match apply_damage_to_target(
+            state,
+            &ctx,
+            TargetRef::Object(recipient_id),
+            power as u32,
+            false,
+            events,
+        )? {
+            DamageResult::Applied(_) => {}
+            DamageResult::NeedsChoice => {
+                // CR 120.3 + CR 616.1e: This source's damage paused for a
+                // replacement choice. Each remaining source deals its own power
+                // from its own object, so stash one continuation node per
+                // remaining source (each carrying its own `source_id`), then the
+                // parent sub_ability tail.
+                stash_remaining_each_deals_chain(
+                    state,
+                    ability,
+                    &source_ids[i + 1..],
+                    recipient_id,
+                );
+                mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
+                return Ok(());
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
+/// Last Known Information when the object has left the battlefield. Mirrors the
+/// `ObjectScope::Source` arm of `quantity::resolve_object_pt`.
+fn object_power_with_lki(state: &GameState, id: ObjectId) -> i32 {
+    state
+        .objects
+        .get(&id)
+        .and_then(|obj| obj.power)
+        .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
+        .unwrap_or(0)
+}
+
+/// CR 120.1 + CR 616.1e: Build one continuation node per remaining source after a
+/// replacement choice paused mid-resolution. Each node deals that source's power
+/// to the recipient with that source creature as the damage source (its own
+/// `source_id`). The parent's sub_ability tail is appended last so any downstream
+/// chain resumes once the choice resolves.
+fn stash_remaining_each_deals_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining_sources: &[ObjectId],
+    recipient_id: ObjectId,
+) {
+    let mut head: Option<ResolvedAbility> = None;
+    for &source_id in remaining_sources {
+        let power = object_power_with_lki(state, source_id);
+        if power <= 0 {
+            continue;
+        }
+        let node = build_remaining_damage_node(
+            source_id,
+            ability.controller,
+            TargetRef::Object(recipient_id),
+            power as u32,
+        );
+        match head.as_mut() {
+            Some(h) => append_to_sub_chain(h, node),
+            None => head = Some(node),
+        }
+    }
+    match head {
+        Some(mut h) => {
+            if let Some(sub) = ability.sub_ability.as_ref() {
+                append_to_sub_chain(&mut h, sub.as_ref().clone());
+            }
+            append_to_pending_continuation(state, Some(Box::new(h)));
+        }
+        None => {
+            if let Some(sub) = ability.sub_ability.as_ref() {
+                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1403,6 +1954,181 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 120.1 + CR 120.3: Band Together — casting "Up to two target creatures
+    /// you control each deal damage equal to their power to another target
+    /// creature" with a 3/2 and a 2/2 source each deals its own power (3 and 2)
+    /// to a single recipient, which therefore takes 5 marked damage. Each source
+    /// is its own damage source (CR 120.1); the recipient is the last target.
+    #[test]
+    fn band_together_two_sources_deal_combined_power_to_recipient() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        const BAND_TOGETHER: &str = "Up to two target creatures you control each deal damage equal to their power to another target creature.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let src_a = scenario.add_creature(P0, "Striker A", 3, 2).id();
+        let src_b = scenario.add_creature(P0, "Striker B", 2, 2).id();
+        // CR 120.3e: a 0/9 recipient survives 5 marked damage, so the marked
+        // total is directly observable post-resolution.
+        let recipient = scenario.add_creature(P1, "Big Wall", 0, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Band Together", false, BAND_TOGETHER)
+            .id();
+        // Fund the pool generously; the source/recipient choice is the only
+        // interaction under test.
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 6],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+        }
+
+        // CR 601.2c: source slots first (src_a, src_b), recipient slot last.
+        let outcome = runner
+            .cast(spell)
+            .target_objects(&[src_a, src_b, recipient])
+            .resolve();
+
+        // CR 120.1 + CR 120.3e: 3 (Striker A) + 2 (Striker B) = 5 marked on the
+        // recipient.
+        assert_eq!(
+            outcome.damage_marked(recipient),
+            5,
+            "recipient should take each source's power (3 + 2) = 5"
+        );
+        // CR 120.1: the sources are not damaged (one-directional, unlike fight).
+        assert_eq!(outcome.damage_marked(src_a), 0);
+        assert_eq!(outcome.damage_marked(src_b), 0);
+    }
+
+    /// CR 120.3f + CR 120.4b + CR 616.1e: In the `EachTarget` simultaneous batch,
+    /// Phase C can still pause after damage is dealt if lifelink life gain needs a
+    /// replacement choice. Remaining already-replaced damage survivors must be
+    /// parked as post-replacement continuations, not fresh `DealDamage` nodes that
+    /// would re-run damage replacement/prevention selection.
+    #[test]
+    fn each_target_phase_c_lifelink_pause_stashes_post_replacement_survivors() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let source_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lifelink Source A".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Lifelink Source B".to_string(),
+            Zone::Battlefield,
+        );
+        for (source, power) in [(source_a, 2), (source_b, 3)] {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.base_power = Some(power);
+            obj.toughness = Some(2);
+            obj.base_toughness = Some(2);
+            obj.keywords.push(Keyword::Lifelink);
+        }
+        let recipient = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.base_power = Some(0);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+
+        let replacement_host = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Life Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_host)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::GainLife)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Life replacement".to_string()),
+            );
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::EachTarget),
+            },
+            vec![
+                TargetRef::Object(source_a),
+                TargetRef::Object(source_b),
+                TargetRef::Object(recipient),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state.objects[&recipient].damage_marked, 2,
+            "first source's post-replacement damage applies before lifelink pauses"
+        );
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("remaining post-replacement survivor must be stashed");
+        match &cont.chain.effect {
+            Effect::ApplyPostReplacementDamage {
+                context,
+                target,
+                amount,
+                is_combat,
+            } => {
+                assert_eq!(context.source_id, source_b);
+                assert_eq!(context.controller, PlayerId(0));
+                assert!(context.has_lifelink);
+                assert_eq!(*target, TargetRef::Object(recipient));
+                assert_eq!(*amount, 3);
+                assert!(!*is_combat);
+            }
+            other => panic!("expected post-replacement damage continuation, got {other:?}"),
+        }
     }
 
     /// CR 122.1c: damage to a permanent with a shield counter is prevented and
@@ -4384,5 +5110,285 @@ mod tests {
         // CR 120.3e: BOTH creatures marked 1 (controller=None means no exclusion).
         assert_eq!(state.objects[&own_creature].damage_marked, 1);
         assert_eq!(state.objects[&opp_creature].damage_marked, 1);
+    }
+
+    // --- "deals damage equal to <source quantity> to any other target" ---
+    //
+    // CR 120.1 + CR 115.4: A creature's ability that deals damage "equal to his
+    // power" / "equal to the number of +1/+1 counters on him" to "any other
+    // target" parses to `Effect::DealDamage { amount: <source quantity>, target:
+    // Typed{ properties: [Another] } }`. Per CR 115.4 "another target" excludes
+    // the ability's own source from the legal targets (the `Another` marker),
+    // while the runtime still enumerates players + creatures/planeswalkers/
+    // battles (Screaming Nemesis precedent). These tests drive the real parsed
+    // output through the activation/resolution pipeline.
+
+    /// Extract the activated ability definition that a parsed "gains
+    /// \"{T}: …\" until end of turn" trigger grants.
+    #[cfg(test)]
+    fn extract_granted_ability(
+        oracle: &str,
+        card_name: &str,
+    ) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{ContinuousModification, Effect};
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            card_name,
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .into_iter()
+            .next()
+            .expect("cast trigger present");
+        let execute = trigger.execute.expect("trigger has an execute ability");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected GenericEffect granting an ability, got {:?}",
+                execute.effect
+            );
+        };
+        let modification = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::GrantAbility { definition } => Some((**definition).clone()),
+                _ => None,
+            });
+        modification.expect("a GrantAbility modification")
+    }
+
+    /// CR 120.1 + CR 115.4 + CR 208.3 — DISCRIMINATING runtime gate for Iron
+    /// Fist, Living Weapon. Its cast-trigger grants "{T}: ~ deals damage equal
+    /// to his power to any other target". Parsing the full card, attaching the
+    /// granted ability to a 4-power Iron Fist, and activating it at an opponent
+    /// creature must deal exactly 4 damage. Reverting the gendered-pronoun
+    /// quantity fix makes "his power" fall to `Effect::Unimplemented`, so the
+    /// granted ability deals no damage and `ActivateAbility` never reaches a
+    /// damage resolution — this assertion flips.
+    #[test]
+    fn iron_fist_granted_ability_deals_damage_equal_to_power() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        let granted = extract_granted_ability(
+            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
+             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
+            "Iron Fist, Living Weapon",
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let iron_fist = scenario
+            .add_creature(P0, "Iron Fist, Living Weapon", 4, 4)
+            .with_ability_definition(granted)
+            .id();
+        let victim = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+        let mut runner = scenario.build();
+
+        let ability_index = runner.state().objects[&iron_fist].abilities.len() - 1;
+        let outcome = runner
+            .activate(iron_fist, ability_index)
+            .target_object(victim)
+            .resolve();
+
+        // CR 208.3: damage equals the source's power (4).
+        assert_eq!(
+            outcome.state().objects[&victim].damage_marked,
+            4,
+            "Iron Fist must deal damage equal to his power (4) to the chosen other target"
+        );
+    }
+
+    /// CR 115.4 — DISCRIMINATING runtime gate that "any OTHER target" (i.e.
+    /// "another target") excludes the source. Iron Fist's granted ability must
+    /// NOT offer Iron Fist itself as a legal target. If the `Another` exclusion
+    /// were lost, the source would appear in the legal-target set.
+    #[test]
+    fn iron_fist_granted_ability_excludes_itself_as_target() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+        use crate::types::TargetRef;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        let granted = extract_granted_ability(
+            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
+             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
+            "Iron Fist, Living Weapon",
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let iron_fist = scenario
+            .add_creature(P0, "Iron Fist, Living Weapon", 4, 4)
+            .with_ability_definition(granted)
+            .id();
+        let victim = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+        let mut runner = scenario.build();
+
+        let ability_index = runner.state().objects[&iron_fist].abilities.len() - 1;
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: iron_fist,
+                ability_index,
+            })
+            .expect("activation announced");
+
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected TargetSelection after activation, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let legal = &target_slots[0].legal_targets;
+        assert!(
+            !legal.contains(&TargetRef::Object(iron_fist)),
+            "'any other target' must exclude the source (Iron Fist), got {legal:?}"
+        );
+        assert!(
+            legal.contains(&TargetRef::Object(victim)),
+            "the opponent creature must be a legal target, got {legal:?}"
+        );
+    }
+
+    /// CR 120.1 + CR 122.1 + CR 115.4 — DISCRIMINATING runtime gate for Red
+    /// Hulk's Enrage reflex. Its reflexive "he deals damage equal to the number
+    /// of +1/+1 counters on him to any other target" parses to
+    /// `DealDamage { amount: CountersOn{Source, P1P1}, target: Another }`.
+    /// Resolving that effect against a Red Hulk carrying 3 +1/+1 counters must
+    /// deal 3 damage to the chosen other target, and must exclude Red Hulk
+    /// itself. Reverting the "on him" source-pronoun fix routes the reflex to
+    /// `Effect::Unimplemented`, dealing 0 damage — this flips.
+    #[test]
+    fn red_hulk_reflex_deals_damage_equal_to_counter_count() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+        use crate::types::TargetRef;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        // Pull the reflexive damage effect out of the parsed enrage trigger so the
+        // runtime test exercises the real parser output.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Reach, trample\nEnrage — Whenever Red Hulk is dealt damage, put a +1/+1 \
+             counter on him. When you do, he deals damage equal to the number of +1/+1 \
+             counters on him to any other target.",
+            "Red Hulk",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed.triggers.into_iter().next().expect("enrage trigger");
+        let execute = trigger.execute.expect("trigger execute");
+        let reflex = execute
+            .sub_ability
+            .as_deref()
+            .expect("reflexive when-you-do sub-ability")
+            .clone();
+        assert!(
+            matches!(
+                &*reflex.effect,
+                crate::types::ability::Effect::DealDamage {
+                    amount: crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::CountersOn {
+                            scope: crate::types::ability::ObjectScope::Source,
+                            counter_type: Some(CounterType::Plus1Plus1),
+                        },
+                    },
+                    ..
+                }
+            ),
+            "reflex must deal damage equal to +1/+1 counters on the source, got {:?}",
+            reflex.effect
+        );
+
+        // Attach the reflexive damage as a no-cost activated ability so it can be
+        // driven through the activation/resolution pipeline; Red Hulk carries 3
+        // counters.
+        let mut ability = reflex;
+        ability.kind = crate::types::ability::AbilityKind::Activated;
+        ability.cost = None;
+        ability.condition = None;
+
+        // Build a fresh scenario for each assertion: the announce-and-inspect
+        // pass leaves a target prompt open, so the resolve pass uses its own
+        // runner.
+        let build_red_hulk = |ability: crate::types::ability::AbilityDefinition| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let red_hulk = {
+                let mut builder = scenario.add_creature(P0, "Red Hulk", 7, 7);
+                builder.with_plus_counters(3);
+                builder.with_ability_definition(ability);
+                builder.id()
+            };
+            let victim = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+            (scenario.build(), red_hulk, victim)
+        };
+
+        // CR 115.4: "any other target" ("another target") excludes the source.
+        {
+            let (mut runner, red_hulk, victim) = build_red_hulk(ability.clone());
+            let ability_index = runner.state().objects[&red_hulk].abilities.len() - 1;
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: red_hulk,
+                    ability_index,
+                })
+                .expect("activation announced");
+            let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected TargetSelection, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert!(
+                !target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(red_hulk)),
+                "'any other target' must exclude Red Hulk itself"
+            );
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(victim)),
+                "the opponent creature must be a legal target"
+            );
+        }
+
+        // CR 122.1: damage equals the number of +1/+1 counters on the source (3).
+        {
+            let (mut runner, red_hulk, victim) = build_red_hulk(ability);
+            let ability_index = runner.state().objects[&red_hulk].abilities.len() - 1;
+            let outcome = runner
+                .activate(red_hulk, ability_index)
+                .target_object(victim)
+                .resolve();
+            assert_eq!(
+                outcome.state().objects[&victim].damage_marked,
+                3,
+                "Red Hulk's reflex must deal damage equal to its +1/+1 counter count (3)"
+            );
+        }
+        // Silence the unused CounterType import on builds where the matches! arm
+        // already consumed it via the qualified path.
+        let _ = CounterType::Plus1Plus1;
     }
 }

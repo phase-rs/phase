@@ -1963,18 +1963,15 @@ fn parse_highest_mana_value_library_suffix(
 ) -> Result<(&str, Vec<FilterProp>), nom::Err<OracleError<'_>>> {
     let (rest, _) = tag("with the highest mana value among cards in your library with mana value ")
         .parse(input)?;
-    let (rest, threshold) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest)
-    {
-        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
-            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
-        ("", QuantityExpr::Ref { qty })
-    } else {
-        let (rest, _) = tag("less than or equal to ").parse(rest)?;
-        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
-            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
-        ("", QuantityExpr::Ref { qty })
-    };
+    let (rest, threshold) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest) {
+            let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
+            ("", QuantityExpr::Ref { qty })
+        } else {
+            let (rest, _) = tag("less than or equal to ").parse(rest)?;
+            let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
+            ("", QuantityExpr::Ref { qty })
+        };
 
     let eligible_filter = TargetFilter::Typed(
         TypedFilter::card()
@@ -4823,6 +4820,26 @@ mod tests {
             OracleDiagnostic::TargetFallback { context, .. }
                 if context == "search-filter-suffix unmatched"
         )));
+    }
+
+    #[test]
+    fn highest_mana_value_library_suffix_rejects_partial_counter_threshold_tail() {
+        assert!(
+            parse_highest_mana_value_library_suffix(
+                "with the highest mana value among cards in your library with mana value x or less, where x is the number of charge counters on ~ plus one",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn highest_mana_value_library_suffix_rejects_partial_life_gained_threshold_tail() {
+        assert!(
+            parse_highest_mana_value_library_suffix(
+                "with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn plus one",
+            )
+            .is_err()
+        );
     }
 
     #[test]

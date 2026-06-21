@@ -121,8 +121,12 @@ pub fn resolve_double_pt(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (mode, target_filter) = match &ability.effect {
-        Effect::DoublePT { mode, target } => (mode, target),
+    let (mode, target_filter, factor) = match &ability.effect {
+        Effect::DoublePT {
+            mode,
+            target,
+            factor,
+        } => (mode, target, *factor),
         _ => return Ok(()),
     };
 
@@ -135,7 +139,7 @@ pub fn resolve_double_pt(
     let ids = crate::game::effects::effect_object_targets(target_filter, &effective_targets);
 
     for obj_id in ids {
-        let modifications = double_modifications(state, obj_id, mode)?;
+        let modifications = double_modifications(state, obj_id, mode, factor)?;
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
@@ -160,8 +164,12 @@ pub fn resolve_double_pt_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (mode, target_filter) = match &ability.effect {
-        Effect::DoublePTAll { mode, target } => (mode, target.clone()),
+    let (mode, target_filter, factor) = match &ability.effect {
+        Effect::DoublePTAll {
+            mode,
+            target,
+            factor,
+        } => (mode, target.clone(), *factor),
         _ => return Ok(()),
     };
 
@@ -177,7 +185,7 @@ pub fn resolve_double_pt_all(
         .collect();
 
     for obj_id in matching {
-        let modifications = double_modifications(state, obj_id, mode)?;
+        let modifications = double_modifications(state, obj_id, mode, factor)?;
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
@@ -196,36 +204,42 @@ pub fn resolve_double_pt_all(
     Ok(())
 }
 
-/// CR 701.10b/c: Compute +X/+Y modifications that double a creature's current P/T.
-/// Snapshot the current power/toughness at resolution time, as the CR specifies.
+/// CR 701.10b/c + CR 613.4c: Compute the layer-7c modifications that multiply a
+/// creature's current P/T by `factor`. Snapshot the current power/toughness at
+/// resolution time, as the CR specifies, and add `(factor - 1)` copies of that
+/// snapshot: `factor == 2` ("double") adds +P/+T per CR 701.10b; `factor == 3`
+/// ("triple") adds +2P/+2T; etc. CR 701.10c is handled implicitly — adding a
+/// negative snapshot multiple yields the correct -X/-Y result for negative P/T.
 fn double_modifications(
     state: &GameState,
     obj_id: ObjectId,
     mode: &DoublePTMode,
+    factor: u32,
 ) -> Result<Vec<ContinuousModification>, EffectError> {
     let obj = state
         .objects
         .get(&obj_id)
         .ok_or(EffectError::ObjectNotFound(obj_id))?;
+    // CR 701.10b: "double" adds 1x the snapshot; generalize to (factor - 1)x.
+    let added_copies = i32::try_from(factor).unwrap_or(i32::MAX).saturating_sub(1);
     let mut mods = Vec::new();
-    match mode {
-        DoublePTMode::Power => {
-            if let Some(p) = obj.power {
-                mods.push(ContinuousModification::AddPower { value: p });
-            }
+    let add_power = matches!(mode, DoublePTMode::Power | DoublePTMode::PowerAndToughness);
+    let add_toughness = matches!(
+        mode,
+        DoublePTMode::Toughness | DoublePTMode::PowerAndToughness
+    );
+    if add_power {
+        if let Some(p) = obj.power {
+            mods.push(ContinuousModification::AddPower {
+                value: p.saturating_mul(added_copies),
+            });
         }
-        DoublePTMode::Toughness => {
-            if let Some(t) = obj.toughness {
-                mods.push(ContinuousModification::AddToughness { value: t });
-            }
-        }
-        DoublePTMode::PowerAndToughness => {
-            if let Some(p) = obj.power {
-                mods.push(ContinuousModification::AddPower { value: p });
-            }
-            if let Some(t) = obj.toughness {
-                mods.push(ContinuousModification::AddToughness { value: t });
-            }
+    }
+    if add_toughness {
+        if let Some(t) = obj.toughness {
+            mods.push(ContinuousModification::AddToughness {
+                value: t.saturating_mul(added_copies),
+            });
         }
     }
     Ok(mods)
@@ -511,6 +525,7 @@ mod tests {
             Effect::DoublePT {
                 mode: DoublePTMode::PowerAndToughness,
                 target: TargetFilter::SelfRef,
+                factor: 2,
             },
             vec![TargetRef::Object(other)],
             source,
@@ -531,6 +546,98 @@ mod tests {
             state.objects[&other].power,
             Some(3),
             "propagated parent target must NOT be doubled"
+        );
+    }
+
+    /// CR 701.10a + CR 613.4c: `factor: 2` ("double") adds +P/+T (Tifa's Limit
+    /// Break — Meteor Strikes; The Skullspore Nexus — power-only). Discriminator:
+    /// a 3/3 becomes 6/6, which cannot coincide with a no-op (3 != 6). Reverting
+    /// the `factor` math (e.g. dropping the multiplier) flips the 6/6 assertion.
+    #[test]
+    fn double_pt_factor_two_doubles_power_and_toughness() {
+        let mut state = GameState::new_two_player(7);
+        let obj = make_creature(&mut state, "Cloud", 3, 3, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::DoublePT {
+                mode: DoublePTMode::PowerAndToughness,
+                target: TargetFilter::Any,
+                factor: 2,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_double_pt(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj].power, Some(6), "double 3 power → 6");
+        assert_eq!(
+            state.objects[&obj].toughness,
+            Some(6),
+            "double 3 toughness → 6"
+        );
+    }
+
+    /// CR 701.10a + CR 613.4c: `factor: 3` ("triple" — Tifa's Limit Break, Final
+    /// Heaven) adds +2P/+2T so a 3/3 becomes 9/9. Discriminator: 9/9 is distinct
+    /// from both the no-op (3/3) and the double result (6/6), so reverting the
+    /// `factor` parameterization (which would fall back to doubling) flips this.
+    #[test]
+    fn double_pt_factor_three_triples_power_and_toughness() {
+        let mut state = GameState::new_two_player(7);
+        let obj = make_creature(&mut state, "Cloud", 3, 3, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::DoublePT {
+                mode: DoublePTMode::PowerAndToughness,
+                target: TargetFilter::Any,
+                factor: 3,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_double_pt(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj].power, Some(9), "triple 3 power → 9");
+        assert_eq!(
+            state.objects[&obj].toughness,
+            Some(9),
+            "triple 3 toughness → 9"
+        );
+    }
+
+    /// CR 701.10a + CR 613.4c: power-only multiply (The Skullspore Nexus —
+    /// "Double target creature's power") with `factor: 3` leaves toughness
+    /// untouched. Discriminator: power 4 → 12, toughness stays 5.
+    #[test]
+    fn double_pt_factor_three_power_only_leaves_toughness() {
+        let mut state = GameState::new_two_player(7);
+        let obj = make_creature(&mut state, "Sephiroth", 4, 5, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::DoublePT {
+                mode: DoublePTMode::Power,
+                target: TargetFilter::Any,
+                factor: 3,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_double_pt(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj].power, Some(12), "triple 4 power → 12");
+        assert_eq!(
+            state.objects[&obj].toughness,
+            Some(5),
+            "power-only multiply must not change toughness"
         );
     }
 

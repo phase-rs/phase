@@ -27,6 +27,7 @@ describe("dispatchResolveAll progress", () => {
     useGameStore.setState({
       gameState: stateWithStack(200),
       resolutionProgress: null,
+      isResolvingAll: false,
       // Capture every setResolutionProgress call for assertions.
       setResolutionProgress: (p) => {
         progressCalls.push(p);
@@ -82,10 +83,34 @@ describe("dispatchResolveAll progress", () => {
     // Final call clears progress.
     expect(progressCalls[progressCalls.length - 1]).toBeNull();
     expect(useGameStore.getState().resolutionProgress).toBeNull();
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
 
     // rAF yield fired between the instant chunks (the load-bearing repaint fix):
     // 2 yields between 3 chunks.
     expect(rafSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses responsive instant chunks for giant stacks and marks Resolve All busy", async () => {
+    useGameStore.setState({ gameState: stateWithStack(19192) });
+
+    const resolveAll = vi.fn<EngineResolveAll>(async (_requester, _aiSeats, maxResolutions) => {
+      expect(useGameStore.getState().isResolvingAll).toBe(true);
+      expect(maxResolutions).toBe(5_000);
+      return chunk(0, 19192);
+    });
+
+    useGameStore.setState({
+      adapter: {
+        resolveAll,
+        getState: vi.fn().mockResolvedValue(stateWithStack(0)),
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    expect(resolveAll).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
   });
 });
 

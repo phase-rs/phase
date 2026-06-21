@@ -137,9 +137,9 @@ fn wort_grants_conspire_offers_cost_and_copies_when_paid() {
             matches!(
                 cost,
                 engine::types::ability::AdditionalCost::Optional {
-                    cost: engine::types::ability::AbilityCost::TapCreatures { count: 2, .. },
+                    cost: engine::types::ability::AbilityCost::TapCreatures { ref requirement, .. },
                     repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
-                }
+                } if requirement.fixed_count() == Some(2)
             ),
             "granted Conspire must surface an optional TapCreatures{{2}} cost: {cost:?}"
         ),
@@ -153,7 +153,7 @@ fn wort_grants_conspire_offers_cost_and_copies_when_paid() {
 
     match runner.state().waiting_for.clone() {
         WaitingFor::PayCost {
-            kind: PayCostKind::TapCreatures,
+            kind: PayCostKind::TapCreatures { .. },
             choices,
             count,
             ..

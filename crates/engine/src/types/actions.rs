@@ -489,6 +489,14 @@ pub enum GameAction {
         object_id: ObjectId,
         door: crate::game::game_object::RoomDoor,
     },
+    /// CR 709.5f-g: Response to `WaitingFor::ChooseRoomDoor` — the player picked
+    /// which door (half) of the targeted Room to act on, and the operation to
+    /// apply to it. The `(op, door)` pair must be one of the prompt's `options`.
+    ChooseRoomDoor {
+        object_id: ObjectId,
+        op: crate::types::ability::DoorLockOp,
+        door: crate::game::game_object::RoomDoor,
+    },
     /// CR 702.51a: Tap creature/artifact for convoke or waterbend mana.
     /// CR 302.6: Summoning sickness does not apply (convoke doesn't use the tap ability mechanism).
     TapForConvoke {
@@ -1236,6 +1244,7 @@ impl GameAction {
             GameAction::SaddleMount { mount_id, .. } => Some(*mount_id),
             GameAction::Transform { object_id } => Some(*object_id),
             GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
+            GameAction::ChooseRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),

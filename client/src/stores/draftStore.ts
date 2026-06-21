@@ -95,7 +95,9 @@ const initialState: DraftStoreState = {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
+/** Index→AI-profile names; the difficulty index maps 1:1 to these and to the
+ *  `setSelector.difficultyLevels` i18n keys rendered by `BotDifficultySelector`. */
+export const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
 const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
 
 // ── Match helpers ──────────────────────────────────────────────────────

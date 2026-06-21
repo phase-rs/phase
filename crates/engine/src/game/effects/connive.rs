@@ -108,9 +108,12 @@ pub fn resolve(
         ReplacementResult::Execute(_) => {}
         ReplacementResult::Prevented => {
             // Draw was prevented — skip the discard step
+            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // id (LKI if it left the battlefield) so "whenever a creature you
+            // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
-                source_id: ability.source_id,
+                source_id: conniver_id,
             });
             return Ok(());
         }
@@ -153,9 +156,12 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's id (LKI
+    // if it left the battlefield) so "whenever a creature you control connives"
+    // matches the conniving permanent, not the causing source.
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Connive,
-        source_id: ability.source_id,
+        source_id: conniver_id,
     });
     Ok(())
 }

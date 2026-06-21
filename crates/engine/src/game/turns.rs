@@ -571,6 +571,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // open-ended "cards exiled with ~" filter for sources without a per-turn
     // cap.
     state.exile_cast_permissions_used.clear();
+    // CR 601.2a + CR 401.5: Reset per-turn TopOfLibraryCastPermission
+    // once-per-turn tracking (Assemble the Players, Johann, Apprentice Sorcerer).
+    state.top_of_library_cast_permissions_used.clear();
     state.cards_exiled_with_source_this_turn.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
@@ -595,6 +598,18 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
     state.created_tokens_this_turn.clear();
+    // CR 122.6 + CR 514.2: The `counter_added_this_turn` ledger backs the
+    // turn-scoped `CountersPutOnThisTurn` filter predicate (CR 122.6 look-back),
+    // which feeds continuous statics such as Kid Loki's hexproof grant. Those
+    // "this turn" effects end at cleanup (CR 514.2), so clearing the ledger
+    // changes layer-relevant state. Route the expiry through the layer
+    // invalidation authority — mirroring the turn-boundary continuous-effect
+    // prunes (`prune_until_next_turn_effects`) — guarded on a non-empty ledger so
+    // we only invalidate when something actually depended on it; otherwise a
+    // static that gained a keyword from a counter placed last turn stays cached.
+    if !state.counter_added_this_turn.is_empty() {
+        state.layers_dirty.mark_full();
+    }
     state.counter_added_this_turn.clear();
     state.players_who_discarded_card_this_turn.clear();
     state.cards_discarded_this_turn_by_player.clear();
@@ -602,6 +617,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.sacrificed_permanents_this_turn.clear();
     state.zone_changes_this_turn.clear();
     state.battlefield_entries_this_turn.clear();
+    // CR 701.26 + CR 603.4: reset per-object tap counts so "first time it became
+    // tapped this turn" intervening-ifs start fresh each turn.
+    state.object_tap_count_this_turn.clear();
     state.damage_dealt_this_turn.clear();
     // CR 702.173a + CR 514: Clear the Freerunning eligibility ledger at
     // cleanup. CR 702.173a's "was dealt combat damage this turn" predicate
@@ -734,6 +752,25 @@ pub fn execute_untap_with_choices(
     state.pending_damage_replacements.retain(|r| {
         !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
     });
+    // CR 514.2 + CR 500.7: Arm "until the end of the player's next turn"
+    // restrictions (Kang's power-up prohibition) when that player's next turn
+    // begins — convert to `EndOfTurn` so the cleanup-step prune (`execute_cleanup`)
+    // ends them at THIS turn's cleanup, persisting through the whole turn.
+    // Mirrors `prune_until_next_turn_effects` (layers.rs). NOTE: if the granted
+    // turn is SKIPPED/PREVENTED before its untap step, this conversion never runs
+    // and the restriction is never armed/pruned — a documented narrow edge shared
+    // with the analogous `Duration::UntilEndOfNextTurnOf` arming.
+    {
+        use crate::types::ability::GameRestriction;
+        for restriction in state.restrictions.iter_mut() {
+            if let GameRestriction::ProhibitActivity { expiry, .. } = restriction {
+                if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { player } if *player == active)
+                {
+                    *expiry = RestrictionExpiry::EndOfTurn;
+                }
+            }
+        }
+    }
     state.restrictions.retain(|restriction| {
         use crate::types::ability::GameRestriction;
 

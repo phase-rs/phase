@@ -122,6 +122,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
+            | WaitingFor::ChooseRoomDoor { .. }
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::SpecializeColor { .. }
@@ -1154,6 +1155,7 @@ pub(super) fn handle_resolution_choice(
                 controller,
                 source_id,
                 actor,
+                tally_mode,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -1195,6 +1197,7 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     actor,
+                    tally_mode,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
@@ -1214,6 +1217,7 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     actor,
+                    tally_mode,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
@@ -1236,6 +1240,7 @@ pub(super) fn handle_resolution_choice(
                     &per_choice_effect,
                     &new_tallies,
                     &new_ballots,
+                    tally_mode,
                     events,
                 );
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
@@ -1653,6 +1658,8 @@ pub(super) fn handle_resolution_choice(
                 for &card_id in &cards {
                     state.revealed_cards.remove(&card_id);
                 }
+                state.private_look_ids.clear();
+                state.private_look_player = None;
                 set_priority(state, player);
                 if decline_runs_continuation {
                     effects::drain_pending_continuation(state, events);
@@ -1691,6 +1698,8 @@ pub(super) fn handle_resolution_choice(
             for &card_id in &cards {
                 state.revealed_cards.remove(&card_id);
             }
+            state.private_look_ids.clear();
+            state.private_look_player = None;
 
             set_priority(state, player);
             // CR 701.20a: For an optional reveal, the stashed continuation is the
@@ -2110,6 +2119,26 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
+            // CR 608.2c: When the parked continuation consumes the chain's
+            // tracked set (a `GrantCastingPermission { target: TrackedSet }` /
+            // any `TrackedSet`-referencing downstream effect — e.g. End-Blaze
+            // Epiphany's "choose a card exiled this way … you may play that
+            // card"), the interactive choose is the producer of that set, so the
+            // chosen cards must be published as the fresh tracked set the
+            // continuation reads. This mirrors the per-player drain
+            // (`publish_fresh_tracked_set`) and the random-choose path
+            // (`apply_parent_chain_context`); without it the grant's
+            // `TrackedSet(0)` sentinel binds to a stale/empty set and the
+            // permission lands nowhere. Gated on the continuation actually
+            // referencing a tracked set so non-consuming continuations
+            // (partition sub-abilities reading `ParentTarget`) are unaffected.
+            let continuation_consumes_tracked_set = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| effects::chain_references_tracked_set(&cont.chain));
+            if continuation_consumes_tracked_set {
+                effects::publish_fresh_tracked_set(state, chosen.clone());
+            }
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
@@ -2237,7 +2266,7 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::ConniveDiscard {
                 player,
                 conniver_id,
-                source_id,
+                source_id: _,
                 cards,
                 count,
             },
@@ -2278,9 +2307,12 @@ pub(super) fn handle_resolution_choice(
             };
 
             effects::connive::add_connive_counters(state, conniver_id, nonland_count, events);
+            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // id (LKI if it left the battlefield) so "whenever a creature you
+            // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
-                source_id,
+                source_id: conniver_id,
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -2386,6 +2418,16 @@ pub(super) fn handle_resolution_choice(
                 })
                 .collect();
             if !discarded_to_graveyard.is_empty() {
+                // CR 608.2c: A `ZoneChangedThisWay` reflexive gate ("When you
+                // discard a card this way, …" — Talion's Messenger, The Ancient
+                // One) reads `last_zone_changed_ids`. The synchronous resolve path
+                // populates that ledger from the discard's `ZoneChanged` events
+                // (`effects/mod.rs`), but a discard that paused for an interactive
+                // `DiscardChoice` (hand > 1) moves the chosen card HERE, after the
+                // parent effect already returned. Re-publish the just-moved cards
+                // into the ledger so the deferred gate, re-evaluated when the
+                // stashed continuation drains, sees the discarded objects.
+                state.last_zone_changed_ids = discarded_to_graveyard.clone();
                 // CR 701.9a + CR 608.2c: stamp these members with the producer
                 // action `Discarded` so a `caused_by: Some(Discarded)` "discarded
                 // this way" consumer counts them while a `caused_by: None`
@@ -2406,6 +2448,23 @@ pub(super) fn handle_resolution_choice(
             if !chosen.is_empty() {
                 if let Some(cont) = state.pending_continuation.as_mut() {
                     cont.chain.set_optional_effect_performed_recursive(true);
+                }
+            }
+
+            // CR 608.2c + CR 400.7j: A reflexive sub deferred across this
+            // interactive discard may name the discarded card anaphorically —
+            // "When you discard a card this way, target player mills cards equal
+            // to ITS mana value" (The Ancient One). The synchronous resolve path
+            // captures that referent via `parent_referent_context_from_events`
+            // (`effects/mod.rs`); the interactive path moves the card here, after
+            // the parent returned, so capture it now and stamp it onto the stashed
+            // continuation. The discarded card is in the public graveyard, so its
+            // characteristics are read live. Mirrors the `EffectZoneChoice` path.
+            if let Some(snapshot) =
+                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
+            {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_effect_context_object_recursive(snapshot);
                 }
             }
 
@@ -2777,6 +2836,27 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 },
+                // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
+                // deferred optional attach (Nahiri, the Lithomancer +2).
+                EffectKind::Attach => {
+                    let Some(cont) = state.pending_continuation.take() else {
+                        return Err(EngineError::InvalidAction(
+                            "Attach EffectZoneChoice missing stashed ability".to_string(),
+                        ));
+                    };
+                    effects::attach::complete_resolution_attachment_choice(
+                        &mut *state,
+                        *cont.chain,
+                        chosen[0],
+                        events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    set_priority(state, player);
+                    resume_with_error_propagation(state, events)?;
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
                 // CR 601.2c + CR 115.1: Resolution-time hand pick for
                 // `CastFromZone` (Electrodominance, Baral's Expertise).
                 EffectKind::CastFromZone => {
@@ -3307,6 +3387,40 @@ pub(super) fn handle_resolution_choice(
             // while ChooseRingBearer pauses spell resolution (issue #1017).
             if let Some(outcome) =
                 batch_or_drain_observer_triggers(state, events, events.len(), events.len())
+            {
+                return Ok(outcome);
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        // CR 709.5f-g: the controller picked which door (half) of the targeted
+        // Room to lock/unlock. Validate the (op, door) pair is one the prompt
+        // offered, apply the primitive (unlocking emits `RoomDoorUnlocked` so
+        // CR 709.5h-i triggers fire), then drain the parked continuation.
+        (
+            WaitingFor::ChooseRoomDoor {
+                player,
+                object_id,
+                options,
+            },
+            GameAction::ChooseRoomDoor {
+                object_id: chosen_object,
+                op,
+                door,
+            },
+        ) => {
+            if chosen_object != object_id || !options.contains(&(op, door)) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid room-door choice — not an offered (operation, door)".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            effects::set_room_door_lock::apply_door_op(state, object_id, player, op, door, events);
+            let waiting_for = finish_with_continuation(state, player, events);
+            // CR 603.2 + CR 709.5h-i: an effect-driven unlock can trigger
+            // "when you unlock"/"when you fully unlock" abilities; batch or
+            // dispatch them now that the choice has resolved.
+            if let Some(outcome) =
+                batch_or_drain_observer_triggers(state, events, events_before, events.len())
             {
                 return Ok(outcome);
             }

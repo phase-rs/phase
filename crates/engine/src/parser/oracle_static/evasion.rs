@@ -1671,8 +1671,21 @@ pub(crate) fn parse_attached_assigns_damage_from_toughness(
     )
 }
 
+/// Possessive pronoun for any character's combat damage ("its"/"his"/"her"/"their").
+/// Widens the neuter-only assumption so gendered-character cards (e.g. Wolverine)
+/// parse the same combat-damage-assignment static as neuter creatures.
+fn parse_possessive_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("its"), tag("his"), tag("her"), tag("their"))).parse(input)
+}
+
+/// Nominative pronoun for any character ("it"/"he"/"she"/"they").
+fn parse_nominative_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)
+}
+
 /// CR 510.1c: Parse "you may have this creature assign its combat damage as though it
-/// weren't blocked" self-referential static.
+/// weren't blocked" self-referential static. Accepts gendered pronouns
+/// (his/her/he/she/they) so named characters parse the same as neuter creatures.
 pub(crate) fn parse_assign_damage_as_though_unblocked(
     lower: &str,
     text: &str,
@@ -1687,9 +1700,13 @@ pub(crate) fn parse_assign_damage_as_though_unblocked(
     .parse(clean)
     .ok()?;
     let (rest, _) = result;
-    let (rest, _) = tag::<_, _, VE<'_>>(" assign its combat damage as though it weren't blocked")
+    let (rest, _) = tag::<_, _, VE<'_>>(" assign ").parse(rest).ok()?;
+    let (rest, _) = parse_possessive_pronoun(rest).ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" combat damage as though ")
         .parse(rest)
         .ok()?;
+    let (rest, _) = parse_nominative_pronoun(rest).ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" weren't blocked").parse(rest).ok()?;
     if !rest.is_empty() {
         return None;
     }
@@ -1728,11 +1745,17 @@ pub(crate) fn parse_attached_creature_assign_damage_as_though_unblocked(
         )
     };
 
-    let (_, _) = tag::<_, _, VE<'_>>(
-        "'s controller may have it assign its combat damage as though it weren't blocked",
-    )
-    .parse(rest.lower)
-    .ok()?;
+    let (after, _) = tag::<_, _, VE<'_>>("'s controller may have ")
+        .parse(rest.lower)
+        .ok()?;
+    let (after, _) = parse_nominative_pronoun(after).ok()?;
+    let (after, _) = tag::<_, _, VE<'_>>(" assign ").parse(after).ok()?;
+    let (after, _) = parse_possessive_pronoun(after).ok()?;
+    let (after, _) = tag::<_, _, VE<'_>>(" combat damage as though ")
+        .parse(after)
+        .ok()?;
+    let (after, _) = parse_nominative_pronoun(after).ok()?;
+    let (_, _) = tag::<_, _, VE<'_>>(" weren't blocked").parse(after).ok()?;
 
     Some(
         StaticDefinition::continuous()
@@ -2663,4 +2686,51 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
     }
 
     None
+}
+
+#[cfg(test)]
+mod assign_damage_pronoun_tests {
+    use super::*;
+
+    fn assert_unblocked_self(lower: &str) {
+        let def = parse_assign_damage_as_though_unblocked(lower, lower)
+            .unwrap_or_else(|| panic!("expected Some for {lower:?}"));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AssignDamageAsThoughUnblocked]
+        );
+    }
+
+    #[test]
+    fn parses_neuter_pronouns() {
+        // Regression: neuter "its"/"it" must still parse (Thorn Elemental class).
+        assert_unblocked_self(
+            "you may have ~ assign its combat damage as though it weren't blocked",
+        );
+    }
+
+    #[test]
+    fn parses_masculine_pronouns() {
+        // Wolverine, Claws Out: "his"/"he".
+        assert_unblocked_self(
+            "you may have ~ assign his combat damage as though he weren't blocked",
+        );
+    }
+
+    #[test]
+    fn parses_feminine_pronouns() {
+        assert_unblocked_self(
+            "you may have ~ assign her combat damage as though she weren't blocked",
+        );
+    }
+
+    #[test]
+    fn rejects_non_matching() {
+        assert!(parse_assign_damage_as_though_unblocked(
+            "you may have ~ assign its combat damage to any target",
+            "you may have ~ assign its combat damage to any target",
+        )
+        .is_none());
+    }
 }

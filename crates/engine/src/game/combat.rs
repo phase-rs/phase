@@ -6430,6 +6430,78 @@ mod tests {
         );
     }
 
+    /// CR 508.1d + CR 509.1c: Hustle — "Target creature attacks or blocks this
+    /// turn if able." Drives the *full production parse* of Hustle's Oracle text
+    /// through `resolve` → transient continuous effect → `evaluate_layers` →
+    /// combat enforcement, and asserts BOTH the attack requirement (declaring no
+    /// attackers is illegal on the controller's turn) AND the block requirement
+    /// (declaring no blockers is illegal when the forced creature could block)
+    /// reach `combat.rs`.
+    ///
+    /// Revert-proof: on pre-change code the parser does not recognize "attacks or
+    /// blocks this turn if able" — the whole line lowers to `Effect::Unimplemented`,
+    /// the `let Effect::GenericEffect = ...` destructure panics, and neither
+    /// requirement is granted, so both `is_err()` assertions fail.
+    #[test]
+    fn hustle_attacks_or_blocks_reaches_combat_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        let mut state = setup_combat_phase();
+        // The forced creature is controlled by the same player that will declare
+        // attackers (PlayerId(0)); the spell caster is also PlayerId(0).
+        let forced = create_creature(&mut state, PlayerId(0), "Forced Soldier", 2, 2);
+
+        // Production parse of Hustle's full Oracle text — no hand-built effect.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Target creature attacks or blocks this turn if able.",
+            "Hustle",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "Hustle parses one spell ability");
+        let effect = (*parsed.abilities[0].effect).clone();
+        let Effect::GenericEffect { .. } = &effect else {
+            panic!("Hustle must parse to GenericEffect, got {effect:?}");
+        };
+
+        // Bind the spell to the chosen creature target; `affected: ParentTarget`
+        // resolves against `ability.targets` at registration time.
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(forced)], forced, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // CR 508.1d: declaring no attackers is illegal — the forced creature must attack.
+        assert!(
+            declare_attackers(&mut state, &[], &mut Vec::new()).is_err(),
+            "Hustle MustAttack must reach declare_attackers enforcement"
+        );
+
+        // CR 509.1c: now stage a block scenario. PlayerId(1) attacks PlayerId(0);
+        // the forced creature is an untapped, legal blocker, so declaring no
+        // blockers must be illegal.
+        let attacker = create_creature(&mut state, PlayerId(1), "Aggressor", 2, 2);
+        state.active_player = PlayerId(1);
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "Hustle MustBlock must reach declare_blockers enforcement"
+        );
+        // Sanity: assigning the forced creature as a blocker satisfies the requirement.
+        assert!(
+            validate_blockers(&state, &[(forced, attacker)]).is_ok(),
+            "blocking the attacker should satisfy the MustBlock requirement"
+        );
+    }
+
     #[test]
     fn must_be_blocked_respects_flying_evasion() {
         // MustBeBlocked doesn't force illegal blocks: flying attacker can't be

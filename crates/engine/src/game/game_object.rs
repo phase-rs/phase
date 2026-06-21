@@ -293,6 +293,19 @@ impl RoomUnlockState {
             fully_unlocked: !was_fully_unlocked && self.left_unlocked && self.right_unlocked,
         }
     }
+
+    /// CR 709.5g: To lock a half, remove its unlocked designation. Returns
+    /// whether the designation was actually removed (false if it was already
+    /// locked). Mirror of [`unlock`], but no fully-unlocked outcome exists —
+    /// locking only ever removes a designation.
+    pub fn lock(&mut self, door: RoomDoor) -> bool {
+        let was_unlocked = self.is_unlocked(door);
+        match door {
+            RoomDoor::Left => self.left_unlocked = false,
+            RoomDoor::Right => self.right_unlocked = false,
+        }
+        was_unlocked
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

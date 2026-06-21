@@ -178,6 +178,13 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
             FilterProp::ToughnessGTPower,
             tag("toughness greater than its power"),
         ),
+        // CR 208.1 + CR 613.4b self-comparison — must precede the general P/T
+        // combinator so "power greater than its base power" wins over a numeric
+        // "power greater than N" parse (Ms. Marvel, Elastic Ally).
+        value(
+            FilterProp::PowerExceedsBase,
+            tag("power greater than its base power"),
+        ),
         // CR 509.1b: "greater power" — relative to source.
         value(FilterProp::PowerGTSource, tag("greater power")),
         // CR 208: the shared power/toughness comparison combinator (handles

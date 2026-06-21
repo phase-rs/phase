@@ -777,6 +777,9 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
 fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
     match effect {
         Effect::Intensify { .. } => {}
+        // Heist exiles a card from an opponent's library at random; it does not
+        // name a conjure card, so there is no static face to preload.
+        Effect::Heist { .. } | Effect::HeistExile => {}
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
             // registry. Duplicate-conjure copies a card already in play (its face
@@ -888,11 +891,16 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        // CR 120.1: leaf effect — the source/recipient filters carry no nested
+        // ability or effect to walk.
+        | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
@@ -927,6 +935,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Tribute { .. }
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -972,6 +981,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
         | Effect::Connive { .. }
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
@@ -980,6 +990,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::SolveCase
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -1022,6 +1033,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Goad { .. }
         | Effect::GoadAll { .. }
         | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
@@ -1344,6 +1356,13 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 obj.base_printed_ref = obj.printed_ref.clone();
             } else {
                 apply_card_face_to_object(obj, &card_face);
+                // CR 702.103b: Rehydration re-stamps printed characteristics from
+                // card-data.json, which clobbers the synthesized Aura subtype while
+                // `bestow_form` remains set (issue #3253). Re-apply the bestow
+                // type-changing effect so WASM/client views see a legal Aura.
+                if obj.bestow_form.is_some() {
+                    crate::game::casting::apply_bestow_aura_form(obj);
+                }
             }
 
             if let Some(back_face) = obj.back_face.as_mut() {
@@ -2697,6 +2716,7 @@ mod tests {
             per_choice_effect: vec![Box::new(conjure_ability("vote", Zone::Hand))],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
+            tally_mode: crate::types::ability::VoteTally::PerVote,
         };
         walk_effect(&vote, &mut names);
 
@@ -2832,6 +2852,7 @@ mod tests {
             source_rider: Some(CounterSourceRider::LosesAbilities {
                 static_def: Box::new(counter_static),
             }),
+            countered_spell_zone: None,
         };
         walk_effect(&counter, &mut names);
 
@@ -3014,6 +3035,76 @@ mod tests {
         assert!(
             after.contains(&id),
             "rehydrate must rebuild the derived index before layer flush (issue #581)"
+        );
+    }
+
+    /// Issue #3253: card-data rehydration must not leave a bestowed permanent
+    /// without the synthesized Aura subtype while `bestow_form` remains set.
+    #[test]
+    fn rehydrate_resyncs_bestow_aura_subtype() {
+        use crate::game::game_object::{AttachTarget, BestowFormState};
+
+        let mut face = test_face(
+            "Springheart Nantuko",
+            "springheart-oracle",
+            vec![CoreType::Enchantment, CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 1,
+            },
+        );
+        face.card_type.subtypes = vec!["Insect".into(), "Monk".into()];
+        let db = db_from_faces(&[face.clone()]);
+        let printed_ref = printed_ref_from_face(&face).unwrap();
+
+        let mut state = GameState::new_two_player(3253);
+        let host_id = create_object(
+            &mut state,
+            CardId(3253),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let aura_id = create_object(
+            &mut state,
+            CardId(3254),
+            PlayerId(0),
+            "Springheart Nantuko".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types = face.card_type.clone();
+            obj.base_card_types = face.card_type.clone();
+            obj.printed_ref = Some(printed_ref.clone());
+            obj.base_printed_ref = Some(printed_ref);
+            obj.base_characteristics_initialized = true;
+        }
+
+        crate::game::casting::apply_bestow_aura_form(state.objects.get_mut(&aura_id).unwrap());
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.attached_to = Some(AttachTarget::Object(host_id));
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let obj = state.objects.get(&aura_id).unwrap();
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.bestow_form, Some(BestowFormState));
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Aura"),
+            "live subtypes must include Aura after rehydrate, got {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.base_card_types.subtypes.iter().any(|s| s == "Aura"),
+            "base subtypes must include Aura after rehydrate, got {:?}",
+            obj.base_card_types.subtypes
+        );
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "bestowed object must not keep Creature core type"
         );
     }
 }

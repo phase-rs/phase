@@ -289,6 +289,7 @@ mod tests {
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
             ),
         );
@@ -355,6 +356,7 @@ mod tests {
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -424,6 +426,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -551,6 +554,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -641,6 +645,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -703,6 +708,7 @@ mod tests {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         };
         assert!(reveal_hand_matches_chosen_player_target(
             &state,
@@ -723,6 +729,7 @@ mod tests {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         };
         assert!(!reveal_hand_matches_chosen_player_target(
             &state,

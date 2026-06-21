@@ -1748,8 +1748,85 @@ fn unmask_ring_tempts_you_phrase(text: String) -> String {
     text.replace(RING_TEMPTS_YOU_PLACEHOLDER, "the ring tempts you")
 }
 
+const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
+
+/// CR 701.40a / CR 701.58a / CR 701.62a: A handful of cards are *named* after a
+/// keyword action ("Manifest Dread" → "Manifest dread.", "Cloak" → "Cloak …").
+/// Multi-word self-reference normalization is case-insensitive, so it would
+/// rewrite the card's own primary keyword-action verb to `~`, producing the
+/// nonsensical body "~." and a parse gap. Mask the keyword-action phrase the
+/// same way the Ring temptation phrase is protected, but ONLY when the card
+/// name *is* that keyword action — a keyword phrase that merely appears in the
+/// body of an unrelated card never collides with `~` normalization, so the
+/// narrow guard avoids touching every other card. The phrase is restored after
+/// normalization so the dispatcher sees the real keyword-action text.
+fn mask_card_name_keyword_action(text: &str, card_name: &str) -> Option<(String, Vec<String>)> {
+    // CR 701.40a / CR 701.58a / CR 701.62a: keyword actions whose phrasing can
+    // be an entire card name. These are full keyword-action verb phrases, not
+    // bare nouns, so an exact (case-insensitive) card-name match is unambiguous.
+    const KEYWORD_ACTIONS: &[&str] = &["manifest dread", "cloak", "manifest"];
+    let name_lower = card_name.trim().to_ascii_lowercase();
+    // allow-noncombinator: Iterator::find over the keyword-action table (slice
+    // selection), not string-dispatch parsing.
+    let &phrase = KEYWORD_ACTIONS.iter().find(|kw| name_lower == **kw)?;
+
+    let lower = text.to_ascii_lowercase();
+    let mut masked = String::with_capacity(text.len());
+    // Original-cased slices captured per masked occurrence, restored in order so
+    // the dispatcher sees the printed casing ("Manifest dread.").
+    let mut originals: Vec<String> = Vec::new();
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+    // allow-noncombinator: structural occurrence-masking before `~` normalization
+    // (mirrors `mask_ring_tempts_you_phrase`), not parsing dispatch.
+    while let Some(idx) = lower_rest.find(phrase) {
+        // CR 201.5 boundary: only mask a free-standing occurrence of the
+        // keyword phrase (the body verb), never a substring inside a longer
+        // word (so "manifested"/"cloaked" are left intact).
+        let before_ok = idx == 0
+            || !rest[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after = idx + phrase.len();
+        let after_ok = after >= rest.len()
+            || !rest[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            masked.push_str(&rest[..idx]);
+            masked.push_str(KEYWORD_ACTION_PLACEHOLDER);
+            originals.push(rest[idx..after].to_string());
+        } else {
+            masked.push_str(&rest[..after]);
+        }
+        rest = &rest[after..];
+        lower_rest = &lower_rest[after..];
+    }
+    masked.push_str(rest);
+    Some((masked, originals))
+}
+
+/// Restore the original-cased keyword-action occurrences masked by
+/// [`mask_card_name_keyword_action`], in the order they were captured.
+fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String {
+    let mut result = text;
+    for original in originals {
+        result = result.replacen(KEYWORD_ACTION_PLACEHOLDER, original, 1);
+    }
+    result
+}
+
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
-    let text = mask_ring_tempts_you_phrase(text);
+    let pre = mask_ring_tempts_you_phrase(text);
+    // CR 701.40a/701.58a/701.62a: protect the keyword-action body verb on cards
+    // named after a keyword action ("Manifest Dread", "Cloak") so it survives
+    // self-reference `~` normalization. The original casing is restored at the end.
+    let (text, kw_action_originals) = match mask_card_name_keyword_action(&pre, card_name) {
+        Some((masked, originals)) => (masked, originals),
+        None => (pre, Vec::new()),
+    };
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
 
@@ -1954,6 +2031,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     let effective_name_str = effective_name;
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
+    result = unmask_card_name_keyword_action(result, &kw_action_originals);
     unmask_ring_tempts_you_phrase(result)
 }
 
@@ -2070,6 +2148,33 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("Whenever the Ring tempts you, draw a card.", "Ring Watcher"),
             "Whenever the ring tempts you, draw a card."
+        );
+    }
+
+    #[test]
+    fn normalize_card_named_after_keyword_action_preserves_keyword_phrase() {
+        // CR 701.62a: The card "Manifest Dread" has the keyword-action body
+        // "Manifest dread." Self-reference normalization is case-insensitive for
+        // multi-word names, so without the keyword-action mask the body would be
+        // rewritten to "~." (a parse gap). The keyword phrase must survive.
+        assert_eq!(
+            normalize_card_name_refs("Manifest dread.", "Manifest Dread"),
+            "Manifest dread."
+        );
+        // CR 701.40a / CR 701.58a: same class for single-word keyword-action
+        // names — "Cloak"/"Manifest" body verbs must not normalize to `~`.
+        assert_eq!(
+            normalize_card_name_refs("Cloak the top card of your library.", "Cloak"),
+            "Cloak the top card of your library."
+        );
+        // The mask is word-boundary-aware: it must not touch a longer word that
+        // merely starts with the keyword phrase ("manifested").
+        assert_eq!(
+            normalize_card_name_refs(
+                "Manifest dread. A manifested permanent you control gets +1/+1.",
+                "Manifest Dread"
+            ),
+            "Manifest dread. A manifested permanent you control gets +1/+1."
         );
     }
 

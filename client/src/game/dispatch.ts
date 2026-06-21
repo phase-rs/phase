@@ -607,18 +607,13 @@ export async function restoreGameState(
 
 const BATCH_CHUNK_SIZE = 5;
 // Under "Instant" stack pressure (a multi-hundred/thousand identical-trigger
-// storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted: the
-// dominant cost becomes the per-chunk full-state `getState` (~12MB serialize)
-// + `getLegalActions` + the inter-chunk delay, repeated once per 5 items. We
-// drain in large chunks instead — the engine can resolve unboundedly in one
-// call, but a bounded chunk keeps each WASM call short enough that the main
-// thread yields between chunks (no "page unresponsive" freeze) while still
-// collapsing ~580 round-trips into a few dozen. The value is an empirical
-// tradeoff: smaller chunks give visibly-advancing "resolving X of Y" progress
-// (the bar updates once per chunk) at the cost of more per-chunk `getState`
-// serialization; the rAF yield below — not this size — is what guarantees the
-// overlay repaints between chunks.
-const BATCH_CHUNK_INSTANT = 50;
+// storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted. Keep
+// large storms in engine-owned fast-forward batches so partial stacks collapse
+// before the frontend pays the per-chunk `getState` + `getLegalActions` cost.
+// The value is intentionally large: the worker boundary already keeps the main
+// thread responsive, while this still lets the overlay update during truly
+// pathological stacks.
+const BATCH_CHUNK_INSTANT = 5_000;
 const BATCH_CHUNK_BASE_DELAY_MS = 150;
 let batchResolveInProgress = false;
 
@@ -635,7 +630,8 @@ export async function dispatchResolveAll(
 
   batchResolveInProgress = true;
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
-  const { setResolutionProgress } = useGameStore.getState();
+  const { setIsResolvingAll, setResolutionProgress } = useGameStore.getState();
+  setIsResolvingAll(true);
   // Storm-origin denominator: latched from the FIRST chunk's `total` because
   // the engine reports the *remaining* stack per chunk (shrinks as it drains),
   // so only the first chunk carries the true origin count.
@@ -707,6 +703,7 @@ export async function dispatchResolveAll(
     if (gameId && newState) saveGame(gameId, newState);
   } finally {
     batchResolveInProgress = false;
+    setIsResolvingAll(false);
     setResolutionProgress(null);
   }
 }

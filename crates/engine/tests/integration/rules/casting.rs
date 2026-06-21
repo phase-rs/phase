@@ -1004,6 +1004,7 @@ fn setup_pitch_scenario() -> (
         .with_ability(Effect::Counter {
             target: TargetFilter::Any,
             source_rider: None,
+            countered_spell_zone: None,
         })
         .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
             count: 1,

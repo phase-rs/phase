@@ -361,7 +361,6 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::Goad { target }
         | Effect::ChangeZone { target, .. }
         | Effect::Connive { target, .. }
-        | Effect::Suspect { target, .. }
         | Effect::ForceBlock { target, .. }
         | Effect::Exploit { target, .. }
         | Effect::Attach { target, .. }
@@ -370,6 +369,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::ExtraTurn { target, .. }
         | Effect::SkipNextStep { target, .. }
         | Effect::Regenerate { target, .. }
+        | Effect::RemoveAllDamage { target, .. }
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
@@ -379,6 +379,21 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         // mass (`All`) scope falls through to `false`, matching the legacy
         // `TapAll`/`UntapAll`.
         Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => !matches!(target, TargetFilter::None),
+        // CR 701.60a: only single-permanent suspect/unsuspect declares a target.
+        // The mass (`All`) scope (e.g. Absolving Lammasu, "all suspected
+        // creatures are no longer suspected") is a non-targeting population
+        // effect — its filter is not a selectable target, so it falls through to
+        // `false` (mirrors `SetTapState`'s `Single`/`All` split).
+        Effect::Suspect {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        | Effect::Unsuspect {
             scope: EffectScope::Single,
             target,
             ..
@@ -597,5 +612,54 @@ mod tests {
             .filter(|effect| matches!(effect, Effect::Draw { .. }))
             .count();
         assert_eq!(draw_count, 3);
+    }
+
+    // CR 701.60a: mass un-designation ("all suspected creatures are no longer
+    // suspected", Absolving Lammasu) is a non-targeting population effect, so it
+    // must NOT be scored as target-requiring. Only `EffectScope::Single`
+    // (targeted/anaphoric "suspect target creature" / "it's no longer
+    // suspected") declares a target, mirroring the engine's `target_filter()`
+    // and the `SetTapState` `Single`/`All` split.
+    #[test]
+    fn mass_unsuspect_is_not_target_requiring() {
+        // The non-None filter is identical across scopes (the mass clause still
+        // carries its population filter); only `scope` distinguishes them, so a
+        // pass proves the scope gate — not the filter — drives the decision.
+        let single = Effect::Unsuspect {
+            target: TargetFilter::Any,
+            scope: EffectScope::Single,
+        };
+        let mass = Effect::Unsuspect {
+            target: TargetFilter::Any,
+            scope: EffectScope::All,
+        };
+        assert!(
+            effect_requires_targets(&single),
+            "single-scope Unsuspect must be target-requiring"
+        );
+        assert!(
+            !effect_requires_targets(&mass),
+            "mass Unsuspect{{All}} (Absolving Lammasu) must not be target-requiring"
+        );
+    }
+
+    #[test]
+    fn mass_suspect_is_not_target_requiring() {
+        let single = Effect::Suspect {
+            target: TargetFilter::Any,
+            scope: EffectScope::Single,
+        };
+        let mass = Effect::Suspect {
+            target: TargetFilter::Any,
+            scope: EffectScope::All,
+        };
+        assert!(
+            effect_requires_targets(&single),
+            "single-scope Suspect must be target-requiring"
+        );
+        assert!(
+            !effect_requires_targets(&mass),
+            "mass Suspect{{All}} must not be target-requiring"
+        );
     }
 }

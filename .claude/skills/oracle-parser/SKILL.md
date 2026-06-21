@@ -273,6 +273,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `3c` | "Channel — {cost}, Discard this card: {effect}" | activated-ability build | `oracle.rs` |
 | `3d` | "Boast — {cost}: {effect}" (implicit attacked-this-turn + once-per-turn restrictions, CR 702.142a) | activated-ability build | `oracle.rs` |
 | `3e` | "Exhaust — {cost}: {effect}" (implicit activate-only-once, CR 702.177a) | activated-ability build | `oracle.rs` |
+| `3e2` | "Power-up — {cost}: {effect}" (activate only once per game, MV cost reduction if entered this turn, CR 602.5b) | activated-ability build | `oracle.rs` |
 | `3f` | "Forecast — {cost}: {effect}" (hand-only, your upkeep, once per turn, CR 702.57a-b) | activated-ability build | `oracle.rs` |
 | `4` | Activated ability — contains `":"` with cost-like prefix | `find_activated_colon()` + `parse_activated_ability_definition()` | `oracle_cost.rs` + `oracle_effect/` |
 | `5-pre` | Trigger-framed "… enters with [counters] on it" — CR 614.1c replacement despite When/Whenever framing | `parse_replacement_line()` | `oracle_replacement.rs` |

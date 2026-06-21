@@ -1935,6 +1935,28 @@ mod tests {
     }
 
     #[test]
+    fn ninjutsu_legal_with_mana_already_in_pool() {
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let actions = legal_actions(&state);
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id,
+                    creature_to_return,
+                } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
+            )),
+            "Ninjutsu must be legal when the activation cost is already in the mana pool"
+        );
+    }
+
+    #[test]
     fn ninjutsu_legal_action_uses_auto_tappable_mana_sources() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
         state.players[0].mana_pool.clear();

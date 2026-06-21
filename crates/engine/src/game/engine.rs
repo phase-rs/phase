@@ -42,8 +42,8 @@ use super::mulligan;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
-    bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
-    mark_public_state_from_events, sync_waiting_for,
+    bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
+    mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
 use super::sba;
 use super::splice;
@@ -51,6 +51,10 @@ use super::triggers;
 use super::turn_control;
 use super::turns;
 use super::zones;
+
+pub use super::engine_resolve_batch::{
+    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+};
 
 #[derive(Debug, Clone, Error)]
 pub enum EngineError {
@@ -62,6 +66,12 @@ pub enum EngineError {
     NotYourPriority,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicFinalizeMode {
+    Immediate,
+    DeferredDisplay,
 }
 
 fn handle_unlock_room_door(
@@ -118,7 +128,18 @@ fn handle_unlock_room_door(
         }
     };
 
-    casting::pay_unless_cost(state, player, &cost, events)?;
+    // CR 116.2m + CR 709.5e + CR 106.6: The unlock cost is a special action's
+    // mana cost. Route payment through `PaymentContext::SpecialAction(UnlockDoor)`
+    // so spend-restricted mana ("only to … unlock doors", Smoky Lounge) is
+    // eligible here and spell/activation-restricted mana is correctly rejected.
+    casting::pay_special_action_mana_cost(
+        state,
+        player,
+        object_id,
+        &cost,
+        crate::types::mana::SpecialAction::UnlockDoor,
+        events,
+    )?;
 
     super::room::unlock_door_designation(state, object_id, player, door, events);
     Ok(WaitingFor::Priority { player })
@@ -144,6 +165,25 @@ pub fn apply(
     actor: PlayerId,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
+    apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
+}
+
+pub(super) fn apply_action_boundary(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary_with_stack_limit(state, actor, action, mode, None)
+}
+
+pub(super) fn apply_action_boundary_with_stack_limit(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+    stack_resolution_limit: Option<u32>,
+) -> Result<ActionResult, EngineError> {
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -152,7 +192,7 @@ pub fn apply(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     check_actor_authorization(state, actor, &action)?;
-    let mut result = apply_action(state, actor, action)?;
+    let mut result = apply_action(state, actor, action, stack_resolution_limit)?;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -168,7 +208,10 @@ pub fn apply(
     // consumer of `public_state_dirty`, so marking once here over the complete
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
-    finalize_public_state(state);
+    finalize_rules_state(state);
+    if matches!(mode, PublicFinalizeMode::Immediate) {
+        finalize_display_state(state);
+    }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
 }
@@ -356,6 +399,7 @@ fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
 fn pass_priority_once_with_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    stack_resolution_limit: Option<u32>,
 ) -> Result<WaitingFor, EngineError> {
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
@@ -369,7 +413,12 @@ fn pass_priority_once_with_pipeline(
     // submitter (the controller), which would mis-count consecutive passes and
     // soft-lock the game.
     let current_seat = turn_control::priority_seat(state);
-    let wf = priority::handle_priority_pass(current_seat, state, events);
+    let wf = priority::handle_priority_pass_with_limit(
+        current_seat,
+        state,
+        events,
+        stack_resolution_limit,
+    );
     sync_waiting_for(state, &wf);
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
@@ -1111,7 +1160,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
 
                 let mut events = Vec::new();
-                match pass_priority_once_with_pipeline(state, &mut events) {
+                match pass_priority_once_with_pipeline(state, &mut events, None) {
                     Ok(wf) => {
                         let stack_empty_or_grew =
                             finish_completed_or_interrupted_until_stack_empty_sessions(state);
@@ -1320,6 +1369,7 @@ fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
     action: GameAction,
+    stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
     // Clear stale revealed_cards from the previous action.
     // RevealTop reveals (e.g. Goblin Guide) are momentary — shown for one state update.
@@ -1339,9 +1389,13 @@ fn apply_action(
     // CR 701.20e: A bare "look at the top card" peek is visible to the looker
     // only until they act on it. The peek window must survive the action that
     // serves the dependent "you may reveal that card" optional (the looked-at
-    // card is shown while that `OptionalEffectChoice` is pending), then clear on
-    // the next action boundary — mirroring the momentary `revealed_cards` reveal.
-    if !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+    // card is shown while that `OptionalEffectChoice` is pending) and any
+    // `RevealChoice` opened by a private look-at-hand, then clear on the next
+    // action boundary — mirroring the momentary `revealed_cards` reveal.
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::RevealChoice { .. }
+    ) {
         state.private_look_ids.clear();
         state.private_look_player = None;
     }
@@ -1571,7 +1625,7 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let wf = pass_priority_once_with_pipeline(state, &mut events)?;
+            let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
                 events,
                 waiting_for: wf,
@@ -2311,15 +2365,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
-                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_spell_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    *count,
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
+                PayCostKind::TapCreatures { aggregate } => {
+                    engine_casting::handle_tap_creatures_for_spell_cost(
+                        state,
+                        *player,
+                        *pending_cast.clone(),
+                        *count,
+                        *aggregate,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::Behold { action } => engine_casting::handle_behold_for_cost(
                     state,
                     *player,
@@ -2342,14 +2399,18 @@ fn apply_action(
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
-                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
+                // CR 605.1a: mana-ability tap costs are always fixed-count; the
+                // aggregate form never resumes a mana ability.
+                PayCostKind::TapCreatures { .. } => {
+                    engine_casting::handle_tap_creatures_for_mana_ability(
+                        state,
+                        *count,
+                        choices,
+                        pending_mana_ability,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
                     state,
                     *count,
@@ -3036,12 +3097,18 @@ fn apply_action(
                     .find(|p| p.id == player)
                     .map(|p| p.mana_pool.clone())
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                let current_shards = if pending_ref.activation_ability_index.is_some() {
+                let activation_ability_index = pending_ref.activation_ability_index;
+                let current_shards = if let Some(ability_index) = activation_ability_index {
                     let (source_types, source_subtypes) =
                         casting::activation_source_types(state, spell_object);
                     let activation_ctx = crate::types::mana::PaymentContext::Activation {
                         source_types: &source_types,
                         source_subtypes: &source_subtypes,
+                        ability_tag: casting::activation_ability_tag(
+                            state,
+                            spell_object,
+                            ability_index,
+                        ),
                     };
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
@@ -4396,7 +4463,7 @@ fn apply_action(
                 AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
             };
             state.auto_pass.insert(*player, stored_mode);
-            let wf = pass_priority_once_with_pipeline(state, &mut events)?;
+            let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
             return Ok(ActionResult {
                 events,
                 waiting_for: wf,
@@ -5170,6 +5237,7 @@ pub(super) fn begin_pending_trigger_target_selection(
     let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
     let description = trigger.description.clone();
+    let trigger_controller = trigger.controller;
     let trigger_event = trigger.trigger_event.clone();
     let trigger_events = if state.pending_trigger_event_batch.is_empty() {
         trigger_event.iter().cloned().collect::<Vec<_>>()
@@ -5214,6 +5282,9 @@ pub(super) fn begin_pending_trigger_target_selection(
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
+        trigger_controller: Some(trigger_controller),
+        trigger_event,
+        trigger_events,
         target_slots,
         mode_labels: Vec::new(),
         target_constraints,
@@ -8120,6 +8191,121 @@ mod tests {
                 ..
             } if *object_id == room
         )));
+    }
+
+    /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
+    /// to "cast Room spells and unlock doors". The door-unlock half lowers to
+    /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
+    /// through `PaymentContext::SpecialAction(UnlockDoor)`, so the restricted {R}
+    /// IS eligible. Before this fix the unlock cost paid via
+    /// `PaymentContext::Effect`, which rejects every restriction — the restricted
+    /// {R} could not pay and the unlock failed. Reverting the
+    /// `pay_special_action_mana_cost` wiring flips this assertion (the unlock
+    /// would error "Cannot pay mana cost").
+    #[test]
+    fn unlock_door_restricted_mana_pays_room_unlock_cost() {
+        use crate::types::mana::{ManaRestriction, ManaType, ManaUnit, SpecialAction};
+
+        let mut state = setup_game_at_main_phase();
+        let room = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Bottomless Pool".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.room_unlocks = Some(Default::default());
+            // CR 709.5e: left door's unlock cost is the object's mana cost ({R}).
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        // Smoky Lounge's restricted {R}: only for casting Room spells OR unlocking
+        // doors. Mirrors the lowering of `ManaSpendRestriction::Any([SpellType,
+        // UnlockDoor])`.
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Room".to_string()),
+            ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
+        ]);
+        {
+            let player = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            player
+                .mana_pool
+                .add(ManaUnit::new(ManaType::Red, room, false, vec![restriction]));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::UnlockRoomDoor {
+                object_id: room,
+                door: RoomDoor::Left,
+            },
+        )
+        .expect("restricted mana must be able to pay a door's unlock cost");
+
+        let room_obj = state.objects.get(&room).unwrap();
+        assert!(
+            room_obj.room_unlocks.unwrap().left_unlocked,
+            "the door must be unlocked after paying its cost with door-restricted mana"
+        );
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::RoomDoorUnlocked { object_id, door: RoomDoor::Left, .. } if *object_id == room
+        )));
+        // The restricted {R} was consumed paying the unlock cost.
+        let pool_left = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .mana
+            .len();
+        assert_eq!(
+            pool_left, 0,
+            "the restricted mana must be spent on the unlock"
+        );
+    }
+
+    /// CR 106.6 + CR 116.2m: Door-restricted mana is rejected for unrelated
+    /// payments. The unlock cost is the ONLY thing this {R} can pay (besides Room
+    /// spell casts) — a generic effect cost must not draw on it. Reverting the
+    /// `OnlyForSpecialAction` gate (e.g. making it `true` for `Effect`) flips this.
+    #[test]
+    fn unlock_door_restricted_mana_rejected_for_effect_and_spell_payments() {
+        use crate::types::mana::{
+            ManaRestriction, ManaType, PaymentContext, SpecialAction, SpellMeta,
+        };
+
+        let restriction = ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor);
+
+        // Accepts the matching special action.
+        assert!(restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
+        // Rejects generic effect-resolution payments (the pre-fix unlock path).
+        assert!(!restriction.allows(&PaymentContext::Effect));
+        // Rejects a Room spell cast (this leaf is the door half only).
+        let room_spell = SpellMeta {
+            types: vec!["Enchantment".to_string()],
+            subtypes: vec!["Room".to_string()],
+            ..SpellMeta::default()
+        };
+        assert!(!restriction.allows(&PaymentContext::Spell(&room_spell)));
+        // Rejects ability activation.
+        assert!(!restriction.allows(&PaymentContext::Activation {
+            source_types: &["Artifact".to_string()],
+            source_subtypes: &["Equipment".to_string()],
+            ability_tag: None,
+        }));
+        let _ = ManaType::Red;
     }
 
     #[test]
@@ -11509,6 +11695,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -11921,7 +12108,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: crate::types::ability::TypedFilter::creature()
                                 .controller(crate::types::ability::ControllerRef::You)
                                 .into(),
@@ -11959,7 +12146,7 @@ mod tests {
             result.waiting_for,
             WaitingFor::PayCost {
                 player: PlayerId(0),
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count: 1,
                 resume: CostResume::ManaAbility { .. },
                 ..
@@ -12392,7 +12579,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: TypedFilter::creature()
                                 .controller(ControllerRef::You)
                                 .into(),
@@ -12448,7 +12635,7 @@ mod tests {
         match result.waiting_for {
             WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::ManaAbility { .. },
@@ -12524,7 +12711,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 2,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(2),
                             filter: TypedFilter::creature()
                                 .with_type(TypeFilter::Subtype("Elf".to_string()))
                                 .controller(ControllerRef::You)
@@ -12574,7 +12761,7 @@ mod tests {
         match result.waiting_for {
             WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::TapCreatures,
+                kind: PayCostKind::TapCreatures { .. },
                 count,
                 choices: creatures,
                 resume: CostResume::Spell { .. },
@@ -12631,7 +12818,7 @@ mod tests {
                     costs: vec![
                         AbilityCost::Tap,
                         AbilityCost::TapCreatures {
-                            count: 1,
+                            requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                             filter: TypedFilter::creature()
                                 .with_type(TypeFilter::Subtype("Elf".to_string()))
                                 .controller(ControllerRef::You)
@@ -13716,6 +13903,9 @@ mod trigger_target_tests {
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
@@ -13819,6 +14009,9 @@ mod trigger_target_tests {
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(legal_target)],
                 optional: false,
@@ -14233,6 +14426,9 @@ mod trigger_target_tests {
         state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![
                 crate::types::game_state::TargetSelectionSlot {
                     legal_targets: vec![
@@ -14317,6 +14513,13 @@ mod trigger_target_tests {
             },
         ];
         let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
+        let trigger_event = GameEvent::DamageDealt {
+            source_id: ObjectId(31),
+            target: TargetRef::Object(ObjectId(99)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
         // CR 603.3c + CR 603.3d "Push first" contract migration.
         let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(31),
@@ -14345,7 +14548,7 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: target_constraints.clone(),
             distribute: None,
-            trigger_event: None,
+            trigger_event: Some(trigger_event.clone()),
             modal: None,
             mode_abilities: vec![],
             description: None,
@@ -14364,6 +14567,9 @@ mod trigger_target_tests {
         state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: Some(PlayerId(0)),
+            trigger_event: Some(trigger_event.clone()),
+            trigger_events: vec![trigger_event.clone()],
             target_slots: target_slots.clone(),
             mode_labels: Vec::new(),
             target_constraints: target_constraints.clone(),
@@ -14385,7 +14591,16 @@ mod trigger_target_tests {
         .unwrap();
 
         match intermediate.waiting_for {
-            WaitingFor::TriggerTargetSelection { selection, .. } => {
+            WaitingFor::TriggerTargetSelection {
+                trigger_controller,
+                trigger_event: prompt_event,
+                trigger_events,
+                selection,
+                ..
+            } => {
+                assert_eq!(trigger_controller, Some(PlayerId(0)));
+                assert_eq!(prompt_event, Some(trigger_event.clone()));
+                assert_eq!(trigger_events, vec![trigger_event]);
                 assert_eq!(selection.current_slot, 1);
                 assert_eq!(
                     selection.current_legal_targets,

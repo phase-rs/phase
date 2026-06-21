@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::multispace0;
 
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
@@ -148,6 +149,29 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     .parse(input)
     .expect("rest fallback makes cast-scope suffix stripping infallible");
     stripped.trim()
+}
+
+/// CR 604.1 + CR 601.2f: Strip an inline "during your turn" timing clause from
+/// a cost-modification subject before type parsing. Paladin Class: "Spells your
+/// opponents cast during your turn cost {1} more to cast."
+fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCondition>) {
+    if let Ok((_, prefix)) = terminated(
+        take_until(" during your turn"),
+        (
+            tag::<_, _, OracleError<'_>>(" during your turn"),
+            nom::combinator::eof,
+        ),
+    )
+    .parse(text)
+    {
+        return (prefix.trim(), Some(StaticCondition::DuringYourTurn));
+    }
+    if let Some((before, _, _)) = nom_primitives::scan_preceded(text, |i| {
+        all_consuming(tag::<_, _, OracleError<'_>>(" during your turn")).parse(i)
+    }) {
+        return (before, Some(StaticCondition::DuringYourTurn));
+    }
+    (text, None)
 }
 
 fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
@@ -363,6 +387,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
 
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
+    let mut during_your_turn_scope = None;
     let spell_filter = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
     } else if let Some(filter) = first_qualified_spell_filter.cloned() {
@@ -371,6 +396,8 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     } else if let Some(cost_idx) = lower.find(" cost") {
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let prefix = &lower[..cost_idx];
+        let (prefix, turn_scope) = strip_cost_mod_during_your_turn_scope(prefix);
+        during_your_turn_scope = turn_scope;
         let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
         let without_from = if !cast_from_zones.is_empty() {
@@ -615,6 +642,8 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     }
     if let Some((filter, timing)) = first_qualified_spell.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter, timing));
+    } else if let Some(during_your_turn_scope) = during_your_turn_scope {
+        definition.condition = Some(during_your_turn_scope);
     }
     if definition.condition.is_none() {
         definition.condition = leading_condition;
@@ -652,6 +681,43 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
                 }
             }
         }
+    }
+
+    // CR 601.2f: Leading-condition form — "If [condition], this spell costs
+    // {N} less to cast." The trailing scan above misses this because the "if"
+    // is at the start of the line (no preceding space), so `rfind(" if ")`
+    // never matches it. Consume the condition with the shared combinator and
+    // accept it only when followed by the comma separating it from the
+    // already-parsed cost clause. The Avatar cycle (Avatar of
+    // Fury/Hope/Might/Will/Woe) and "If you weren't the starting player, this
+    // spell costs {1} less" cards use this form.
+    if definition.condition.is_none() {
+        if let Ok((_rest, sc)) = preceded(
+            tag("if "),
+            terminated(
+                nom_condition::parse_inner_condition,
+                (multispace0, tag(",")),
+            ),
+        )
+        .parse(lower)
+        {
+            definition.condition = Some(sc);
+        }
+    }
+
+    // CR 102.1 + CR 601.2f: Leading "During your turn," timing restriction —
+    // the cost modification functions only on the static controller's turn
+    // (Tithe Taker: "During your turn, spells your opponents cast cost {1} more
+    // to cast ..."). The trailing/`if` scans above miss this because it is a
+    // comma-separated timing prefix, not an "if"/"as long as" clause. The cost
+    // resolver gates on `StaticCondition::DuringYourTurn`, which is evaluated
+    // against the source permanent's controller (CR 102.1: active player).
+    if definition.condition.is_none()
+        && tag::<_, _, OracleError<'_>>("during your turn, ")
+            .parse(lower)
+            .is_ok()
+    {
+        definition.condition = Some(StaticCondition::DuringYourTurn);
     }
 
     Some(definition)

@@ -13,7 +13,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     if let Effect::AddRestriction { restriction } = &ability.effect {
         let mut restriction = restriction.clone();
-        fill_runtime_fields(&mut restriction, ability);
+        fill_runtime_fields(state, &mut restriction, ability);
         state.restrictions.push(restriction);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::AddRestriction,
@@ -28,7 +28,11 @@ pub fn resolve(
 }
 
 /// Fill runtime-bound fields of a restriction using the resolving ability context.
-fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbility) {
+fn fill_runtime_fields(
+    state: &GameState,
+    restriction: &mut GameRestriction,
+    ability: &ResolvedAbility,
+) {
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
         | GameRestriction::ProhibitActivity { source, .. } => {
@@ -42,14 +46,34 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
         GameRestriction::ProhibitActivity {
             affected_players, ..
         } => {
-            if matches!(
-                affected_players,
-                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
-                    | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
-            ) {
-                *affected_players = crate::types::ability::RestrictionPlayerScope::SpecificPlayer(
-                    resolved_target_player,
-                );
+            use crate::types::ability::RestrictionPlayerScope;
+            match affected_players {
+                RestrictionPlayerScope::TargetedPlayer
+                | RestrictionPlayerScope::ParentTargetedPlayer => {
+                    *affected_players =
+                        RestrictionPlayerScope::SpecificPlayer(resolved_target_player);
+                }
+                // CR 508.5 / CR 508.5a: capture the defending player as the
+                // restriction is created — they are fixed once attackers are
+                // declared (Xantid Swarm's "defending player can't cast spells").
+                // If the source has left combat before the trigger resolves,
+                // read the trigger event per CR 508.5.
+                RestrictionPlayerScope::DefendingPlayer => {
+                    if let Some(defender) =
+                        crate::game::combat::defending_player_for_attacker(state, ability.source_id)
+                            .or_else(|| {
+                                super::myriad::defending_player_from_attack_event(
+                                    state.current_trigger_event.as_ref(),
+                                    ability.source_id,
+                                )
+                            })
+                    {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(defender);
+                    }
+                }
+                RestrictionPlayerScope::AllPlayers
+                | RestrictionPlayerScope::SpecificPlayer(_)
+                | RestrictionPlayerScope::OpponentsOfSourceController => {}
             }
         }
         GameRestriction::DamagePreventionDisabled { .. } => {}
@@ -57,24 +81,31 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
 
     match restriction {
         GameRestriction::ProhibitActivity { expiry, .. } => {
-            // CR 514.2: "until [the end of] your next turn" restrictions expire
-            // relative to the controller's next turn. The restriction-expiry
-            // system tracks only `UntilPlayerNextTurn` (begin-of-next-turn), so
-            // both readings map to it here — the precise end-of-next-turn timing
-            // matters only for continuous effects / play-permissions (handled in
-            // the layer prune); no printed restriction uses "end of next turn".
-            if let Some(
-                crate::types::ability::Duration::UntilNextTurnOf {
-                    player: crate::types::ability::PlayerScope::Controller,
+            use crate::types::ability::{Duration, PlayerScope};
+            match ability.duration.as_ref() {
+                // CR 514.2 + CR 611.2a: "until your next turn" expires at the
+                // *beginning* of the controller's next turn.
+                Some(Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                }) => {
+                    *expiry = RestrictionExpiry::UntilPlayerNextTurn {
+                        player: ability.controller,
+                    };
                 }
-                | crate::types::ability::Duration::UntilEndOfNextTurnOf {
-                    player: crate::types::ability::PlayerScope::Controller,
-                },
-            ) = ability.duration.as_ref()
-            {
-                *expiry = RestrictionExpiry::UntilPlayerNextTurn {
-                    player: ability.controller,
-                };
+                // CR 514.2 + CR 500.7: "during [the controller's] next turn …"
+                // (Kang) persists through that entire turn and expires at its
+                // cleanup. Lower to the pre-armed `UntilEndOfNextTurnOf` marker,
+                // which the untap step converts to `EndOfTurn` (mirroring
+                // `prune_until_next_turn_effects`) so the existing cleanup prune
+                // ends it at THAT turn's cleanup.
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }) => {
+                    *expiry = RestrictionExpiry::UntilEndOfNextTurnOf {
+                        player: ability.controller,
+                    };
+                }
+                _ => {}
             }
         }
         GameRestriction::DamagePreventionDisabled { .. } => {}
@@ -183,6 +214,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                        only_tag: None,
                     },
                 },
             },
@@ -217,6 +249,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                        only_tag: None,
                     },
                 },
             },
