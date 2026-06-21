@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{one_of, space1};
+use nom::character::complete::{one_of, space0, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -2578,18 +2578,20 @@ fn parse_hand_reveal_target_and_card_filter(
     // clause must populate `card_filter`; an empty `None` filter matches nothing, so
     // without it the RevealHand chooses and exiles nothing (a silent no-op).
     if let Ok((rest, target)) = parse_hand_possessive_target(after_reveal_lower) {
-        if let Some(choose) = rest
-            .trim_start()
-            .strip_prefix("and ")
-            .map(str::trim_start)
-            .filter(|clause| {
-                nom_primitives::scan_contains(clause, "card from it")
-                    && alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
-                        .parse(*clause)
-                        .is_ok()
-            })
+        if let Ok((_, choose)) = preceded(
+            (space0, tag::<_, _, OracleError<'_>>("and "), space0),
+            nom::combinator::rest,
+        )
+        .parse(rest)
         {
-            return (target, super::parse_choose_filter(choose, ctx));
+            let chooses_card_from_it = nom_primitives::scan_contains(choose, "card from it")
+                && alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
+                    .parse(choose)
+                    .is_ok();
+
+            if chooses_card_from_it {
+                return (target, super::parse_choose_filter(choose, ctx));
+            }
         }
     }
 
