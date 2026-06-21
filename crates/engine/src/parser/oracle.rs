@@ -792,6 +792,104 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
     parse_static_line_multi(line)
 }
 
+/// CR 614.6 + CR 701.26b: A single `<subject> can't <P1> and can't <P2>`
+/// prohibition whose two conjuncts belong to DIFFERENT parser layers — the
+/// static layer and/or the replacement layer. Blossombind ("Enchanted creature
+/// can't become untapped and can't have counters put on it.") joins an
+/// untap-event prevention (CR 701.26b) and an `AddCounter`-prevention
+/// replacement (CR 614.6). Because the counter-prohibition substring trips
+/// `is_static_pattern`, the whole line would otherwise be claimed by the static
+/// parser, silently dropping the second conjunct. Split on the conjunction,
+/// re-attach the shared subject to each clause, route each to BOTH layer parsers,
+/// and adopt the split only when every conjunct is claimed by at least one layer
+/// AND at least one replacement is produced (a pure-static compound keeps its
+/// existing single-layer multi-static path). `line` is already
+/// self-ref-normalized for static parsing.
+fn parse_static_replacement_compound(
+    line: &str,
+    lower: &str,
+    card_name: &str,
+) -> Option<(Vec<StaticDefinition>, Vec<ReplacementDefinition>)> {
+    // Re-attach the shared subject to each conjunct so each clause parses
+    // independently (Oracle text drops the subject on the second conjunct).
+    let (subject, p1, p2) = split_dual_cant_clause(line, lower)?;
+    let left = format!("{subject} can't {p1}");
+    let right = format!("{subject} can't {p2}");
+
+    let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left);
+    let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right);
+    let left_repl = parse_replacement_line(&left, card_name);
+    let right_repl = parse_replacement_line(&right, card_name);
+
+    // Each conjunct must be claimed by at least one layer; otherwise this is not
+    // a clean cross-layer compound and the line belongs to the single-layer
+    // fallbacks.
+    let left_claimed = left_repl.is_some() || !left_statics.is_empty();
+    let right_claimed = right_repl.is_some() || !right_statics.is_empty();
+    if !left_claimed || !right_claimed {
+        return None;
+    }
+
+    let mut replacements = Vec::new();
+    replacements.extend(left_repl);
+    replacements.extend(right_repl);
+    // At least one conjunct must be a replacement — pure-static compounds have
+    // their own multi-static splitters and must not be diverted here.
+    if replacements.is_empty() {
+        return None;
+    }
+
+    let mut statics = left_statics;
+    statics.extend(right_statics);
+    Some((statics, replacements))
+}
+
+/// CR 614.6: Split `<subject> can't <P1> and can't <P2>` into the shared subject
+/// and the two bare predicates (the leading `can't ` already stripped). Operates
+/// on the lowercase view for matching but returns ORIGINAL-case slices of `line`.
+///
+/// Robust against a subject that itself contains "can't" (e.g. "A creature that
+/// can't block can't become untapped and can't …"): the conjunction `" and can't
+/// "` is the unambiguous structural boundary between the two prohibitions, so we
+/// split there FIRST to isolate P2, then take the LAST `" can't "` within the
+/// left half as the P1 boundary. `rfind` here is a deliberate structural
+/// last-boundary scan, not a parsing-dispatch substring test — the predicate
+/// tokens themselves are parsed by the layer parsers the caller invokes.
+fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'a str, &'a str)> {
+    const CONJ: [&str; 2] = [" and can't ", " and can\u{2019}t "];
+    const CANT: [&str; 2] = [" can't ", " can\u{2019}t "];
+
+    // Trim a single trailing period (on both views, so byte offsets stay aligned).
+    // allow-noncombinator: structural trailing-punctuation trim on a whole line, not parsing dispatch.
+    let lower = lower.strip_suffix('.').unwrap_or(lower);
+    let line = &line[..lower.len()];
+
+    // Conjunction boundary: "<left> and can't <P2>". The conjunction divider is
+    // located structurally so the two prohibition predicates can each be handed to
+    // the layer parsers; the predicate tokens themselves are parsed there.
+    // allow-noncombinator: structural conjunction-boundary scan, not parsing dispatch.
+    let (conj_pos, conj_len) = CONJ
+        .iter()
+        .find_map(|needle| lower.find(needle).map(|pos| (pos, needle.len())))?;
+    let left_lower = &lower[..conj_pos];
+    let p2 = line[conj_pos + conj_len..].trim();
+
+    // P1 boundary: the LAST " can't " inside the left half, so a subject that
+    // itself contains "can't" (e.g. "A creature that can't block …") is not
+    // truncated. The subject is everything before it; P1 everything after.
+    // allow-noncombinator: structural last-boundary scan, not parsing dispatch.
+    let (cant_pos, cant_len) = CANT
+        .iter()
+        .find_map(|needle| left_lower.rfind(needle).map(|pos| (pos, needle.len())))?;
+    let subject = line[..cant_pos].trim();
+    let p1 = line[cant_pos + cant_len..conj_pos].trim();
+
+    if subject.is_empty() || p1.is_empty() || p2.is_empty() {
+        return None;
+    }
+    Some((subject, p1, p2))
+}
+
 /// CR 607.2d: Reconcile self-chosen type statics with the source's linked
 /// persisted choice.
 /// CR 614.1c + CR 608.2d: Cards like Banner of Kinship parse "as ~ enters,
@@ -2888,6 +2986,24 @@ pub(crate) fn parse_oracle_ir(
         if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
             result.casting_options.push(option);
             result.triggers.push(trigger);
+            i += 1;
+            continue;
+        }
+
+        // Priority 6e: Compound `<subject> can't <P1> and can't <P2>` prohibition
+        // whose conjuncts cross parser layers (static and/or replacement).
+        // CR 701.26b + CR 614.6: Blossombind class — "Enchanted creature can't
+        // become untapped and can't have counters put on it" is two replacement
+        // effects (an Untap prevention and an AddCounter prevention). The "can't
+        // have counters put on" substring makes Priority 7's `is_static_pattern`
+        // fire and consume the whole line, dropping a conjunct. Split on the
+        // " and can't " conjunction so each clause reaches BOTH layer parsers and
+        // every conjunct is claimed.
+        if let Some((statics, replacements)) =
+            parse_static_replacement_compound(&static_line, &static_line_lower, card_name)
+        {
+            result.statics.extend(statics);
+            result.replacements.extend(replacements);
             i += 1;
             continue;
         }
@@ -16772,6 +16888,113 @@ Artifacts you control have \"{T}: Add {U}. Spend this mana only to cast a spell 
             "unexpected DynamicQty warning: {:?}",
             r.parse_warnings
         );
+    }
+
+    /// CR 701.26b + CR 614.6: Blossombind — the compound "Enchanted creature
+    /// can't become untapped and can't have counters put on it." is two
+    /// replacement effects: an unconditional `Untap` prevention (CR 701.26b — the
+    /// BROAD prohibition, NOT the untap-step-only `StaticMode::CantUntap` class)
+    /// and an `AddCounter` prevention (CR 614.6). The Priority-6e cross-layer
+    /// splitter must emit BOTH (and leave no Unimplemented). Reverting the splitter
+    /// collapses the line to an Unimplemented ability and drops a conjunct. The
+    /// Untap replacement must carry no `DuringUntapStep` condition so it applies to
+    /// every untap path (the runtime regression test in `tap_untap.rs` drives an
+    /// actual untap effect and asserts the host stays tapped).
+    #[test]
+    fn blossombind_compound_splits_into_untap_and_counter_replacements() {
+        let r = parse(
+            "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature can't become untapped and can't have counters put on it.",
+            "Blossombind",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert!(
+            !r.abilities
+                .iter()
+                .any(|def| matches!(*def.effect, Effect::Unimplemented { .. })),
+            "no Unimplemented should remain, got {:?}",
+            r.abilities
+        );
+        // The broad untap prohibition must NOT lower to a CantUntap static
+        // (that class is untap-step-only and would not stop a spell/ability untap).
+        assert!(
+            !r.statics
+                .iter()
+                .any(|def| def.mode == StaticMode::CantUntap),
+            "broad 'can't become untapped' must not be a CantUntap static, got {:?}",
+            r.statics
+        );
+        let untap = r
+            .replacements
+            .iter()
+            .find(|def| def.event == ReplacementEvent::Untap)
+            .expect("compound must emit an Untap-prevention replacement");
+        assert!(
+            untap.condition.is_none(),
+            "the untap prevention must be unconditional (apply to every untap), got {:?}",
+            untap.condition
+        );
+        assert!(
+            untap.execute.is_none(),
+            "a bare 'can't become untapped' has no alternative effect, got {:?}",
+            untap.execute
+        );
+        assert!(
+            r.replacements
+                .iter()
+                .any(|def| def.event == ReplacementEvent::AddCounter),
+            "compound must emit an AddCounter-prevention replacement, got {:?}",
+            r.replacements
+        );
+    }
+
+    /// CR 207.2c + CR 702.185c: Temporal Intervention — the "Void —" ability-word
+    /// prefix has no rules meaning, so the body "This spell costs {2} less to cast
+    /// if [a nonland permanent left the battlefield this turn or a spell was warped
+    /// this turn]" must still lower to a self `ModifyCost`/`Reduce` static with the
+    /// Void condition attached — not an `Unimplemented` ability. Reverting the
+    /// ability-word strip in `is_self_spell_cost_modification` makes
+    /// `should_defer_spell_to_effect` fire on the "this turn" substring inside the
+    /// condition, routing the line to the effect parser and dropping the cost
+    /// reduction (the line becomes an Unimplemented ability). Discriminating:
+    /// the static count and the absence of Unimplemented both flip on revert.
+    #[test]
+    fn temporal_intervention_void_prefix_keeps_self_cost_reduction_static() {
+        let r = parse(
+            "Void \u{2014} This spell costs {2} less to cast if a nonland permanent left the battlefield this turn or a spell was warped this turn.\nTarget opponent reveals their hand. You choose a nonland card from it. That player discards that card.",
+            "Temporal Intervention",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert!(
+            !r.abilities
+                .iter()
+                .any(|def| matches!(*def.effect, Effect::Unimplemented { .. })),
+            "Void-prefixed cost reduction must not leave an Unimplemented ability, got {:?}",
+            r.abilities
+        );
+        let reduction = r
+            .statics
+            .iter()
+            .find(|def| {
+                matches!(
+                    &def.mode,
+                    StaticMode::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount: ManaCost::Cost { generic: 2, .. },
+                        ..
+                    }
+                )
+            })
+            .expect("Void body must lower to a self ModifyCost/Reduce of {2}");
+        assert!(
+            reduction.condition.is_some(),
+            "the Void cost reduction must carry its gating condition"
+        );
+        assert!(matches!(reduction.affected, Some(TargetFilter::SelfRef)));
     }
 
     #[test]

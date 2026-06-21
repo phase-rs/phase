@@ -1221,9 +1221,18 @@ pub(crate) enum ShuffleImperativeAst {
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.
+    ///
+    /// `all` distinguishes a single-target move ("shuffle target card from your
+    /// graveyard into your library", `false`) from a filtered mass move
+    /// ("shuffle all nonland cards from your graveyard into your library",
+    /// `true`). When `true`, the lowering emits `Effect::ChangeZoneAll` so every
+    /// eligible object moves with no interactive choice (CR 400.6) and the move
+    /// stamps `last_effect_count`; when `false` it emits a single
+    /// `Effect::ChangeZone`.
     TargetedChangeZoneToLibrary {
         target: TargetFilter,
         origin: Option<Zone>,
+        all: bool,
     },
     Unimplemented {
         text: String,

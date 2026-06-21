@@ -227,6 +227,23 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         };
     }
 
+    // CR 207.2c: A mode's flavor name ("Take 59 Flights of Stairs — …", Aerith
+    // Rescue Mission) is italic flavor with no rules meaning. These names can
+    // exceed the 4-word ability-word cap, so the short-label split above misses
+    // them. A flavor label never contains a sentence terminator, a cost brace,
+    // or an activation colon — those mark an actual effect/cost — so split on
+    // the first " — " when the prefix is punctuation-free flavor text. The body
+    // (the real rules text) is what `parse_effect_chain` lowers.
+    if let Some((label, body)) = split_mode_flavor_label(text) {
+        return ModeAst {
+            raw: text.to_string(),
+            label: Some(label.to_string()),
+            body: body.to_string(),
+            mode_cost: None,
+            mode_pawprint: None,
+        };
+    }
+
     ModeAst {
         raw: text.to_string(),
         label: None,
@@ -234,6 +251,30 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         mode_cost: None,
         mode_pawprint: None,
     }
+}
+
+/// CR 207.2c: Split a modal mode's flavor name from its rules text on the first
+/// " — " / " – " separator. Unlike `split_short_label_prefix`, this imposes no
+/// word-count cap (mode flavor names can be long), but requires the prefix to be
+/// punctuation-free flavor text — no `.`, `:`, or `{` — so an actual effect
+/// sentence or activation cost is never mistaken for a label. Returns
+/// `(label, body)` with both trimmed, or `None`.
+fn split_mode_flavor_label(text: &str) -> Option<(&str, &str)> {
+    for sep in [" — ", " – "] {
+        // allow-noncombinator: structural label/body split on the em-dash mode
+        // separator (mirrors `split_short_label_prefix`), not parsing dispatch.
+        if let Some(pos) = text.find(sep) {
+            let prefix = text[..pos].trim();
+            let rest = text[pos + sep.len()..].trim();
+            // allow-noncombinator: punctuation guard distinguishing a flavor
+            // label from an effect sentence / activation cost; structural, not
+            // a parsing-dispatch substring scan.
+            if !prefix.is_empty() && !rest.is_empty() && !prefix.contains(['.', ':', '{']) {
+                return Some((prefix, rest));
+            }
+        }
+    }
+    None
 }
 
 fn strip_mode_separator(text: &str) -> &str {
@@ -1605,6 +1646,44 @@ mod tests {
         assert!(modes[0].mode_cost.is_some());
         assert_eq!(modes[0].body, "Draw a card.");
         assert!(modes[1].mode_cost.is_some());
+    }
+
+    /// Aerith Rescue Mission (std long-tail): a mode flavor name can exceed the
+    /// 4-word ability-word cap ("Take 59 Flights of Stairs" = 5 words). The
+    /// long-flavor split must strip the flavor label so the body
+    /// ("Tap up to three target creatures...") reaches the effect parser,
+    /// instead of the whole "Take 59 Flights of Stairs — Tap ..." text falling
+    /// to `Effect::Unimplemented`. Revert-discriminating: the 3-word mode keeps
+    /// parsing via `split_short_label_prefix`, but the 5-word mode's body would
+    /// retain its flavor prefix without `split_mode_flavor_label`.
+    /// CR 207.2c: ability/flavor words carry no rules meaning.
+    #[test]
+    fn collect_mode_asts_long_flavor_label_strips_to_body() {
+        let lines = vec![
+            "Choose one —",
+            "• Take the Elevator — Create three 1/1 colorless Hero creature tokens.",
+            "• Take 59 Flights of Stairs — Tap up to three target creatures. Put a stun counter on one of them.",
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        assert_eq!(modes.len(), 2);
+        assert_eq!(
+            modes[0].label.as_deref(),
+            Some("Take the Elevator"),
+            "short (3-word) flavor label still splits"
+        );
+        assert_eq!(
+            modes[0].body,
+            "Create three 1/1 colorless Hero creature tokens."
+        );
+        assert_eq!(
+            modes[1].label.as_deref(),
+            Some("Take 59 Flights of Stairs"),
+            "long (5-word) flavor label must be stripped via split_mode_flavor_label"
+        );
+        assert_eq!(
+            modes[1].body, "Tap up to three target creatures. Put a stun counter on one of them.",
+            "the long-flavor mode body must drop the flavor prefix"
+        );
     }
 
     #[test]

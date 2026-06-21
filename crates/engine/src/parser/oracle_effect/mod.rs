@@ -2073,6 +2073,67 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
     })
 }
 
+/// CR 601.2f + CR 611.2c: A one-shot effect that creates a turn-duration spell
+/// cost-modification continuous effect — "Spells you cast this turn that are
+/// [colors] cost {X} less to cast, where X is the amount of life you [lost|
+/// gained] this turn." (Rowan, Scion of War; Will, Scion of Peace, activated as
+/// `{T}: ...`). This is distinct from a *printed* cost-modification static
+/// (which is always on) because the subject's "this turn" duration marker makes
+/// it a continuous effect created by resolution (CR 611.2a) — it must expire at
+/// end of turn.
+///
+/// The static-line authority (`parse_static_line`) already lowers the entire
+/// `ModifyCost` payload (color-disjunction `spell_filter`, dynamic-X
+/// `LifeLostThisTurn`/`LifeGainedThisTurn` `dynamic_count`); we delegate to it
+/// rather than re-implementing cost-modifier parsing. The resulting static is
+/// then granted onto the resolving source for one turn via `GrantStaticAbility`
+/// on `SelfRef` (mirroring `try_parse_combat_tax_effect_clause`), so layer-6
+/// installs it on the source's `static_definitions` where
+/// `collect_battlefield_cost_modifiers` reads it at cast time.
+fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    // The "this turn" subject duration is the structural discriminator that
+    // separates this temporary effect from a printed cost-mod static. The
+    // subject is "spells you cast this turn ..." (a duration on the affected
+    // SET, CR 611.2a), so require the marker on the cost-modify subject before
+    // delegating to the static authority.
+    if !scan_contains_phrase(tp.lower, "spells you cast this turn") {
+        return None;
+    }
+    if !scan_contains_phrase(tp.lower, "less to cast")
+        && !scan_contains_phrase(tp.lower, "more to cast")
+    {
+        return None;
+    }
+
+    let static_def = super::oracle_static::parse_static_line(tp.original)?;
+    if !matches!(static_def.mode, StaticMode::ModifyCost { .. }) {
+        return None;
+    }
+
+    // CR 611.2c: Grant the parsed cost-mod static onto the resolving source for
+    // one turn. `affected: SelfRef` anchors the host grant to the source; the
+    // inner static carries its own controller-scoped `affected` (cards you
+    // control) so it functions exactly as if printed on the source.
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(static_def),
+                }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::SelfRef),
+        },
+        distribute: None,
+        multi_target: None,
+        duration: Some(Duration::UntilEndOfTurn),
+        sub_ability: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
@@ -2552,8 +2613,12 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 }
 
 fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    // CR 608.2c: the optional leading "you " subject ("you earthbend 4" — Fatal
+    // Fissure's delayed trigger) names the controller performing the keyword
+    // action. Earthbend is a player action with no extra targeting, so the
+    // subject is simply consumed before the count/target parse.
     let (_, rest) = nom_on_lower(tp.original, tp.lower, |i| {
-        value((), tag("earthbend ")).parse(i)
+        value((), preceded(opt(tag("you ")), tag("earthbend "))).parse(i)
     })?;
     // `rest` is the original-case remainder; lowercase it for the nom-based
     // dispatcher inside `parse_earthbend_count_expr`, which expects already-lowered
@@ -5170,6 +5235,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 601.2f: "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
     if let Some(clause) = try_parse_grant_next_spell_ability(tp) {
+        return clause;
+    }
+
+    // CR 601.2f + CR 611.2c: "Spells you cast this turn that are [colors] cost
+    // {X} less to cast, where X is the amount of life you [lost|gained] this
+    // turn" — turn-duration spell cost-modification continuous effect
+    // (Rowan/Will, Scion of …). Tried after the "next spell" handlers since
+    // those are the more specific one-spell forms.
+    if let Some(clause) = try_parse_temporary_spell_cost_modification(tp) {
         return clause;
     }
 

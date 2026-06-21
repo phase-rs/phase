@@ -48,6 +48,20 @@ pub fn resolve(
                     | ContinuousModification::AddDynamicKeyword { value, .. } => {
                         *value = snapshot_resolution_context_quantity(value, events);
                     }
+                    // CR 611.2d: A resolution-created continuous effect that
+                    // grants a `ModifyCost` static keyed to a variable X (Rowan,
+                    // Scion of War / Will, Scion of Peace: "cost {X} less … where
+                    // X is the amount of life you lost/gained this turn") fixes X
+                    // once, here, on resolution. Without this, the granted
+                    // static's `dynamic_count` would be re-resolved at every
+                    // later cast (casting.rs::collect_self_cost_modifiers),
+                    // letting same-turn life changes retroactively move the
+                    // already-locked reduction. Snapshot the dynamic count into a
+                    // concrete `amount` so the grant behaves as a fixed-X
+                    // continuous effect for the rest of the turn (CR 611.2c).
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        snapshot_granted_cost_modifier(state, ability, definition);
+                    }
                     _ => {}
                 }
             }
@@ -610,6 +624,45 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
             right: Box::new(snapshot_resolution_context_quantity(right, events)),
         },
     }
+}
+
+/// CR 611.2d + CR 608.2h: Fix a granted cost-modification static's variable X
+/// once, at resolution.
+///
+/// When a resolving ability creates a turn-duration continuous effect that
+/// grants a [`StaticMode::ModifyCost`] keyed to a dynamic game-state quantity
+/// (Rowan, Scion of War / Will, Scion of Peace: "Spells you cast this turn …
+/// cost {X} less … where X is the amount of life you lost/gained this turn"),
+/// CR 611.2d requires X to be determined exactly once, on resolution — not
+/// re-read at each later cast. The parser lowers X as
+/// `ModifyCost { amount, dynamic_count: Some(LifeLostThisTurn/…), .. }`, where
+/// the effective reduction is `amount * resolve_quantity(dynamic_count)`
+/// (casting.rs::collect_self_cost_modifiers). We resolve that multiplier here
+/// and fold it into a concrete `amount` (via [`ManaCost::scaled`], matching the
+/// generic-and-shard scaling `apply_cost_mod_to_mana` would have applied), then
+/// clear `dynamic_count` so the grant is a fixed-X continuous effect for the
+/// rest of the turn (CR 611.2c). Statics with no `dynamic_count` are untouched.
+fn snapshot_granted_cost_modifier(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    definition: &mut StaticDefinition,
+) {
+    use crate::types::statics::StaticMode;
+
+    let StaticMode::ModifyCost {
+        amount,
+        dynamic_count,
+        ..
+    } = &mut definition.mode
+    else {
+        return;
+    };
+    let Some(qty) = dynamic_count.take() else {
+        return;
+    };
+    let multiplier =
+        resolve_quantity_with_targets(state, &QuantityExpr::Ref { qty }, ability).max(0) as u32;
+    *amount = amount.scaled(multiplier);
 }
 
 #[cfg(test)]

@@ -2467,6 +2467,13 @@ fn detect_duration_this_turn(
         "regenerated this turn",
         "scryed this turn",
         "surveiled this turn",
+        // CR 702.171c: "creature that saddled it this turn" — a relative-clause
+        // target filter (`FilterProp::SaddledSource`), not an effect duration.
+        // Same turn-history-quantity class as "attacked this turn" / "died this
+        // turn": the "this turn" scopes the saddler-membership window (cleared at
+        // cleanup), never a forward-looking duration. Calamity / Giant Beaver /
+        // The Gitrog, Ravenous Ride.
+        "saddled it this turn",
     ];
     // Only exempt when EVERY occurrence of "this turn" is part of a quantity
     // context. Counting occurrences ensures we still fire on cards that have
@@ -3688,6 +3695,22 @@ mod tests {
         let parsed = parse_named(
             "Reach\nThis creature has indestructible as long as it attacked a battle this turn.",
             "War Historian",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// CR 702.171c: "creature that saddled it this turn" is a relative-clause
+    /// target filter (`FilterProp::SaddledSource`), a turn-history-quantity
+    /// context — not a forward-looking effect duration. After the saddler-ref
+    /// filter suffix parses, `detect_duration_this_turn` must not fire (Giant
+    /// Beaver / The Gitrog, Ravenous Ride regression).
+    #[test]
+    fn duration_this_turn_accepts_saddled_it_this_turn_filter() {
+        let parsed = parse_named(
+            "Vigilance\nWhenever this creature attacks while saddled, put a +1/+1 counter on target creature that saddled it this turn.",
+            "Giant Beaver",
             &["Creature"],
         );
 

@@ -3521,11 +3521,29 @@ pub(crate) fn extract_verb_up_to_multi_target(text: &str) -> Option<MultiTargetS
     multi_target
 }
 
+/// CR 115.1: the "controlled by different players" target-set constraint phrase.
+/// Single source of truth shared by the detector
+/// (`parse_controlled_by_different_players_target_constraint`) and the per-slot
+/// stripper (`strip_controlled_by_different_players` →
+/// `try_parse_exchange_control_targets`).
+pub(crate) const CONTROLLED_BY_DIFFERENT_PLAYERS: &str = " controlled by different players";
+
+/// Locate the `CONTROLLED_BY_DIFFERENT_PLAYERS` constraint with a `take_until`
+/// combinator and return the span BEFORE it (trimmed). Returns `None` when the
+/// constraint is absent, so callers keep the original span. Composed from the
+/// shared constraint phrase so the detector and the stripper can never drift.
+pub(crate) fn strip_controlled_by_different_players(span: &str) -> Option<&str> {
+    take_until::<_, _, OracleError<'_>>(CONTROLLED_BY_DIFFERENT_PLAYERS)
+        .parse(span)
+        .ok()
+        .map(|(_, before)| before.trim_end())
+}
+
 fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     let lower = text.to_lowercase();
     let mut parser = preceded(
-        take_until::<_, _, OracleError<'_>>(" controlled by different players"),
-        tag(" controlled by different players"),
+        take_until::<_, _, OracleError<'_>>(CONTROLLED_BY_DIFFERENT_PLAYERS),
+        tag(CONTROLLED_BY_DIFFERENT_PLAYERS),
     );
     parser.parse(lower.as_str()).is_ok()
 }

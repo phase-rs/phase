@@ -267,17 +267,35 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
-        // CR 603.7c + CR 106.3: "add one mana of any type that land produced"
-        // (Vorinclex, Voice of Hunger; Dictate of Karametra). Only meaningful
-        // inside a TapsForMana trigger context; resolves the mana color from
-        // the triggering `ManaAdded` event at resolution time.
+        // CR 603.7c + CR 106.3: "add one mana of any type that <source> produced"
+        // (Vorinclex, Voice of Hunger: "land"; Roxanne, Starfall Savant: "Oasis or
+        // artifact token"). The trailing `<source>` is an anaphor to the trigger
+        // subject; only meaningful inside a TapsForMana trigger context, where the
+        // mana color is read from the triggering `ManaAdded` event at resolution.
         if let Some((_, _)) = nom_on_lower(rest, &rest_lower, |i| {
             preceded(
                 tag("mana of any type that "),
-                alt((
-                    value((), tag("land produced")),
-                    value((), tag("permanent produced")),
-                )),
+                terminated(
+                    alt((
+                        value((), tag("land")),
+                        value((), tag("permanent")),
+                        // CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the
+                        // anaphor names the tapped mana source, which is an Oasis
+                        // OR an artifact token ("that Oasis or artifact token
+                        // produced"). Same resolution: the added mana's type is
+                        // read from the triggering ManaAdded event, so the source
+                        // subtype is immaterial to the runtime. Composed as
+                        // "<subtype>[ or <subtype>]" so any future composite
+                        // source list is one more `tag` arm, not a flat
+                        // permutation.
+                        value(
+                            (),
+                            (tag("oasis"), opt((tag(" or "), tag("artifact token")))),
+                        ),
+                        value((), tag("artifact token")),
+                    )),
+                    tag(" produced"),
+                ),
             )
             .parse(i)
         }) {
@@ -2464,6 +2482,33 @@ mod tests {
                 ..
             }) => Some(options),
             _ => None,
+        }
+    }
+
+    /// CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the mana-echo anaphor
+    /// names the tapped source, which is an Oasis OR an artifact token. The actual
+    /// printed text is "add one mana of any type that Oasis or artifact token
+    /// produced"; the bare "artifact token produced" and "Oasis produced" forms
+    /// must also resolve. All reuse the same `TriggerEventManaType` production as
+    /// the land/permanent forms (runtime covered by the land tests). Reverting the
+    /// composite arm makes the real Roxanne text return None (a parser gap).
+    #[test]
+    fn roxanne_mana_echo_source_variants_parse_as_trigger_event_mana_type() {
+        for echo in [
+            "add one mana of any type that Oasis or artifact token produced",
+            "add one mana of any type that artifact token produced",
+            "add one mana of any type that Oasis produced",
+        ] {
+            assert!(
+                matches!(
+                    try_parse_add_mana_effect(echo),
+                    Some(Effect::Mana {
+                        produced: ManaProduction::TriggerEventManaType,
+                        ..
+                    })
+                ),
+                "mana-echo must reuse TriggerEventManaType for {echo:?}"
+            );
         }
     }
 

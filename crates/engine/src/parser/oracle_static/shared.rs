@@ -2856,6 +2856,15 @@ pub(crate) fn parse_rule_static_predicate_nom(
             RuleStaticPredicate::CantBeSacrificed,
             tag("can't be sacrificed"),
         ),
+        // NOTE: "can't become untapped" / "can't be untapped" (CR 701.26b) is the
+        // BROAD untap prohibition and is NOT a rule-static predicate. It would
+        // conflate with `StaticMode::CantUntap`, which is the untap-step-only
+        // class (CR 502.3, "doesn't untap during its untap step") enforced only by
+        // the untap-step turn-based-action loop — a spell/ability untap would
+        // bypass it. The broad form is parsed as an unconditional
+        // `ProposedEvent::Untap` prevention by
+        // `oracle_replacement::parse_cant_become_untapped_replacement` (mirroring
+        // CR 122.1d stun counters), so every untap path consults it.
         value(
             RuleStaticPredicate::LoseAllAbilities,
             alt((tag("loses all abilities"), tag("lose all abilities"))),

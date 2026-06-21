@@ -373,6 +373,19 @@ fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
     }
 }
 
+/// CR 205.1a + CR 613.1d: the "become(s) " animation/type-change verb in both
+/// conjugations (conjugated "becomes " and imperative "become "). Single source
+/// of truth for the bare-become conjunct split in `split_clause_sequence` — used
+/// both for the remainder peek and the word-boundary antecedent scan so the two
+/// conjugations are never enumerated in two places.
+fn parse_become_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag::<_, _, OracleError<'_>>("becomes "), tag("become "))),
+    )
+    .parse(input)
+}
+
 fn parse_becomes_plotted_continuation(lower: &str) -> bool {
     // allow-noncombinator: punctuation cleanup before all_consuming
     let text = lower.trim().trim_end_matches('.').trim();
@@ -810,6 +823,29 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && starts_prefix_clause(
                                 trimmed_before.trim_end_matches(',').trim_end(),
                             );
+                        // CR 205.1a + CR 613.1d: a bare "becomes <descriptor>" conjunct
+                        // splits off as its OWN become clause only when the antecedent is
+                        // ALSO a become predicate (a compound-become like Alacrian Armory's
+                        // "becomes saddled … and becomes an artifact creature …"). When the
+                        // antecedent is a continuous-modification predicate ("This creature
+                        // gets +3/+3 and becomes a Bear Berserker until end of turn"), the
+                        // "becomes" is a TYPE-CHANGE modifier on the same continuous effect
+                        // (CR 613.1d Layer 4), absorbed by `parse_continuous_modifications` —
+                        // not a separate clause. Suppress the bare-become split in that case
+                        // so the single GenericEffect carries both the pump and the subtype
+                        // change. The antecedent is a become predicate iff its text already
+                        // contains a "become(s) " verb. A single `parse_become_verb`
+                        // combinator (`alt` of the two conjugations) is the source of truth
+                        // for both the remainder peek and the word-boundary antecedent scan,
+                        // so the two conjugations are never enumerated twice.
+                        let bare_becomes_remainder = parse_become_verb(remainder_trimmed).is_ok();
+                        let antecedent_is_become = nom_primitives::scan_at_word_boundaries(
+                            &before_lower,
+                            parse_become_verb,
+                        )
+                        .is_some();
+                        let bare_becomes_continuation =
+                            bare_becomes_remainder && !antecedent_is_become;
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -825,6 +861,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
                         || roll_die_modifier_continuation
+                        || bare_becomes_continuation
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -1895,6 +1932,23 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
     // under nom's 21-arm limit.
     .or(value((), starts_each_player_predicate_clause_lower))
+    // CR 205.1a + CR 613.1d + CR 702.171b: a bare "becomes <descriptor>"
+    // conjunct joined by " and " is a second animation/designation predicate whose
+    // subject is carried over (anaphorically) from the prior conjunct — the same
+    // demonstrative subject the first "becomes" clause used. Alacrian Armory:
+    // "that permanent becomes saddled if it's a Mount and becomes an artifact
+    // creature if it's a Vehicle" — without this split the compound stays one
+    // chunk, the trailing-conditional peel only catches the LAST "if it's a …"
+    // gate, and the residual fails closed to an Unimplemented effect named
+    // "become". Splitting routes the second conjunct through `parse_clause_ast` →
+    // `try_parse_subject_become_clause`, where the empty (carried-over) subject
+    // resolves to the parent target and each conjunct's "if it's a <type>" gate
+    // parses exactly as the standalone "[subject] becomes <descriptor> if it's a
+    // <type>" clause does. A bare conjugated "becomes" (or imperative "become") is
+    // always a verb predicate, never a noun-phrase continuation, so the split is
+    // safe. Reuses the shared `parse_become_verb` combinator. Mirrors the anaphoric
+    // "it becomes " arm above for the subject-carried form.
+    .or(parse_become_verb)
     .parse(s)
     .is_ok();
     if has_verb_prefix {

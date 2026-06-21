@@ -1037,6 +1037,16 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
             tag::<_, _, OracleError<'_>>(" of the chosen type").parse(after_type)
         {
             (rest_after_chosen, Some(FilterProp::IsChosenCreatureType))
+        } else if let Some((prop, consumed)) = crate::parser::oracle_target::parse_mana_value_suffix(
+            after_type.trim_start(),
+            &mut ParseContext::default(),
+        ) {
+            // CR 202.3: "if it's a creature card with mana value N or less/greater"
+            // (Kellan, Daring Traveler) — the revealed-card gate carries a mana-value
+            // bound as an additional filter property. Recompute the offset against the
+            // untrimmed `after_type` so byte arithmetic below stays exact.
+            let leading_ws = after_type.len() - after_type.trim_start().len();
+            (&after_type[leading_ws + consumed..], Some(prop))
         } else {
             (after_type, None)
         };

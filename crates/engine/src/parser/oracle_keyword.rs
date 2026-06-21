@@ -1055,6 +1055,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return result;
     }
 
+    // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
+    // creature] has \"Cumulative upkeep {1}\"") routes through this shared keyword
+    // parser; the top-level keyword-line path calls the dedicated cost-aware
+    // parser directly, so delegate to it here too (Mana Chains, Dreams of the
+    // Dead, Decomposition).
+    if let Some(kw) = super::oracle_special::parse_cumulative_upkeep_keyword(text) {
+        return Some(kw);
+    }
+
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
         return Some(kw);
     }
@@ -2058,6 +2067,26 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.24: a GRANTED cumulative upkeep (the quoted-ability grant path
+    /// routes through `parse_keyword_from_oracle`) must parse with its cost, like
+    /// the top-level keyword-line path — Mana Chains / Dreams of the Dead (mana),
+    /// Decomposition (pay-life em-dash form).
+    #[test]
+    fn parse_keyword_from_oracle_granted_cumulative_upkeep() {
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep {1}"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
+        ));
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep {2}"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
+        ));
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep\u{2014}pay 1 life"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::PayLife { .. }))
+        ));
     }
 
     /// CR 702.85c: a spell printing cascade as repeated bare words has one instance

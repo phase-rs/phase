@@ -2357,6 +2357,12 @@ pub enum FilterProp {
     Untapped,
     /// CR 702.171b: Matches permanents with the saddled designation.
     IsSaddled,
+    /// CR 702.171c: Matches a creature that saddled the filter source this turn
+    /// (i.e. was tapped to pay the source's saddle cost — recorded in the
+    /// source's `saddled_by` and cleared at end of turn). Source-relative sibling
+    /// of `BlockingSource`; used by "choose a creature that saddled it this turn"
+    /// (Calamity, Galloping Inferno).
+    SaddledSource,
     /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
     /// `controller` relative to the ability source ("each battle they protect").
     ProtectorMatches {

@@ -821,4 +821,123 @@ mod tests {
             "All/Untap must untap each matching permanent"
         );
     }
+
+    /// CR 701.26b + CR 614.6: Blossombind — "Enchanted creature can't become
+    /// untapped" is the BROAD untap prohibition: it must stop EVERY untap, not
+    /// just the untap step. This drives an actual untap-effect path
+    /// (`resolve_set_tap_state` Single/Untap, i.e. "untap target creature"), which
+    /// the untap-step turn-based-action loop never runs, and asserts the enchanted
+    /// host stays tapped. The replacement is parsed from the real Oracle text and
+    /// installed on an attached Aura, then consulted via `process_one_untap` →
+    /// `replace_event`. Reverting the untap-prevention replacement (or its routing
+    /// through the Priority-6e splitter) lets the host untap and flips this
+    /// assertion. A `StaticMode::CantUntap` static — the previous modeling — would
+    /// NOT discriminate here: `process_one_untap` never consults it.
+    #[test]
+    fn blossombind_enchanted_creature_cant_be_untapped_by_an_effect() {
+        let mut state = GameState::new_two_player(42);
+
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bound Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.tapped = true;
+        }
+
+        let unbound = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Free Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&unbound).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.tapped = true;
+        }
+
+        // Parse the real Blossombind static line; pull the Untap-prevention
+        // replacement out of the cross-layer split and install it on an Aura.
+        let parsed = crate::parser::parse_oracle_text(
+            "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature can't become untapped and can't have counters put on it.",
+            "Blossombind",
+            &[],
+            &["Enchantment".to_string()],
+            &["Aura".to_string()],
+        );
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .any(|def| def.event == crate::types::replacements::ReplacementEvent::Untap),
+            "Blossombind must yield an Untap-prevention replacement, got {:?}",
+            parsed.replacements
+        );
+
+        let aura = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Blossombind".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.replacement_definitions = parsed.replacements.clone().into();
+            obj.attached_to = Some(host.into());
+        }
+        state.objects.get_mut(&host).unwrap().attachments.push(aura);
+
+        // "Untap target creature" on the enchanted host — a real effect path,
+        // distinct from the untap step. The prohibition must keep it tapped.
+        let untap_host = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![TargetRef::Object(host)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &untap_host, &mut events).unwrap();
+        assert!(
+            state.objects[&host].tapped,
+            "an effect-driven untap of the enchanted creature must be prevented"
+        );
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == host)
+            ),
+            "no PermanentUntapped event should fire for the prevented host"
+        );
+
+        // A non-enchanted creature is untouched by the prohibition.
+        let untap_other = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![TargetRef::Object(unbound)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &untap_other, &mut events).unwrap();
+        assert!(
+            !state.objects[&unbound].tapped,
+            "a non-enchanted creature must untap normally"
+        );
+    }
 }

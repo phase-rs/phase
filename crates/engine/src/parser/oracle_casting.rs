@@ -159,6 +159,7 @@ pub(crate) fn parse_spell_casting_option_line(
     let body_lower = primary_body.to_lowercase();
 
     parse_self_flash_option(primary_body, &body_lower, card_name)
+        .or_else(|| parse_self_has_flash_option(&body_lower))
         .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
         .and_then(|mut option| {
             if option.condition.is_none() {
@@ -257,6 +258,42 @@ fn parse_self_flash_option(
         return Some(option);
     }
 
+    Some(option)
+}
+
+/// CR 702.8a + CR 601.3d: Parse a self-referential conditional flash grant of the
+/// form "~ has flash as long as <condition>" (Take for a Ride: "Take for a Ride
+/// has flash as long as you've committed a crime this turn"). The spell grants
+/// ITSELF flash — a conditional casting permission — rather than the
+/// "you may cast ~ as though it had flash" framing handled by
+/// `parse_self_flash_option`. Self-references are normalized to `~` upstream
+/// (CR 201.4b), so the subject is matched as the `~` token.
+///
+/// As with the sibling conditional-flash arm, an unrecognized predicate refuses
+/// to emit the option entirely (the `?` on `parse_restriction_condition`): CR
+/// 601.3d only grants flash "if those conditions are met", so degrading to an
+/// unconditional permission would be strictly more permissive than the printed
+/// text. The bare "~ has flash" form (no condition) emits an unconditional
+/// permission.
+fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
+    // `body_lower` is already lowercase, so parse it directly with combinators
+    // (no `nom_on_lower` case-bridge needed — the condition text is delegated to
+    // `parse_restriction_condition`, which lowercases internally).
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>("~ has flash"),
+        opt(tag(" as long as ")),
+    )
+    .parse(body_lower)
+    .ok()?;
+    let mut option = SpellCastingOption::as_though_had_flash();
+    // Strip trailing sentence punctuation so a bare "~ has flash." parses as an
+    // unconditional grant (condition empty) and a trailing period on a condition
+    // clause does not reach `parse_restriction_condition`.
+    let condition_text = rest.trim().trim_end_matches(['.', ',']).trim();
+    if condition_text.is_empty() {
+        return Some(option);
+    }
+    option = option.condition(parse_restriction_condition(condition_text)?);
     Some(option)
 }
 
@@ -1674,6 +1711,53 @@ mod tests {
         assert!(
             option.is_none(),
             "unrecognized leading-if predicate must drop the alt-cost option, got: {option:?}"
+        );
+    }
+
+    /// Take for a Ride (std long-tail): "~ has flash as long as you've committed
+    /// a crime this turn" — a self-referential conditional flash grant. The line
+    /// (self-ref normalized to `~` upstream) must emit an `AsThoughHadFlash`
+    /// casting option gated on the crime condition, not `Effect::Unimplemented`.
+    /// Revert-discriminating: removing `parse_self_has_flash_option` makes
+    /// `parse_spell_casting_option_line` return `None`.
+    /// CR 702.8a (Flash); CR 601.3d (conditional flash); CR 700.13 (crime).
+    #[test]
+    fn spell_self_has_flash_conditional_on_crime() {
+        let option = parse_spell_casting_option_line(
+            "~ has flash as long as you've committed a crime this turn.",
+            "Take for a Ride",
+        )
+        .expect("self conditional-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        match option.condition {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CrimesCommittedThisTurn,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {}
+            other => panic!("expected CrimesCommittedThisTurn GE 1 condition, got {other:?}"),
+        }
+    }
+
+    /// Bare "~ has flash" (no condition) emits an unconditional flash option.
+    #[test]
+    fn spell_self_has_flash_unconditional() {
+        let option = parse_spell_casting_option_line("~ has flash.", "Some Spell")
+            .expect("bare self-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        assert!(
+            option.condition.is_none(),
+            "bare '~ has flash' must be unconditional, got {:?}",
+            option.condition
         );
     }
 

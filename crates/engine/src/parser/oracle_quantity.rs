@@ -115,6 +115,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         return Some(qty);
     }
 
+    if let Some(qty) = parse_shuffled_this_way_count(trimmed) {
+        return Some(qty);
+    }
+
     if all_consuming(pair(
         tag::<_, _, OracleError<'_>>("the number of"),
         alt((tag(" counters on ~"), tag(" counters on it"))),
@@ -543,6 +547,35 @@ fn parse_milled_this_way_count(text: &str) -> Option<QuantityRef> {
         opt(tag("nonland ")),
         alt((tag("cards"), tag("card"))),
         tag(" milled this way"),
+    ))
+    .parse(text)
+    .is_ok()
+    .then_some(QuantityRef::EventContextAmount)
+}
+
+/// CR 608.2c + CR 701.24: "the number of [nonland] cards shuffled into [a]
+/// library this way" — the count of cards moved into a library by the preceding
+/// shuffle/move instruction in this resolution (Elixir: "Shuffle all nonland
+/// cards from your graveyard into your library. You gain life equal to the
+/// number of cards shuffled into your library this way."). The preceding mass
+/// `ChangeZone` (Graveyard → Library) stamps `last_effect_count`, which
+/// `EventContextAmount` reads — mirroring `parse_milled_this_way_count`. The
+/// possessive (`your` / `their` / `its owner's` / `a`) library is the same
+/// library the move just populated, so the destination article is a leaf
+/// variation that does not change the resolved count.
+fn parse_shuffled_this_way_count(text: &str) -> Option<QuantityRef> {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("the number of "),
+        opt(tag("nonland ")),
+        alt((tag("cards"), tag("card"))),
+        tag(" shuffled into "),
+        alt((
+            tag("your library"),
+            tag("their library"),
+            tag("its owner's library"),
+            tag("a library"),
+        )),
+        tag(" this way"),
     ))
     .parse(text)
     .is_ok()

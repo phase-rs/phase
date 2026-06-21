@@ -6701,10 +6701,23 @@ pub(crate) fn evaluate_condition(
                         _ => false,
                     }
                 }
-                Some(_) => {
-                    // Other filter properties not yet supported for revealed card checks
-                    true
-                }
+                // CR 202.3 + CR 700.1: Generic property gates on the revealed card
+                // (e.g. Kellan, Daring Traveler's "creature card with mana value 3
+                // or less" → `FilterProp::Cmc`). Evaluate the property against the
+                // revealed subject through the shared filter evaluator, exactly as
+                // `subtype_filter` does above.
+                Some(prop) => subject_id.is_some_and(|id| {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        id,
+                        &TargetFilter::Typed(crate::types::ability::TypedFilter {
+                            type_filters: vec![],
+                            controller: None,
+                            properties: vec![prop.clone()],
+                        }),
+                        &crate::game::filter::FilterContext::from_ability(ability),
+                    )
+                }),
                 None => true,
             };
             type_matches && subtype_matches && filter_matches

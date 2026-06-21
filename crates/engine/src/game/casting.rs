@@ -31427,6 +31427,299 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 611.2c + CR 611.2d + CR 119.3 + CR 105.2: End-to-end Rowan,
+    /// Scion of War. Parsing the activated ability, resolving its `GenericEffect`
+    /// through the real effect pipeline, and re-evaluating layers must install a
+    /// turn-duration `ModifyCost` static on Rowan that reduces black/red spells
+    /// by exactly the controller's life LOST this turn AT THE MOMENT THE ABILITY
+    /// RESOLVED — and leave other-color spells untouched.
+    ///
+    /// CR 611.2d: the variable X in a resolution-created continuous effect is
+    /// determined once, on resolution. The reduction must be snapshotted then;
+    /// later same-turn life changes must NOT move it.
+    ///
+    /// Discrimination map:
+    /// - Reverting the `and/or` color-separator fix drops the color filter to
+    ///   `None`, so the green spell would ALSO be reduced (the `green == {2}`
+    ///   assertion flips).
+    /// - Reverting the `try_parse_temporary_spell_cost_modification` handler
+    ///   leaves the ability `Unimplemented`, so no static is granted and the
+    ///   black spell stays at `{2}` (the `black == {0}` assertion flips).
+    /// - Reverting the `snapshot_granted_cost_modifier` fix (CR 611.2d) re-reads
+    ///   the dynamic count at cast time: the post-resolution `life_lost = 5`
+    ///   change would push black to `{0}` instead of holding the snapshotted
+    ///   `{0}`-at-2 reduction, and the later `life_lost = 0` change would restore
+    ///   black to `{2}` instead of holding the snapshotted reduction (both
+    ///   `snapshot holds` assertions flip).
+    #[test]
+    fn rowan_scion_of_war_reduces_black_red_spells_by_life_lost() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Rowan on the battlefield, controlled by P0.
+        let rowan = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rowan, Scion of War".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Parse the real activated ability and pull out the GenericEffect clause.
+        let parsed = crate::parser::parse_oracle_text(
+            "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
+            "Rowan, Scion of War",
+            &["Menace".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string()],
+        );
+        let cost_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("Rowan must parse a GenericEffect cost ability");
+
+        // CR 611.2d: the controller lost 2 life BEFORE the ability resolves, so
+        // X is fixed at 2 on resolution.
+        state.players[0].life_lost_this_turn = 2;
+
+        // Resolve the effect against Rowan as the source/controller.
+        let resolved =
+            ResolvedAbility::new((*cost_ability.effect).clone(), vec![], rowan, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        let mut events = Vec::new();
+        super::super::effects::effect::resolve(&mut state, &resolved, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // Three spells in hand: black, red, green — all printed {2}.
+        let make_spell = |state: &mut GameState, id: u64, name: &str, color: ManaColor| {
+            let s = create_object(state, CardId(id), PlayerId(0), name.to_string(), Zone::Hand);
+            let obj = state.objects.get_mut(&s).unwrap();
+            obj.mana_cost = ManaCost::generic(2);
+            obj.base_mana_cost = ManaCost::generic(2);
+            obj.color = vec![color];
+            obj.base_card_types.core_types.push(CoreType::Instant);
+            obj.card_types.core_types.push(CoreType::Instant);
+            s
+        };
+        let black = make_spell(&mut state, 10, "Black Spell", ManaColor::Black);
+        let red = make_spell(&mut state, 11, "Red Spell", ManaColor::Red);
+        let green = make_spell(&mut state, 12, "Green Spell", ManaColor::Green);
+
+        let cost = |state: &GameState, id| {
+            apply_cost_modifiers_to_base(
+                state,
+                PlayerId(0),
+                id,
+                state.objects.get(&id).unwrap().mana_cost.clone(),
+            )
+            .expect("cost computed")
+        };
+
+        // Black/red reduced by 2 (life lost at resolution) → {0}; green unaffected → {2}.
+        assert_eq!(
+            cost(&state, black),
+            ManaCost::generic(0),
+            "black spell reduced by life lost at resolution"
+        );
+        assert_eq!(
+            cost(&state, red),
+            ManaCost::generic(0),
+            "red spell reduced by life lost at resolution"
+        );
+        assert_eq!(
+            cost(&state, green),
+            ManaCost::generic(2),
+            "green spell is NOT black/red and must be untouched"
+        );
+
+        // CR 611.2d: losing MORE life after resolution must NOT deepen the
+        // already-locked reduction. Black stays at {0} (snapshotted reduction of
+        // 2 applied to a {2} spell), not re-reduced by the new {5}.
+        state.players[0].life_lost_this_turn = 5;
+        assert_eq!(
+            cost(&state, black),
+            ManaCost::generic(0),
+            "snapshot holds: more life lost after resolution does not deepen the reduction"
+        );
+
+        // CR 611.2d: dropping life lost back to 0 after resolution must NOT erase
+        // the already-locked reduction. Black stays at {0}, not back at {2}.
+        state.players[0].life_lost_this_turn = 0;
+        assert_eq!(
+            cost(&state, black),
+            ManaCost::generic(0),
+            "snapshot holds: zeroing life lost after resolution does not erase the reduction"
+        );
+    }
+
+    /// CR 611.2d: zero life lost at the moment Rowan's ability resolves snapshots
+    /// X to 0, so the granted static reduces nothing — even if the controller
+    /// then loses life later this turn.
+    #[test]
+    fn rowan_scion_of_war_zero_life_lost_at_resolution_snapshots_zero() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let rowan = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rowan, Scion of War".to_string(),
+            Zone::Battlefield,
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
+            "Rowan, Scion of War",
+            &["Menace".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string()],
+        );
+        let cost_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("Rowan must parse a GenericEffect cost ability");
+
+        // No life lost at resolution → X snapshots to 0.
+        let resolved =
+            ResolvedAbility::new((*cost_ability.effect).clone(), vec![], rowan, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        let mut events = Vec::new();
+        super::super::effects::effect::resolve(&mut state, &resolved, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let black = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Black Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&black).unwrap();
+            obj.mana_cost = ManaCost::generic(2);
+            obj.base_mana_cost = ManaCost::generic(2);
+            obj.color = vec![ManaColor::Black];
+            obj.base_card_types.core_types.push(CoreType::Instant);
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+
+        let cost = |state: &GameState, id| {
+            apply_cost_modifiers_to_base(
+                state,
+                PlayerId(0),
+                id,
+                state.objects.get(&id).unwrap().mana_cost.clone(),
+            )
+            .expect("cost computed")
+        };
+
+        // Snapshotted X = 0 → no reduction, even after later life loss.
+        assert_eq!(
+            cost(&state, black),
+            ManaCost::generic(2),
+            "zero life lost at resolution yields zero reduction"
+        );
+        state.players[0].life_lost_this_turn = 3;
+        assert_eq!(
+            cost(&state, black),
+            ManaCost::generic(2),
+            "snapshot holds: life lost after a zero-X resolution does not create a reduction"
+        );
+    }
+
+    /// CR 601.2f + CR 611.2c + CR 611.2d + CR 119.3 + CR 105.2: Will, Scion of
+    /// Peace mirrors Rowan with the white/blue color axis and life GAINED.
+    /// Confirms the second member of the class resolves through the same seam
+    /// with the gained-life dynamic count snapshotted on resolution and the
+    /// white/blue filter.
+    #[test]
+    fn will_scion_of_peace_reduces_white_blue_spells_by_life_gained() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let will = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Will, Scion of Peace".to_string(),
+            Zone::Battlefield,
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.",
+            "Will, Scion of Peace",
+            &["Vigilance".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string()],
+        );
+        let cost_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("Will must parse a GenericEffect cost ability");
+
+        // CR 611.2d: 2 life gained BEFORE resolution → X fixed at 2.
+        state.players[0].life_gained_this_turn = 2;
+        let resolved =
+            ResolvedAbility::new((*cost_ability.effect).clone(), vec![], will, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        let mut events = Vec::new();
+        super::super::effects::effect::resolve(&mut state, &resolved, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let make_spell = |state: &mut GameState, id: u64, name: &str, color: ManaColor| {
+            let s = create_object(state, CardId(id), PlayerId(0), name.to_string(), Zone::Hand);
+            let obj = state.objects.get_mut(&s).unwrap();
+            obj.mana_cost = ManaCost::generic(3);
+            obj.base_mana_cost = ManaCost::generic(3);
+            obj.color = vec![color];
+            obj.base_card_types.core_types.push(CoreType::Instant);
+            obj.card_types.core_types.push(CoreType::Instant);
+            s
+        };
+        let white = make_spell(&mut state, 10, "White Spell", ManaColor::White);
+        let blue = make_spell(&mut state, 11, "Blue Spell", ManaColor::Blue);
+        let red = make_spell(&mut state, 12, "Red Spell", ManaColor::Red);
+
+        let cost = |state: &GameState, id| {
+            apply_cost_modifiers_to_base(
+                state,
+                PlayerId(0),
+                id,
+                state.objects.get(&id).unwrap().mana_cost.clone(),
+            )
+            .expect("cost computed")
+        };
+        assert_eq!(
+            cost(&state, white),
+            ManaCost::generic(1),
+            "white reduced by life gained at resolution"
+        );
+        assert_eq!(
+            cost(&state, blue),
+            ManaCost::generic(1),
+            "blue reduced by life gained at resolution"
+        );
+        assert_eq!(
+            cost(&state, red),
+            ManaCost::generic(3),
+            "red is NOT white/blue and must be untouched"
+        );
+
+        // CR 611.2d: zeroing life gained after resolution does NOT erase the
+        // snapshotted reduction — white holds at {1}, not back at {3}.
+        state.players[0].life_gained_this_turn = 0;
+        assert_eq!(
+            cost(&state, white),
+            ManaCost::generic(1),
+            "snapshot holds: zeroing life gained after resolution keeps the locked reduction"
+        );
+    }
+
     /// CR 601.2f: self-spell reductions and battlefield raises share one total
     /// cost calculation. A self reduction must not floor the spell to {0}
     /// before a battlefield tax is added.

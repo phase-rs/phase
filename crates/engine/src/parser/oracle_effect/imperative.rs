@@ -284,7 +284,12 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     ))
     .parse(lower)
     {
-        let qty_text = qty_tail.trim_end_matches('.').trim();
+        // CR 113.3 + CR 121.1: A granted-ability quotation closes at a comma
+        // ("gains \"… draw cards equal to its toughness,\""), so the dynamic
+        // count phrase can carry a trailing comma when the granted ability is
+        // re-parsed from its body text (The Pride of Hull Clade). Strip trailing
+        // sentence punctuation (period or comma) before the anaphoric-ref match.
+        let qty_text = qty_tail.trim_end_matches(['.', ',']).trim();
         // CR 107.1a + CR 121.1: "cards equal to half the number of cards in
         // their library" — fraction-led dynamic draw count, rounded per CR
         // 107.1a. `qty_text` is already lowercase + trimmed, so call
@@ -1257,15 +1262,19 @@ pub(super) fn parse_targeted_action_ast(
     {
         let after_discard = &lower[lower.len() - after_discard_orig.len()..];
         // CR 701.9a: Back-reference discard — "discard that card" / "discard
-        // those cards" target a specific card identified by the parent effect
-        // (Seek/Conjure/Reveal-Choose populate ParentTarget at runtime). Must
-        // be checked before the player-choice count-based discard path, since
-        // "that card" is not a count phrase.
-        if alt((
+        // those cards" / "discard it" target a specific card identified by the
+        // parent effect (Seek/Conjure/Reveal-Choose populate ParentTarget at
+        // runtime; Binding Negotiation: "You may choose a nonland card from it.
+        // If you do, they discard it"). Must be checked before the
+        // player-choice count-based discard path, since the anaphor is not a
+        // count phrase. `all_consuming` keeps the bare pronoun arm from
+        // shadowing "it at random" or longer phrases that begin with "it".
+        if all_consuming(alt((
             tag::<_, _, OracleError<'_>>("that card"),
             tag("those cards"),
-        ))
-        .parse(after_discard)
+            tag("it"),
+        )))
+        .parse(after_discard.trim_end_matches(['.', ',']).trim_end())
         .is_ok()
         {
             return Some(TargetedImperativeAst::DiscardCard {
@@ -1639,9 +1648,12 @@ pub(super) fn parse_targeted_action_ast(
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::GainControl { target, all });
     }
-    // Earthbend: "earthbend [N] [target <type>]"
+    // Earthbend: "[you ]earthbend [N] [target <type>]". The optional "you "
+    // subject (Fatal Fissure's delayed trigger "you earthbend 4") names the
+    // controller performing the keyword action; earthbend is a player action, so
+    // the subject carries no extra targeting and is simply consumed.
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value((), tag("earthbend ")).parse(input)
+        value((), preceded(opt(tag("you ")), tag("earthbend "))).parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (target, power, toughness) = parse_earthbend_params(text, rest_lower);
@@ -5117,6 +5129,18 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             && nom_primitives::scan_contains(lower, "library")
             && nom_primitives::scan_contains(lower, "from")
         {
+            // CR 400.6: a leading "all "/"each " quantifier ("shuffle all
+            // nonland cards from your graveyard into your library", Elixir) is a
+            // filtered mass move — every eligible object moves with no choice.
+            // Distinguish it from the single-target form ("shuffle target card
+            // from your graveyard …") so the lowering picks `ChangeZoneAll` over
+            // `ChangeZone`. `parse_target` strips the quantifier, so detect it on
+            // the lowercase remainder first.
+            let all = nom_on_lower(text, lower, |input| {
+                let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(input)?;
+                value((), alt((tag("all "), tag("each ")))).parse(input)
+            })
+            .is_some();
             let (target, _) = parse_target(after_shuffle);
             let origin = if nom_primitives::scan_contains(lower, "graveyard") {
                 Some(Zone::Graveyard)
@@ -5127,7 +5151,11 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             } else {
                 None
             };
-            return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary { target, origin });
+            return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
+                target,
+                origin,
+                all,
+            });
         }
     }
 
@@ -5205,21 +5233,46 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             lower_change_zone_all_to_library(origins)
         }
         // CR 701.24a: Targeted zone change to library with implicit shuffle sub_ability.
-        ShuffleImperativeAst::TargetedChangeZoneToLibrary { target, origin } => {
-            let effect = Effect::ChangeZone {
-                origin,
-                destination: Zone::Library,
-                target,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                face_down_profile: None,
-            };
-            with_shuffle_sub_ability(effect)
+        ShuffleImperativeAst::TargetedChangeZoneToLibrary {
+            target,
+            origin,
+            all,
+        } => {
+            // CR 400.6: "shuffle all <filter> from <zone> into your library"
+            // (Elixir) is a mandatory mass move of every eligible object — no
+            // interactive "choose up to one" choice. `ChangeZoneAll` carries the
+            // typed filter, moves all matching cards at once, and stamps
+            // `last_effect_count` (which a chained "equal to the number shuffled
+            // this way" quantity reads). The single-target form keeps `ChangeZone`.
+            if all {
+                let effect = Effect::ChangeZoneAll {
+                    origin,
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
+                };
+                with_shuffle_sub_ability(effect)
+            } else {
+                let effect = Effect::ChangeZone {
+                    origin,
+                    destination: Zone::Library,
+                    target,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                };
+                with_shuffle_sub_ability(effect)
+            }
         }
         ShuffleImperativeAst::Unimplemented { text } => parsed_clause(Effect::Unimplemented {
             name: "shuffle".to_string(),
@@ -7691,6 +7744,16 @@ fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFi
 /// so we don't accept malformed inputs like "target creature and dance" as a
 /// valid two-target phrase.
 fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, TargetFilter)> {
+    // CR 601.2c + CR 115.1: a trailing "controlled by different players"
+    // (Kitsune, Dragon's Daughter: "exchange control of two other target
+    // creatures controlled by different players") is a target-SET constraint
+    // (`TargetSelectionConstraint::DifferentObjectControllers`), extracted
+    // separately in the chain lowerer — it is not part of either per-slot filter.
+    // Strip it via the shared `strip_controlled_by_different_players` combinator
+    // (single source of truth with the detector
+    // `parse_controlled_by_different_players_target_constraint`) so the per-slot
+    // `parse_target` sees a clean "two other target creatures" span.
+    let span = super::lower::strip_controlled_by_different_players(span).unwrap_or(span);
     // Quantified shape: "two target Xs" dispatched via nom. We peek for the
     // `"two target "` prefix with `alt((tag(...), tag(...)))` (plural handled by
     // `parse_target`'s QUANTIFIED_PREFIXES), then re-enter `parse_target` on the
@@ -9215,6 +9278,35 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
     None
 }
 
+/// CR 701.15a + CR 701.15b: Recognize the verbatim goad *definition* —
+/// "attack[s] each combat if able and attack[s] a player other than you if able".
+/// This compound is precisely what goad does (CR 701.15a: must attack each combat
+/// if able; CR 701.15b: must attack a player other than the goading player),
+/// printed in full on cards that grant the effect without the "goad" keyword
+/// (Maximum Carnage chapter I). Mapping it to the goad mechanic is the correct
+/// class reuse: the goading player is the resolving controller ("you"), so the
+/// subject's own creatures are forced onto opponents, and `goaded_by` cleanup at
+/// the goading player's next turn matches the card's "Until your next turn"
+/// duration (CR 701.15a). Returns the bare marker; `subject.rs` binds the affected
+/// set to `Effect::GoadAll`.
+pub(super) fn try_parse_goad_equivalent(lower: &str) -> bool {
+    let trimmed = lower.trim_end_matches('.').trim();
+    let parsed: Result<(&str, ()), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        value(
+            (),
+            (
+                tag(" each combat if able and "),
+                alt((tag("attacks"), tag("attack"))),
+                tag(" a player other than you if able"),
+            ),
+        ),
+    )
+        .map(|(_, marker)| marker)
+        .parse(trimmed);
+    matches!(parsed, Ok((rest, ())) if rest.is_empty())
+}
+
 /// CR 508.1d + CR 509.1c: Parse the combined "attacks or blocks ... if able"
 /// requirement (Hustle: "Target creature attacks or blocks this turn if able.").
 ///
@@ -10510,6 +10602,41 @@ mod tests {
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
+        }
+    }
+
+    /// The Pride of Hull Clade (std long-tail): the granted ability body
+    /// "draw cards equal to its toughness," closes at a comma (it is the inner
+    /// quotation of a `gains "..."` clause). The trailing comma must be stripped
+    /// before the anaphoric-ref match so the dynamic count resolves to
+    /// `QuantityRef::Toughness { Anaphoric }` instead of `Effect::Unimplemented`.
+    /// Revert-discriminating: with the comma in the qty text, the anaphoric match
+    /// fails and `parse_numeric_imperative_ast` returns `None` (-> Unimplemented
+    /// upstream). CR 121.1 + CR 113.3c (granted triggered-ability quotation).
+    #[test]
+    fn parse_draw_cards_equal_to_its_toughness_with_trailing_comma() {
+        use crate::types::ability::QuantityRef;
+        let text = "draw cards equal to its toughness,";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        match result {
+            Some(NumericImperativeAst::Draw { count, up_to }) => {
+                assert!(!up_to, "fixed-anaphor draw count is not 'up to'");
+                // The "its toughness" anaphor binds to the source/granted creature
+                // at parse time (Source) or remaps later (Anaphoric) — the
+                // discriminating point is that the trailing comma no longer breaks
+                // the dynamic-count parse into `Effect::Unimplemented`.
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness { .. }
+                        }
+                    ),
+                    "expected Draw count = a Toughness ref, got {count:?}"
+                );
+            }
+            other => panic!("expected Draw with a toughness count, got {other:?}"),
         }
     }
 
@@ -12241,6 +12368,29 @@ mod tests {
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
         }
+    }
+
+    /// Binding Negotiation (std long-tail): "If you do, they discard it" — the
+    /// "discard it" back-reference targets the card chosen by the parent
+    /// RevealHand effect. It must lower to `DiscardCard { target: ParentTarget }`
+    /// alongside the existing "that card" / "those cards" anaphors, not
+    /// `Effect::Unimplemented`. Revert-discriminating: removing the "it" arm
+    /// makes `parse_targeted_action_ast` miss the anaphor.
+    /// CR 701.9a (discard); CR 608.2c (anaphoric back-reference).
+    #[test]
+    fn parse_discard_it_anaphor() {
+        let text = "discard it";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            matches!(
+                result,
+                Some(TargetedImperativeAst::DiscardCard {
+                    target: TargetFilter::ParentTarget
+                })
+            ),
+            "expected DiscardCard(ParentTarget) for 'discard it', got {result:?}"
+        );
     }
 
     #[test]

@@ -3658,6 +3658,88 @@ mod tests {
         );
     }
 
+    /// CR 502.3 + CR 701.26b: Blossombind — "Enchanted creature can't become
+    /// untapped …" is an unconditional `ProposedEvent::Untap` PREVENTION
+    /// (CR 701.26b, the broad prohibition — NOT a `CantUntap` static, which is the
+    /// untap-step-only class). This drives the production untap step (`execute_untap`)
+    /// and asserts the host stays tapped; the EFFECT-driven untap path is covered
+    /// separately in `tap_untap.rs`. The replacement is parsed from the real
+    /// Oracle text via the cross-layer split and installed on the attached Aura.
+    /// Reverting the untap-prevention replacement (or its split routing) makes the
+    /// untap-step `replace_event` return `Execute`, the creature untaps, and this
+    /// assertion fails — so the test discriminates the change.
+    #[test]
+    fn execute_untap_honors_blossombind_cant_become_untapped() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bound Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blossombind".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            // Parse the real compound line; pull the Untap-prevention replacement
+            // out of the cross-layer split and install it on the Aura. (The
+            // AddCounter-prevention conjunct is irrelevant to untap; the full split
+            // is exercised by the parser-layer test.)
+            let parsed = crate::parser::parse_oracle_text(
+                "Enchant creature\nEnchanted creature can't become untapped and can't have counters put on it.",
+                "Blossombind",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            );
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|def| def.event == ReplacementEvent::Untap),
+                "Blossombind's untap prohibition must parse to an Untap-prevention replacement"
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.replacement_definitions = parsed.replacements.into();
+        }
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert!(
+            state.objects[&host].tapped,
+            "Blossombind's enchanted creature must stay tapped at the untap step"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == host)
+            }),
+            "skipped untap must not emit PermanentUntapped"
+        );
+    }
+
     #[test]
     fn execute_untap_honors_attached_subject_cant_untap_from_parser() {
         use crate::game::effects::attach::attach_to;
