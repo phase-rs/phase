@@ -32,6 +32,31 @@ pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor])
     total
 }
 
+/// CR 700.5: Count colored mana symbols of the given color among mana costs of
+/// cards in a player's graveyard (graveyard-scope Chroma). This is the graveyard
+/// sibling of `count_devotion`, which counts permanents on the battlefield.
+pub fn count_graveyard_chroma(state: &GameState, player: PlayerId, color: ManaColor) -> u32 {
+    let graveyard = match state.players.iter().find(|p| p.id == player) {
+        Some(p) => &p.graveyard,
+        None => return 0,
+    };
+    let mut total = 0u32;
+    for &id in graveyard {
+        let obj = match state.objects.get(&id) {
+            Some(o) => o,
+            None => continue,
+        };
+        if let ManaCost::Cost { ref shards, .. } = obj.mana_cost {
+            for shard in shards {
+                if shard.contributes_to(color) {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +280,103 @@ mod tests {
         assert!(!ManaCostShard::Colorless.contributes_to(ManaColor::White));
         assert!(!ManaCostShard::Snow.contributes_to(ManaColor::Blue));
         assert!(!ManaCostShard::X.contributes_to(ManaColor::Red));
+    }
+
+    #[test]
+    fn graveyard_chroma_counts_matching_shards() {
+        let mut state = setup();
+        // Card in graveyard with cost {B}{B}{B} → 3 black symbols
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dark Ritual".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
+            3
+        );
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Red),
+            0
+        );
+    }
+
+    #[test]
+    fn graveyard_chroma_sums_across_cards() {
+        let mut state = setup();
+        for i in 0..3 {
+            let id = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Blue],
+                generic: 1,
+            };
+        }
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
+            3
+        );
+    }
+
+    #[test]
+    fn graveyard_chroma_ignores_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "On Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
+            0
+        );
+    }
+
+    #[test]
+    fn graveyard_chroma_hybrid_counts_for_each_color() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hybrid Card".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::BlueBlack, ManaCostShard::BlueBlack],
+            generic: 1,
+        };
+
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
+            2
+        );
+        assert_eq!(
+            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Blue),
+            2
+        );
     }
 }

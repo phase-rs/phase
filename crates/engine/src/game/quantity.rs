@@ -364,6 +364,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
+        | QuantityRef::GraveyardChroma { .. }
         | QuantityRef::DistinctCardTypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
@@ -597,6 +598,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::GraveyardChroma { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::PlayerCount { .. }
@@ -773,6 +775,9 @@ fn entered_object_perturbs_quantity_ref(
         // CR 903.3d: a commander entering the battlefield or command zone can change
         // the single-commander mana value. Conservatively perturb on any commander entry.
         QuantityRef::CommanderManaValue { .. } => entered.is_commander,
+        // Graveyard chroma reads graveyard mana symbols — not affected by
+        // another object entering the battlefield.
+        QuantityRef::GraveyardChroma { .. } => false,
         // Player-level, single-object, history-record, payment, and choice refs:
         // an object's battlefield entry/exit cannot change their value. Identical
         // enumeration to the `false` arm of `quantity_ref_uses_object_count`.
@@ -1887,6 +1892,17 @@ fn resolve_ref(
                 })
                 .unwrap_or(0),
         },
+        // CR 700.5: Graveyard-scope Chroma — count colored mana symbols among
+        // mana costs of cards in the scoped player's graveyard.
+        QuantityRef::GraveyardChroma { color, scope } => {
+            let mut total = 0i32;
+            for p in scoped_players(state, scope, ctx, controller) {
+                total += u32_to_i32_saturating(crate::game::devotion::count_graveyard_chroma(
+                    state, p.id, *color,
+                ));
+            }
+            total
+        }
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {

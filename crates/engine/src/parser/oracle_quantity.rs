@@ -3701,6 +3701,26 @@ mod tests {
         }
     }
 
+    /// CR 700.5: graveyard-scope Chroma CDA — Umbra Stalker's "the number of
+    /// black mana symbols in the mana costs of cards in your graveyard" must
+    /// route through `parse_cda_quantity` as a `GraveyardChroma` reference.
+    #[test]
+    fn parse_cda_quantity_graveyard_chroma() {
+        let expr = parse_cda_quantity(
+            "the number of black mana symbols in the mana costs of cards in your graveyard",
+        )
+        .expect("should parse graveyard chroma");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::GraveyardChroma {
+                    color: ManaColor::Black,
+                    scope: CountScope::Controller,
+                },
+            }
+        );
+    }
+
     #[test]
     fn parse_cda_quantity_permanents_sacrificed_this_turn() {
         let expr = parse_cda_quantity("the number of permanents you've sacrificed this turn")

@@ -4085,6 +4085,10 @@ pub enum QuantityRef {
     TargetZoneCardCount { zone: ZoneRef },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: DevotionColors },
+    /// CR 700.5: Graveyard-scope Chroma — count colored mana symbols in the mana
+    /// costs of cards in a player's graveyard. Distinct from `Devotion` which counts
+    /// permanents you control (battlefield scope).
+    GraveyardChroma { color: ManaColor, scope: CountScope },
     /// CR 205.2a: Count distinct card types (CoreType) across a parameterized
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.

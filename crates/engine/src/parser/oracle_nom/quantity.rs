@@ -641,6 +641,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         |i| parse_basic_land_types_among_lands_controlled_by_ref(i, ControllerRef::TargetPlayer),
         parse_devotion_ref,
         parse_chroma_devotion_ref,
+        parse_graveyard_chroma_ref,
         parse_counters_among_ref,
         // CR 402.1: "the player with the {most|fewest} cards in hand" — the
         // cross-player hand-size extremum, the hand-zone peer of the life
@@ -2714,6 +2715,24 @@ fn parse_chroma_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         rest,
         QuantityRef::Devotion {
             colors: DevotionColors::Fixed(vec![color]),
+        },
+    ))
+}
+
+/// CR 700.5: Graveyard-scope Chroma — "the number of \<color\> mana symbols in
+/// the mana costs of cards in your graveyard" counts colored mana symbols among
+/// cards in the controller's graveyard. Distinct from the permanents-scope
+/// Chroma (devotion).
+fn parse_graveyard_chroma_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the number of ").parse(input)?;
+    let (rest, color) = super::primitives::parse_color(rest)?;
+    let (rest, _) =
+        tag(" mana symbols in the mana costs of cards in your graveyard").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::GraveyardChroma {
+            color,
+            scope: CountScope::Controller,
         },
     ))
 }
@@ -7231,6 +7250,24 @@ mod tests {
             q,
             QuantityRef::Devotion {
                 colors: DevotionColors::ChosenColor
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 700.5: graveyard-scope Chroma — "the number of <color> mana symbols in
+    /// the mana costs of cards in your graveyard" (Umbra Stalker).
+    #[test]
+    fn test_parse_graveyard_chroma() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of black mana symbols in the mana costs of cards in your graveyard",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::GraveyardChroma {
+                color: ManaColor::Black,
+                scope: CountScope::Controller,
             }
         );
         assert_eq!(rest, "");

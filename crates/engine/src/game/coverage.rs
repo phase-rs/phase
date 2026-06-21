@@ -1246,6 +1246,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
+        QuantityRef::GraveyardChroma { color, .. } => {
+            format!("graveyard chroma ({})", fmt_mana_color_full(color))
+        }
         QuantityRef::DistinctCardTypes { source } => match source {
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
@@ -5919,6 +5922,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
+        QuantityRef::GraveyardChroma { .. } => ("GraveyardChroma", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
