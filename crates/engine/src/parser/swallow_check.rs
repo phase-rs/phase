@@ -4846,12 +4846,13 @@ mod tests {
         )));
     }
 
-    /// CR 122.1 + CR 603.2: Construct a Cosmic Cube's second-draw trigger body
-    /// (token + plan counter) parses with zero Unimplemented. The
-    /// seventh-plan-counter sacrifice parses too; ONLY the heavy "you control
-    /// target opponent during their next turn" rider stays honestly
-    /// `Effect::Unimplemented` (intentionally deferred). Shape gate paired with
-    /// `tests/construct_cosmic_cube_second_draw_token.rs`.
+    /// CR 122.1 + CR 603.2 + CR 723.1: Construct a Cosmic Cube parses with zero
+    /// Unimplemented across the whole card. The second-draw trigger body (token +
+    /// plan counter) is fully supported; the seventh-plan-counter sacrifice
+    /// parses; and the reflexive "you control target opponent during their next
+    /// turn" rider now lowers to `Effect::ControlNextTurn` via the shared
+    /// turn-control subsystem (CR 723) rather than staying `Unimplemented`. Shape
+    /// gate paired with `tests/construct_cosmic_cube_second_draw_token.rs`.
     #[test]
     fn construct_second_draw_body_parses_token_and_plan_counter() {
         let parsed = parse_named(
@@ -4876,8 +4877,8 @@ mod tests {
             !def_tree_has_unimplemented(second_draw),
             "the token + plan-counter body must be fully supported"
         );
-        // The deferred control-opponent rider remains honest: exactly one
-        // Unimplemented across the whole card.
+        // CR 723.1: the entire card — including the reflexive control-opponent
+        // rider — now parses with zero Unimplemented effects.
         let total_unimpl: usize = parsed
             .triggers
             .iter()
@@ -4885,8 +4886,36 @@ mod tests {
             .filter(|d| def_tree_has_unimplemented(d))
             .count();
         assert_eq!(
-            total_unimpl, 1,
-            "only the deferred 'you control target opponent' rider stays Unimplemented"
+            total_unimpl, 0,
+            "every effect on Construct a Cosmic Cube must be supported (control-opponent rider now lowers to ControlNextTurn)"
+        );
+
+        // CR 723.1: the reflexive rider lowers to `Effect::ControlNextTurn` —
+        // the discriminating shape assertion. Without the "their next turn"
+        // possessive variant in the suffix combinator this would be Unimplemented.
+        fn def_tree_has_control_next_turn(def: &AbilityDefinition) -> bool {
+            if matches!(*def.effect, Effect::ControlNextTurn { .. }) {
+                return true;
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(def_tree_has_control_next_turn)
+                || def
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(def_tree_has_control_next_turn)
+                || def
+                    .mode_abilities
+                    .iter()
+                    .any(def_tree_has_control_next_turn)
+        }
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(def_tree_has_control_next_turn),
+            "the seventh-counter reflexive rider must lower to Effect::ControlNextTurn"
         );
     }
 }

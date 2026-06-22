@@ -5592,16 +5592,24 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
     }
 }
 
-/// CR 608.2c: Parse "Repeat this process for <keyword list>." — Kathril, Aspect
-/// Warper. Returns the keyword list; the chunk loop wraps it in
-/// `SpecialClause::RepeatProcessForKeywords` and lowering replicates the
-/// antecedent conditional keyword-counter clause once per keyword. Mirrors
-/// `try_parse_same_is_true_continuation`; covers every "repeat this process for
-/// <list>" card, not Kathril alone.
+/// CR 608.2c: Parse a counter-class keyword-list continuation —
+/// "Repeat this process for <keyword list>." (Kathril, Aspect Warper) or
+/// "Do the same for <keyword list>." (Super-Adaptoid). Returns the keyword
+/// list; the chunk loop wraps it in `SpecialClause::RepeatProcessForKeywords`
+/// and lowering replicates the antecedent conditional keyword-counter clause
+/// once per keyword. Both phrasings are leaf-level variants of the same
+/// "replicate the prior keyword-counter clause for each listed keyword"
+/// directive, so they share one combinator and one `SpecialClause`. Mirrors
+/// `try_parse_same_is_true_continuation`; covers every card of this class, not
+/// Kathril or Super-Adaptoid alone.
 pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
     let lower = text.to_lowercase();
     let (keywords, rest) = nom_on_lower(text, &lower, |i| {
-        let (i, _) = tag("repeat this process for ").parse(i)?;
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("repeat this process for "),
+            tag("do the same for "),
+        ))
+        .parse(i)?;
         parse_keyword_list(i)
     })?;
     // The sentence must be fully consumed by the keyword list (modulo a trailing

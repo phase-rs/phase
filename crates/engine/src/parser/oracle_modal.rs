@@ -18,11 +18,12 @@ use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
 use super::oracle_static::parse_static_line;
 use super::oracle_trigger::parse_trigger_lines;
-use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
+use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
@@ -94,6 +95,12 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             // unhandled (`modal: None`) rather than emit a mis-routed choice.
             // No in-scope corpus card hits this guard.
             if !header_is_opponent_chooser_with_additional_cost(&header, &modes) {
+                // CR 700.2 + CR 601.2c: When the shared mode effect is phrased
+                // once in the header ("Choose up to two. Return those cards …")
+                // and each bullet is a bare target, distribute the shared effect
+                // into every mode body so each chosen mode resolves its own
+                // effect on its own target (Call Damage Control class).
+                let modes = distribute_shared_mode_effect(&candidate, modes);
                 return Some((OracleBlockAst::Modal { header, modes }, next));
             }
         }
@@ -286,6 +293,135 @@ fn strip_mode_separator(text: &str) -> &str {
     .parse(trimmed)
     .map(|(rest, _)| rest.trim())
     .unwrap_or(trimmed)
+}
+
+/// CR 700.2 + CR 601.2c: Distribute a header-level shared mode effect across
+/// bare-target modes.
+///
+/// Some modal spells phrase the shared instruction once in the header and leave
+/// each bullet mode as a bare target (Call Damage Control: "Choose up to two.
+/// Return those cards from your graveyard to your hand. • Target artifact card.
+/// • Target creature card. …"). The header's second sentence names a `those
+/// <noun>` anaphor that resolves to the chosen modes' targets, and each mode
+/// supplies only its target's card-type. Because the engine resolves every
+/// chosen mode as its own `ResolvedAbility` (CR 700.2c — one target per chosen
+/// mode), the rules-correct lowering rewrites each bare-target mode body into
+/// the full shared effect with the anaphor replaced by that mode's target
+/// phrase: `"Return target artifact card from your graveyard to your hand."`,
+/// etc. Each mode then independently returns its own targeted card.
+///
+/// This builds for the CLASS: the card-type is the only per-mode axis; the
+/// substitution is purely structural over the `those <noun>` slot, so it covers
+/// any "Choose up to N. <verb> those <noun> …. • Target A. • Target B." spell.
+///
+/// Returns the rewritten modes when the class matches, otherwise the modes
+/// unchanged.
+fn distribute_shared_mode_effect(header_full_text: &str, modes: Vec<ModeAst>) -> Vec<ModeAst> {
+    // The shared effect lives in the header sentence(s) after the choose-count.
+    // `parse_modal_header_ast` keys off the first sentence; the remainder is the
+    // shared template. Require at least two modes (CR 700.2 modal) and that
+    // every mode is a bare target so we never clobber a mode that already
+    // carries its own verb/effect.
+    if modes.len() < 2 || !modes.iter().all(|m| mode_body_is_bare_target(&m.body)) {
+        return modes;
+    }
+
+    let Some((prefix, suffix)) = parse_shared_those_template(header_full_text) else {
+        return modes;
+    };
+
+    modes
+        .into_iter()
+        .map(|mode| {
+            // The bare-target body retains the "target" keyword and card-type
+            // phrase ("Target artifact card"); lowercase its leading article so
+            // it reads mid-sentence inside the shared template. Drop a trailing
+            // period — the suffix supplies sentence punctuation.
+            let target_phrase = lowercase_first_word(mode.body.trim().trim_end_matches('.').trim());
+            let distributed = format!("{prefix}{target_phrase}{suffix}");
+            ModeAst {
+                raw: mode.raw,
+                label: mode.label,
+                body: distributed,
+                mode_cost: mode.mode_cost,
+                mode_pawprint: mode.mode_pawprint,
+            }
+        })
+        .collect()
+}
+
+/// True when a modal mode body is a bare target phrase using the "target"
+/// keyword and nothing else — i.e. the body parses fully (modulo a trailing
+/// period) as a single `target …` phrase with no leading or trailing verb. The
+/// parser is the detector: `parse_target_with_syntax` reports `TargetKeyword`
+/// only when the phrase opened with "target", and a leftover non-empty
+/// remainder means there is an effect verb the shared template would wrongly
+/// swallow.
+fn mode_body_is_bare_target(body: &str) -> bool {
+    let body = body.trim().trim_end_matches('.').trim();
+    let lower = body.to_lowercase();
+    // Must open with the "target" keyword (CR 601.2c) — a descriptor phrase
+    // ("an artifact card") is not this class.
+    if tag::<_, _, OracleError<'_>>("target ")
+        .parse(lower.as_str())
+        .is_err()
+    {
+        return false;
+    }
+    let mut ctx = ParseContext::default();
+    let (_, rest, syntax) = crate::parser::oracle_target::parse_target_with_syntax(body, &mut ctx);
+    syntax == crate::parser::oracle_target::TargetSyntax::TargetKeyword && rest.trim().is_empty()
+}
+
+/// CR 700.2: Parse a header's shared mode-effect template into the text on
+/// either side of its `those <noun>` anaphor slot. The first header sentence is
+/// the choose-count (handled by `parse_modal_header_ast`); the shared effect is
+/// the following sentence whose object is `those <plural-noun>` referring to the
+/// chosen modes' targets. Returns `(prefix, suffix)` such that
+/// `format!("{prefix}{target}{suffix}")` reconstructs the per-mode effect, or
+/// `None` when no such template exists.
+fn parse_shared_those_template(header_full_text: &str) -> Option<(String, String)> {
+    // Skip the choose-count sentence; the shared effect is the next non-empty
+    // sentence. Splitting on the sentence terminator mirrors
+    // `parse_modal_header_ast`'s own sentence segmentation.
+    let mut sentences = header_full_text
+        // allow-noncombinator: structural sentence segmentation on the sentence
+        // terminator, mirroring `parse_modal_header_ast`; not parsing dispatch.
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let _count_sentence = sentences.next()?;
+    let effect_sentence = sentences.next()?;
+
+    // Split the effect sentence around the `those ` anaphor slot, preserving the
+    // original casing of the surrounding text via `TextPair`. The prefix is the
+    // verb clause before the slot ("Return "); the anaphor noun ("cards") that
+    // immediately follows is discarded, and the remainder is the suffix
+    // ("from your graveyard to your hand").
+    let lower = effect_sentence.to_lowercase();
+    let pair = TextPair::new(effect_sentence, &lower);
+    let (before, after) = pair.split_around("those ")?;
+    let after = after.trim_start();
+    // Consume the (plural) anaphor noun word with a nom combinator; the
+    // remainder (with its leading space preserved) is the shared suffix, kept so
+    // the reconstructed body reads "<target> from your graveyard …" rather than
+    // gluing the target phrase onto the suffix. A bare "those" with no trailing
+    // clause is not a usable template.
+    let (_, suffix) = nom_on_lower(after.original, after.lower, |i| {
+        value((), take_until::<_, _, OracleError<'_>>(" ")).parse(i)
+    })?;
+    Some((before.original.to_string(), format!("{}.", suffix)))
+}
+
+/// Lowercase only the first word of a phrase, leaving the remainder untouched.
+/// Used to make a bullet mode's leading "Target …" read mid-sentence ("…
+/// target …") inside a distributed shared-effect template.
+fn lowercase_first_word(phrase: &str) -> String {
+    let mut chars = phrase.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_lowercase(), chars.as_str()),
+        None => String::new(),
+    }
 }
 
 /// CR 614.12c + CR 607.2d: Recognise an anchor-word as-enters header sentence
@@ -1538,6 +1674,102 @@ mod tests {
         // indicates a different pattern (e.g. a keyword with inline reminder).
         let raw = "Increment (reminder) extra text";
         assert_eq!(extract_ability_word_reminder_body(raw), None);
+    }
+
+    fn bare_target_mode(body: &str) -> ModeAst {
+        ModeAst {
+            raw: format!("{body}."),
+            label: None,
+            body: body.to_string(),
+            mode_cost: None,
+            mode_pawprint: None,
+        }
+    }
+
+    #[test]
+    fn parse_shared_those_template_splits_around_anaphor() {
+        let (prefix, suffix) = parse_shared_those_template(
+            "Choose up to two. Return those cards from your graveyard to your hand.",
+        )
+        .expect("template must parse");
+        assert_eq!(prefix, "Return ");
+        assert_eq!(suffix, " from your graveyard to your hand.");
+    }
+
+    #[test]
+    fn parse_shared_those_template_requires_effect_sentence() {
+        // A bare choose-count header carries no shared effect.
+        assert_eq!(parse_shared_those_template("Choose up to two."), None);
+        // A second sentence without a `those <noun>` anaphor is not a template.
+        assert_eq!(
+            parse_shared_those_template("Choose one. You may choose the same mode more than once."),
+            None
+        );
+    }
+
+    #[test]
+    fn distribute_shared_mode_effect_covers_card_type_axis() {
+        // CR 700.2 + CR 601.2c: the card-type is the only per-mode axis; each
+        // bare target gets the shared "Return … from your graveyard to your
+        // hand" effect.
+        let modes = vec![
+            bare_target_mode("Target artifact card"),
+            bare_target_mode("Target creature card"),
+            bare_target_mode("Target enchantment card"),
+            bare_target_mode("Target land card"),
+        ];
+        let out = distribute_shared_mode_effect(
+            "Choose up to two. Return those cards from your graveyard to your hand.",
+            modes,
+        );
+        assert_eq!(
+            out.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+            vec![
+                "Return target artifact card from your graveyard to your hand.",
+                "Return target creature card from your graveyard to your hand.",
+                "Return target enchantment card from your graveyard to your hand.",
+                "Return target land card from your graveyard to your hand.",
+            ]
+        );
+        // `raw` (the bullet text shown in `mode_descriptions`) is preserved.
+        assert_eq!(out[0].raw, "Target artifact card.");
+    }
+
+    #[test]
+    fn distribute_shared_mode_effect_leaves_full_effect_modes_unchanged() {
+        // Standard modal modes already carry their own verb; the bare-target
+        // gate must not clobber them.
+        let modes = vec![
+            bare_target_mode("Draw a card"),
+            bare_target_mode("Gain 3 life"),
+        ];
+        let out = distribute_shared_mode_effect(
+            "Choose one. Return those cards from your graveyard to your hand.",
+            modes.clone(),
+        );
+        assert_eq!(out, modes, "non-bare-target modes must be left untouched");
+    }
+
+    #[test]
+    fn distribute_shared_mode_effect_noop_without_shared_template() {
+        // A plain modal with no shared-effect sentence is unchanged even when
+        // every mode is a bare target.
+        let modes = vec![
+            bare_target_mode("Target artifact card"),
+            bare_target_mode("Target creature card"),
+        ];
+        let out = distribute_shared_mode_effect("Choose up to two.", modes.clone());
+        assert_eq!(out, modes);
+    }
+
+    #[test]
+    fn mode_body_is_bare_target_discriminates_target_keyword() {
+        assert!(mode_body_is_bare_target("Target artifact card"));
+        assert!(mode_body_is_bare_target("Target creature card."));
+        // A descriptor phrase is not a "target" mode.
+        assert!(!mode_body_is_bare_target("Destroy target creature"));
+        // A bare target with a trailing verb is not a bare target.
+        assert!(!mode_body_is_bare_target("Target creature gets +1/+1"));
     }
 
     #[test]

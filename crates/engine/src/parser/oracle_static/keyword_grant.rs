@@ -960,11 +960,18 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     // CR 510.1c: Aura/Equipment-style compound statics can attach the
     // toughness-combat-damage rule to the same affected object as a P/T
-    // modification ("Enchanted creature gets +0/+2 and assigns...").
-    if nom_primitives::scan_contains(
+    // modification ("Enchanted creature gets +0/+2 and assigns…"). The same
+    // predicate also rides one-shot duration-bound continuous effects whose
+    // subject is plural ("creatures you control … assign combat damage equal to
+    // their toughness rather than their power" — The Kingpin of Crime), so this
+    // accepts both the singular ("its…its") and plural ("their…their") surface
+    // forms via the shared predicate combinator.
+    if nom_primitives::scan_at_word_boundaries(
         unquoted_lower.as_str(),
-        "assigns combat damage equal to its toughness rather than its power",
-    ) {
+        super::evasion::parse_assigns_damage_from_toughness_predicate,
+    )
+    .is_some()
+    {
         modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 

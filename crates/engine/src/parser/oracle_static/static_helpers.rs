@@ -6,6 +6,26 @@ use super::prelude::*;
 use super::support::*;
 use nom::character::complete::multispace0;
 
+/// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
+/// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
+/// Shared by the chosen-name name-picker classes — the `CantBeActivated`
+/// prohibition (Pithing Needle / Phyrexian Revoker / Sorcerous Spyglass) and the
+/// directional activated-ability cost modifier (Skyseer's Chariot). Returns
+/// `None` for any other subject so callers fall back to `parse_type_phrase`.
+pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<TargetFilter> {
+    let trimmed = subject_lower.trim();
+    value(
+        TargetFilter::HasChosenName,
+        all_consuming(alt((
+            tag::<_, _, OracleError<'_>>("sources with the chosen name"),
+            tag("cards with the chosen name"),
+        ))),
+    )
+    .parse(trimmed)
+    .ok()
+    .map(|(_, filter)| filter)
+}
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"

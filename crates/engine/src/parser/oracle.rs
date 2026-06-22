@@ -12319,6 +12319,75 @@ mod tests {
         assert!(r.parse_warnings.is_empty());
     }
 
+    /// CR 700.2 + CR 601.2c + CR 404.1: Call Damage Control (MSH) — a modal
+    /// spell whose shared return-to-hand effect is phrased once in the header
+    /// ("Return those cards from your graveyard to your hand.") and whose four
+    /// bullets are bare targets distinguished only by card-type. The shared
+    /// effect must be distributed across every mode so each lowers to an
+    /// `Effect::Bounce` (return to hand) of a card of its type in the
+    /// controller's graveyard — never an unimplemented target marker.
+    /// Revert-probe: if `distribute_shared_mode_effect` is removed, each mode is
+    /// an unimplemented "target" marker and the Bounce match below fails.
+    #[test]
+    fn call_damage_control_distributes_shared_return_effect_across_modes() {
+        use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+        let r = parse(
+            "Choose up to two. Return those cards from your graveyard to your hand.\n• Target artifact card.\n• Target creature card.\n• Target enchantment card.\n• Target land card.",
+            "Call Damage Control",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 0, "\"up to two\" => min 0");
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 4);
+
+        let expected_types = [
+            TypeFilter::Artifact,
+            TypeFilter::Creature,
+            TypeFilter::Enchantment,
+            TypeFilter::Land,
+        ];
+        assert_eq!(r.abilities.len(), 4);
+        for (ability, expected) in r.abilities.iter().zip(expected_types) {
+            match ability.effect.as_ref() {
+                Effect::Bounce {
+                    target,
+                    destination,
+                    ..
+                } => {
+                    assert_eq!(
+                        *destination, None,
+                        "no explicit destination => return to hand"
+                    );
+                    match target {
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller,
+                            properties,
+                        }) => {
+                            assert_eq!(type_filters.as_slice(), &[expected]);
+                            assert_eq!(*controller, Some(ControllerRef::You));
+                            assert!(
+                                properties.iter().any(|p| matches!(
+                                    p,
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard
+                                    }
+                                )),
+                                "target must be scoped to your graveyard (CR 404.1), got {properties:?}"
+                            );
+                        }
+                        other => panic!("expected Typed graveyard target, got {other:?}"),
+                    }
+                }
+                other => panic!("each mode must lower to Bounce, got {other:?}"),
+            }
+        }
+        assert!(r.parse_warnings.is_empty());
+    }
+
     #[test]
     fn conditional_modal_max_supports_kicker_condition() {
         let r = parse(

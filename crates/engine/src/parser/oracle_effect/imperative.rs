@@ -127,20 +127,36 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
     TargetFilter::Controller
 }
 
-/// Shared ControlNextTurn suffix parser (CR 722.1). Called after a prefix
+/// Shared ControlNextTurn suffix parser (CR 723.1). Called after a prefix
 /// combinator ("you control " or "gain control of ") has matched; parses the
-/// target, then " during that player's next turn", then the optional extra-turn
-/// tail (CR 722.1 doesn't require it; some cards like Emrakul grant it).
+/// target, then the "during <possessive> next turn" duration clause, then the
+/// optional extra-turn tail (CR 723.1 doesn't require it; some cards like
+/// Emrakul grant it).
+///
+/// CR 723.1: "control another player during that player's next turn." The
+/// possessive is a single grammatical axis — "that player's" when the target
+/// noun is "player" (Mindslaver), "their" when the target noun is "opponent"
+/// (Construct a Cosmic Cube). Both refer to the targeted player, so they lower
+/// to the same effect; they are composed as one `alt()` over the possessive,
+/// never enumerated as separate full-string arms.
+///
 /// Returns `None` when the suffix doesn't apply, allowing the caller to treat
 /// the match as a different effect (e.g., plain `GainControl`).
 fn try_parse_control_next_turn_suffix(_text: &str, rest: &str) -> Option<(TargetFilter, bool)> {
     let (target_text, _) = super::strip_optional_target_prefix(rest);
     let (target, rem) = parse_target(target_text);
     let rem_lower = rem.to_ascii_lowercase();
-    tag::<_, _, OracleError<'_>>(" during that player's next turn")
-        .parse(rem_lower.as_str())
-        .ok()?;
-    let rem_after_during = &rem[" during that player's next turn".len()..];
+    let (consumed, _) = preceded(
+        tag::<_, _, OracleError<'_>>(" during "),
+        terminated(
+            alt((tag("that player's"), tag("their"), tag("its"))),
+            tag(" next turn"),
+        ),
+    )
+    .parse(rem_lower.as_str())
+    .map(|(remainder, _)| (rem_lower.len() - remainder.len(), remainder))
+    .ok()?;
+    let rem_after_during = &rem[consumed..];
     let rem_after_during_lower = rem_after_during.to_ascii_lowercase();
     let (_tail, grant_extra_turn_after) = if let Ok((tail, _)) = alt((
         tag::<_, _, OracleError<'_>>(". after that turn, that player takes an extra turn"),
@@ -1601,10 +1617,11 @@ pub(super) fn parse_targeted_action_ast(
             multi_target,
         });
     }
-    // CR 722.1: "You control target player during that player's next turn"
-    // (Mindslaver). Declarative form — "you" is not stripped as an imperative
-    // subject because this isn't a verb-on-controller pattern. Must match
-    // before the "gain control of" branch below since the prefixes differ.
+    // CR 723.1: "You control target player during that player's next turn"
+    // (Mindslaver), or "you control target opponent during their next turn"
+    // (Construct a Cosmic Cube). Declarative form — "you" is not stripped as an
+    // imperative subject because this isn't a verb-on-controller pattern. Must
+    // match before the "gain control of" branch below since the prefixes differ.
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), tag("you control ")).parse(input)
     }) {
@@ -6774,7 +6791,7 @@ pub(super) fn parse_imperative_family_ast(
         ));
     }
 
-    // CR 722.1: "You control target player during that player's next turn"
+    // CR 723.1: "You control target player during that player's next turn"
     // (Mindslaver / Word of Command class). "You" is the spell/ability controller
     // in a declarative sentence (not an imperative verb), so this bypasses the
     // first_word dispatch below. Delegates to the ControlNextTurn combinator
@@ -11285,7 +11302,7 @@ mod tests {
         }
     }
 
-    // CR 722.1: Mindslaver's declarative "You control target player during that
+    // CR 723.1: Mindslaver's declarative "You control target player during that
     // player's next turn" must route through the ControlNextTurn combinator.
     #[test]
     fn parse_mindslaver_control_next_turn() {
@@ -11309,7 +11326,39 @@ mod tests {
         }
     }
 
-    // CR 722.1: variant that grants an extra turn afterward (e.g., Emrakul-style).
+    // CR 723.1: "their"-possessive duration variant with an "opponent" target
+    // (Construct a Cosmic Cube: "you control target opponent during their next
+    // turn"). Exercises the possessive `alt()` axis and the opponent target
+    // filter, both of which differ from the Mindslaver "that player's"/"player"
+    // shape — confirms the combinator generalizes the possessive rather than
+    // hard-coding "that player's".
+    #[test]
+    fn parse_control_next_turn_their_possessive_opponent_target() {
+        let text = "You control target opponent during their next turn.";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            result.is_some(),
+            "Should parse the 'their next turn' / 'target opponent' variant"
+        );
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::ControlNextTurn {
+                target,
+                grant_extra_turn_after,
+            } => {
+                assert_eq!(
+                    target,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "target opponent → ControllerRef::Opponent filter"
+                );
+                assert!(!grant_extra_turn_after);
+            }
+            other => panic!("Expected Effect::ControlNextTurn, got {other:?}"),
+        }
+    }
+
+    // CR 723.1: variant that grants an extra turn afterward (e.g., Emrakul-style).
     #[test]
     fn parse_control_next_turn_with_extra_turn_tail() {
         let text = "You control target player during that player's next turn. \

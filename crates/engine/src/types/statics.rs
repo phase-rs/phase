@@ -552,7 +552,7 @@ pub enum BlockExceptionKind {
 
 /// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
 /// All three modes are applied in the CR 601.2f cost-locking step.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CostModifyMode {
     /// Subtractive — reduce generic mana (floor: 0).
     Reduce,
@@ -561,6 +561,13 @@ pub enum CostModifyMode {
     /// Floor — cost cannot fall below `amount` after all Reduce/Raise settle.
     /// CR 601.2f last-step floor. Trinisphere class.
     Minimum,
+}
+
+/// Serde default for the `mode` field on activation-cost statics: the original
+/// subtractive (`Reduce`) form, so card-data serialized before the directional
+/// field was added still deserializes as a reduction (CR 118.7).
+fn cost_modify_mode_reduce() -> CostModifyMode {
+    CostModifyMode::Reduce
 }
 
 /// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
@@ -802,18 +809,34 @@ pub enum StaticMode {
         spell_filter: Option<TargetFilter>,
         action: AdditionalCostTaxAction,
     },
-    /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
-    /// E.g., "Ninjutsu abilities you activate cost {1} less to activate."
-    /// `keyword` identifies which ability type is reduced (e.g., "ninjutsu", "equip", "cycling").
-    /// `amount` is the fixed generic mana reduction per activation.
+    /// CR 601.2f + CR 118.7: Modifies the generic mana cost of activated abilities
+    /// matching a keyword type, in the direction given by `mode`.
+    /// E.g., "Ninjutsu abilities you activate cost {1} less to activate." (`Reduce`)
+    /// or "Activated abilities of sources with the chosen name cost {2} more to
+    /// activate." (`Raise`, Skyseer's Chariot).
+    /// `keyword` identifies which ability type is modified — `"activated"` matches
+    /// every activated ability, or a tagged keyword (e.g. "ninjutsu", "equip",
+    /// "cycling", "power-up") matches the activating ability's `AbilityTag`.
+    /// `amount` is the fixed generic mana adjustment per activation.
+    ///
+    /// Directional parameterization (not a `Raise`-only sibling): the
+    /// `CostModifyMode` axis is shared with [`StaticMode::ModifyCost`] (the
+    /// cast-cost analogue). `Minimum` is not meaningful here — only `Reduce`
+    /// (CR 118.7) and `Raise` (CR 118.7 increase) are emitted/applied.
     ReduceAbilityCost {
+        /// CR 118.7: Direction of the adjustment. `#[serde(default)]` keeps
+        /// already-serialized card-data (which predates this field) reading as
+        /// the original subtractive form.
+        #[serde(default = "cost_modify_mode_reduce")]
+        mode: CostModifyMode,
         keyword: String,
         amount: u32,
         /// "This effect can't reduce the mana in that cost to less than one mana."
+        /// Only meaningful for `Reduce` — `Raise` never floors.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         minimum_mana: Option<u32>,
-        /// CR 601.2f: Dynamic multiplier for cost reduction (e.g., "for each Dragon you control").
-        /// When present, the total reduction is `amount * resolve_quantity(dynamic_count)`.
+        /// CR 601.2f: Dynamic multiplier for the adjustment (e.g., "for each Dragon you control").
+        /// When present, the total adjustment is `amount * resolve_quantity(dynamic_count)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
@@ -1553,11 +1576,13 @@ impl Hash for StaticMode {
         std::mem::discriminant(self).hash(state);
         match self {
             StaticMode::ReduceAbilityCost {
+                mode,
                 keyword,
                 amount,
                 minimum_mana,
                 ..
             } => {
+                mode.hash(state);
                 keyword.hash(state);
                 amount.hash(state);
                 minimum_mana.hash(state);
@@ -1862,15 +1887,26 @@ impl fmt::Display for StaticMode {
                 AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
             },
             StaticMode::ReduceAbilityCost {
+                mode,
                 keyword,
                 amount,
                 minimum_mana,
                 ..
             } => {
+                // CR 118.7: Encode the direction so the registry round-trip is
+                // lossless. A leading "+"/"-" marks Raise/Reduce; legacy strings
+                // with no marker default to Reduce in `from_str` for back-compat.
+                let sign = match mode {
+                    CostModifyMode::Raise => "+",
+                    _ => "-",
+                };
                 if let Some(minimum_mana) = minimum_mana {
-                    write!(f, "ReduceAbilityCost({keyword},{amount},{minimum_mana})")
+                    write!(
+                        f,
+                        "ReduceAbilityCost({sign}{keyword},{amount},{minimum_mana})"
+                    )
                 } else {
-                    write!(f, "ReduceAbilityCost({keyword},{amount})")
+                    write!(f, "ReduceAbilityCost({sign}{keyword},{amount})")
                 }
             }
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
@@ -2198,7 +2234,9 @@ impl FromStr for StaticMode {
                 dynamic_count: None,
             },
             s if s.starts_with("ReduceAbilityCost(") => {
-                // Parse "ReduceAbilityCost(keyword,amount)"
+                // Parse "ReduceAbilityCost([+|-]keyword,amount[,minimum_mana])".
+                // CR 118.7: a leading "+"/"-" on the keyword marks Raise/Reduce;
+                // legacy strings without a marker default to Reduce.
                 let inner = s
                     .strip_prefix("ReduceAbilityCost(")
                     .and_then(|s| s.strip_suffix(')'));
@@ -2206,8 +2244,16 @@ impl FromStr for StaticMode {
                     let mut parts = inner.split(',');
                     if let (Some(kw), Some(amt), extra) = (parts.next(), parts.next(), parts.next())
                     {
+                        let (mode, keyword) = if let Some(rest) = kw.strip_prefix('+') {
+                            (CostModifyMode::Raise, rest)
+                        } else if let Some(rest) = kw.strip_prefix('-') {
+                            (CostModifyMode::Reduce, rest)
+                        } else {
+                            (CostModifyMode::Reduce, kw)
+                        };
                         StaticMode::ReduceAbilityCost {
-                            keyword: kw.to_string(),
+                            mode,
+                            keyword: keyword.to_string(),
                             amount: amt.parse().unwrap_or(1),
                             minimum_mana: extra.and_then(|value| value.parse().ok()),
                             dynamic_count: None,

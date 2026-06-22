@@ -15417,12 +15417,35 @@ fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &
 }
 
 /// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
-/// by `attach_repeat_process_keywords` to rewrite the "if a creature card in
-/// your graveyard has <keyword>" gate of each replicated counter clause.
+/// by `attach_repeat_process_keywords` to rewrite each replicated counter
+/// clause's keyword gate. Covers every keyword-gate shape the antecedent
+/// conditional keyword-counter clause can take:
+///   - `QuantityCheck` over an `ObjectCount` filter — "if a creature card in
+///     your graveyard has <keyword>" (Kathril, Aspect Warper).
+///   - `TargetHasKeywordInstead` / `SourceLacksKeyword` — "if that creature has
+///     <keyword> and ~ doesn't" (Super-Adaptoid).
+///   - `And`/`Or`/`Not` — recurse into each compound conjunct so the
+///     Super-Adaptoid conjunction has BOTH the target-has and the source-lacks
+///     keyword swapped together.
 fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keyword: &Keyword) {
-    if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = condition {
-        rewrite_quantity_expr_keyword(lhs, new_keyword);
-        rewrite_quantity_expr_keyword(rhs, new_keyword);
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rewrite_quantity_expr_keyword(lhs, new_keyword);
+            rewrite_quantity_expr_keyword(rhs, new_keyword);
+        }
+        AbilityCondition::TargetHasKeywordInstead { keyword }
+        | AbilityCondition::SourceLacksKeyword { keyword } => {
+            *keyword = new_keyword.clone();
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for inner in conditions {
+                rewrite_ability_condition_keyword(inner, new_keyword);
+            }
+        }
+        AbilityCondition::Not { condition } => {
+            rewrite_ability_condition_keyword(condition, new_keyword);
+        }
+        _ => {}
     }
 }
 
@@ -22199,6 +22222,55 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    /// CR 510.1a + CR 613.11: The Kingpin of Crime's attack ability — "Whenever you
+    /// attack, you may pay 2 life. If you do, until end of turn, creatures you
+    /// control with toughness greater than their power assign combat damage equal
+    /// to their toughness rather than their power." The plural surface form of the
+    /// damage-by-toughness predicate (and the plural "toughness greater than their
+    /// power" filter) must lower with NO residual `Effect::Unimplemented`.
+    #[test]
+    fn the_kingpin_of_crime_full_card_has_no_unimplemented() {
+        let parsed = parse_oracle_text(
+            "Extort (Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life.)\n\
+             Whenever you attack, you may pay 2 life. If you do, until end of turn, creatures you control with toughness greater than their power assign combat damage equal to their toughness rather than their power.",
+            "The Kingpin of Crime",
+            &["Extort".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Spider".to_string()],
+        );
+
+        fn effect_has_unimplemented(effect: &Effect) -> bool {
+            matches!(effect, Effect::Unimplemented { .. })
+        }
+        fn ability_has_unimplemented(ability: &AbilityDefinition) -> bool {
+            effect_has_unimplemented(&ability.effect)
+                || ability
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(ability_has_unimplemented)
+                || ability
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(ability_has_unimplemented)
+        }
+
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                assert!(
+                    !ability_has_unimplemented(execute),
+                    "trigger lowered to an Unimplemented node: {execute:#?}"
+                );
+            }
+        }
+        for ability in &parsed.abilities {
+            assert!(
+                !ability_has_unimplemented(ability),
+                "ability lowered to an Unimplemented node: {:#?}",
+                ability
+            );
+        }
+    }
 
     /// CR 601.2c + CR 115.1: HONEST DEFERRAL — Graceful Takedown's heterogeneous
     /// compound source set ("any number of target enchanted creatures you control

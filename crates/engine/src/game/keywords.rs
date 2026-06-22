@@ -14,7 +14,7 @@ use crate::types::keywords::{
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
@@ -807,12 +807,20 @@ fn apply_ability_cost_reduction(
             continue;
         }
         if let StaticMode::ReduceAbilityCost {
+            ref mode,
             ref keyword,
             amount,
             ref dynamic_count,
             ..
         } = static_def.mode
         {
+            // CR 118.7: This ninjutsu-cost path only subtracts. A directional
+            // static in the `Raise` direction keyed on the same keyword must not
+            // reach the subtraction below — skip it (cost increases on ninjutsu
+            // are not modeled here; this path is reduction-only by construction).
+            if !matches!(mode, CostModifyMode::Reduce) {
+                continue;
+            }
             if keyword == ability_keyword {
                 // CR 601.2f: When dynamic_count is present, the total reduction is
                 // amount * resolve_quantity(dynamic_count). E.g., "cost {1} less for each Dragon".

@@ -7,22 +7,25 @@ use super::support::*;
 use crate::types::ability::CastTimingPermission;
 
 /// CR 602.1: Parse the leading keyword of a "<Keyword> abilities of …" class-wide
-/// activation cost-reduction static, returning the canonical keyword string that
+/// activation cost-modification static, returning the canonical keyword string that
 /// the runtime gate (`apply_static_activated_ability_cost_reduction`) matches
 /// against `AbilityTag::keyword_str()`.
 ///
 /// Restricted to the *tagged activated* keywords — those whose activated
 /// abilities carry an `AbilityTag` at parse time and therefore expose a
-/// `keyword_str()` the gate can compare. Matching an untagged keyword (e.g.
-/// "equip", "plot") here would emit a `ReduceAbilityCost` static that never
-/// fires at runtime, so those are deliberately excluded. Ordered longest-first
-/// so "power-up" wins before any shorter prefix could.
+/// `keyword_str()` the gate can compare. An untagged keyword (e.g. "plot",
+/// which is a special action, not an activated ability) would emit a
+/// `ReduceAbilityCost` static that never fires at runtime, so it is excluded.
+/// `equip` IS tagged (`AbilityTag::Equip`, set at synthesis), so it is included
+/// here (Firion class). Ordered longest-first so "power-up" wins before any
+/// shorter prefix could.
 pub(crate) fn parse_taggable_ability_keyword(input: &str) -> OracleResult<'_, &'static str> {
     alt((
         value(AbilityTag::PowerUp.keyword_str(), tag("power-up")),
         value(AbilityTag::Exhaust.keyword_str(), tag("exhaust")),
-        value(AbilityTag::Boast.keyword_str(), tag("boast")),
         value(AbilityTag::Outlast.keyword_str(), tag("outlast")),
+        value(AbilityTag::Boast.keyword_str(), tag("boast")),
+        value(AbilityTag::Equip.keyword_str(), tag("equip")),
     ))
     .parse(input)
 }

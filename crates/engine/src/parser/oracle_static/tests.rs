@@ -9650,6 +9650,7 @@ fn static_reduce_ability_cost_ninjutsu() {
         matches!(
             def.mode,
             StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
                 ref keyword,
                 amount: 1,
                 minimum_mana: None,
@@ -9670,6 +9671,7 @@ fn static_reduce_equip_abilities_with_object_qualifier() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "equip".to_string(),
             amount: 1,
             minimum_mana: None,
@@ -14305,6 +14307,7 @@ fn static_reduce_activated_ability_cost_generic() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "activated".to_string(),
             amount: 2,
             minimum_mana: None,
@@ -14322,6 +14325,7 @@ fn static_reduce_activated_ability_cost_generic_with_minimum() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "activated".to_string(),
             amount: 2,
             minimum_mana: Some(1),
@@ -14339,6 +14343,7 @@ fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "activated".to_string(),
             amount: 2,
             minimum_mana: Some(1),
@@ -14360,6 +14365,7 @@ fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "activated".to_string(),
             amount: 2,
             minimum_mana: Some(1),
@@ -14386,6 +14392,7 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
     assert_eq!(
         def.mode,
         StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
             keyword: "exhaust".to_string(),
             amount: 2,
             minimum_mana: None,
@@ -14420,6 +14427,113 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
     );
     assert_eq!(parsed.statics.len(), 1);
     assert_eq!(parsed.abilities.len(), 1);
+}
+
+// --- CR 118.7: Directional activated-ability cost modifier (Reduce vs Raise) ---
+
+#[test]
+fn static_activated_ability_cost_increase_chosen_name() {
+    // Skyseer's Chariot: the Raise direction with a chosen-name source filter.
+    // This is the parameterization that forces reduce → directional.
+    let def = parse_static_line(
+        "Activated abilities of sources with the chosen name cost {2} more to activate.",
+    )
+    .expect("Skyseer cost-increase static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "activated".to_string(),
+            amount: 2,
+            // CR 118.7: increases never floor.
+            minimum_mana: None,
+            dynamic_count: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::HasChosenName),
+        "Skyseer must scope the increase to sources with the chosen name"
+    );
+}
+
+#[test]
+fn static_activated_ability_cost_generic_reduce_vs_raise_discriminates() {
+    // CR 118.7: the same grammar with only the direction word changed must yield
+    // opposite `CostModifyMode`s. Pins reduce ≠ increase at the parser layer.
+    let reduce = parse_static_line(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+    )
+    .expect("reduce form parses");
+    let raise = parse_static_line(
+        "Activated abilities of creatures you control cost {2} more to activate.",
+    )
+    .expect("raise form parses");
+    let reduce_mode = match reduce.mode {
+        StaticMode::ReduceAbilityCost { mode, .. } => mode,
+        other => panic!("expected ReduceAbilityCost, got {other:?}"),
+    };
+    let raise_mode = match raise.mode {
+        StaticMode::ReduceAbilityCost { mode, .. } => mode,
+        other => panic!("expected ReduceAbilityCost, got {other:?}"),
+    };
+    assert_eq!(reduce_mode, CostModifyMode::Reduce);
+    assert_eq!(raise_mode, CostModifyMode::Raise);
+    assert_ne!(reduce_mode, raise_mode);
+}
+
+#[test]
+fn static_possessive_equip_ability_cost_reduction_self_ref() {
+    // Firion, Wild Rose Warrior's granted equip-cost reduction leaf:
+    // "This Equipment's equip abilities cost {2} less to activate." Keyed on the
+    // tagged Equip keyword (CR 702.6a), scoped to the source object (SelfRef).
+    let def = parse_static_line("This Equipment's equip abilities cost {2} less to activate.")
+        .expect("Firion equip-cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "equip".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::SelfRef),
+        "\"This Equipment's …\" must self-reference the source (CR 109.5)"
+    );
+}
+
+#[test]
+fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
+    // CR 118.7: the Display/from_str registry encoding must round-trip the
+    // direction so a serialized Raise static does not silently decode as Reduce.
+    for mode in [CostModifyMode::Reduce, CostModifyMode::Raise] {
+        let original = StaticMode::ReduceAbilityCost {
+            mode,
+            keyword: "activated".to_string(),
+            amount: 3,
+            minimum_mana: None,
+            dynamic_count: None,
+        };
+        let encoded = original.to_string();
+        let decoded = encoded
+            .parse::<StaticMode>()
+            .expect("registry string parses back into a StaticMode");
+        match decoded {
+            StaticMode::ReduceAbilityCost {
+                mode: decoded_mode,
+                amount: 3,
+                ..
+            } => assert_eq!(
+                decoded_mode, mode,
+                "direction lost in round trip: {encoded}"
+            ),
+            other => panic!("registry round trip dropped variant: {other:?}"),
+        }
+    }
 }
 
 // --- Group C: Spells you cast have keyword ---

@@ -13004,6 +13004,35 @@ fn reduce_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
     reduce_generic_in_cost_with_minimum_mana(cost, amount, 0);
 }
 
+/// CR 601.2f + CR 118.7: Increase the generic mana component of an ability cost
+/// by `amount` (CR 601.2f: "plus all additional costs and cost increases").
+/// The directional analogue of `reduce_generic_in_cost` — a cost increase only
+/// ever grows the generic component (cost increases can't change colored
+/// requirements). For a `Composite`, the increase is applied to the first mana
+/// sub-cost so the net generic delta on the whole cost is exactly `amount`;
+/// non-mana costs are unaffected. Skyseer's Chariot class (Raise direction).
+fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
+    if amount == 0 {
+        return;
+    }
+    match cost {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => {
+            *generic = generic.saturating_add(amount);
+        }
+        AbilityCost::Composite { costs } => {
+            if let Some(sub) = costs
+                .iter_mut()
+                .find(|c| matches!(c, AbilityCost::Mana { .. }))
+            {
+                increase_generic_in_cost(sub, amount);
+            }
+        }
+        _ => {} // Non-mana costs unaffected
+    }
+}
+
 /// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.
 /// Mutates `ability_def.cost` in place, reducing generic mana by `amount_per * count`.
 fn apply_cost_reduction(
@@ -13053,6 +13082,7 @@ fn apply_static_activated_ability_cost_reduction(
 
     for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::ReduceAbilityCost {
+            mode,
             keyword,
             amount,
             minimum_mana,
@@ -13074,7 +13104,17 @@ fn apply_static_activated_ability_cost_reduction(
         }) {
             continue;
         }
-        reduce_generic_in_cost_with_minimum_mana(cost, *amount, minimum_mana.unwrap_or(0));
+        // CR 118.7: Apply the adjustment in the static's direction. `Reduce`
+        // subtracts generic mana (honoring the optional one-mana floor);
+        // `Raise` adds generic mana (Skyseer's Chariot). `Minimum` is not
+        // emitted for activated-ability statics and is treated as a no-op.
+        match mode {
+            CostModifyMode::Reduce => {
+                reduce_generic_in_cost_with_minimum_mana(cost, *amount, minimum_mana.unwrap_or(0));
+            }
+            CostModifyMode::Raise => increase_generic_in_cost(cost, *amount),
+            CostModifyMode::Minimum => {}
+        }
     }
 }
 
@@ -20650,6 +20690,7 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
                     keyword: "activated".to_string(),
                     amount: 1,
                     minimum_mana: None,
@@ -20800,6 +20841,7 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
                     keyword: "activated".to_string(),
                     amount: 2,
                     minimum_mana: Some(1),
@@ -46010,6 +46052,7 @@ mod tests {
                 .core_types
                 .push(crate::types::card_type::CoreType::Creature);
             obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
                 keyword: "exhaust".to_string(),
                 amount: 2,
                 minimum_mana: None,
@@ -46092,6 +46135,209 @@ mod tests {
             generic_of(&def_self),
             6,
             "\"other permanents\" must exclude the static's own source"
+        );
+    }
+
+    /// CR 118.7 + CR 601.2f: Skyseer's Chariot — "Activated abilities of sources
+    /// with the chosen name cost {2} more to activate." The directional
+    /// (`mode: Raise`) parameterization of the activated-ability cost static.
+    ///
+    /// Drives the production seam `apply_cost_reduction` (the same path
+    /// `can_activate_ability` reaches at cost-determination time). Discriminating
+    /// assertions:
+    ///   - An activated ability on a source whose name matches Skyseer's chosen
+    ///     name is INCREASED {3} → {5}. If `mode` were reverted to `Reduce`, this
+    ///     would read {1} and the `assert_eq!(.., 5)` would fail.
+    ///   - A source with a DIFFERENT name is unaffected ({3}), pinning the
+    ///     `HasChosenName` filter.
+    #[test]
+    fn skyseer_increases_chosen_name_activated_ability_cost() {
+        use crate::types::ability::{ChosenAttribute, Effect, StaticDefinition, TargetFilter};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(7);
+
+        // Skyseer's Chariot carries the parsed Raise static and has chosen the
+        // name "Targeted Source".
+        let chariot = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Skyseer's Chariot".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&chariot).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Artifact);
+            obj.chosen_attributes
+                .push(ChosenAttribute::CardName("Targeted Source".to_string()));
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::HasChosenName)]
+            .into();
+        }
+
+        // A source whose name matches the chosen name.
+        let matched = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Targeted Source".to_string(),
+            Zone::Battlefield,
+        );
+        // A source with a different name.
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Some Other Card".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [matched, other] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "ability".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3,
+                },
+            });
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        // Matched-name source: {3} → {5} (increased by {2}). Reverting the
+        // direction field to `Reduce` makes this {1}, flipping the assertion.
+        let mut def_match = make_def();
+        apply_cost_reduction(&state, &mut def_match, PlayerId(1), matched);
+        assert_eq!(
+            generic_of(&def_match),
+            5,
+            "chosen-name source's activated ability must be INCREASED by {{2}}"
+        );
+
+        // Non-matching source: unchanged ({3}).
+        let mut def_other = make_def();
+        apply_cost_reduction(&state, &mut def_other, PlayerId(1), other);
+        assert_eq!(
+            generic_of(&def_other),
+            3,
+            "a source without the chosen name must not be taxed"
+        );
+    }
+
+    /// CR 118.7 + CR 702.6a: Firion, Wild Rose Warrior's granted equip-cost
+    /// reduction — "This Equipment's equip abilities cost {2} less to activate."
+    /// (`mode: Reduce`, keyword `"equip"`, `SelfRef`).
+    ///
+    /// Drives `apply_cost_reduction`. Discriminating assertions:
+    ///   - The Equipment's OWN equip ability ({3} → {1}). Reverting `mode` to
+    ///     `Raise` would yield {5}, flipping the assertion (proves direction).
+    ///   - A non-equip (untagged) ability on the same Equipment is unchanged,
+    ///     pinning the `"equip"` keyword gate.
+    #[test]
+    fn firion_reduces_self_equip_ability_cost() {
+        use crate::types::ability::{AbilityTag, Effect, StaticDefinition, TargetFilter};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(7);
+
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Firion's Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "equip".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef)]
+            .into();
+        }
+
+        let make_equip_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "equip-effect".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3,
+                },
+            });
+            def.ability_tag = Some(AbilityTag::Equip);
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        // Equipment's own equip ability: {3} → {1}. Reverting direction → {5}.
+        let mut def_equip = make_equip_def();
+        apply_cost_reduction(&state, &mut def_equip, PlayerId(0), equipment);
+        assert_eq!(
+            generic_of(&def_equip),
+            1,
+            "this Equipment's equip ability must be reduced by {{2}}"
+        );
+
+        // A non-equip activated ability on the same Equipment: unchanged.
+        let mut def_plain = make_equip_def();
+        def_plain.ability_tag = None;
+        apply_cost_reduction(&state, &mut def_plain, PlayerId(0), equipment);
+        assert_eq!(
+            generic_of(&def_plain),
+            3,
+            "a non-equip ability must not be reduced by the equip-keyed static"
         );
     }
 

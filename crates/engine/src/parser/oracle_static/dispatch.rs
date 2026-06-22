@@ -2290,6 +2290,7 @@ pub(crate) fn parse_static_line_inner(
                 });
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Reduce,
                     keyword: keyword.trim().to_string(),
                     amount,
                     minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
@@ -2325,9 +2326,58 @@ pub(crate) fn parse_static_line_inner(
         let (affected, _rest) = parse_type_phrase(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
                 keyword: keyword.to_string(),
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
+    // --- "[Subject]'s <keyword> abilities cost {N} less/more to activate" ---
+    // CR 602.1 + CR 601.2f + CR 118.7 + CR 702.6a: Possessive keyword-ability cost
+    // modifier keyed on a tagged activated keyword. Firion, Wild Rose Warrior's
+    // granted ability "This Equipment's equip abilities cost {2} less to activate"
+    // (keyword = "equip", subject = SelfRef). Distinct from the "<keyword>
+    // abilities of [subject]" form above by its possessive ("'s") grammar.
+    if let Some(((subject, keyword, amount, mode), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, subject) = take_until("'s ").parse(i)?;
+        let (i, _) = tag("'s ").parse(i)?;
+        let (i, keyword) = parse_taggable_ability_keyword(i)?;
+        let (i, _) = tag(" abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" ").parse(i)?;
+        let (i, mode) = alt((
+            value(CostModifyMode::Reduce, tag("less to activate")),
+            value(CostModifyMode::Raise, tag("more to activate")),
+        ))
+        .parse(i)?;
+        Ok((i, (subject.to_string(), keyword, amount, mode)))
+    }) {
+        // CR 109.5: "This Equipment's …" (and other "this <type>" possessives)
+        // self-reference the source permanent → SelfRef, so the static affects
+        // only this object's equip ability — not every Equipment. Mirrors the
+        // self-reference dispatch in `evasion.rs`.
+        let subject_lower = subject.to_lowercase();
+        let affected = if subject == "~" || SELF_REF_TYPE_PHRASES.contains(&subject_lower.as_str())
+        {
+            TargetFilter::SelfRef
+        } else {
+            parse_type_phrase(&subject).0
+        };
+        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+            .flatten();
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: keyword.to_string(),
+                amount,
+                minimum_mana,
                 dynamic_count: None,
             })
             .affected(affected)
@@ -2376,6 +2426,7 @@ pub(crate) fn parse_static_line_inner(
         let (affected, _rest) = parse_type_phrase(&filter_text);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
                 keyword: "activated".to_string(),
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
@@ -2386,34 +2437,46 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // --- "Activated abilities of [filter] cost {N} less to activate" ---
-    // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
-    if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
-        if let Ok((_, (filter_part, after_cost))) = nom_primitives::split_once_on(rest, " cost ") {
-            if nom_primitives::scan_contains(after_cost, "less to activate") {
-                let amount = nom_primitives::split_once_on(after_cost, " less")
-                    .ok()
-                    .and_then(|(_, (mana_str, _))| {
-                        let stripped = mana_str.trim().trim_matches('{').trim_matches('}');
-                        stripped.parse::<u32>().ok()
-                    })
-                    .unwrap_or(1);
-                // Parse the filter between "of" and "cost" using parse_type_phrase
-                let filter_text =
-                    &tp.original["activated abilities of ".len()..][..filter_part.len()];
-                let (affected, _rest) = parse_type_phrase(filter_text);
-                return Some(
-                    StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                        keyword: "activated".to_string(),
-                        amount,
-                        minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
-                        dynamic_count: None,
-                    })
-                    .affected(affected)
-                    .description(text.to_string()),
-                );
-            }
-        }
+    // --- "Activated abilities of [filter] cost {N} less/more to activate" ---
+    // CR 602.1 + CR 601.2f + CR 118.7: Generic activated-ability cost modifier,
+    // directional. Reduce (Training Grounds: "Activated abilities of creatures you
+    // control cost {2} less to activate") and Raise (Skyseer's Chariot: "Activated
+    // abilities of sources with the chosen name cost {2} more to activate").
+    // Combinator: prefix → subject → " cost {N} " → direction. The subject is
+    // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
+    if let Some(((amount, mode, subject_filter), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("activated abilities of ").parse(i)?;
+        let (i, subject) = take_until(" cost ").parse(i)?;
+        let (i, _) = tag(" cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" ").parse(i)?;
+        let (i, mode) = alt((
+            value(CostModifyMode::Reduce, tag("less to activate")),
+            value(CostModifyMode::Raise, tag("more to activate")),
+        ))
+        .parse(i)?;
+        Ok((i, (amount, mode, subject.to_string())))
+    }) {
+        // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
+        // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
+        let affected = parse_chosen_name_source_filter(&subject_filter)
+            .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+        // CR 118.7: a one-mana floor only applies to reductions.
+        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+            .flatten();
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
     }
 
     // --- CR 601.2f: Cost-floor statics (Trinisphere class) ---

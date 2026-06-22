@@ -1529,32 +1529,96 @@ pub(super) fn strip_player_property_superlative_conditional(
     )
 }
 
+/// CR 608.2e + CR 122.1b: Parse "if that creature has <keyword>[ and ~ doesn't], <effect>".
+///
+/// The optional " and ~ doesn't" conjunct (Super-Adaptoid: "If that creature
+/// has haste and Super-Adaptoid doesn't, put a haste counter on
+/// Super-Adaptoid") yields a compound `And([TargetHasKeywordInstead,
+/// SourceLacksKeyword])` so the keyword counter is only placed when the target
+/// HAS the keyword AND the source LACKS it. Without the conjunct (Toxic riders:
+/// "if that creature has toxic, draw a card") it stays a bare
+/// `TargetHasKeywordInstead`. The keyword is captured up to the next " and " /
+/// "," / "; " boundary and lowered through `Keyword::from_str`, so both
+/// evergreen keywords and parameterized-but-bare keywords (Toxic) are
+/// recognized — and the prose "and ~ doesn't" tail is never folded into the
+/// keyword name (a bare `split_once(", ")` captured "haste and ~ doesn't" as
+/// one `Unknown` keyword). Unrecognized phrases stay `Keyword::Unknown` (see
+/// the inline note at the `from_str` call), preserving the pre-existing inert
+/// rider for target-gated counter/P-T "instead" cards that have no keyword to
+/// mirror. Building block for the whole "if that creature has KW [and ~
+/// doesn't], …" class, not a single card.
 pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
-    let prefix = alt((
-        tag::<_, _, OracleError<'_>>("if that creature has "),
-        tag("if that permanent has "),
-    ))
-    .parse(lower.as_str())
-    .ok()
-    .map(|(rest, _)| rest);
-    if let Some(rest) = prefix {
-        if let Some((keyword_str, body)) = rest.split_once(", ") {
-            let keyword = crate::types::keywords::Keyword::from_str(keyword_str.trim()).unwrap();
-            let body = body.trim();
-            let body_text = text[text.len() - body.len()..].trim();
-            let body_text = body_text
-                .strip_suffix(" instead.")
-                .or_else(|| body_text.strip_suffix(" instead"))
-                .unwrap_or(body_text);
-            let body_text = body_text.strip_prefix("it ").unwrap_or(body_text);
-            return (
-                Some(AbilityCondition::TargetHasKeywordInstead { keyword }),
-                body_text.to_string(),
-            );
-        }
-    }
-    (None, text.to_string())
+    type E<'a> = OracleError<'a>;
+    let parsed = nom_on_lower(text, &lower, |i| {
+        let (i, _) = alt((
+            tag::<_, _, E>("if that creature has "),
+            tag("if that permanent has "),
+        ))
+        .parse(i)?;
+        // The keyword name runs up to the first of " and " (the lack conjunct),
+        // "," / "; " (the effect connective). `alt` of three terminators keeps
+        // the captured span to the keyword word(s) only.
+        let (i, keyword_str) = alt((
+            terminated(take_until(" and "), peek(tag::<_, _, E>(" and "))),
+            terminated(take_until(", "), peek(tag(", "))),
+            terminated(take_until("; "), peek(tag("; "))),
+        ))
+        .parse(i)?;
+        // CR 122.1b: `Keyword::from_str` is infallible — an unrecognized phrase
+        // (a counter or power/toughness gate such as "a +1/+1 counter on it" or
+        // "power 4 or greater") becomes `Keyword::Unknown`, leaving a
+        // semantically-inert `TargetHasKeywordInstead { Unknown }` rider. That
+        // mirrors pre-existing engine behavior for the target-gated "instead"
+        // cards in that class (Bring Low, Strider, Urdnan), which have no real
+        // keyword to mirror. Rejecting `Unknown` here would silently un-support
+        // that unrelated class — out of scope for the Super-Adaptoid keyword
+        // mirror, which only needs real keywords ("haste", captured before
+        // " and ~ doesn't"). Honest counter/P-T gate support is deferred to its
+        // own change.
+        let keyword = Keyword::from_str(keyword_str).unwrap();
+        // Optional " and ~ doesn't" lack conjunct (Super-Adaptoid class). `~` is
+        // the normalized card name; the bare anaphora forms cover un-normalized
+        // text.
+        let (i, source_lacks) = opt((
+            tag(" and "),
+            alt((
+                tag::<_, _, E>("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("it"),
+            )),
+            tag(" doesn't"),
+        ))
+        .parse(i)
+        .map(|(rest, matched)| (rest, matched.is_some()))?;
+        // Connective ", " (optionally "; ") separates condition from the effect.
+        let (i, _) = alt((tag(", "), tag("; "))).parse(i)?;
+        let condition = if source_lacks {
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::TargetHasKeywordInstead {
+                        keyword: keyword.clone(),
+                    },
+                    AbilityCondition::SourceLacksKeyword { keyword },
+                ],
+            }
+        } else {
+            AbilityCondition::TargetHasKeywordInstead { keyword }
+        };
+        Ok((i, condition))
+    });
+    let Some((condition, body)) = parsed else {
+        return (None, text.to_string());
+    };
+    let body = body.trim();
+    // Structural cleanup of the already-extracted effect body (drop the
+    // trailing "instead" override marker and the leading "it " pronoun), not
+    // parsing dispatch — the condition has already been parsed above.
+    let body = body.strip_suffix(" instead.").unwrap_or(body); // allow-noncombinator: effect-body suffix cleanup
+    let body = body.strip_suffix(" instead").unwrap_or(body); // allow-noncombinator: effect-body suffix cleanup
+    let body = body.strip_prefix("it ").unwrap_or(body); // allow-noncombinator: effect-body pronoun cleanup
+    (Some(condition), body.to_string())
 }
 
 fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, usize)> {
