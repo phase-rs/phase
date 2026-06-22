@@ -5066,9 +5066,10 @@ fn apply_single_replacement(
                                 && matches!(proposed, ProposedEvent::Draw { .. })
                                 && draw_replacement_count(state, rid, &proposed).is_some()
                             {
-                                return def.sub_ability.as_ref().map(|sub| {
-                                    PostReplacementContinuation::Template(Box::new(sub.as_ref().clone()))
-                                });
+                                return def
+                                    .sub_ability
+                                    .clone()
+                                    .map(PostReplacementContinuation::Template);
                             }
                             // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
                             // PutCounter/ChangeZone) in the sub_ability chain to find
