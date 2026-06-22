@@ -117,14 +117,6 @@ type GameRunState = "running" | "paused-disconnect" | "paused-manual";
 
 /** Default grace window for guest auto-reconnect, in milliseconds. */
 const DEFAULT_GRACE_PERIOD_MS = 30_000;
-/**
- * Grace window applied to every persisted seat when a host resumes.
- * Wider than the in-flight default because the entire resume scenario
- * is "host was away for a while, guests may take a while to come
- * back." 5 minutes leaves headroom for browser reopen + tab warm-up +
- * reconnect backoff.
- */
-const RESUME_GRACE_PERIOD_MS = 5 * 60_000;
 
 /**
  * Guest auto-reconnect backoff schedule. Escalates briskly for early
@@ -426,24 +418,15 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /**
-   * Open a reconnect grace window for a seat. Used only by resume
-   * rehydration to pre-seed `disconnectedSeats` — mid-game disconnects
-   * go through `handleGuestDisconnect` which carries additional
-   * broadcast and run-state responsibilities.
-   *
-   * Uses `RESUME_GRACE_PERIOD_MS` (5m) rather than the default 30s:
-   * returning guests may need to discover the host's revival through
-   * their reconnect backoff, which can take minutes.
+   * Pre-seed a persisted guest seat as disconnected on host resume, so a
+   * returning guest's token takes `handleReconnect`'s existing valid path.
+   * No grace timer is armed: consistent with the mid-game disconnect policy,
+   * a player who hasn't returned is never auto-conceded. The seat is held
+   * indefinitely (game paused) until the guest reconnects; the host may
+   * explicitly concede or kick a seat that never comes back.
    */
   private armResumeGrace(pid: PlayerId): void {
-    const timer = setTimeout(() => {
-      if (!this.playerTokens.has(pid)) return;
-      void this.concedePlayer(pid, "Resume grace expired", "conceded")
-        .catch((err) => {
-          console.error("[P2PHost] resume-grace auto-concede failed:", err);
-        });
-    }, RESUME_GRACE_PERIOD_MS);
-    this.disconnectedSeats.set(pid, { disconnectedAt: Date.now(), timer });
+    this.disconnectedSeats.set(pid, { disconnectedAt: Date.now(), timer: null });
   }
 
   /**
@@ -1275,31 +1258,16 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
-    // Mid-game disconnect: enter grace window.
-    const timer = setTimeout(() => {
-      // Grace expired without reconnect AND without host decision — auto-concede.
-      if (this.gameRunState === "paused-disconnect") {
-        this.concedePlayer(pid, "Disconnect grace expired", "conceded")
-          .then(() => {
-            // Notify remaining guests that the seat was conceded past (not kicked).
-            for (const [otherPid, s] of this.guestSessions) {
-              if (otherPid === pid) continue;
-              s.send({
-                type: "player_conceded",
-                playerId: pid,
-                reason: "Disconnect grace expired",
-              });
-            }
-          })
-          .catch((err) => {
-            console.error("[P2PHost] auto-concede failed:", err);
-          });
-      }
-    }, this.gracePeriodMs);
-
+    // Mid-game disconnect: hold the seat open indefinitely. We do NOT
+    // auto-concede a dropped player — no grace timer is armed. The game stays
+    // `paused-disconnect`, which auto-resumes the moment the player reconnects
+    // (see `handleReconnect`'s resume check). Conceding a dropped player is
+    // now ALWAYS a deliberate host action ("Continue without them" →
+    // `concedeDisconnected`, or `kickPlayer`) — never a timer. CR 104.3a
+    // concede still applies, but only on explicit host choice.
     this.disconnectedSeats.set(pid, {
       disconnectedAt: Date.now(),
-      timer,
+      timer: null,
     });
     this.gameRunState = "paused-disconnect";
 
@@ -1585,6 +1553,12 @@ export class P2PGuestAdapter implements EngineAdapter {
     existingPlayerToken?: string,
     private readonly displayName?: string,
     private readonly reservationToken?: string,
+    // IndexedDB key for the persisted reconnect token, decoupled from
+    // `hostPeerId` (the dial target). The dial target tracks the live
+    // PEER_ID_PREFIX; the storage key is held on the legacy prefix so tokens
+    // persisted before a prefix bump still resolve. Falls back to
+    // `hostPeerId` when omitted (callers that don't persist across bumps).
+    private readonly sessionKey?: string,
   ) {
     if (existingPlayerToken) {
       this.playerToken = existingPlayerToken;
@@ -1750,7 +1724,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "game_setup": {
         this.assignedPlayerId = msg.assignedPlayerId;
         this.playerToken = msg.playerToken;
-        void saveP2PSession(this.hostPeerId, {
+        void saveP2PSession(this.sessionKey ?? this.hostPeerId, {
           playerToken: msg.playerToken,
           playerId: msg.assignedPlayerId,
         });
@@ -1763,7 +1737,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "reconnect_ack": {
         this.assignedPlayerId = msg.assignedPlayerId;
         if (this.playerToken) {
-          void saveP2PSession(this.hostPeerId, {
+          void saveP2PSession(this.sessionKey ?? this.hostPeerId, {
             playerToken: this.playerToken,
             playerId: msg.assignedPlayerId,
           });

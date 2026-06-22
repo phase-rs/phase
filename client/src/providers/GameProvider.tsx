@@ -789,25 +789,31 @@ export function GameProvider({
             hostPeerHandle = peer;
             signal.throwIfAborted();
 
-            // Reconstruct the same peer id `joinRoom(code)` dialed — the
-            // IndexedDB session key for auto-reconnect is keyed on the full
-            // prefixed id, and the guest adapter uses it on reconnect to
-            // call `peer.connect(hostPeerId)`. IndexedDB (not sessionStorage)
-            // means a guest whose tab crashed can reopen and rejoin with
-            // their original seat.
-            const hostPeerId = `phase-${code}`;
-            const existing = await loadP2PSession(hostPeerId);
+            // Two deliberately-decoupled identifiers:
+            //  - dial target: `conn.peer` — the *actual* host peer id we just
+            //    connected to (= `phase2-<code>`). Auto-reconnect re-dials
+            //    this, so it must be the live id the host registered under;
+            //    reconstructing a literal prefix here is how the dial silently
+            //    broke after the PEER_ID_PREFIX bump.
+            //  - sessionKey: the IndexedDB key for the persisted reconnect
+            //    token, held on the legacy `phase-` prefix so tokens saved
+            //    before the bump still resolve. IndexedDB (not sessionStorage)
+            //    means a guest whose tab crashed can reopen and rejoin with
+            //    their original seat.
+            const sessionKey = `phase-${code}`;
+            const existing = await loadP2PSession(sessionKey);
             const reservationToken =
               window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
               peer,
-              hostPeerId,
+              conn.peer,
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
               reservationToken,
+              sessionKey,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;
