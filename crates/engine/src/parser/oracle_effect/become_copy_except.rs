@@ -746,18 +746,15 @@ fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, Vec<ContinuousMod
             .map(|(_, pair)| pair)?;
     // CR 707.9a: peel an optional `with <…>` clause off the head before the
     // type list so its text is never mistaken for type words. Only the quoted
-    // form (Shelob's Food sacrifice ability) is granted; a non-quoted `with`
-    // clause (Imposter Mech's "with crew 3") is a not-yet-supported shape that
-    // is dropped fail-soft rather than parsed as bogus subtypes.
+    // form (Shelob's Food sacrifice ability) is granted: `split_single_quoted_ability`
+    // trims leading whitespace and requires a leading `"`, returning `None` for a
+    // non-quoted `with` clause (Imposter Mech's "with crew 3"), which is then
+    // dropped fail-soft via `unwrap_or_default` rather than parsed as bogus subtypes.
     let (type_text, ability_mods) = match nom_primitives::split_once_on(head, " with ") {
         Ok((_, (types, after_with))) => {
-            let mods = if after_with.trim_start().starts_with('"') {
-                split_single_quoted_ability(after_with)
-                    .map(|(quoted_text, _)| parse_quoted_ability_modifications(quoted_text))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let mods = split_single_quoted_ability(after_with)
+                .map(|(quoted_text, _)| parse_quoted_ability_modifications(quoted_text))
+                .unwrap_or_default();
             (types, mods)
         }
         Err(_) => (head, Vec::new()),
