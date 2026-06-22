@@ -115,7 +115,7 @@ describe("Discard bulk-select grid", () => {
     fireEvent.click(screen.getByRole("button", { name: /Bravo/i })); // keep 2 -> keepCap reached
     fireEvent.click(screen.getByRole("button", { name: /Discard \(/ })); // confirm (avoids "Discard instead" toggle)
     const call = dispatchMock.mock.calls.find((c) => c[0].type === "SelectCards");
-    expect(call?.[0].data.cards.slice().sort()).toEqual([3, 4]); // complement of {1,2}
+    expect(call?.[0].data.cards.slice().sort((a, b) => a - b)).toEqual([3, 4]); // complement of {1,2}
     expect(call?.[0].data.cards).toHaveLength(2);
   });
 
