@@ -1677,7 +1677,8 @@ export type ShardChoice =
 export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
-  | { type: "Counters" };
+  | { type: "Counters" }
+  | { type: "Speed" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }

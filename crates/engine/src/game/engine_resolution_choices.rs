@@ -1026,7 +1026,18 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(pending_mana_ability) = pending_mana_ability {
                 let mut pending = pending_mana_ability.as_ref().clone();
-                pending.chosen_counter_count = Some(amount);
+                // CR 107.1c / CR 107.3a: bind the announced amount to the
+                // correct mana-ability cost axis — a removed-counter count
+                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
+                match resource {
+                    PayableResource::Counters => pending.chosen_counter_count = Some(amount),
+                    PayableResource::Speed => pending.chosen_x = Some(amount),
+                    other => {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Unexpected pay-amount resource {other:?} for mana ability"
+                        )))
+                    }
+                }
                 let waiting_for =
                     mana_abilities::advance_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
@@ -1067,6 +1078,14 @@ pub(super) fn handle_resolution_choice(
                 PayableResource::Counters => {
                     return Err(EngineError::InvalidAction(
                         "Counter amount choices require a pending mana ability".to_string(),
+                    ));
+                }
+                PayableResource::Speed => {
+                    // CR 702.179e: `Pay X speed` only ever arises as a mana-ability
+                    // activation cost, which carries a `pending_mana_ability` and
+                    // is handled above. Reaching the standalone branch is a bug.
+                    return Err(EngineError::InvalidAction(
+                        "Speed amount choices require a pending mana ability".to_string(),
                     ));
                 }
                 PayableResource::Life => {

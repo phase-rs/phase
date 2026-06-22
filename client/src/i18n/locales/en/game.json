@@ -451,7 +451,8 @@
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
     "resourceMana": "mana",
-    "resourceCounters": "counters"
+    "resourceCounters": "counters",
+    "resourceSpeed": "speed"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",

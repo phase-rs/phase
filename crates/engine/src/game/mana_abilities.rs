@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
-    ManaProduction, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
-    REMOVE_COUNTER_COST_ANY_NUMBER,
+    ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
@@ -244,6 +244,11 @@ fn produce_mana_from_ability(
         source_id,
         player,
         ability_def,
+        // CR 107.3c: X is irrelevant here — `ProductionOverride::Combination`
+        // short-circuits `AnyCombination` count resolution (the produced
+        // sequence was pre-chosen by the player), and the produced count X is
+        // enforced via the prompt path's `AnyCombination { count: X }`.
+        None,
         cost_paid_object,
     );
 
@@ -333,12 +338,19 @@ fn resolved_mana_ability_for_current_state(
     source_id: ObjectId,
     player: PlayerId,
     ability_def: &AbilityDefinition,
+    chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> ResolvedAbility {
     let mut resolved =
         super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
     if let Some(snapshot) = cost_paid_object {
         resolved.set_cost_paid_object_recursive(snapshot);
+    }
+    // CR 107.3a/.3c: bind the announced X into the resolved ability so produced
+    // mana counts (`AnyCombination { count: Ref(Variable "X") }`) and any X-bearing
+    // sub-effects resolve to the chosen value (Chicago Loop's `Add X mana`).
+    if let Some(x) = chosen_x {
+        resolved.set_chosen_x_recursive(x);
     }
     apply_condition_instead_mana_swap(state, &resolved)
 }
@@ -462,6 +474,8 @@ pub fn activate_mana_ability(
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -1062,6 +1076,29 @@ fn can_activate_mana_ability_by_simulation(
     .is_ok()
 }
 
+// CR 701.59: collect-evidence amount inside a (possibly composite) mana-ability cost.
+pub(crate) fn collect_evidence_cost_amount(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::CollectEvidence { amount } => Some(*amount),
+        AbilityCost::Composite { costs } => costs.iter().find_map(collect_evidence_cost_amount),
+        _ => None,
+    }
+}
+
+// CR 107.3a + CR 702.179f: a mana-ability cost of "Pay X speed".
+fn pay_speed_x_cost(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::PaySpeed {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name },
+                },
+        } if name == "X" => true,
+        AbilityCost::Composite { costs } => costs.iter().any(pay_speed_x_cost),
+        _ => false,
+    }
+}
+
 pub(super) fn advance_mana_ability_activation(
     state: &mut GameState,
     mut pending: PendingManaAbility,
@@ -1073,6 +1110,32 @@ pub(super) fn advance_mana_ability_activation(
         .and_then(|obj| obj.abilities.get(pending.ability_index))
         .cloned()
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+
+    // CR 107.3a + CR 601.2b + CR 702.179f: A `Pay X speed` mana-ability cost
+    // (Chicago Loop's `Pay X speed: Add X mana in any combination of colors`)
+    // requires the player to announce X before any cost is paid or mana is
+    // produced. X is bound to BOTH the speed cost and the produced-mana count.
+    if pending.chosen_x.is_none() {
+        if let Some(cost) = &ability_def.cost {
+            if pay_speed_x_cost(cost) {
+                // CR 118.3: a player can't pay a cost without the resources to
+                // pay it fully, so X is bounded by the player's current speed.
+                // CR 702.179f: a player with no speed has speed 0.
+                let max = super::speed::effective_speed(state, pending.player) as u32;
+                let source_id = pending.source_id;
+                let player = pending.player;
+                return Ok(WaitingFor::PayAmountChoice {
+                    player,
+                    resource: PayableResource::Speed,
+                    min: 0,
+                    max,
+                    accumulated: 0,
+                    source_id,
+                    pending_mana_ability: Some(Box::new(pending)),
+                });
+            }
+        }
+    }
 
     if pending.chosen_discards.is_empty() {
         if let Some((count, cards)) =
@@ -1179,6 +1242,36 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
+    // CR 605.2 + CR 701.59: "Collect evidence N" in a (possibly composite)
+    // mana-ability cost (Cryptex) requires interactively exiling graveyard
+    // cards before any mana is produced. Surface the choice via the shared
+    // CollectEvidenceChoice prompt, resuming this activation once cards are
+    // chosen. Keyed on not-yet-collected (empty selection).
+    if pending.collected_evidence.is_empty() {
+        if let Some(cost) = &ability_def.cost {
+            if let Some(amount) = collect_evidence_cost_amount(cost) {
+                // CR 605.2 + CR 605.3b: pay the ability's cost before producing mana.
+                if !super::effects::collect_evidence::can_collect_evidence(
+                    state,
+                    pending.player,
+                    amount,
+                ) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay collect-evidence cost for mana ability".to_string(),
+                    ));
+                }
+                return Ok(
+                    super::effects::collect_evidence::begin_cost_payment_for_mana_ability(
+                        state,
+                        pending.player,
+                        amount,
+                        pending,
+                    ),
+                );
+            }
+        }
+    }
+
     // CR 107.1c + CR 605.3a: "Remove any number of <type> counters" in a
     // mana-ability cost requires choosing the count before costs are paid and
     // mana is produced.
@@ -1247,6 +1340,7 @@ pub(super) fn advance_mana_ability_activation(
             pending.source_id,
             pending.player,
             &ability_def,
+            pending.chosen_x,
             pending.cost_paid_object.clone(),
         );
         if let Some(choice) = mana_choice_prompt(
@@ -1268,6 +1362,7 @@ pub(super) fn advance_mana_ability_activation(
                 &mut pending.chosen_sacrificed_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
                 pending.chosen_counter_count,
+                pending.chosen_x,
             )?;
             // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
             // Sacrifice, etc.) generated during a mana ability's cost step
@@ -1319,6 +1414,7 @@ pub(super) fn advance_mana_ability_activation(
         &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
         pending.chosen_counter_count,
+        pending.chosen_x,
         pending.cost_paid_object,
     )?;
     complete_mana_ability_activation(
@@ -1353,6 +1449,7 @@ fn pay_mana_ability_cost(
         &mut std::iter::empty(),
         None,
         None,
+        None,
     )
 }
 
@@ -1370,6 +1467,7 @@ fn resolve_mana_ability_with_selected_choices(
     sacrificed_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
     chosen_counter_count: Option<u32>,
+    chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
@@ -1388,6 +1486,7 @@ fn resolve_mana_ability_with_selected_choices(
         &mut sacrificed,
         chosen_hybrid_payment,
         chosen_counter_count,
+        chosen_x,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -1418,6 +1517,7 @@ fn resolve_mana_ability_with_selected_choices(
         source_id,
         player,
         ability_def,
+        chosen_x,
         cost_paid_object,
     );
 
@@ -1598,6 +1698,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
     chosen_counter_count: Option<u32>,
+    chosen_x: Option<u32>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -1972,6 +2073,28 @@ where
                     AbilityCost::Mill { count } => {
                         mill_for_mana_cost(state, player, *count, events)?;
                     }
+                    // CR 605.2 + CR 701.59: Collect-evidence sub-cost inside a
+                    // Composite mana-ability cost (Cryptex). The exile was
+                    // already performed interactively via the
+                    // `CollectEvidenceChoice` resume (see
+                    // `advance_mana_ability_activation`); no-op here so the cost
+                    // is neither re-paid nor errored.
+                    AbilityCost::CollectEvidence { .. } => {}
+                    // CR 107.3a/.3c + CR 702.179f: `Pay X speed` sub-cost
+                    // inside a Composite mana-ability cost. Concretize the
+                    // announced X into a Fixed cost, then delegate to the
+                    // single-authority cost payer.
+                    AbilityCost::PaySpeed { amount } => {
+                        let cost = match chosen_x {
+                            Some(x) => AbilityCost::PaySpeed {
+                                amount: QuantityExpr::Fixed { value: x as i32 },
+                            },
+                            None => AbilityCost::PaySpeed {
+                                amount: amount.clone(),
+                            },
+                        };
+                        super::costs::pay_ability_cost(state, player, source_id, &cost, events)?;
+                    }
                     // Self-contained components (Untap {Q}, Exert, PayEnergy,
                     // self-ReturnToHand, EffectCost) delegate to the
                     // single-authority cost payer alongside the tap.
@@ -1985,6 +2108,24 @@ where
                     }
                 }
             }
+        }
+        // CR 605.2 + CR 701.59: Bare collect-evidence mana-ability cost. The
+        // exile already happened interactively via the `CollectEvidenceChoice`
+        // resume; no-op so the cost is neither re-paid nor errored.
+        Some(AbilityCost::CollectEvidence { .. }) => {}
+        // CR 107.3a/.3c + CR 702.179f: Bare `Pay X speed` mana-ability cost
+        // (Chicago Loop). Concretize the announced X into a Fixed cost, then
+        // delegate to the single-authority cost payer.
+        Some(AbilityCost::PaySpeed { amount }) => {
+            let cost = match chosen_x {
+                Some(x) => AbilityCost::PaySpeed {
+                    amount: QuantityExpr::Fixed { value: x as i32 },
+                },
+                None => AbilityCost::PaySpeed {
+                    amount: amount.clone(),
+                },
+            };
+            super::costs::pay_ability_cost(state, player, source_id, &cost, events)?;
         }
         // Self-contained components (Untap, Exert, PayEnergy, self-ReturnToHand,
         // EffectCost) delegate to the single-authority cost payer.
@@ -2057,6 +2198,11 @@ fn mill_for_mana_cost(
 /// `PaySpeed` is deliberately excluded: Chicago Loop's `Pay X speed: Add X mana`
 /// couples a player-announced X to both cost and effect (CR 601.2b), which the
 /// non-announcing delegation path cannot express — it is handled on its own.
+///
+/// `CollectEvidence` is also deliberately excluded: Cryptex's `Collect evidence 3`
+/// is paid interactively via the `CollectEvidenceChoice` prompt that
+/// `advance_mana_ability_activation` surfaces before mana production (CR 701.59),
+/// so it is a no-op in the cost-payment match rather than a delegated payment.
 fn is_self_contained_mana_subcost(cost: &AbilityCost) -> bool {
     matches!(
         cost,
@@ -5909,6 +6055,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -5971,6 +6119,8 @@ mod tests {
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_counter_count: None,
+                chosen_x: None,
+                collected_evidence: Vec::new(),
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
@@ -6199,6 +6349,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6300,6 +6452,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7199,6 +7353,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7566,6 +7722,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -8124,6 +8282,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -8192,6 +8352,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -8315,6 +8477,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -8376,6 +8540,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -8528,6 +8694,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,

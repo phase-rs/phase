@@ -422,7 +422,8 @@
     "payAmount": "Paga {{value}} {{resource}}",
     "resourceEnergy": "energia",
     "resourceMana": "mana",
-    "resourceCounters": "segnalini"
+    "resourceCounters": "segnalini",
+    "resourceSpeed": "velocità"
   },
   "hand": {
     "viewFullHand_one": "Vedi la mano completa ({{count}} carta)",

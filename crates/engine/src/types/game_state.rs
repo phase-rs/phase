@@ -1814,6 +1814,13 @@ pub enum CollectEvidenceResume {
     Effect {
         pending_ability: Box<ResolvedAbility>,
     },
+    /// CR 605.2 + CR 701.59: Collect evidence paid as a mana ability's
+    /// activation cost (Cryptex's `{T}, Collect evidence 3: Add one mana...`).
+    /// Resumes the parked mana-ability activation with the chosen cards stamped
+    /// into `PendingManaAbility::collected_evidence`, rather than a `PendingCast`.
+    ManaAbility {
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1927,6 +1934,18 @@ pub struct PendingManaAbility {
     /// in a mana-ability cost. The amount is chosen before mana production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_count: Option<u32>,
+    /// CR 107.3a + CR 601.2b + CR 702.179e/f: Announced value of X for a
+    /// `Pay X speed` mana-ability cost (Chicago Loop's `Pay X speed: Add X mana
+    /// in any combination of colors`). Chosen before cost payment and mana
+    /// production; bound to BOTH the speed cost and the produced-mana count via
+    /// `set_chosen_x_recursive`. `None` until the player announces X.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_x: Option<u32>,
+    /// CR 605.2 + CR 701.59: Cards exiled to pay a `Collect evidence N`
+    /// mana-ability cost (Cryptex). Filled by the `CollectEvidenceChoice` resume
+    /// before mana production; empty until the player selects cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected_evidence: Vec<ObjectId>,
     /// CR 117.1 + CR 118.3: Pre-selected objects to exile as part of an
     /// `AbilityCost::Exile { filter: !SelfRef, .. }` mana ability cost. Used
     /// by Food Chain's battlefield exile cost and Titans' Nest's graveyard
@@ -4246,6 +4265,11 @@ pub enum PayableResource {
     /// CR 119.4: Pay any amount of life — N is deducted as life loss via
     /// life_costs::pay_life_as_cost (life-loss replacement pipeline + CantLoseLife).
     Life,
+    /// CR 702.179e/f: Announce X for a `Pay X speed` mana-ability cost. The chosen
+    /// amount is the announced X, bounded above by the player's current speed
+    /// (CR 702.179f: no speed counts as 0). Mana-ability only — paid via the
+    /// `PendingManaAbility::chosen_x` path, never the standalone resource branch.
+    Speed,
 }
 
 fn default_one() -> u32 {
@@ -4590,7 +4614,8 @@ impl WaitingFor {
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
-                CollectEvidenceResume::Effect { .. } => None,
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
         }
@@ -4621,7 +4646,8 @@ impl WaitingFor {
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
-                CollectEvidenceResume::Effect { .. } => None,
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
         }
@@ -8471,6 +8497,8 @@ mod tests {
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
                     chosen_counter_count: None,
+                    chosen_x: None,
+                    collected_evidence: Vec::new(),
                     chosen_exiled: Vec::new(),
                     chosen_sacrificed_battlefield: Vec::new(),
                     cost_paid_object: None,
