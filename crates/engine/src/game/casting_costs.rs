@@ -6687,12 +6687,23 @@ fn auto_tap_mana_sources_inner(
                 // returns, so it — and every ancestor already in
                 // `excluded_sources` — must be excluded from any nested
                 // auto-tap, or two cross-paying costed mana abilities recurse
-                // infinitely. Hoisted above the sub-cost guard so the chain is
-                // threaded into resolution even for abilities with no mana
-                // sub-cost.
-                let mut excluded = excluded_sources.clone();
-                excluded.insert(option.object_id);
-                if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
+                // infinitely. The exclusion set is read only by
+                // `pay_mana_sub_cost`, reached only through the `AbilityCost::Mana`
+                // arms — exactly the costs `mana_sub_cost_of` reports `Some` for.
+                // A tap-only / sacrifice / pay-life mana ability never consumes
+                // it, so clone-and-extend only when a mana sub-cost is present and
+                // otherwise forward the caller's set unchanged — skipping a heap
+                // allocation per selected source on this auto-tap hot path.
+                let sub_cost = mana_sub_cost_of(&ability_def.cost);
+                let mut excluded_buf;
+                let excluded: &HashSet<ObjectId> = if sub_cost.is_some() {
+                    excluded_buf = excluded_sources.clone();
+                    excluded_buf.insert(option.object_id);
+                    &excluded_buf
+                } else {
+                    excluded_sources
+                };
+                if let Some(sub_cost) = sub_cost {
                     let (source_types, source_subtypes) =
                         super::casting::activation_source_types(state, option.object_id);
                     let activation_ctx = PaymentContext::Activation {
@@ -6706,7 +6717,7 @@ fn auto_tap_mana_sources_inner(
                         sub_cost,
                         events,
                         Some(option.object_id),
-                        &excluded,
+                        excluded,
                         Some(&activation_ctx),
                     );
                 }
@@ -6720,10 +6731,10 @@ fn auto_tap_mana_sources_inner(
                 // skip it silently — the player can still manually tap other sources.
                 let override_value = production_override_for_option(&ability_def, &option);
                 // CR 605.3c: Resolve via the exclusion-aware entry so the
-                // in-flight chain (`excluded`, including this source) threads
-                // into the ability's own mana sub-cost auto-tap. The public
-                // `resolve_mana_ability` would discard the chain and re-tap a
-                // suspended ancestor, recursing infinitely.
+                // in-flight chain (`excluded`, including this source when it has a
+                // mana sub-cost) threads into the ability's own mana sub-cost
+                // auto-tap. The public `resolve_mana_ability` would discard the
+                // chain and re-tap a suspended ancestor, recursing infinitely.
                 let _ = mana_abilities::resolve_mana_ability_excluding(
                     state,
                     option.object_id,
@@ -6731,7 +6742,7 @@ fn auto_tap_mana_sources_inner(
                     &ability_def,
                     events,
                     override_value,
-                    &excluded,
+                    excluded,
                 );
             }
         } else {
