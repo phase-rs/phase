@@ -229,28 +229,38 @@ pub struct ManaSourceOption {
 
 /// Check whether an ability cost includes a tap component.
 /// Matches both `AbilityCost::Tap` and `Composite` costs containing `Tap`.
-pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
+/// True when `cost` contains a component satisfying `pred`, checking both a bare
+/// cost and every component of a `Composite`. Single walker behind all
+/// component-presence predicates (`has_tap_component`, `has_untap_component`,
+/// `cost_includes_sacrifice`, `cost_includes_loyalty`).
+pub(crate) fn cost_has_component(
+    cost: &Option<AbilityCost>,
+    pred: impl Fn(&AbilityCost) -> bool,
+) -> bool {
     match cost {
-        Some(AbilityCost::Tap) => true,
-        Some(AbilityCost::Composite { costs }) => {
-            costs.iter().any(|c| matches!(c, AbilityCost::Tap))
-        }
-        _ => false,
+        Some(AbilityCost::Composite { costs }) => costs.iter().any(&pred),
+        Some(c) => pred(c),
+        None => false,
     }
+}
+
+pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| matches!(c, AbilityCost::Tap))
+}
+
+/// CR 107.6 + CR 302.6: True when the cost includes the untap symbol ({Q}).
+/// Like {T}, a {Q} cost on a creature is gated by summoning sickness (CR 302.6
+/// names both symbols) and requires the source to currently be tapped. Matches a
+/// bare `Untap` cost and one nested inside a `Composite` (Pili-Pala: `{2}, {Q}`).
+pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
 }
 
 /// CR 701.21: True when paying this ability's cost sacrifices a permanent
 /// (the source itself or another). Matches a bare `Sacrifice` cost and a
 /// `Sacrifice` nested inside a `Composite`, for any target filter.
 fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
-    fn is_sac(c: &AbilityCost) -> bool {
-        matches!(c, AbilityCost::Sacrifice(_))
-    }
-    match cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(is_sac),
-        Some(c) => is_sac(c),
-        None => false,
-    }
+    cost_has_component(cost, |c| matches!(c, AbilityCost::Sacrifice(_)))
 }
 
 /// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.

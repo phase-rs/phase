@@ -46,7 +46,18 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     if ability_def.multi_target.is_some() || target_attached.is_some() {
         return false;
     }
-    ability_def.multi_target.is_none() && target_attached.is_none()
+    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
+    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
+    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
+    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
+    // off the instant-speed mana-ability path.
+    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
+    if mana_sources::cost_has_component(&ability_def.cost, |c| {
+        matches!(c, AbilityCost::Loyalty { .. })
+    }) {
+        return false;
+    }
+    true
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -966,10 +977,17 @@ fn mana_ability_ready_without_simulation(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
-    // CR 302.6 + CR 602.5a: a {T}-cost mana ability on a creature that hasn't been
-    // controlled since the start of its controller's most recent turn can't be
-    // activated (haste / CanActivateAbilitiesAsThoughHaste lift it via the shared predicate).
-    if mana_sources::has_tap_component(&ability_def.cost)
+    // CR 107.6: A {Q}-cost mana ability requires a currently-tapped source — an
+    // already-untapped permanent can't be untapped to pay the cost (Pili-Pala).
+    if mana_sources::has_untap_component(&ability_def.cost) && !obj.tapped {
+        return false;
+    }
+    // CR 302.6 + CR 602.5a: a {T}- or {Q}-cost mana ability on a creature that
+    // hasn't been controlled since the start of its controller's most recent turn
+    // can't be activated (CR 302.6 names both symbols). Haste /
+    // CanActivateAbilitiesAsThoughHaste lift it via the shared predicate.
+    if (mana_sources::has_tap_component(&ability_def.cost)
+        || mana_sources::has_untap_component(&ability_def.cost))
         && super::restrictions::summoning_sick_for_tap_ability(state, obj)
     {
         return false;
@@ -1601,6 +1619,10 @@ where
                 events,
             )?;
         }
+        // CR 605.1a + CR 701.17a: Bare `Mill` mana-ability cost. The Millikin
+        // `{T}, Mill a card: Add {C}` shape routes through the Composite arm; this
+        // arm covers a hypothetical mill-only mana ability for completeness.
+        Some(AbilityCost::Mill { count }) => mill_for_mana_cost(state, player, *count, events)?,
         Some(AbilityCost::PayLife { amount }) => {
             // CR 119.4 + CR 903.4: QuantityExpr resolves against the activator's
             // current state (e.g. commander color identity count).
@@ -1942,6 +1964,20 @@ where
                             events,
                         )?;
                     }
+                    // CR 605.1a + CR 701.17a: `Mill` sub-cost inside a Composite
+                    // mana-ability cost — Millikin (`{T}, Mill a card: Add {C}`).
+                    // Mill is non-interactive (no choice gate in
+                    // `advance_mana_ability_activation`), so it is paid directly
+                    // here alongside the tap.
+                    AbilityCost::Mill { count } => {
+                        mill_for_mana_cost(state, player, *count, events)?;
+                    }
+                    // Self-contained components (Untap {Q}, Exert, PayEnergy,
+                    // self-ReturnToHand, EffectCost) delegate to the
+                    // single-authority cost payer alongside the tap.
+                    c if is_self_contained_mana_subcost(c) => {
+                        super::costs::pay_ability_cost(state, player, source_id, c, events)?;
+                    }
                     other => {
                         return Err(EngineError::InvalidAction(format!(
                             "Unsupported mana ability sub-cost: {other:?}"
@@ -1949,6 +1985,11 @@ where
                     }
                 }
             }
+        }
+        // Self-contained components (Untap, Exert, PayEnergy, self-ReturnToHand,
+        // EffectCost) delegate to the single-authority cost payer.
+        Some(c) if is_self_contained_mana_subcost(c) => {
+            super::costs::pay_ability_cost(state, player, source_id, c, events)?;
         }
         Some(other) => {
             return Err(EngineError::InvalidAction(format!(
@@ -1959,6 +2000,75 @@ where
     }
 
     Ok(())
+}
+
+/// CR 605.1a + CR 701.17a-b: Pay a `Mill` cost component of a mana ability by
+/// milling `count` cards from the activating player's library into their
+/// graveyard. Routes through the replacement pipeline (mirroring `mill::resolve`
+/// and the rad-counter handler) so graveyard-redirect replacements (Rest in
+/// Peace / Leyline of the Void) apply and "a card was put into a graveyard"
+/// triggers see the milled cards. Millikin (`{T}, Mill a card: Add {C}`) is the
+/// canonical case — mill is a non-mana cost component and the {C} is produced
+/// unconditionally.
+fn mill_for_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let proposed = crate::types::proposed_event::ProposedEvent::Mill {
+        player_id: player,
+        count,
+        destination: Zone::Graveyard,
+        applied: Default::default(),
+    };
+    match super::replacement::replace_event(state, proposed, events) {
+        super::replacement::ReplacementResult::Execute(event) => {
+            // CR 616.1: a per-card `Moved` ordering choice parks the prompt
+            // (`state.waiting_for` left set, tail in `pending_batch_deliveries`);
+            // bail like `mill::resolve` does so the surfaced prompt is not
+            // clobbered. The parked activation resumes the remaining cost
+            // components and mana production.
+            super::effects::mill::apply_mill_after_replacement(state, event, events).map_err(
+                |e| EngineError::InvalidAction(format!("Mill cost could not be paid: {e:?}")),
+            )?;
+        }
+        // CR 701.17b: "mill as many as you can" — a fully replaced-away or empty
+        // library still pays the cost (milling zero cards is legal).
+        super::replacement::ReplacementResult::Prevented => {}
+        super::replacement::ReplacementResult::NeedsChoice(choosing_player) => {
+            state.waiting_for =
+                super::replacement::replacement_choice_waiting_for(choosing_player, state);
+        }
+    }
+    Ok(())
+}
+
+/// Single-authority delegation gate: self-contained mana-ability cost components
+/// (non-interactive, non-mana, non-tap, no `chosen_*` selection) that the
+/// activated-ability cost payer (`super::costs::pay_ability_cost`) already
+/// resolves correctly. Routing these through that one authority — rather than
+/// duplicating each CR-annotated body here — keeps replacement routing and rule
+/// annotations in a single place (CLAUDE.md: "single authority for ability
+/// costs"). Covers Untap ({Q}, Pili-Pala), Exert (Arena of Glory / Oasis
+/// Ritualist), PayEnergy (Aether Hub class), self-`ReturnToHand` (Grinning
+/// Ignus), and `EffectCost` put-counter-on-self (Wall of Roots).
+///
+/// `PaySpeed` is deliberately excluded: Chicago Loop's `Pay X speed: Add X mana`
+/// couples a player-announced X to both cost and effect (CR 601.2b), which the
+/// non-announcing delegation path cannot express — it is handled on its own.
+fn is_self_contained_mana_subcost(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Untap
+            | AbilityCost::Exert
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+    )
 }
 
 fn pay_life_cost(
@@ -3839,6 +3949,432 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+    }
+
+    /// CR 605.1a + CR 701.17a: Millikin — `{T}, Mill a card: Add {C}`. The mill
+    /// is a non-mana cost component of a mana ability. Regression: before the
+    /// `Mill` arm existed in the mana-ability cost payer, paying the cost errored
+    /// (`Unsupported mana ability sub-cost: Mill`), so the readiness simulation
+    /// in `can_activate_mana_ability_now` failed and the ability was never
+    /// offered — the user could not tap Millikin for mana.
+    #[test]
+    fn millikin_mills_a_card_and_adds_colorless() {
+        let mut state = GameState::new_two_player(42);
+        // Stock player 0's library so there is a card to mill.
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+
+        // Millikin is an artifact creature; mark it un-sick so the {T} gate passes.
+        let id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Millikin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+        }
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def.clone());
+
+        let library_before = state.players[0].library.len();
+
+        // The user-facing regression: the ability must be offered as activatable.
+        assert!(
+            can_activate_mana_ability_now(&state, PlayerId(0), id, 0, &def),
+            "Millikin's {{T}}, Mill a card: Add {{C}} ability must be activatable"
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        // {C} produced, source tapped, exactly one card milled to the graveyard.
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert!(state.objects.get(&id).unwrap().tapped);
+        assert_eq!(state.players[0].library.len(), library_before - 1);
+        assert_eq!(state.players[0].graveyard.len(), 1);
+    }
+
+    /// CR 118.3: Wall of Roots — `Put a -0/-1 counter on ~: Add {G}`. The cost is
+    /// an `EffectCost` (put-counter-on-self), delegated to the single-authority
+    /// cost payer. Regression: before the self-contained delegation arm, this
+    /// errored and the ability was never offered.
+    #[test]
+    fn wall_of_roots_effect_cost_adds_green() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Wall of Roots".to_string(),
+            Zone::Battlefield,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::EffectCost {
+            effect: Box::new(Effect::PutCounter {
+                counter_type: CounterType::PowerToughness {
+                    power: 0,
+                    toughness: -1,
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }),
+        });
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        let counters = &state.objects.get(&id).unwrap().counters;
+        assert_eq!(
+            counters
+                .get(&CounterType::PowerToughness {
+                    power: 0,
+                    toughness: -1
+                })
+                .copied(),
+            Some(1),
+            "the -0/-1 counter cost was paid onto Wall of Roots"
+        );
+    }
+
+    /// CR 107.14: Aether Hub class — `{T}, Pay {E}: Add {C}`. The `PayEnergy`
+    /// sub-cost delegates to the single-authority cost payer alongside the tap.
+    #[test]
+    fn energy_cost_mana_ability_spends_energy() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 1;
+        let id = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Aether Hub".to_string(),
+            Zone::Battlefield,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        });
+        // `can_activate_mana_ability_now` re-fetches the ability from the object,
+        // so it must be attached at the activation index.
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def.clone());
+
+        assert!(
+            can_activate_mana_ability_now(&state, PlayerId(0), id, 0, &def),
+            "energy-cost mana ability must be activatable with enough energy"
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert_eq!(state.players[0].energy, 0, "the {{E}} cost was spent");
+    }
+
+    /// CR 107.14: With insufficient energy the `PayEnergy` cost is unpayable
+    /// (CR 118.3), so the ability is not offered.
+    #[test]
+    fn energy_cost_mana_ability_unavailable_without_energy() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 0;
+        let id = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Aether Hub".to_string(),
+            Zone::Battlefield,
+        );
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def.clone());
+        assert!(
+            !can_activate_mana_ability_now(&state, PlayerId(0), id, 0, &def),
+            "energy-cost mana ability must NOT be activatable without energy"
+        );
+    }
+
+    /// CR 107.6 + CR 302.6: Pili-Pala — `{Q}: Add {C}`. The untap symbol requires
+    /// a currently-tapped source; once paid the source untaps. A summoning-sick
+    /// creature can't activate it (CR 302.6 names {Q} alongside {T}).
+    #[test]
+    fn untap_cost_mana_ability_requires_tapped_source() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Pili-Pala".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            obj.tapped = true;
+        }
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Untap);
+        // `can_activate_mana_ability_now` re-fetches the ability from the object.
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def.clone());
+
+        // Tapped + un-sick: activatable.
+        assert!(can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            id,
+            0,
+            &def
+        ));
+
+        // Untapped: the {Q} cost can't be paid, so it's not offered.
+        state.objects.get_mut(&id).unwrap().tapped = false;
+        assert!(!can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            id,
+            0,
+            &def
+        ));
+
+        // Summoning sick (while tapped): CR 302.6 blocks {Q}.
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.tapped = true;
+            obj.summoning_sick = true;
+        }
+        assert!(!can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            id,
+            0,
+            &def
+        ));
+
+        // Pay it: untaps and produces {C}.
+        state.objects.get_mut(&id).unwrap().summoning_sick = false;
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert!(!state.objects.get(&id).unwrap().tapped, "{{Q}} untapped it");
+    }
+
+    /// CR 118.3 + CR 602.2b: Grinning Ignus — `Return ~ to its owner's hand:
+    /// Add {C}`. The self-`ReturnToHand` cost delegates to the single-authority
+    /// cost payer; the source ends up in hand.
+    #[test]
+    fn self_return_to_hand_cost_mana_ability() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(34),
+            PlayerId(0),
+            "Grinning Ignus".to_string(),
+            Zone::Battlefield,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        });
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert_eq!(
+            state.objects.get(&id).unwrap().zone,
+            Zone::Hand,
+            "source returned to hand as the cost"
+        );
+    }
+
+    /// CR 701.43: Oasis Ritualist class — `{T}, Exert ~: Add {C}`. The `Exert`
+    /// sub-cost delegates to the single-authority cost payer alongside the tap.
+    #[test]
+    fn exert_cost_mana_ability_taps_and_produces() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(35),
+            PlayerId(0),
+            "Oasis Ritualist".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().summoning_sick = false;
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Exert],
+        });
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert!(state.objects.get(&id).unwrap().tapped);
+    }
+
+    /// CR 605.1a: A loyalty ability that adds mana (Chandra `[+1]: Add {R}{R}`)
+    /// is NOT a mana ability — it uses the stack and obeys loyalty timing. The
+    /// classifier must exclude it; an otherwise-identical `{T}` cost stays a mana
+    /// ability.
+    #[test]
+    fn loyalty_ability_is_not_a_mana_ability() {
+        let mana_effect = || Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![ManaColor::Red, ManaColor::Red],
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+
+        let loyalty_ability = AbilityDefinition::new(AbilityKind::Activated, mana_effect())
+            .cost(AbilityCost::Loyalty { amount: 1 });
+        assert!(
+            !is_mana_ability(&loyalty_ability),
+            "a [+1]: Add {{R}}{{R}} loyalty ability is not a mana ability (CR 605.1a)"
+        );
+
+        let tap_ability =
+            AbilityDefinition::new(AbilityKind::Activated, mana_effect()).cost(AbilityCost::Tap);
+        assert!(
+            is_mana_ability(&tap_ability),
+            "the same effect with a {{T}} cost remains a mana ability"
+        );
     }
 
     /// Build a Treasure-style token — `{T}, Sacrifice this: Add one mana of any
