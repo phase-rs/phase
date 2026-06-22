@@ -85,6 +85,25 @@ pub(super) fn try_parse_subject_predicate_ast(
         ));
     }
 
+    // CR 701.15a: "it's goaded [duration]" / "it is goaded [duration]" — copula +
+    // past-participle state assignment. The contraction "it's" fuses subject +
+    // copula and cannot be split by `find_predicate_start`, so intercept the
+    // pattern early and lower it to `Effect::Goad` with the pronoun-resolved
+    // target. Covers Jon Irenicus, Vislor Turlough, and any future card that
+    // sets the goaded state via copula rather than the imperative "goad it".
+    if let Some(clause) = try_parse_copula_goaded_clause(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability| PredicateAst::Continuous {
+                effect,
+                duration,
+                sub_ability: None,
+            },
+            ctx,
+        ));
+    }
+
     if let Some(clause) = try_parse_subject_additive_type_clause(text, ctx) {
         return Some(clause);
     }
@@ -4100,6 +4119,52 @@ fn extract_pump_modifiers(
     Some((power?, toughness?))
 }
 
+/// CR 701.15a: Parse "it's goaded [duration]" / "it is goaded [duration]" copula
+/// state-setting clauses. The contraction "it's" fuses the subject pronoun with
+/// the copula "is", so `find_predicate_start` cannot split subject from predicate.
+/// This helper catches the pattern early and lowers it to `Effect::Goad` with the
+/// pronoun-resolved target and an optional trailing duration.
+///
+/// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
+/// Vislor Turlough ("it's goaded for as long as they control it"), and the
+/// non-contracted form ("it is goaded").
+fn try_parse_copula_goaded_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Strip subject + copula: "it's goaded ..." / "it is goaded ..."
+    let after_subject = alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("it's "),
+            tag::<_, _, OracleError<'_>>("goaded"),
+        ),
+        preceded(tag::<_, _, OracleError<'_>>("it is "), tag("goaded")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let remainder = after_subject.0.trim_start();
+    // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
+    let duration = if remainder.is_empty() || remainder == "." {
+        // CR 701.15a: Default goad duration is until the goading player's next turn.
+        None
+    } else {
+        let stripped = remainder.trim_end_matches('.');
+        parse_duration(stripped).ok().map(|(_, d)| d)
+    };
+    let target = resolve_it_pronoun(ctx);
+    Some(ParsedEffectClause {
+        effect: Effect::Goad { target },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// Detect "its controller gains life equal to its power" and similar patterns where
 /// the targeted permanent's controller (or owner) gains life based on the permanent's stats.
 ///
@@ -6435,5 +6500,60 @@ mod tests {
         assert!(!mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 701.15a: copula-goaded clause tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copula_goaded_permanent_duration() {
+        // Jon Irenicus: "it's goaded for the rest of the game"
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_copula_goaded_clause("it's goaded for the rest of the game", &mut ctx)
+                .expect("should parse");
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+    }
+
+    #[test]
+    fn copula_goaded_no_duration() {
+        // Bare "it's goaded" with no trailing duration.
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_copula_goaded_clause("it's goaded", &mut ctx).expect("should parse");
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        assert_eq!(clause.duration, None);
+    }
+
+    #[test]
+    fn copula_goaded_non_contracted() {
+        // Non-contracted form: "it is goaded for the rest of the game"
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_copula_goaded_clause("it is goaded for the rest of the game", &mut ctx)
+                .expect("should parse");
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+    }
+
+    #[test]
+    fn copula_goaded_for_as_long_as() {
+        // Vislor Turlough: "it's goaded for as long as they control it"
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_copula_goaded_clause("it's goaded for as long as they control it", &mut ctx);
+        assert!(clause.is_some(), "should parse for-as-long-as duration");
+        let clause = clause.unwrap();
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        // Duration should be a ForAsLongAs variant, not None.
+        assert!(clause.duration.is_some());
+    }
+
+    #[test]
+    fn copula_goaded_rejects_non_goaded() {
+        // "it's attacking" should NOT match this parser.
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause("it's attacking", &mut ctx).is_none());
     }
 }
