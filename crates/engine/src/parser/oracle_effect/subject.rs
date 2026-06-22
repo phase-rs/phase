@@ -4143,14 +4143,23 @@ fn try_parse_copula_goaded_clause(
     ))
     .parse(lower.as_str())
     .ok()?;
-    let remainder = after_subject.0.trim_start();
+    let remainder = after_subject.0.trim_start().trim_end_matches('.').trim();
     // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
-    let duration = if remainder.is_empty() || remainder == "." {
+    let duration = if remainder.is_empty() {
         // CR 701.15a: Default goad duration is until the goading player's next turn.
         None
     } else {
-        let stripped = remainder.trim_end_matches('.');
-        parse_duration(stripped).ok().map(|(_, d)| d)
+        // The trailing text must be a *complete*, clause-final duration with
+        // nothing left over. A clause like "it's goaded for the rest of the
+        // game and draws a card" carries a further conjunct that this helper
+        // does not lower — declining (rather than silently dropping the
+        // remainder) avoids dishonest coverage and lets the compound fall
+        // through to the chained-clause parser.
+        let (rest, d) = parse_duration(remainder).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        Some(d)
     };
     let target = resolve_it_pronoun(ctx);
     Some(ParsedEffectClause {
@@ -6555,5 +6564,27 @@ mod tests {
         // "it's attacking" should NOT match this parser.
         let mut ctx = ParseContext::default();
         assert!(try_parse_copula_goaded_clause("it's attacking", &mut ctx).is_none());
+    }
+
+    #[test]
+    fn copula_goaded_declines_trailing_clause_after_duration() {
+        // A further conjunct after the duration must not be silently dropped.
+        // The duration parser stops at "for the rest of the game", leaving
+        // "and draws a card" — this helper does not lower that conjunct, so it
+        // declines rather than emitting a Goad that loses the trailing effect.
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause(
+            "it's goaded for the rest of the game and draws a card",
+            &mut ctx,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn copula_goaded_declines_trailing_clause_without_duration() {
+        // No duration, but trailing non-duration text — likewise declined so the
+        // remainder is not discarded.
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
     }
 }
