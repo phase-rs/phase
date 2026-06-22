@@ -15,6 +15,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+use std::collections::HashSet;
 
 use super::cost_payability::{eligible_exile_cost_objects, exile_cost_effective_zone};
 use super::effects::mana::resolve_restrictions;
@@ -200,9 +201,46 @@ pub fn resolve_mana_ability(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
 ) -> Result<(), EngineError> {
+    // CR 605.3c: A top-level mana-ability activation has no suspended ancestor
+    // on the call stack, so the in-flight exclusion chain starts empty. The
+    // source itself is added downstream in `pay_mana_sub_cost`.
+    resolve_mana_ability_excluding(
+        state,
+        source_id,
+        player,
+        ability_def,
+        events,
+        color_override,
+        &HashSet::new(),
+    )
+}
+
+/// Resolve a mana ability while excluding an in-flight chain of ancestor
+/// mana-ability sources from the cost-payment auto-tap (CR 605.3c). Called by
+/// the casting auto-tap (`auto_tap_mana_sources_inner`) when paying one mana
+/// ability's mana sub-cost forces activation of further mana abilities: each
+/// ancestor activation is synchronously suspended mid-payment on the Rust call
+/// stack and must not be re-activated, or the auto-tap recurses infinitely
+/// (two cross-paying Signets, an N-source chain, or a self-loop).
+pub(super) fn resolve_mana_ability_excluding(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    color_override: Option<ProductionOverride>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     // Pay the full ability cost (tap, sacrifice, etc.)
     let waiting_before_cost = state.waiting_for.clone();
-    pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
+    pay_mana_ability_cost(
+        state,
+        source_id,
+        player,
+        &ability_def.cost,
+        events,
+        excluded_sources,
+    )?;
     if state.waiting_for != waiting_before_cost {
         return Ok(());
     }
@@ -1368,6 +1406,15 @@ pub(super) fn advance_mana_ability_activation(
                 pending.chosen_mana_payment.as_deref(),
                 pending.chosen_counter_count,
                 pending.chosen_x,
+                // CR 605.3c: The interactive resume path is a fresh activation
+                // root, not a link in a suspended in-flight chain. Synchronous
+                // casting auto-tap recursion never crosses an interactive
+                // `WaitingFor` node: the instant a sub-cost needs a prompt the
+                // activation unwinds the Rust stack and serializes to
+                // `PendingManaAbility`. At resume there is therefore no ancestor
+                // activation on the call stack to exclude, so the chain is
+                // empty here.
+                &HashSet::new(),
             )?;
             if state.waiting_for != waiting_before_cost {
                 return Ok(state.waiting_for.clone());
@@ -1425,6 +1472,9 @@ pub(super) fn advance_mana_ability_activation(
         pending.chosen_counter_count,
         pending.chosen_x,
         pending.cost_paid_object,
+        // CR 605.3c: Same as the interactive cost-payment site above — resume
+        // is a fresh activation root, the suspended-ancestor chain is empty.
+        &HashSet::new(),
     )?;
     if state.waiting_for != waiting_before_cost {
         return Ok(state.waiting_for.clone());
@@ -1448,6 +1498,7 @@ fn pay_mana_ability_cost(
     player: PlayerId,
     cost: &Option<AbilityCost>,
     events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
     pay_mana_ability_cost_with_choices(
         state,
@@ -1462,6 +1513,7 @@ fn pay_mana_ability_cost(
         None,
         None,
         None,
+        excluded_sources,
     )
 }
 
@@ -1481,6 +1533,7 @@ fn resolve_mana_ability_with_selected_choices(
     chosen_counter_count: Option<u32>,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
@@ -1499,6 +1552,7 @@ fn resolve_mana_ability_with_selected_choices(
         chosen_hybrid_payment,
         chosen_counter_count,
         chosen_x,
+        excluded_sources,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -1711,6 +1765,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     chosen_hybrid_payment: Option<&[ManaType]>,
     chosen_counter_count: Option<u32>,
     chosen_x: Option<u32>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -1730,6 +1785,7 @@ where
                 cost,
                 chosen_hybrid_payment,
                 events,
+                excluded_sources,
             )?;
         }
         // CR 605.1a + CR 701.17a: Bare `Mill` mana-ability cost. The Millikin
@@ -2075,6 +2131,7 @@ where
                             cost,
                             chosen_hybrid_payment,
                             events,
+                            excluded_sources,
                         )?;
                     }
                     // CR 605.1a + CR 701.17a: `Mill` sub-cost inside a Composite
@@ -2538,9 +2595,21 @@ fn pay_mana_sub_cost(
     cost: &ManaCost,
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
     if hybrid_plan.is_none() {
-        let excluded_sources = std::collections::HashSet::from([source_id]);
+        // CR 605.3c: Every source already in `excluded_sources` is an ancestor
+        // mana-ability activation that is synchronously suspended on the call
+        // stack mid-payment (its cost is still being paid; it has not yet
+        // resolved). CR 605.3c ("Once a player begins to activate a mana
+        // ability, that ability can't be activated again until it has
+        // resolved") applies to each ancestor link individually, so the entire
+        // in-flight chain must be excluded from auto-tap — not just `source_id`.
+        // Extending the chain here (rather than rebuilding it from
+        // `{source_id}`) is what makes a 2-source cross-payment, an N-source
+        // chain, or a self-loop terminate instead of recursing infinitely.
+        let mut excluded_sources = excluded_sources.clone();
+        excluded_sources.insert(source_id);
         // CR 605.1a: A mana ability never carries a power-up tag (power-up
         // abilities can't produce mana), so the tag-scoped activation context is
         // `None` here — Quinjet's {R}{R} must not pay another mana ability's cost.

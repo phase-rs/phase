@@ -6679,9 +6679,20 @@ fn auto_tap_mana_sources_inner(
                 .and_then(|obj| obj.abilities.get(idx))
                 .cloned();
             if let Some(ability_def) = ability_def {
+                // CR 605.3c: Extend the in-flight exclusion chain with this
+                // source before re-entering auto-tap (pre-tap below) and before
+                // resolving the ability (which re-enters auto-tap through its
+                // mana sub-cost payment). This source's activation is suspended
+                // on the call stack until `resolve_mana_ability_excluding`
+                // returns, so it — and every ancestor already in
+                // `excluded_sources` — must be excluded from any nested
+                // auto-tap, or two cross-paying costed mana abilities recurse
+                // infinitely. Hoisted above the sub-cost guard so the chain is
+                // threaded into resolution even for abilities with no mana
+                // sub-cost.
+                let mut excluded = excluded_sources.clone();
+                excluded.insert(option.object_id);
                 if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
-                    let mut excluded = excluded_sources.clone();
-                    excluded.insert(option.object_id);
                     let (source_types, source_subtypes) =
                         super::casting::activation_source_types(state, option.object_id);
                     let activation_ctx = PaymentContext::Activation {
@@ -6708,13 +6719,19 @@ fn auto_tap_mana_sources_inner(
                 // source is somehow invalid (e.g., removed by a replacement effect), we
                 // skip it silently — the player can still manually tap other sources.
                 let override_value = production_override_for_option(&ability_def, &option);
-                let _ = mana_abilities::resolve_mana_ability(
+                // CR 605.3c: Resolve via the exclusion-aware entry so the
+                // in-flight chain (`excluded`, including this source) threads
+                // into the ability's own mana sub-cost auto-tap. The public
+                // `resolve_mana_ability` would discard the chain and re-tap a
+                // suspended ancestor, recursing infinitely.
+                let _ = mana_abilities::resolve_mana_ability_excluding(
                     state,
                     option.object_id,
                     player,
                     &ability_def,
                     events,
                     override_value,
+                    &excluded,
                 );
             }
         } else {
