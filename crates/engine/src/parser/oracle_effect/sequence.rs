@@ -2686,19 +2686,28 @@ pub(super) fn apply_clause_continuation(
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            match &mut *previous.effect {
-                Effect::Destroy {
-                    cant_regenerate, ..
+            // CR 608.2c: walk backward through the definition chain to find
+            // the nearest Destroy/DestroyAll. The regen clause may not be
+            // adjacent — e.g. Kirtar's Wrath threshold has a Token creation
+            // between the DestroyAll and "Creatures destroyed this way can't
+            // be regenerated."
+            if let Some(def) = defs.iter_mut().rev().find(|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::Destroy { .. } | Effect::DestroyAll { .. }
+                )
+            }) {
+                match &mut *def.effect {
+                    Effect::Destroy {
+                        cant_regenerate, ..
+                    }
+                    | Effect::DestroyAll {
+                        cant_regenerate, ..
+                    } => {
+                        *cant_regenerate = true;
+                    }
+                    _ => unreachable!(),
                 }
-                | Effect::DestroyAll {
-                    cant_regenerate, ..
-                } => {
-                    *cant_regenerate = true;
-                }
-                _ => {}
             }
         }
         ContinuationAst::PutRest {
@@ -5204,6 +5213,20 @@ pub(super) fn parse_followup_continuation_ast(
         // target the source ability via `SelfRef`/`ParentTarget`.
         Effect::Token { .. } => try_parse_token_enters_with_counters(&lower)
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
+        // CR 701.19c + CR 608.2c: "Creatures/A creature destroyed this way
+        // can't be regenerated" after a non-Destroy effect (e.g. Token
+        // creation in Kirtar's Wrath threshold) — the Destroy/DestroyAll is
+        // earlier in the chain; `apply_clause_continuation` walks backward
+        // to find it. The "destroyed this way" noun phrase unambiguously
+        // refers to a preceding destruction instruction.
+        _ if nom_primitives::scan_contains(&lower, "destroyed this way can't be regenerated")
+            || nom_primitives::scan_contains(
+                &lower,
+                "destroyed this way cannot be regenerated",
+            ) =>
+        {
+            Some(ContinuationAst::CantRegenerate)
+        }
         _ => None,
     }
 }
