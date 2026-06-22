@@ -6555,7 +6555,39 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
         .parse(input)
     }
 
+    // CR 310.1 + CR 120.1: "or battle" disjunction — extends player/opponent
+    // damage recipients to include battles (March of the Machine onward).
+    fn parse_opponent_or_battle_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    opponent_player_filter(),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                ],
+            },
+            preceded(
+                tag("an "),
+                alt((tag("opponent or battle"), tag("opponent or a battle"))),
+            ),
+        )
+        .parse(input)
+    }
+
     alt((
+        // CR 310.1: Three-way disjunction — longest match first.
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                ],
+            },
+            alt((
+                tag("a player, planeswalker, or battle"),
+                tag("a player, a planeswalker, or a battle"),
+            )),
+        ),
         value(
             TargetFilter::Or {
                 filters: vec![
@@ -6568,7 +6600,18 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
                 tag("a player or a planeswalker"),
             )),
         ),
+        // CR 310.1: Two-way player-or-battle disjunction.
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                ],
+            },
+            alt((tag("a player or battle"), tag("a player or a battle"))),
+        ),
         value(TargetFilter::Player, tag("a player")),
+        parse_opponent_or_battle_recipient,
         parse_opponent_player_recipient,
         value(TargetFilter::Controller, tag("you")),
     ))
@@ -9702,10 +9745,28 @@ fn try_parse_one_or_more_combat_damage_to_player(
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
-        let Some(subject_text) = rest
+        // CR 310.1: Try battle-inclusive suffixes first (longer match wins).
+        let (subject_text, recipient_filter) = if let Some(t) = rest
+            .strip_suffix(" deal combat damage to a player or battle")
+            .or_else(|| rest.strip_suffix(" deals combat damage to a player or battle"))
+            .or_else(|| rest.strip_suffix(" deal combat damage to a player or a battle"))
+            .or_else(|| rest.strip_suffix(" deals combat damage to a player or a battle"))
+        {
+            (
+                t,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                    ],
+                },
+            )
+        } else if let Some(t) = rest
             .strip_suffix(" deal combat damage to a player")
             .or_else(|| rest.strip_suffix(" deals combat damage to a player"))
-        else {
+        {
+            (t, TargetFilter::Player)
+        } else {
             continue;
         };
 
@@ -9741,7 +9802,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
         def.mode = TriggerMode::DamageDoneOnceByController;
         def.damage_kind = DamageKindFilter::CombatOnly;
         def.valid_source = Some(filter);
-        def.valid_target = Some(TargetFilter::Player);
+        def.valid_target = Some(recipient_filter);
         def.batched = true;
         return Some((TriggerMode::DamageDoneOnceByController, def));
     }
@@ -13359,6 +13420,70 @@ mod tests {
         }
     }
 
+    // --- CR 310.1: "or battle" damage-recipient qualifier ---
+
+    #[test]
+    fn parse_damage_to_qualifier_player_or_battle() {
+        // CR 310.1: "to a player or battle" must produce an Or filter
+        // containing both Player and Battle (Archpriest of Shadows class).
+        match parse_damage_to_qualifier("to a player or battle") {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Player, Battle }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_damage_to_qualifier_opponent_or_battle() {
+        // CR 310.1: "to an opponent or battle" — Bloodfeather Phoenix class.
+        match parse_damage_to_qualifier("to an opponent or battle") {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2);
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    })
+                )));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Opponent, Battle }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_damage_to_qualifier_player_planeswalker_or_battle() {
+        // CR 310.1: Three-way disjunction — Farseeing Flockmate class.
+        match parse_damage_to_qualifier("to a player, planeswalker, or battle") {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 3);
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Planeswalker)
+                )));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Player, Planeswalker, Battle }}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn glory_of_battle_trigger_gates_on_creature_recipient() {
         // CR 120.3: "Whenever ~ deals damage to a creature, put a +1/+1 counter
@@ -14785,6 +14910,110 @@ mod tests {
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
             sub.effect
         );
+    }
+
+    // --- CR 310.1: "or battle" damage-recipient triggers ---
+
+    #[test]
+    fn archpriest_of_shadows_player_or_battle_trigger() {
+        // CR 310.1: "deals combat damage to a player or battle" must include
+        // Battle in the trigger's valid_target (Archpriest of Shadows class).
+        let def = parse_trigger_line(
+            "Whenever Archpriest of Shadows deals combat damage to a player or battle, return target creature card from your graveyard to the battlefield.",
+            "Archpriest of Shadows",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        match &def.valid_target {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Player, Battle }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bloodfeather_phoenix_opponent_or_battle_trigger() {
+        // CR 310.1: "deals damage to an opponent or battle" — opponent disjunction.
+        let def = parse_trigger_line(
+            "Whenever an instant or sorcery spell you control deals damage to an opponent or battle, you may pay {R}. If you do, return Bloodfeather Phoenix from your graveyard to the battlefield.",
+            "Bloodfeather Phoenix",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        match &def.valid_target {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    })
+                )));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Opponent, Battle }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn farseeing_flockmate_player_planeswalker_or_battle_trigger() {
+        // CR 310.1: Three-way "a player, planeswalker, or battle" disjunction.
+        let def = parse_trigger_line(
+            "Whenever Farseeing Flockmate deals combat damage to a player, planeswalker, or battle, surveil 1.",
+            "Farseeing Flockmate",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        match &def.valid_target {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 3);
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Planeswalker)
+                )));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Player, Planeswalker, Battle }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zurgo_and_ojutai_one_or_more_player_or_battle_trigger() {
+        // CR 310.1 + CR 603.10a: "one or more dragons you control deal combat
+        // damage to a player or battle" — batched damage with battle recipient.
+        let def = parse_trigger_line(
+            "Whenever one or more Dragons you control deal combat damage to a player or battle, look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.",
+            "Zurgo and Ojutai",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert!(def.batched);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        match &def.valid_target {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.contains(&TypeFilter::Battle)
+                )));
+            }
+            other => panic!("expected Or {{ Player, Battle }}, got {other:?}"),
+        }
     }
 
     /// CR 406.3 + CR 701.16a + CR 400.7i: Gonti, Canny Acquisitor. "look at the
