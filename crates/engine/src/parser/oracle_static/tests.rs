@@ -5497,6 +5497,36 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
     }
 }
 
+/// CR 613.1f + CR 108.3: "all artifact cards in your graveyard" — ownership-based
+/// graveyard filter (Necrotic Ooze variant class). Uses FilterProp::Owned rather
+/// than TypedFilter::controller because graveyard cards are "yours" by ownership.
+#[test]
+fn parse_grant_all_activated_abilities_artifact_cards_in_your_graveyard() {
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
+    use crate::types::TypeFilter;
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+        ])),
+    };
+    for predicate in [
+        "all activated abilities of all artifact cards in your graveyard",
+        "has all activated abilities of all artifact cards in your graveyard",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
 /// CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" (and the
 /// has/have/are/is copula variants) maps to `AddAllBasicLandTypes`; "gain all
 /// land types" maps to `AddAllLandTypes`. Building-block coverage for the whole

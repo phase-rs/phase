@@ -835,14 +835,17 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             tag("all legendary creatures you control"),
         ),
         // CR 613.1f: "all artifact cards in your graveyard"
+        // CR 108.3: Graveyard cards are "yours" by ownership, not control —
+        // use FilterProp::Owned rather than TypedFilter::controller here.
         value(
-            TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Artifact)
-                    .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::InZone {
-                        zone: Zone::Graveyard,
-                    }]),
-            ),
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
             tag("all artifact cards in your graveyard"),
         ),
     ))
