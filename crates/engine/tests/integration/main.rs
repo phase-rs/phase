@@ -5,7 +5,6 @@ mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
 mod ambuscade_one_sided_fight_anaphoric;
 mod amphin_mutineer_regression;
-mod anaphoric_scope_allowlist_guard;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
