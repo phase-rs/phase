@@ -1263,7 +1263,9 @@
       "optType": "Type",
       "optColor": "Color",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
-      "counterKeep": "Keep {{selected}} of {{cap}}"
+      "counterKeep": "Keep {{selected}} of {{cap}}",
+      "keepInstead": "Keep instead",
+      "discardInstead": "Discard instead"
     },
     "discard": {
       "title": "Discard",
@@ -1279,7 +1281,9 @@
       "subtitleUpTo_other": "Choose up to {{count}} cards to discard",
       "subtitleUnless": "Choose {{count}} cards or 1 matching card to discard",
       "subtitleExact_one": "Choose {{count}} card to discard",
-      "subtitleExact_other": "Choose {{count}} cards to discard"
+      "subtitleExact_other": "Choose {{count}} cards to discard",
+      "subtitleKeep_one": "Choose 1 card to keep — the rest are discarded",
+      "subtitleKeep_other": "Choose {{count}} cards to keep — the rest are discarded"
     },
     "harmonize": {
       "title": "Harmonize",
