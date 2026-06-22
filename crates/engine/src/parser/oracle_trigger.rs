@@ -1132,6 +1132,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         None => def.condition.take(),
     };
 
+    // CR 601.2h + CR 400.7d: On a spell-cast-family trigger, an intervening-if
+    // anaphor "mana spent to cast it"/"...this spell" denotes the *triggering
+    // spell*, not the ability's source permanent. The bare anaphor parses to
+    // `CastManaObjectScope::SelfObject` (correct for ETB / resolving-spell
+    // contexts where the object the spell *is* equals the source), so when the
+    // hoisted condition lands on a spell-cast trigger the `SelfObject` snapshot
+    // would read the source's payment-time mana (normally 0) and wrongly block
+    // the trigger. Remap to `TriggeringSpell` so the threshold evaluates the
+    // cast spell that fired the trigger (The Emperor of Palamecia, #1490). The
+    // comparison-form `extract_if_condition` path already emits `TriggeringSpell`
+    // for "cast it"; this converges the threshold-form path with it.
+    if is_spell_cast_trigger_mode(&def.mode) {
+        if let Some(cond) = def.condition.as_mut() {
+            remap_self_cast_scope_to_triggering_spell(cond);
+        }
+    }
+
     // CR 121.1 + CR 603.4: "draw cards equal to the difference" inside a
     // trigger body (Kozilek the Great Distortion, Damia Sage of Stone, Krang
     // Master Mind, The Ten Rings, Doctor Octopus). The "if you have fewer than
@@ -2651,6 +2668,76 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 ///
 /// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
 /// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
+/// CR 601.2i: Trigger modes whose triggering object is a *spell* (or a spell
+/// copy / spell-or-ability cast). For these, a "mana spent to cast it" anaphor
+/// in an intervening-if refers to that triggering spell rather than the ability
+/// source. See `remap_self_cast_scope_to_triggering_spell`.
+fn is_spell_cast_trigger_mode(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::SpellCast
+            | TriggerMode::SpellCopy
+            | TriggerMode::SpellCastOrCopy
+            | TriggerMode::SpellAbilityCast
+            | TriggerMode::SpellAbilityCopy
+    )
+}
+
+/// CR 400.7d + CR 601.2h: Within a spell-cast trigger's intervening-if, remap
+/// every `QuantityRef::ManaSpentToCast { scope: SelfObject }` to
+/// `TriggeringSpell`. The condition parser cannot see the trigger mode, so the
+/// bare "it"/"this spell" anaphor lands as `SelfObject`; only here, where the
+/// owning trigger's mode is known, can it be resolved to the triggering spell.
+/// Recurses through the compound (`And`/`Or`/`Not`) and arithmetic wrappers so
+/// the remap reaches a `ManaSpentToCast` ref wherever it is nested.
+fn remap_self_cast_scope_to_triggering_spell(cond: &mut TriggerCondition) {
+    match cond {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            remap_self_cast_scope_in_quantity(lhs);
+            remap_self_cast_scope_in_quantity(rhs);
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions
+                .iter_mut()
+                .for_each(remap_self_cast_scope_to_triggering_spell);
+        }
+        TriggerCondition::Not { condition } => remap_self_cast_scope_to_triggering_spell(condition),
+        // All other variants are leaves that cannot carry a `ManaSpentToCast`
+        // quantity ref — nothing to remap.
+        _ => {}
+    }
+}
+
+/// Recursive `QuantityExpr` companion of
+/// `remap_self_cast_scope_to_triggering_spell`. Exhaustive over `QuantityExpr`
+/// so a new arithmetic wrapper forces a compile error here rather than silently
+/// skipping a nested `ManaSpentToCast` ref.
+fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: scope @ CastManaObjectScope::SelfObject,
+                    ..
+                },
+        } => *scope = CastManaObjectScope::TriggeringSpell,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => remap_self_cast_scope_in_quantity(inner),
+        QuantityExpr::UpTo { max } => remap_self_cast_scope_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => remap_self_cast_scope_in_quantity(exponent),
+        QuantityExpr::Difference { left, right } => {
+            remap_self_cast_scope_in_quantity(left);
+            remap_self_cast_scope_in_quantity(right);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(remap_self_cast_scope_in_quantity);
+        }
+    }
+}
+
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
@@ -18642,14 +18729,18 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::ManaSpentToCast {
+                                // CR 400.7d: "it" on a spell-cast trigger denotes
+                                // the triggering spell, NOT the source permanent.
+                                scope: CastManaObjectScope::TriggeringSpell,
                                 metric: crate::types::ability::CastManaSpentMetric::Total,
-                                ..
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {}
-            other => panic!("expected ManaSpentToCast >= 4 trigger condition, got {other:?}"),
+            other => panic!(
+                "expected ManaSpentToCast {{ TriggeringSpell, Total }} >= 4 trigger condition, got {other:?}"
+            ),
         }
         // The effect text should have the condition stripped.
         let execute = def.execute.as_ref().unwrap();
