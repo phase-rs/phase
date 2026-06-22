@@ -6762,10 +6762,19 @@ pub(super) fn parse_imperative_family_ast(
     if nom_primitives::scan_contains(lower, "additional combat phase") {
         let with_main =
             nom_primitives::scan_contains(lower, "followed by an additional main phase");
+        // CR 500.8 (Full Throttle): "After this main phase, there are N additional
+        // combat phases" anchors to whichever main phase the spell resolves in.
+        // `PreCombatMain` is a resolution-time sentinel remapped in
+        // `effects/additional_phase.rs` when the active phase is a main phase.
+        let after = if nom_primitives::scan_contains(lower, "after this main phase") {
+            Phase::PreCombatMain
+        } else {
+            Phase::EndCombat
+        };
         return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
             target: TargetFilter::Controller,
             phase: Phase::BeginCombat,
-            after: Phase::EndCombat,
+            after,
             followed_by: if with_main {
                 vec![Phase::PostCombatMain]
             } else {
@@ -12352,6 +12361,31 @@ mod tests {
             }
             other => panic!("expected Reveal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_additional_phase_after_this_main_phase_anchors_to_main() {
+        let text = "After this main phase, there are two additional combat phases.";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            result.is_some(),
+            "Should parse main-phase-anchored additional combats"
+        );
+        let effect = lower_imperative_family_effect(result.unwrap());
+        assert!(
+            matches!(
+                effect,
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after: Phase::PreCombatMain,
+                    ref followed_by,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
+                } if followed_by.is_empty()
+            ),
+            "Expected AdditionalPhase anchored to main phase with count 2, got {effect:?}"
+        );
     }
 
     #[test]

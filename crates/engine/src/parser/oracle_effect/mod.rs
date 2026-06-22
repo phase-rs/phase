@@ -47884,6 +47884,35 @@ mod tests {
         );
     }
 
+    /// CR 701.20a: The Ring Goes South — "Put those land cards onto the battlefield
+    /// tapped" must patch kept_destination=Battlefield (not the default Hand).
+    #[test]
+    fn reveal_until_ring_goes_south_land_cards_to_battlefield_tapped() {
+        let def = parse_effect_chain(
+            "The Ring tempts you. Then reveal cards from the top of your library until you reveal X land cards, where X is the number of legendary creatures you control. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+        let reveal = def
+            .sub_ability
+            .as_ref()
+            .expect("RingTemptsYou chains RevealUntil as sub_ability");
+        assert!(
+            matches!(
+                &*reveal.effect,
+                Effect::RevealUntil {
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    kept_destination: Zone::Battlefield,
+                    rest_destination: Zone::Library,
+                    enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                    enters_attacking: false,
+                    ..
+                } if type_filters.contains(&TypeFilter::Land)
+            ),
+            "expected Ring Goes South RevealUntil to keep lands on battlefield tapped, got: {:?}",
+            reveal.effect
+        );
+    }
+
     #[test]
     fn reveal_until_creature_rest_to_graveyard() {
         let def = parse_effect_chain(

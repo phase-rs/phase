@@ -4860,11 +4860,19 @@ pub(super) fn parse_followup_continuation_ast(
         // imperative verb). Both bare imperative ("put that card", second-person
         // reveal-until) and third-person ("the player puts that card",
         // Polymorph / Proteus Staff / Transmogrify) forms are accepted.
+        //
+        // Plural filtered kept clauses ("put those land cards onto the battlefield tapped",
+        // The Ring Goes South) use the same RevealUntilKept patch — checked before the
+        // RevealUntilAllToZone arm because "those land cards" is not a "those cards"
+        // substring and must not fall through with the default Hand kept destination.
         Effect::RevealUntil { .. }
             if nom_primitives::scan_contains(&lower, "put that card")
                 || nom_primitives::scan_contains(&lower, "puts that card")
                 || nom_primitives::scan_contains(&lower, "put it")
-                || nom_primitives::scan_contains(&lower, "puts it") =>
+                || nom_primitives::scan_contains(&lower, "puts it")
+                || ((nom_primitives::scan_contains(&lower, "put those")
+                    || nom_primitives::scan_contains(&lower, "puts those"))
+                    && nom_primitives::scan_contains(&lower, "onto the battlefield")) =>
         {
             let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
@@ -6659,6 +6667,44 @@ mod tests {
             reveal: false,
             enter_tapped: false,
         }
+    }
+
+    #[test]
+    fn reveal_until_ring_goes_south_followup_continuation() {
+        use crate::types::ability::{
+            RevealUntilDisposition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        let reveal = Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Land],
+                ..Default::default()
+            }),
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: RevealUntilDisposition::KeepEach,
+            kept_destination: Zone::Hand,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
+            &reveal,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(ContinuationAst::RevealUntilKept {
+                    destination: Zone::Battlefield,
+                    enter_tapped: true,
+                    ..
+                })
+            ),
+            "expected RevealUntilKept to battlefield tapped, got {result:?}"
+        );
     }
 
     #[test]

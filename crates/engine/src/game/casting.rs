@@ -7671,6 +7671,13 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
     continue_with_prepared(state, player, prepared, events)
 }
 
+pub(super) struct ResolutionCastRequest {
+    pub(super) constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    pub(super) cast_transformed: bool,
+    pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
+    pub(super) exile_instead_of_graveyard_on_resolve: bool,
+}
+
 /// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
 /// spell, rather than granting a lingering permission that requires a separate
 /// later `CastSpell`. The single authority that constructs the
@@ -7699,11 +7706,15 @@ pub(super) fn initiate_cast_during_resolution(
     state: &mut GameState,
     player: PlayerId,
     hit_card: ObjectId,
-    constraint: Option<crate::types::ability::CastPermissionConstraint>,
-    cast_transformed: bool,
-    cleanup: crate::types::ability::ResolutionCastCleanup,
+    request: ResolutionCastRequest,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let ResolutionCastRequest {
+        constraint,
+        cast_transformed,
+        cleanup,
+        exile_instead_of_graveyard_on_resolve,
+    } = request;
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
         // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
@@ -7721,9 +7732,12 @@ pub(super) fn initiate_cast_during_resolution(
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
                 duration: None,
-                exile_instead_of_graveyard_on_resolve: false,
+                exile_instead_of_graveyard_on_resolve,
                 enters_with_counter: None,
             });
+        if exile_instead_of_graveyard_on_resolve {
+            crate::game::casting_costs::apply_exile_instead_of_graveyard_rider(state, hit_card);
+        }
     }
     let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
     prepared.payment_mode = CastPaymentMode::Auto;
@@ -26226,9 +26240,11 @@ mod tests {
         let mut events = Vec::new();
         cast_from_zone::resolve(&mut state, &ability, &mut events).unwrap();
 
-        let prepared = prepare_spell_cast(&state, PlayerId(0), instant)
-            .expect("graveyard instant must be castable under the grant");
-        continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events).unwrap();
+        assert_eq!(
+            state.objects[&instant].zone,
+            Zone::Stack,
+            "CR 608.2g: accepting the free cast must put the spell on the stack during resolution"
+        );
 
         stack::resolve_top(&mut state, &mut events);
 

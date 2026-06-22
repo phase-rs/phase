@@ -1069,6 +1069,16 @@ fn has_later_sentence_if(lower: &str) -> bool {
     })
 }
 
+/// True when a resolution-time optional cast names a player-chosen target that
+/// must be announced when the triggered ability is put on the stack (CR 603.3d).
+fn trigger_effect_requires_stack_time_targets(ability: &AbilityDefinition) -> bool {
+    matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })
+        && ability
+            .effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+}
+
 /// Lowering: assemble a `TriggerDefinition` from a `TriggerIr`.
 ///
 /// Applies all post-extraction transforms: condition composition, target-player
@@ -1124,6 +1134,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
     def.execute = execute;
     def.optional = modifiers.optional;
+    // CR 603.3d + CR 608.2c: "you may cast target … from [public zone]"
+    // (Torrential Gearhulk / Toshiro / Emet-Selch class) — the leading "you
+    // may" is resolution-time optionality on the cast (`execute.optional`), not
+    // permission to skip putting the triggered ability on the stack. Target
+    // selection happens when the ability is put on the stack (CR 603.3d).
+    if def.optional
+        && def
+            .execute
+            .as_ref()
+            .is_some_and(|ability| trigger_effect_requires_stack_time_targets(ability))
+    {
+        def.optional = false;
+    }
     def.unless_pay = modifiers.unless_pay.clone();
 
     // CR 603.4: Compose intervening-if with existing condition via And.
@@ -23998,6 +24021,44 @@ mod tests {
     }
 
     #[test]
+    fn phase_trigger_braids_sacrifices_artifact_creature_or_land() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player sacrifices an artifact, a creature, or a land.",
+            "Braids, Cabal Minion",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Sacrifice { target, .. }) => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 3);
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters == [TypeFilter::Artifact]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Creature]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Land]
+                    )));
+                    assert!(filters.iter().all(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::ScopedPlayer)
+                    )));
+                }
+                other => panic!("expected Or sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
         let def = parse_trigger_line(
             "At the beginning of each player's upkeep, that player sacrifices a non-Elf creature of their choice.",
@@ -24167,6 +24228,48 @@ mod tests {
             .as_ref()
             .expect("should have sub_ability");
         assert!(sub.optional, "second sentence ability should be optional");
+    }
+
+    #[test]
+    fn trigger_you_may_cast_target_instant_from_graveyard_is_not_trigger_optional() {
+        let def = parse_trigger_line(
+            "When this creature enters, you may cast target instant card from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+            "Torrential Gearhulk",
+        );
+        assert!(
+            !def.optional,
+            "CR 603.3d: targeted cast triggers must go on the stack when legal targets exist"
+        );
+        let execute = def.execute.as_ref().expect("ETB execute body");
+        assert!(
+            execute.optional,
+            "CR 608.2c: the cast itself is optional at resolution"
+        );
+        assert_eq!(
+            execute.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Stack,
+            "graveyard instant target must be chosen when the trigger goes on the stack"
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::CastFromZone { .. }),
+            "expected CastFromZone root effect, got {:?}",
+            execute.effect
+        );
+        if let Effect::CastFromZone {
+            without_paying_mana_cost,
+            duration,
+            ..
+        } = execute.effect.as_ref()
+        {
+            assert!(
+                *without_paying_mana_cost,
+                "Gearhulk cast must be without paying mana cost"
+            );
+            assert!(
+                duration.is_none(),
+                "immediate graveyard cast must not carry a standing duration: {duration:?}"
+            );
+        }
     }
 
     // ── Work Item 1: Leaves-Graveyard Batch Triggers ──────────────

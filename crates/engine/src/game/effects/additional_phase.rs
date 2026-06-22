@@ -4,6 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExtraPhase, GameState};
+use crate::types::phase::Phase;
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
 /// CR 500.10a: Only adds phases to the affected player's own turn.
@@ -40,6 +41,17 @@ pub fn resolve(
         }
     };
 
+    // CR 500.8 (Full Throttle): "After this main phase, there are N additional
+    // combat phases" anchors to whichever main phase the spell resolves in.
+    // The parser emits `after: PreCombatMain` as a sentinel for this wording.
+    let after = if after == Phase::PreCombatMain
+        && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        state.phase
+    } else {
+        after
+    };
+
     // CR 500.10a: "If an effect that says 'you get' an additional step or phase
     // would add a step or phase to a turn other than that player's, no steps
     // or phases are added."
@@ -69,15 +81,28 @@ pub fn resolve(
     // `advance_phase` LIFO scan consumes the primary phase first. Repeat
     // the bundle `count` times so each scheduled occurrence still fires
     // its own anchor → primary → follow_up sequence.
-    for _ in 0..count {
+    //
+    // When `count > 1` inserts multiple combat phases after a main-phase
+    // anchor, only the first bundle may anchor to that main phase — the
+    // turn never returns there. Chain subsequent combat bundles to
+    // `EndCombat` so each extra combat is reachable (Full Throttle).
+    // Repeating the same phase/step (Obeka upkeep) keeps the original anchor.
+    for i in 0..count {
+        let bundle_anchor = if i == 0 || phase == after {
+            after
+        } else if phase == Phase::BeginCombat {
+            Phase::EndCombat
+        } else {
+            after
+        };
         for &follow_up in followed_by.iter().rev() {
             state.extra_phases.push(ExtraPhase {
-                anchor: after,
+                anchor: bundle_anchor,
                 phase: follow_up,
             });
         }
         state.extra_phases.push(ExtraPhase {
-            anchor: after,
+            anchor: bundle_anchor,
             phase,
         });
     }
@@ -172,6 +197,41 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
         }
+    }
+
+    #[test]
+    fn additional_phase_after_this_main_phase_uses_active_main_as_anchor() {
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability_with_count(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::PreCombatMain,
+            vec![],
+            PlayerId(0),
+            QuantityExpr::Fixed { value: 2 },
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.extra_phases.len(), 2);
+        assert_eq!(
+            state.extra_phases,
+            vec![
+                ExtraPhase {
+                    anchor: Phase::PostCombatMain,
+                    phase: Phase::BeginCombat,
+                },
+                ExtraPhase {
+                    anchor: Phase::EndCombat,
+                    phase: Phase::BeginCombat,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -372,5 +432,79 @@ mod tests {
             vec![expected, expected, expected, expected, expected],
             "5 combat damage should schedule 5 additional upkeep steps"
         );
+    }
+
+    /// CR 500.8 (Full Throttle): count>1 combat bundles after a main-phase
+    /// anchor must chain through EndCombat — the turn never returns to the
+    /// main phase between inserted combats.
+    #[test]
+    fn additional_combat_count_chains_after_end_combat() {
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PreCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability_with_count(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::PreCombatMain,
+            vec![],
+            PlayerId(0),
+            QuantityExpr::Fixed { value: 2 },
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_phases,
+            vec![
+                ExtraPhase {
+                    anchor: Phase::PreCombatMain,
+                    phase: Phase::BeginCombat,
+                },
+                ExtraPhase {
+                    anchor: Phase::EndCombat,
+                    phase: Phase::BeginCombat,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn additional_combat_count_advances_through_both_extra_phases() {
+        use crate::game::turns::advance_phase;
+
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PreCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability_with_count(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::PreCombatMain,
+            vec![],
+            PlayerId(0),
+            QuantityExpr::Fixed { value: 2 },
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat, "first extra combat");
+
+        while state.phase != Phase::EndCombat {
+            advance_phase(&mut state, &mut events);
+        }
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat, "second extra combat");
+
+        while state.phase != Phase::EndCombat {
+            advance_phase(&mut state, &mut events);
+        }
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert!(state.extra_phases.is_empty());
     }
 }

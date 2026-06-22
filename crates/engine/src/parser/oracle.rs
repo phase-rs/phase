@@ -12649,6 +12649,40 @@ mod tests {
     }
 
     #[test]
+    fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
+        let r = parse(
+            "After this main phase, there are two additional combat phases.\nAt the beginning of each combat this turn, untap all creatures that attacked this turn.",
+            "Full Throttle",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.triggers.is_empty(),
+            "Full Throttle must not emit printed triggers: {:?}",
+            r.triggers
+        );
+        assert_eq!(
+            r.abilities.len(),
+            2,
+            "expected two spell abilities, got {:?}",
+            r.abilities
+        );
+        assert!(matches!(
+            r.abilities[0].effect.as_ref(),
+            Effect::AdditionalPhase {
+                after: Phase::PreCombatMain,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            r.abilities[1].effect.as_ref(),
+            Effect::CreateDelayedTrigger { .. }
+        ));
+    }
+
+    #[test]
     fn spell_temporal_phase_line_builds_delayed_trigger() {
         // CR 603.7b: Full Throttle's second line. A *phase-based* inline delayed
         // trigger on a sorcery ("At the beginning of each combat this turn, ...")

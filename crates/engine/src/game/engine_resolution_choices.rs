@@ -544,14 +544,19 @@ pub(super) fn handle_resolution_choice(
                     state,
                     player,
                     hit_card,
-                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
-                        comparator: crate::types::ability::Comparator::LE,
-                        value: QuantityExpr::Fixed {
-                            value: discover_value as i32,
-                        },
-                    }),
-                    false,
-                    cleanup,
+                    casting::ResolutionCastRequest {
+                        constraint: Some(
+                            crate::types::ability::CastPermissionConstraint::ManaValue {
+                                comparator: crate::types::ability::Comparator::LE,
+                                value: QuantityExpr::Fixed {
+                                    value: discover_value as i32,
+                                },
+                            },
+                        ),
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
@@ -774,14 +779,19 @@ pub(super) fn handle_resolution_choice(
                     state,
                     player,
                     hit_card,
-                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
-                        comparator: crate::types::ability::Comparator::LT,
-                        value: QuantityExpr::Fixed {
-                            value: source_mv as i32,
-                        },
-                    }),
-                    false,
-                    cleanup,
+                    casting::ResolutionCastRequest {
+                        constraint: Some(
+                            crate::types::ability::CastPermissionConstraint::ManaValue {
+                                comparator: crate::types::ability::Comparator::LT,
+                                value: QuantityExpr::Fixed {
+                                    value: source_mv as i32,
+                                },
+                            },
+                        ),
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
@@ -822,7 +832,16 @@ pub(super) fn handle_resolution_choice(
                         },
                 };
                 let result = casting::initiate_cast_during_resolution(
-                    state, player, hit_card, None, false, cleanup, events,
+                    state,
+                    player,
+                    hit_card,
+                    casting::ResolutionCastRequest {
+                        constraint: None,
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
+                    events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
@@ -906,7 +925,16 @@ pub(super) fn handle_resolution_choice(
                     },
             };
             let result = casting::initiate_cast_during_resolution(
-                state, player, chosen, None, false, cleanup, events,
+                state,
+                player,
+                chosen,
+                casting::ResolutionCastRequest {
+                    constraint: None,
+                    cast_transformed: false,
+                    cleanup,
+                    exile_instead_of_graveyard_on_resolve: false,
+                },
+                events,
             )?;
             ResolutionChoiceOutcome::WaitingFor(result)
         }

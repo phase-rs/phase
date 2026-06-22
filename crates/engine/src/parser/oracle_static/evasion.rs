@@ -204,15 +204,18 @@ fn doubler_disjunct_connector(input: &str) -> OracleResult<'_, ()> {
 /// restrictive when it carries a concrete type/subtype restriction or any
 /// property (subtype designations, "another", "of the chosen type", etc.).
 fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
-    let TargetFilter::Typed(tf) = filter else {
-        return false;
-    };
-    tf.type_filters.iter().any(|t| {
-        !matches!(
-            t,
-            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
-        )
-    }) || !tf.properties.is_empty()
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.iter().any(|t| {
+                !matches!(
+                    t,
+                    TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
+                )
+            }) || !tf.properties.is_empty()
+        }
+        TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        _ => false,
+    }
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
