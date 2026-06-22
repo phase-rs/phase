@@ -18620,6 +18620,45 @@ mod tests {
         }
     }
 
+    /// CR 601.2h + CR 603.4: "at least N mana was spent to cast it" is an
+    /// intervening-if on a spell-cast trigger. Must hoist as a trigger-level
+    /// QuantityComparison so the trigger only fires when the threshold is met.
+    /// Regression: The Emperor of Palamecia (#1490).
+    #[test]
+    fn trigger_at_least_mana_spent_intervening_if() {
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, put a +1/+1 counter on ~. Then if it has three or more +1/+1 counters on it, transform it.",
+            "The Emperor of Palamecia",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        // The intervening-if must hoist to a trigger-level condition.
+        let cond = def
+            .condition
+            .as_ref()
+            .expect("at-least-four mana threshold must hoist as trigger condition");
+        match cond {
+            TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                metric: crate::types::ability::CastManaSpentMetric::Total,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {}
+            other => panic!("expected ManaSpentToCast >= 4 trigger condition, got {other:?}"),
+        }
+        // The effect text should have the condition stripped.
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::PutCounter { .. } => {}
+            other => panic!("expected PutCounter effect, got {other:?}"),
+        }
+    }
+
     /// CR 601.2a + #538: Ghostly Pilferer. The cast-origin discriminator
     /// "from anywhere other than their hand" must survive parsing as
     /// `NotEquals(Hand)`; without it the trigger fires on every opponent

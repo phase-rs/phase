@@ -4109,18 +4109,32 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
-/// "[N] or more mana from <source-filter> was spent to cast <self>".
+/// "[N] or more mana from <source-filter> was spent to cast <self>" and
+/// "at least [N] mana from <source-filter> was spent to cast <self>".
 ///
 /// CR 400.7d: the subject anaphora selects the scope (see
 /// `parse_source_qualified_mana_spent_condition`).
 fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, n) = parse_number(input)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
@@ -4239,30 +4253,48 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 /// CR 601.2h + CR 603.4: Intervening-if comparing the total amount of mana
 /// spent to cast the triggering spell against a fixed threshold.
 ///
-/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~" and
-/// the inverse "[N] or less mana was spent to cast …". Produces a
+/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~",
+/// "at least [N] mana was spent to cast …", and the inverse
+/// "[N] or less mana was spent to cast …". Produces a
 /// `StaticCondition::QuantityComparison` with LHS
 /// triggering-spell spent-mana ref that bridges to `TriggerCondition::QuantityComparison`
 /// via the existing `static_condition_to_trigger_condition` path.
 ///
 /// Used by Expressive Firedancer's conditional rider ("If five or more mana
-/// was spent to cast that spell, ..."), Opus/Increment family cards with
-/// mana-threshold riders, and any future card that gates on triggering-spell
-/// cost magnitude. Complementary to `parse_mana_spent_vs_source_pt` (which
-/// handles Increment-style `greater than this creature's P/T`).
+/// was spent to cast that spell, ..."), The Emperor of Palamecia's
+/// intervening-if ("if at least four mana was spent to cast it, ..."),
+/// Opus/Increment family cards with mana-threshold riders, and any future
+/// card that gates on triggering-spell cost magnitude. Complementary to
+/// `parse_mana_spent_vs_source_pt` (which handles Increment-style
+/// `greater than this creature's P/T`).
 ///
 /// CR 400.7d: the subject anaphora selects the scope — "that spell" stays
 /// `TriggeringSpell`; "this spell"/"it" on a resolving spell is `SelfObject`.
 fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Number first — combinator verifies word boundary via existing helper.
-    let (rest, n) = parse_number(input)?;
-    // "or more" / "or fewer" / "or less" threshold word — map to comparator.
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    // Two surface forms — both are `>= N` thresholds:
+    //   "N or more mana was spent to cast …"
+    //   "at least N mana was spent to cast …"
+    // Plus the inverse: "N or less/fewer mana was spent to cast …"
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
     let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
@@ -11655,6 +11687,54 @@ mod tests {
             scope_of("five or more mana was spent to cast that spell"),
             CastManaObjectScope::TriggeringSpell,
         );
+
+        // Site D — "at least N" bare total threshold (Emperor of Palamecia).
+        // "it" maps to SelfObject at the condition level; the trigger bridge
+        // handles context-specific scope adjustment.
+        assert_eq!(
+            scope_of("at least four mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least seven mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
+    }
+
+    /// CR 601.2h: "at least N mana was spent to cast it" must parse identically
+    /// to "N or more mana was spent to cast it" — both are `>= N` thresholds.
+    #[test]
+    fn test_at_least_mana_spent_threshold_parses() {
+        let (rest, c) = parse_condition("if at least four mana was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: crate::types::ability::CastManaSpentMetric::Total,
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => {
+                // "it" → SelfObject at condition level; trigger bridge adjusts.
+                assert_eq!(scope, CastManaObjectScope::SelfObject);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(value, 4);
+            }
+            other => panic!("expected ManaSpentToCast QuantityComparison, got {other:?}"),
+        }
     }
 
     #[test]
