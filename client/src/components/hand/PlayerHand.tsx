@@ -183,6 +183,7 @@ export function PlayerHand() {
   // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+      caretOpacity.set(0);
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -195,7 +196,6 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        caretOpacity.set(0);
         // Reorder is disabled while a cast is in progress: handObjects filters
         // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
         // has N entries. The slot index from `computeHandInsertionSlot` would
@@ -304,9 +304,9 @@ export function PlayerHand() {
           hand expands/collapses. The lift lives on an inner wrapper so the outer
           container (which owns onMouseLeave) stays put and its collapse hit-area
           doesn't move under the cursor.
-          // The drag drop-caret below is likewise driven by MotionValues (not state)
-          // so pointer-move updates never re-render these memoized cards — do not
-          // lift the hovered slot into React state. */}
+          The drag drop-caret below is likewise driven by MotionValues (not state)
+          so pointer-move updates never re-render these memoized cards — do not
+          lift the hovered slot into React state. */}
       <motion.div
         className="flex items-end justify-center"
         animate={{ y: expanded ? -50 : 0 }}
