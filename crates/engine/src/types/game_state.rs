@@ -4220,6 +4220,9 @@ pub enum PayableResource {
     },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
+    /// CR 119.4: Pay any amount of life — N is deducted as life loss via
+    /// life_costs::pay_life_as_cost (life-loss replacement pipeline + CantLoseLife).
+    Life,
 }
 
 fn default_one() -> u32 {

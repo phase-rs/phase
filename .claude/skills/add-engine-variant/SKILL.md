@@ -114,6 +114,8 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 
 5. **Concurrency contract.** Engine extensions ship in a separate PR before the converter PR depending on them, OR in one paired commit if the work is done by a single agent. No half-extensions.
 
+6. **Serialized-surface audit.** Before implementation is complete, determine whether the enum appears in game state, `GameAction`, `WaitingFor`, card-data export, AI/community scenario fixtures, saved test fixtures, client adapter types, or any wire-visible protocol. If yes, add the required serde defaults, migration / compatibility path, regenerated fixture, or protocol version bump. Include a test or CI evidence that existing repo-owned serialized data still loads. If protocol-visible, bump the wire contract or prove no serialized shape changed.
+
 ## Anti-patterns this skill prevents
 
 - "Audit said add variant X" → adding sibling without verification (the audit is wrong about a third of the time per session metrics)

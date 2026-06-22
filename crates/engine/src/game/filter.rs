@@ -1395,6 +1395,12 @@ fn filter_inner_for_object(
                         if source_controller == Some(obj_ctrl) {
                             return false;
                         }
+                        // CR 102.3 + CR 800.4a: A player who has left the game is
+                        // not an opponent; cards in their zones are not legal
+                        // targets (Captain N'ghathrod class).
+                        if !super::players::is_alive(state, obj_ctrl) {
+                            return false;
+                        }
                     }
                     ControllerRef::ScopedPlayer => {
                         match scoped_player_or_controller(
@@ -3220,7 +3226,9 @@ fn matches_filter_prop(
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(obj.owner),
             ControllerRef::Opponent => {
-                source.controller.is_some() && source.controller != Some(obj.owner)
+                source.controller.is_some()
+                    && source.controller != Some(obj.owner)
+                    && super::players::is_alive(state, obj.owner)
             }
             ControllerRef::ScopedPlayer => {
                 scoped_player_or_controller(state, source.ability, source.controller, None)
@@ -3834,7 +3842,9 @@ fn zone_change_record_matches_property(
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(record.owner),
             ControllerRef::Opponent => {
-                source.controller.is_some() && source.controller != Some(record.owner)
+                source.controller.is_some()
+                    && source.controller != Some(record.owner)
+                    && super::players::is_alive(state, record.owner)
             }
             ControllerRef::ScopedPlayer => {
                 scoped_player_or_controller(state, source.ability, source.controller, None)

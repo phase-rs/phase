@@ -166,6 +166,29 @@ Hard failures:
 
 This is the single most common defect the `/review-impl` loop catches (shape-only tests on keyword and parser PRs). Catch it here, before review.
 
+### Maintainer-simulation matrix
+
+Before returning, produce a matrix for every behavioral claim or changed seam. This is the artifact the orchestrator and `/review-impl` use to catch the failure modes maintainers have been flagging in PR review.
+
+Each row MUST include:
+
+- behavioral claim / changed seam
+- production entry point and the first production branch the fixture reaches (`is_empty`, `is_none`, enum match arm, variant guard, etc.)
+- selected authority, if any: permission, source, cost, controller, owner, target, choice, tracked-set id, or replacement id
+- bound value or id type, and when it is bound: announcement, resolution, replacement application, event emission, continuation resume, etc.
+- binding mode: live predicate vs. snapshotted / latched value, with CR rationale when rules-bearing
+- storage location: concrete field, struct, ledger, transient effect, pending state, or `WaitingFor`
+- consuming function(s) that later read the bound value
+- invalidation behavior: zone change, controller change, duration end, all-decline / empty selection, missing legal choice, or why not applicable
+- hostile fixture rows that reach this seam / branch, or `UNREACHABLE` with code evidence
+- serde / protocol / card-data fixture impact when any enum, action, state, export, or serialized scenario shape changes
+
+Hard failures:
+
+- Do not return a generic "maintainer-simulation matrix: pass." The row contents are the gate.
+- If rules text says "this way", "that source", "chosen", "cast using", "from among them", or uses a duration-bound "you", global rescanning is suspect. Either prove the rescan is equivalent with a multi-authority fixture, carry the selected authority through the pipeline, or return a stop-and-return item.
+- If a parser accepts a full rules-bearing sentence while any rider, continuation, restriction, granted ability, or replacement is deferred, the row must show how coverage remains red / honest.
+
 ### CR-annotation diff gate
 
 Before returning, grep every CR number you added or changed **in the diff** against `docs/MagicCompRules.txt` — not just the ones you remember writing:
@@ -185,11 +208,12 @@ Return a structured report to the orchestrator:
 2. **Verification results** — which Tilt resources are green; any failures with `tilt logs` excerpts (own vs unrelated).
 3. **Parser diff gate** — pass/fail with offending lines if any.
 4. **Discriminating-test gate** — the full production-path coverage map for every behavioral claim, including changed seam/function, production entry point, test name, revert-failing assertion, and sibling/negative cases. Explicitly list any unmapped seam as a stop-and-return item. Confirm no production-reachable arm is left covered only by a degenerate fixture. State if any test is shape-only and whether that is acceptable because semantics remain unsupported/red.
-5. **CR-annotation diff gate** — the grep result; list any `UNVERIFIED:` rule, or confirm zero.
-6. **Judgement calls** — any place you had to choose between two readings of the plan, with the reasoning.
-7. **Stop-and-return items** — any places you stopped rather than improvise.
-8. **CR annotations added/changed** — each one with the grep command that verified it.
-9. **Deviations from the plan** — what changed vs. the plan and why.
-10. **Risks** — anything the orchestrator's `/review-impl` loop should pay extra attention to.
+5. **Maintainer-simulation matrix** — the full matrix described above. Explicitly list incomplete rows as stop-and-return items.
+6. **CR-annotation diff gate** — the grep result; list any `UNVERIFIED:` rule, or confirm zero.
+7. **Judgement calls** — any place you had to choose between two readings of the plan, with the reasoning.
+8. **Stop-and-return items** — any places you stopped rather than improvise.
+9. **CR annotations added/changed** — each one with the grep command that verified it.
+10. **Deviations from the plan** — what changed vs. the plan and why.
+11. **Risks** — anything the orchestrator's `/review-impl` loop should pay extra attention to.
 
 Do NOT commit. Do NOT push. The orchestrator decides what to stage and when.

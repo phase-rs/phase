@@ -1041,6 +1041,19 @@ pub(super) fn handle_resolution_choice(
                         "Counter amount choices require a pending mana ability".to_string(),
                     ));
                 }
+                PayableResource::Life => {
+                    // CR 119.4: pay N life via the life-loss-as-cost authority
+                    // (replacement pipeline + CantLoseLife) — NOT inline life
+                    // subtraction.
+                    match crate::game::life_costs::pay_life_as_cost(state, player, amount, events) {
+                        crate::game::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        _ => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Player {player:?} cannot pay {amount} life"
+                            )))
+                        }
+                    }
+                }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much

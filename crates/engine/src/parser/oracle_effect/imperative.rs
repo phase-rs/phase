@@ -6442,6 +6442,30 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
+        // CR 119.4 + CR 107.1c: "pay any amount of life" → variable life payment;
+        // the amount paid binds X for the downstream "draw/look at that many"
+        // step. The word-boundary guard (eof or " .,") blocks "lifelink" /
+        // "lifeforce" from false-matching.
+        if terminated(
+            tag::<_, _, OracleError<'_>>("any amount of life"),
+            peek(alt((
+                value((), eof),
+                value((), nom::combinator::recognize(one_of(" .,"))),
+            ))),
+        )
+        .parse(rest)
+        .is_ok()
+        {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            });
+        }
         // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
         // mana payment. Join forces uses the total paid this way as X for the
         // following effect chain.
@@ -12367,6 +12391,34 @@ mod tests {
             ),
             "expected half-life DivideRounded, got {amount:?}"
         );
+    }
+
+    #[test]
+    fn parse_pay_any_amount_of_life_as_variable_life_cost() {
+        // CR 119.4 + CR 107.1c: "pay any amount of life" → PayLife with a
+        // Variable("X") amount; the chosen amount binds X for the downstream
+        // "draw/look at that many" step (Necrodominance, Plunge into Darkness).
+        for text in [
+            "pay any amount of life",
+            "pay any amount of life, then look at that many cards",
+        ] {
+            let lower = text.to_lowercase();
+            let Some(CostResourceImperativeAst::Pay {
+                cost: AbilityCost::PayLife { amount },
+            }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+            else {
+                panic!("expected PayLife variable cost for {text:?}");
+            };
+            assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { ref name },
+                    } if name == "X"
+                ),
+                "expected Variable(X) life amount for {text:?}, got {amount:?}"
+            );
+        }
     }
 
     #[test]
