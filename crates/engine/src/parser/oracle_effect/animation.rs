@@ -1477,6 +1477,7 @@ mod test_den_bugbear {
         .expect("Cactus Preserve animation phrase must parse");
 
         assert!(
+            // allow-raw-authority: test asserts the parser-output AnimationSpec.keywords vec; no GameState/live object exists at parse time
             spec.keywords.contains(&Keyword::Reach),
             "must include Reach keyword, got: {:?}",
             spec.keywords
