@@ -431,6 +431,34 @@ fn cast_from_zone_has_graveyard_exile_rider(ability: &ResolvedAbility) -> bool {
         .is_some_and(is_graveyard_exile_rider_subability)
 }
 
+/// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class — the
+/// parser represents "the creature cast this way enters with a [counter] counter
+/// on it" as a sequential `AddPendingETBCounters` rider on `CastFromZone`. The
+/// rider's target is the *future* spell cast via the granted permission, not the
+/// current trigger event, so it is consumed as permission metadata rather than
+/// resolved in place (a standalone `AddPendingETBCounters` reads a `SpellCast`
+/// event that does not exist when the permission-granting ability resolves).
+pub(crate) fn is_enters_with_counter_rider_subability(ability: &ResolvedAbility) -> bool {
+    matches!(&ability.effect, Effect::AddPendingETBCounters { .. })
+}
+
+/// Extract the counter the cast-this-way creature enters with, if the
+/// `CastFromZone` carries an enters-with-counter rider sub-ability. Returns the
+/// rider's counter type; the count is fixed at one per CR 122.1 (the printed
+/// rider is always "a [counter] counter").
+fn cast_from_zone_enters_with_counter(
+    ability: &ResolvedAbility,
+) -> Option<crate::types::counter::CounterType> {
+    let sub = ability.sub_ability.as_deref()?;
+    if !is_enters_with_counter_rider_subability(sub) {
+        return None;
+    }
+    match &sub.effect {
+        Effect::AddPendingETBCounters { counter_type, .. } => Some(counter_type.clone()),
+        _ => None,
+    }
+}
+
 /// CR 118.9: Stamp `ExileWithAltCost` / `ExileWithAltAbilityCost` on resolved
 /// targets. Shared by the direct resolve path and the `EffectZoneChoice` resume
 /// path (Electrodominance hand pick).
@@ -459,6 +487,11 @@ pub(crate) fn grant_lingering_permissions(
             _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
         };
     let exile_instead_of_graveyard_on_resolve = cast_from_zone_has_graveyard_exile_rider(ability);
+    // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
+    // counter on it" — recorded on the granted permission so the cast
+    // finalization (`casting_costs::finalize`) registers a pending ETB counter
+    // on the cast object (Osteomancer Adept, The Tomb of Aclazotz).
+    let enters_with_counter = cast_from_zone_enters_with_counter(ability);
 
     for &obj_id in target_ids {
         // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
@@ -532,6 +565,7 @@ pub(crate) fn grant_lingering_permissions(
                             .then_some(Duration::UntilEndOfTurn)
                     }),
                     exile_instead_of_graveyard_on_resolve,
+                    enters_with_counter: enters_with_counter.clone(),
                 }
             };
             if !obj.casting_permissions.contains(&permission) {

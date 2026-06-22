@@ -73,8 +73,11 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
         TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
         TypeFilter::Battle => Some(CoreType::Battle),
         // Non-narrow filter shapes — broad emission carries the trigger.
+        // CR 308.1: Kindred is a non-permanent supplemental type, never a
+        // narrowing battlefield-trigger card type.
         TypeFilter::Instant
         | TypeFilter::Sorcery
+        | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -862,6 +865,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
         | EffectKind::Intensify
+        | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize

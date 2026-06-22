@@ -1425,9 +1425,24 @@ pub enum StaticMode {
     SkipStep {
         step: Phase,
     },
-    /// CR 609.4b: "You may spend mana as though it were mana of any color."
-    /// Allows the controller to pay colored mana costs with mana of any color.
-    SpendManaAsAnyColor,
+    /// CR 609.4b: "You may spend mana as though it were mana of any color" /
+    /// "You may spend mana of any type to cast [filtered] spells." Allows the
+    /// controller to pay colored mana costs with mana of any type or color.
+    ///
+    /// `spell_filter` is the leaf parameterization of the spell-class axis (same
+    /// CR 609.4b section, so a field, not a sibling variant):
+    /// - `None` — board-wide (Chromatic Orrery / Joiner Adept): the concession
+    ///   applies to every cost the controller pays (spell casts, effect
+    ///   payments, activations).
+    /// - `Some(filter)` — scoped to spells the controller casts that match the
+    ///   filter (Vizier of the Menagerie: "creature spells"). The concession is
+    ///   re-derived against the spell object at spend time and never applies to
+    ///   non-spell payments. Consulted by
+    ///   `casting::player_can_spend_as_any_color_for_optional_spell`.
+    SpendManaAsAnyColor {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+    },
     /// CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than pay
     /// that mana." Player-scope payment substitution; the indicated color may
     /// be paid as 2 life instead of 1 colored mana, with the same 1-color-or-2-life
@@ -1815,7 +1830,7 @@ impl StaticMode {
             | StaticMode::SpeedCanIncreaseBeyondFour
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::SkipStep { .. }
-            | StaticMode::SpendManaAsAnyColor
+            | StaticMode::SpendManaAsAnyColor { .. }
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CanAttackWithDefender
@@ -2139,7 +2154,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "DefilerCostReduction({color:?})")
             }
             StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
-            StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
+            StaticMode::SpendManaAsAnyColor { .. } => write!(f, "SpendManaAsAnyColor"),
             // CR 107.4f: K'rrik-class life-for-color payment substitution.
             StaticMode::PayLifeAsColoredMana { color } => {
                 write!(f, "PayLifeAsColoredMana({color:?})")
@@ -2803,8 +2818,8 @@ pub fn block_only_creatures_with_flying_filter() -> TargetFilter {
 /// # Why not `FromStr`?
 /// `FromStr` for `StaticMode` does not enumerate every unit variant by its
 /// exact Rust identifier (it's a separate parser for human-facing strings).
-/// Using `FromStr` would map known variants like `"SpendManaAsAnyColor"` to
-/// `Other("SpendManaAsAnyColor")` whenever they aren't explicitly listed,
+/// Using `FromStr` would map known variants like `"Flying"` to
+/// `Other("Flying")` whenever they aren't explicitly listed,
 /// breaking coverage and registry lookups for those cards.
 pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
@@ -2823,7 +2838,10 @@ where
                 });
             }
             // Try the derived deserializer so all known unit variants
-            // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
+            // (e.g. "CantTap", "Flying", …) round-trip correctly. Struct/
+            // parameterized variants (e.g. the now-struct `SpendManaAsAnyColor`)
+            // are serialized as objects; a bare string for them legitimately
+            // falls through to `Other(s)` below.
             // If the derived impl rejects the string (unknown variant from a newer
             // engine build), fall back to Other(s) so the card still loads.
             match serde_json::from_value::<StaticMode>(serde_json::Value::String(s.clone())) {
@@ -3248,6 +3266,60 @@ mod tests {
         let json2 = r#"{"mode":"GrantsExtraVote"}"#;
         let w2: Wrapper = serde_json::from_str(json2).unwrap();
         assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
+    }
+
+    /// CR 609.4b: `SpendManaAsAnyColor` widened from a unit variant to a struct
+    /// variant carrying `spell_filter: Option<TargetFilter>` (Vizier of the
+    /// Menagerie spell-class scoping). This pins three serde behaviors:
+    ///
+    /// (a) the board-wide `None` shape serializes to the externally-tagged
+    ///     struct form `{"SpendManaAsAnyColor":{}}` (the `spell_filter` field is
+    ///     `skip_serializing_if = "Option::is_none"`) and round-trips;
+    /// (b) the spell-filtered `Some(Typed(creature))` shape round-trips;
+    /// (c) a LEGACY bare string `"SpendManaAsAnyColor"` (serialized by a
+    ///     pre-widening binary that wrote a unit variant) can no longer be read
+    ///     as a struct variant — the derived deserializer rejects the string and
+    ///     `deserialize_static_mode_fwd` DOWNGRADES it to
+    ///     `Other("SpendManaAsAnyColor")`. This is asserted explicitly so the
+    ///     downgrade is documented and intentional, not a silent surprise.
+    #[test]
+    fn spend_mana_as_any_color_struct_serde_and_legacy_downgrade() {
+        use super::super::ability::{TargetFilter, TypedFilter};
+
+        // (a) board-wide None: exact serialized form + round-trip.
+        let board_wide = StaticMode::SpendManaAsAnyColor { spell_filter: None };
+        let json = serde_json::to_string(&board_wide).unwrap();
+        assert_eq!(
+            json, r#"{"SpendManaAsAnyColor":{}}"#,
+            "the None shape must serialize as the externally-tagged struct form with the \
+             skipped-if-None spell_filter field omitted"
+        );
+        let back: StaticMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, board_wide);
+
+        // (b) spell-filtered Some(Typed(creature)): round-trip preserves the filter.
+        let filtered = StaticMode::SpendManaAsAnyColor {
+            spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        let json = serde_json::to_string(&filtered).unwrap();
+        let back: StaticMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, filtered, "the spell-filtered shape must round-trip");
+
+        // (c) legacy bare string downgrades to Other through the fwd-compat path.
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+        let legacy = r#"{"mode":"SpendManaAsAnyColor"}"#;
+        let w: Wrapper = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            w.mode,
+            StaticMode::Other("SpendManaAsAnyColor".to_string()),
+            "a legacy bare-string SpendManaAsAnyColor must DOWNGRADE to Other now that the \
+             variant is a struct — the derived deserializer cannot read a struct variant from a \
+             plain string, so deserialize_static_mode_fwd falls back to Other"
+        );
     }
 
     #[test]

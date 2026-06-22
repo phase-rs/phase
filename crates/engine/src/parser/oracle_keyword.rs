@@ -1930,6 +1930,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
         TypeFilter::Sorcery => "sorcery".to_string(),
         TypeFilter::Planeswalker => "planeswalker".to_string(),
         TypeFilter::Battle => "battle".to_string(),
+        TypeFilter::Kindred => "kindred".to_string(),
         TypeFilter::Permanent => "permanent".to_string(),
         TypeFilter::Card => "card".to_string(),
         TypeFilter::Any => "permanent".to_string(),

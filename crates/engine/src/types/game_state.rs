@@ -1100,6 +1100,29 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
+/// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
+/// `Effect::ForEachCategoryExile` iteration paused by the current member's
+/// interactive choice. Mirrors [`PendingPerPlayerZoneChoice`], but the
+/// iteration unit is a fixed-category member (a color or card type) rather than
+/// a player: each `remaining_member_filters` entry is the `TargetFilter`
+/// restricting the shared pool to cards of that member ("a card of that color/
+/// type"). Each pick accumulates into the resolution chain's tracked object set
+/// so a downstream "from among them" / "put the rest …" reads exactly the cards
+/// exiled across all members.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPerCategoryZoneChoice {
+    /// The `Effect::ForEachCategoryExile` ability whose per-member body repeats.
+    pub ability: Box<ResolvedAbility>,
+    /// CR 608.2c: The full revealed/exiled pool snapshot, captured once at the
+    /// start of the iteration. Each member filters THIS pool (minus cards
+    /// already exiled by an earlier member) — it must not read the mutating
+    /// chain tracked set, which the drain rebinds to the exiled cards.
+    pub pool: Vec<ObjectId>,
+    /// Per-member candidate filters not yet prompted, in category member order
+    /// (WUBRG for colors, CR 205.2a order for card types).
+    pub remaining_member_filters: Vec<crate::types::ability::TargetFilter>,
+}
+
 /// CR 701.38d + CR 608.2c: Stores the remaining voters whose per-ballot
 /// interactive body has not yet been resolved. Created when the first
 /// ballot's ChooseFromZone parks WaitingFor::ChooseFromZoneChoice; drained
@@ -6301,6 +6324,15 @@ pub struct GameState {
     /// tracked set before "put those cards onto the battlefield" resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
+    /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
+    /// `Effect::ForEachCategoryExile` iteration paused by the current member's
+    /// interactive choice ("for each color/card type, you may exile a card of
+    /// that color/type"). Drained alongside `pending_per_player_zone_choice`,
+    /// BEFORE `pending_continuation` runs, so every member's pool pick
+    /// accumulates into the chain's tracked set before a downstream
+    /// "from among them" clause resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
 
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
@@ -7215,6 +7247,7 @@ impl GameState {
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
+            pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,

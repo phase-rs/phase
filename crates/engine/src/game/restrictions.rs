@@ -390,6 +390,8 @@ fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &Type
         TypeFilter::AnyOf(filters) => filters
             .iter()
             .any(|inner| entry_type_filter_matches(record, inner)),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
         _ => false,
     }
 }

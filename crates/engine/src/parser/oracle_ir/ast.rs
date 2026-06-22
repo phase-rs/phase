@@ -978,10 +978,11 @@ pub(crate) enum SearchCreationImperativeAst {
         extra_filters: Vec<TargetFilter>,
     },
     /// CR 400.7 + CR 701.23 + CR 701.24: "Search [possessive] graveyard, hand,
-    /// and library for any number of cards with that name and exile them."
+    /// and library for all cards with that name and exile them."
     /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
     /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the player named by the possessive zone phrase.
+    /// scoped to the player named by the possessive zone phrase. "Any number of
+    /// cards" / "a card" variants are excluded — they require SearchChoice.
     MultiZoneSameNameExile {
         owner: ControllerRef,
     },

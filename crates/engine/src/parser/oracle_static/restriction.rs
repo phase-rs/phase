@@ -2095,6 +2095,85 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
         .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 
+/// CR 609.4b: Parse the spell-class-filtered any-type-mana spend static —
+/// "You (may|can) spend mana of any type to cast <spell-filter> spells."
+/// (Vizier of the Menagerie: "creature spells"). Lowers to
+/// `StaticMode::SpendManaAsAnyColor { spell_filter: Some(filter) }`, scoping the
+/// any-type-mana concession to spells the controller casts that match the filter
+/// (CR 609.4b: the concession changes only how a cost is paid, never the cost).
+///
+/// The unfiltered board-wide form ("you may spend mana as though it were mana of
+/// any color", Chromatic Orrery) is handled separately in `dispatch.rs` and
+/// lowers to `spell_filter: None`. This handler requires the explicit "to cast
+/// <X> spells" scope so it never swallows the board-wide phrasing.
+///
+/// The spell-filter is parsed with the same idiom as
+/// [`try_parse_top_of_library_cast_permission`]: strip the leading article and
+/// the trailing " spell"/" spells", then delegate to `parse_type_phrase` so one
+/// branch covers every spell class (creature, artifact, …), not just creatures.
+pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 609.4b: "you may"/"you can" surface, then "spend mana of any type to
+    // cast ". The "mana of any type" wording (vs "any color") is the spell-cast
+    // any-type concession; the runtime treats both as `any_color` in
+    // mana_payment.rs (any mana satisfies a colored requirement).
+    let rest = nom_tag_lower(text, lower, "you may spend mana of any type to cast ")
+        .or_else(|| nom_tag_lower(text, lower, "you can spend mana of any type to cast "))?;
+
+    // Trailing period is optional; strip it so the type phrase is clean.
+    let rest = rest.trim_end().trim_end_matches('.').trim_end();
+
+    // Strip a leading article — `parse_type_phrase` expects the bare noun.
+    let rest_lower = rest.to_ascii_lowercase();
+    let filter_text = nom_tag_lower(rest, &rest_lower, "a ")
+        .or_else(|| nom_tag_lower(rest, &rest_lower, "an "))
+        .unwrap_or(rest);
+
+    // Drop the trailing " spells"/" spell" token so `parse_type_phrase` sees the
+    // bare type/subtype phrase. `strip_suffix` (not `replacen`) anchors to the
+    // end, so an interior "spell" (e.g. a hypothetical "spellshaper spells") is
+    // never clipped. Without the "spell(s)" anchor this is not the targeted
+    // class — bail so the static stays an honest defer rather than over-matching.
+    let cleaned = filter_text
+        .strip_suffix(" spells") // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
+        .or_else(|| filter_text.strip_suffix(" spell"))?; // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
+
+    let (filter, tail) = parse_type_phrase(cleaned);
+    // A non-empty unconsumed tail means an unrecognised spell class — defer.
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    // `parse_type_phrase` never yields `SelfRef`; for input it cannot classify
+    // (e.g. an empty `cleaned` from "to cast  spells") it returns a degenerate
+    // `Typed` carrying no type constraints and no properties, which would match
+    // EVERY spell — exactly the board-wide concession this filtered handler must
+    // not emit (CR 609.4b: the scope is the named spell class only). Bail on that
+    // empty-filter shape so the line stays an honest defer; any non-degenerate
+    // filter (`Or`/`And`, or a `Typed` with constraints) is kept.
+    if matches!(
+        &filter,
+        TargetFilter::Typed(typed) if typed.type_filters.is_empty() && typed.properties.is_empty()
+    ) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+            spell_filter: Some(filter),
+        })
+        // For the filtered (`Some`) path `affected` is documentation-only:
+        // controller-scoping is enforced at runtime by the explicit
+        // `obj.controller != player_id` gate in
+        // `player_can_spend_as_any_color_for_spell_object`, which never reads
+        // `def.affected`. Kept for intent + structural parity with the
+        // board-wide (`None`) form, which DOES consult `affected`.
+        .affected(TargetFilter::Controller)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
 /// the top of your library [rider]" — top-of-library cast permission class
 /// (Realmwalker, Future Sight, Magus of the Future, Bolas's Citadel, Vivien
@@ -2349,4 +2428,82 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
             .affected(filter)
             .description(text.to_string()),
     )
+}
+
+#[cfg(test)]
+mod filtered_spend_any_type_tests {
+    use super::*;
+
+    /// CR 609.4b: the building block must lower a recognised spell class to a
+    /// spell-class-FILTERED `SpendManaAsAnyColor { spell_filter: Some(Typed) }`,
+    /// scoped to the source's controller. Drives the helper directly (the
+    /// building block, not a single card) so the class — not just Vizier — is
+    /// covered.
+    #[test]
+    fn parses_creature_spell_class_to_filtered_static() {
+        let text = "You can spend mana of any type to cast creature spells.";
+        let lower = text.to_ascii_lowercase();
+        let def = try_parse_filtered_spend_any_type_to_cast(text, &lower)
+            .expect("recognised spell class must lower to a filtered static");
+
+        // The concession is "you may" — scoped to the source's controller.
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+
+        match def.mode {
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: Some(TargetFilter::Typed(typed)),
+            } => assert!(
+                typed.type_filters.contains(&TypeFilter::Creature),
+                "spell filter must scope to creature spells; got {typed:?}"
+            ),
+            other => {
+                panic!("expected SpendManaAsAnyColor {{ Some(Typed(creature)) }}, got {other:?}")
+            }
+        }
+    }
+
+    /// The "you may" surface must also parse (building block covers both modal
+    /// surfaces, not just Vizier's "you can").
+    #[test]
+    fn parses_you_may_surface() {
+        let text = "You may spend mana of any type to cast artifact spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_some(),
+            "the \"you may\" surface must parse the same as \"you can\""
+        );
+    }
+
+    /// CR 609.4b: a degenerate input whose spell class is empty (here a double
+    /// space before "spells", so `cleaned` is "") reaches the empty-`Typed`
+    /// path in `parse_type_phrase` — a filter that would match EVERY spell, i.e.
+    /// the board-wide concession. The empty-filter guard must decline it.
+    ///
+    /// Non-vacuity: this is the exact input the guard exists for. Remove the
+    /// empty-filter guard and this assertion flips (the helper returns
+    /// `Some(SpendManaAsAnyColor { Some(Typed{}) })`, an over-match), proving the
+    /// guard is load-bearing. The dead `SelfRef` guard the WIP shipped never
+    /// fired on this input because `parse_type_phrase` does not yield `SelfRef`.
+    #[test]
+    fn declines_degenerate_empty_spell_class() {
+        let text = "You can spend mana of any type to cast  spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
+            "an empty spell class (matches every spell) must NOT lower to a filtered static"
+        );
+    }
+
+    /// An unrecognised spell class leaves a non-empty unconsumed tail — the
+    /// strict tail guard declines so the line stays an honest defer rather than
+    /// over-matching on a partial parse.
+    #[test]
+    fn declines_unrecognised_spell_class() {
+        let text = "You can spend mana of any type to cast wibble spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
+            "an unrecognised spell class must stay an honest defer"
+        );
+    }
 }

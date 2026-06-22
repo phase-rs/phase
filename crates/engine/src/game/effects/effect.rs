@@ -135,6 +135,39 @@ fn register_transient_effect(
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
 
+    // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
+    // control any time" permission (Lumbering Laundry) is a *player-scoped* look
+    // permission, not an object grant. Unlike a pump or keyword grant, the set of
+    // face-down permanents the looker may see is re-evaluated continuously at look
+    // time (a permanent turned face down after this resolves but before end of
+    // turn is still visible to the looker), so the affected face-down filter must
+    // ride on the TCE intact rather than be expanded to a fixed `SpecificObject`
+    // set by the broadcast branch below. Register ONE TCE whose `controller` is
+    // the looker and whose `affected` keeps the face-down/controller filter; the
+    // visibility check (`viewer_may_look_at_face_down`) reads it exactly like the
+    // printed `MayLookAtFaceDown` static, evaluating the filter against each
+    // face-down permanent from the looker's perspective.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::MayLookAtFaceDown,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
@@ -1880,6 +1913,107 @@ mod tests {
                 "CantPlayLand"
             ),
             "non-targeted player must not be under CantPlayLand"
+        );
+    }
+
+    /// CR 708.5 + CR 611.2c: A `GenericEffect` carrying the `MayLookAtFaceDown`
+    /// permission (Lumbering Laundry's "{2}: Until end of turn, you may look at
+    /// face-down creatures you don't control any time.") registers ONE transient
+    /// continuous effect that KEEPS the face-down/controller filter intact and
+    /// binds to the looker via `controller` — it must NOT be expanded into a
+    /// fixed `SpecificObject` set by the broadcast branch (a look permission is a
+    /// rules-modifying continuous effect per CR 611.2c, re-evaluated continuously
+    /// at look time). Discriminating: the `tce.affected == Typed(..)` assertion
+    /// fails (the broadcast branch would bind to `SpecificObject` per resolution-
+    /// time face-down permanents) if the `register_transient_effect`
+    /// MayLookAtFaceDown branch is removed.
+    #[test]
+    fn generic_effect_may_look_at_face_down_keeps_filter_and_binds_looker() {
+        use crate::types::ability::FilterProp;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let looker = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            looker,
+            "Lumbering Laundry".to_string(),
+            Zone::Battlefield,
+        );
+        // Put an OPPONENT face-down creature on the battlefield, so the broadcast
+        // branch (if it ran) would have a concrete object to bind to — the test
+        // asserts it does NOT bind there.
+        let opp_face_down = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hidden".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&opp_face_down).unwrap().face_down = true;
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::FaceDown]),
+        );
+        let static_def = StaticDefinition::new(StaticMode::MayLookAtFaceDown)
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }]);
+
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: None,
+                target: None,
+            },
+            vec![],
+            source,
+            looker,
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the look permission registers exactly one TCE"
+        );
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(
+            tce.controller, looker,
+            "the TCE controller must be the looker"
+        );
+        assert_eq!(
+            tce.affected, affected,
+            "the face-down/controller filter must ride on the TCE intact, not be expanded to SpecificObject"
+        );
+        assert_eq!(tce.duration, Duration::UntilEndOfTurn);
+        assert!(
+            tce.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            )),
+            "the TCE must carry the MayLookAtFaceDown mode"
+        );
+
+        // CR 708.5: the layer system must NOT stamp the permission onto the
+        // opponent's face-down creature (player-scoped permission, not an object
+        // grant). Mirrors the gather skip in `layers::gather_transient_continuous_effects`.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&opp_face_down]
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd.mode == StaticMode::MayLookAtFaceDown),
+            "the look permission must not be applied to the opponent's creature as an object grant"
         );
     }
 

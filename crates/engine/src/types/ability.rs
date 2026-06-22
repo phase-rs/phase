@@ -68,6 +68,84 @@ pub enum ZoneOwner {
     EachPlayer,
 }
 
+/// CR 105.1 + CR 205.2: A fixed, closed enumeration whose members an effect
+/// iterates over once each ("for each color, …", "for each card type, …").
+///
+/// This is the *category* axis of for-each iteration — distinct from per-object
+/// iteration ("for each creature you control", which counts battlefield
+/// objects). The members come from a printed rules enumeration, not from game
+/// state: the five colors (CR 105.1) or the card types that can appear on cards
+/// in a library (CR 205.2a).
+///
+/// During resolution the iterating effect binds each member in turn and the
+/// per-member payload references it ("a card of *that* color/type") by
+/// augmenting its candidate filter with the bound member's
+/// `FilterProp::HasColor` / `TypeFilter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IterationCategory {
+    /// CR 105.1: The five colors, iterated in WUBRG order.
+    Color,
+    /// CR 205.2a: The card types that can appear on a card in a library —
+    /// artifact, battle, creature, enchantment, instant, kindred, land,
+    /// planeswalker, and sorcery — iterated in CR 205.2a order.
+    CardType,
+}
+
+impl IterationCategory {
+    /// CR 105.1 + CR 205.2a: The ordered member filters for this category, one
+    /// per member. Each entry pairs the bound member with a `TargetFilter`
+    /// restricting candidates to objects that *are* that member (a color via
+    /// `FilterProp::HasColor`, a card type via `TypeFilter`). Used by the
+    /// for-each-category iterator to drive one prompt per member.
+    pub fn member_filters(self) -> Vec<TargetFilter> {
+        match self {
+            // CR 105.1: WUBRG order.
+            IterationCategory::Color => ManaColor::ALL
+                .iter()
+                .map(|&color| {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: None,
+                        properties: vec![FilterProp::HasColor { color }],
+                    })
+                })
+                .collect(),
+            // The members are the CR 205.2a card types that can appear in a
+            // library, offered in CR 205.2a order: artifact, battle, creature,
+            // enchantment, instant, kindred, land, planeswalker, and sorcery.
+            // (Author's gloss, not quoted CR text:) the nontraditional
+            // command-zone types — dungeon/plane/phenomenon/scheme/conspiracy/
+            // vanguard — can never be in a library, so they are never offered.
+            //
+            // Per CR 308.1 ("each kindred card has another card type"), a kindred
+            // card is exilable at BOTH the Kindred member and its other-type
+            // member (e.g. a Kindred Sorcery matches both the kindred member and
+            // the sorcery member). Kindred is offered explicitly via the
+            // dedicated `TypeFilter::Kindred` member below.
+            IterationCategory::CardType => [
+                TypeFilter::Artifact,
+                TypeFilter::Battle,
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+                TypeFilter::Instant,
+                TypeFilter::Kindred,
+                TypeFilter::Land,
+                TypeFilter::Planeswalker,
+                TypeFilter::Sorcery,
+            ]
+            .into_iter()
+            .map(|type_filter| {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![type_filter],
+                    controller: None,
+                    properties: vec![],
+                })
+            })
+            .collect(),
+        }
+    }
+}
+
 /// CR 101.4: Who selects permanents in a multi-player category choice effect
 /// (e.g., Cataclysm, Tragic Arrogance). Determines whether each player independently
 /// chooses which of their permanents to keep, or the spell's controller decides for everyone.
@@ -1769,6 +1847,17 @@ pub enum CastingPermission {
         /// graveyard, exile it instead." Applied when the granted cast finalizes.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard_on_resolve: bool,
+        /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class —
+        /// a `CastFromZone` grant whose sub-ability is "the creature cast this way
+        /// enters with a [counter] counter on it." When `Some(ct)`, the granted
+        /// cast finalization registers a pending ETB counter of type `ct` on the
+        /// cast object so it enters the battlefield carrying that counter
+        /// (CR 122.1h: a finality counter is the keyword counter that exiles the
+        /// permanent instead of letting it die). `None` for every other
+        /// `CastFromZone` grant. Typed `Option<CounterType>` rather than a bool so
+        /// the rider covers any counter the cast-this-way creature enters with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_with_counter: Option<CounterType>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -2175,6 +2264,8 @@ pub enum TypeFilter {
     Planeswalker,
     /// CR 310: Battle — a permanent type introduced in March of the Machine.
     Battle,
+    /// CR 308.1: Kindred — each kindred card has another card type; matched via CoreType::Kindred.
+    Kindred,
     Permanent,
     Card,
     Any,
@@ -7327,6 +7418,22 @@ impl FaceDownProfile {
 // carry a `QuantityExpr`; the right remedy is to box `PtValue::Quantity` (used
 // in 70+ sites), not to box individual `Effect` variants. Allow the spread here
 // until that boxing lands.
+/// Digital-only Alchemy: a modification applied by `Effect::ApplyPerpetual` that
+/// permanently edits a card and follows it across all zones (CR has no entry —
+/// matches the engine's existing `Intensify`/`Conjure` digital-only treatment).
+///
+/// Increment 1 covers base power/toughness setting; the enum is extensible to the
+/// other perpetual forms (`ModifyPowerToughness` for "perpetually gets +N/+N",
+/// `GrantAbility` for "perpetually gains ...", `Become` for type changes).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[serde(tag = "kind")]
+pub enum PerpetualModification {
+    /// "[object] perpetually become(s)/has base power and toughness P/T" — sets
+    /// the card's persistent base power and toughness (High Fae Prankster,
+    /// Three Tree Battalion, Blood Age Muster).
+    SetBasePowerToughness { power: i32, toughness: i32 },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -9225,6 +9332,41 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
     },
+    /// CR 608.2c + CR 105.1 / CR 205.2a: For each member of a fixed category
+    /// (the five colors, or the CR 205.2a card types that can appear in a
+    /// library — nine: artifact, battle, creature, enchantment, instant,
+    /// kindred, land, planeswalker, sorcery), optionally choose one
+    /// card of *that* member from a card pool and exile it — "for each color,
+    /// you may exile a card of that color from among the revealed cards"
+    /// (Sanar), "for each card type, you may exile a card of that type from
+    /// among them" (Portent of Calamity).
+    ///
+    /// This is the category-iteration sibling of
+    /// `ChooseFromZone { zone_owner: EachPlayer }`: it parks one
+    /// `ChooseFromZoneChoice` prompt per category member, augmenting the pool
+    /// candidate filter with the bound member's color/type, and accumulates
+    /// every pick into the resolution chain's tracked object set so a
+    /// downstream "you may cast a spell from among them" / "put the rest into
+    /// your graveyard" reads exactly the cards chosen across all members. The
+    /// pool source is the same as `ChooseFromZone`'s tracked-set resolution
+    /// (the most recent revealed/exiled set). Optionality lives in `up_to`
+    /// (each member's pick is "you may", i.e. 0..=1).
+    ForEachCategoryExile {
+        /// CR 105.1 / CR 205.2a: Which fixed category's members are iterated.
+        category: IterationCategory,
+        /// The zone the pool cards live in (where each chosen card is exiled
+        /// from — typically `Library` for revealed-from-top pools).
+        zone: Zone,
+        /// CR 700.2: Who makes each per-member choice. Controller by default.
+        #[serde(default)]
+        chooser: Chooser,
+        /// CR 608.2d: When true (the "you may exile" idiom), each member's pick
+        /// is a resolution-time optional choice — the player announces the choice
+        /// while applying the effect, selecting 0 or 1 card of that member (a
+        /// 0..=1 optional pick per member).
+        #[serde(default = "default_true")]
+        up_to: bool,
+    },
     /// CR 603.7e: An affected-player-chosen battlefield permanent set, written
     /// into the chain's tracked object set so downstream effects ("pay {N} for
     /// each ... chosen this way", "untap those creatures") reference the exact
@@ -9821,6 +9963,19 @@ pub enum Effect {
         #[serde(default)]
         tapped: bool,
     },
+    /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
+    /// modification to the matched cards that persists for the rest of the game
+    /// and follows each card across all zones — a permanent edit to the card,
+    /// unlike until-end-of-turn or while-on-battlefield continuous effects. Like
+    /// `Intensify`, the change is recorded on the object (`perpetual_mods`) so it
+    /// survives zone changes and serialization. `target` selects the affected
+    /// cards (self, a referenced object such as a conjured duplicate, or a
+    /// filter such as "creatures you control").
+    ApplyPerpetual {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        modification: PerpetualModification,
+    },
     /// Digital-only Alchemy keyword action (no CR entry): increase the intensity
     /// of one or more cards by `amount`. `scope` selects which cards — the source
     /// itself, every card the controller owns with the source's name, or every
@@ -9879,6 +10034,12 @@ pub enum Effect {
 
 fn default_one() -> u32 {
     1
+}
+
+/// `serde` default for the `up_to` flag of `Effect::ForEachCategoryExile` — the
+/// "you may exile" idiom makes each per-member pick optional (0..=1).
+fn default_true() -> bool {
+    true
 }
 
 /// CR 701.10a: A bare "double power/toughness" effect multiplies by 2. Used as
@@ -10899,6 +11060,7 @@ impl Effect {
             // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
             | Effect::ReturnAsAura { .. }
             | Effect::ChooseFromZone { .. }
+            | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
             | Effect::HeistExile
@@ -10956,6 +11118,7 @@ impl Effect {
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
             | Effect::Intensify { .. }
+            | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
@@ -11067,7 +11230,8 @@ impl Effect {
             | Effect::RevealHand { count, .. } => count.as_ref(),
 
             // --- Effects with no QuantityExpr count/amount ---
-            Effect::StartYourEngines { .. }
+            Effect::ApplyPerpetual { .. }
+            | Effect::StartYourEngines { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -11162,6 +11326,7 @@ impl Effect {
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
+            | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Cleanup { .. }
@@ -11280,7 +11445,8 @@ impl Effect {
             | Effect::RevealHand { count, .. } => count.as_mut(),
 
             // --- Effects with no QuantityExpr count/amount ---
-            Effect::StartYourEngines { .. }
+            Effect::ApplyPerpetual { .. }
+            | Effect::StartYourEngines { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -11375,6 +11541,7 @@ impl Effect {
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
+            | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Cleanup { .. }
@@ -11575,6 +11742,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
+        Effect::ForEachCategoryExile { .. } => "ForEachCategoryExile",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
         Effect::Exploit { .. } => "Exploit",
@@ -11634,6 +11802,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Conjure { .. } => "Conjure",
         Effect::Intensify { .. } => "Intensify",
+        Effect::ApplyPerpetual { .. } => "ApplyPerpetual",
         Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
         Effect::ChooseOneOf { .. } => "ChooseOneOf",
         Effect::Unimplemented { name, .. } => name,
@@ -11844,6 +12013,7 @@ pub enum EffectKind {
     RemoveFromCombat,
     Conjure,
     Intensify,
+    ApplyPerpetual,
     DraftFromSpellbook,
     ChooseOneOf,
     Unimplemented,
@@ -12009,6 +12179,9 @@ impl From<&Effect> for EffectKind {
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
+            // The per-member iteration parks `ChooseFromZoneChoice` prompts and
+            // emits `ChooseFromZone` resolution events; it shares the kind.
+            Effect::ForEachCategoryExile { .. } => EffectKind::ChooseFromZone,
             Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
             Effect::Exploit { .. } => EffectKind::Exploit,
@@ -12068,6 +12241,7 @@ impl From<&Effect> for EffectKind {
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Conjure { .. } => EffectKind::Conjure,
             Effect::Intensify { .. } => EffectKind::Intensify,
+            Effect::ApplyPerpetual { .. } => EffectKind::ApplyPerpetual,
             Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
             Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,

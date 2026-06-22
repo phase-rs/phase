@@ -704,15 +704,23 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 }
 
 /// CR 708.5: `viewer` may look at face-down permanent `obj_id` they do not
-/// control if they control an active `MayLookAtFaceDown` static (Found Footage,
-/// Lumbering Laundry) whose affected filter matches the permanent. The affected
-/// filter is resolved from the static's source controller (the viewer), so
-/// `controller: Opponent` correctly scopes to the viewer's opponents.
+/// control if they control an active `MayLookAtFaceDown` permission whose
+/// affected filter matches the permanent. The permission has two sources:
+///   1. A printed continuous static (Found Footage) — scanned from the
+///      battlefield. Its affected filter is resolved from the static's source
+///      controller (the viewer), so `controller: Opponent` scopes to the
+///      viewer's opponents.
+///   2. A duration-bound transient continuous effect created by a resolving
+///      activated ability (Lumbering Laundry's "Until end of turn, you may look
+///      at face-down creatures you don't control any time"). The TCE's
+///      `controller` is the viewer and its `affected` carries the same
+///      face-down/controller filter, so it is read identically.
 fn viewer_may_look_at_face_down(
     state: &GameState,
     obj_id: ObjectId,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
+    use crate::types::ability::{ContinuousModification, Duration};
     use crate::types::statics::StaticMode;
     for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
         if !matches!(def.mode, StaticMode::MayLookAtFaceDown) {
@@ -726,6 +734,57 @@ fn viewer_may_look_at_face_down(
         };
         let ctx = super::filter::FilterContext::from_source(state, source.id);
         if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+            return true;
+        }
+    }
+
+    // CR 708.5 + CR 608.2c + CR 611.2c: Duration-bound permission from a resolved
+    // ability. CR 708.5 is the base own-permanent look right; CR 608.2c binds "you"
+    // to the ability's controller at resolution; CR 611.2c makes this rules-modifying
+    // effect's affected set dynamic (re-evaluated each query, not frozen at creation).
+    for tce in &state.transient_continuous_effects {
+        if !can_view_private_for_player(tce.controller) {
+            continue;
+        }
+        let grants_look = tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            )
+        });
+        if !grants_look {
+            continue;
+        }
+        // Honor the same duration/condition gates the static-mode TCE queries in
+        // `static_abilities.rs` apply (a `ForAsLongAs` duration or explicit
+        // `condition` must still hold this look).
+        if let Duration::ForAsLongAs { condition } = &tce.duration {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(condition) = &tce.condition {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        // CR 608.2c: "you" is latched to the player who controlled the ability at
+        // resolution (the stored `tce.controller`), NOT the source's current
+        // battlefield controller. CR 611.2c: because this is a rules-modifying
+        // continuous effect (it grants a look permission, it does not modify
+        // characteristics or change control), its affected set stays dynamic — we
+        // re-evaluate the affected filter (e.g. "you don't control" =
+        // `ControllerRef::Opponent`) against that latched controller on each query.
+        // A later control change of the source must not reinterpret who the looker
+        // may see. `from_source` would derive `source_controller` from the current
+        // object and silently rebind "you" to the new controller.
+        let ctx = super::filter::FilterContext::from_source_with_controller(
+            tce.source_id,
+            tce.controller,
+        );
+        if super::filter::matches_target_filter(state, obj_id, &tce.affected, &ctx) {
             return true;
         }
     }
@@ -2191,6 +2250,244 @@ mod tests {
         // The opponent (controller) still sees their own permanent regardless.
         let owner_view = filter_state_for_viewer(&state, opponent);
         assert!(owner_view.objects[&secret].back_face.is_some());
+    }
+
+    /// CR 708.5 + CR 611.2c + CR 514.2 (Lumbering Laundry class): the DURATION-BOUND
+    /// look permission. Lumbering Laundry's "{2}: Until end of turn, you may look
+    /// at face-down creatures you don't control any time." resolves into a
+    /// `MayLookAtFaceDown` transient continuous effect controlled by the looker.
+    /// While it is active the looker sees the matched opponent's face-down
+    /// identity; once the `UntilEndOfTurn` TCE is pruned at cleanup, the default
+    /// CR 708.5 redaction returns.
+    ///
+    /// Discriminating on two axes:
+    ///   - the `granted_back.name` assertion (permission active) fails — back_face
+    ///     redacts to None — if the transient-continuous-effect scan added to
+    ///     `viewer_may_look_at_face_down` is removed (the printed-static scan
+    ///     alone never sees this permission).
+    ///   - the post-prune `back_face.is_none()` assertion fails if the permission
+    ///     were modeled as permanent rather than bounded to end of turn.
+    #[test]
+    fn lumbering_laundry_reveals_opponent_face_down_until_end_of_turn() {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, FilterProp, StaticDefinition,
+            TargetFilter, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let looker = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // The opponent manifests a creature face down on the battlefield.
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            opponent,
+            "Laundered Spy".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&secret).unwrap();
+            obj.power = Some(6);
+            obj.toughness = Some(3);
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+        }
+        let mut events = Vec::new();
+        manifest(&mut state, opponent, &mut events).unwrap();
+        assert!(state.objects[&secret].face_down);
+
+        // Without any permission, the looker cannot see the hidden identity.
+        let baseline = filter_state_for_viewer(&state, looker);
+        assert!(
+            baseline.objects[&secret].back_face.is_none(),
+            "without the permission, the looker must not see the opponent's face-down identity"
+        );
+
+        // The looker activates Lumbering Laundry: resolution registers an
+        // UntilEndOfTurn MayLookAtFaceDown transient continuous effect over the
+        // "face-down creatures you don't control" filter, controlled by the looker.
+        let source = create_object(
+            &mut state,
+            CardId(0x1A5),
+            looker,
+            "Lumbering Laundry".to_string(),
+            Zone::Battlefield,
+        );
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::FaceDown]),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            looker,
+            Duration::UntilEndOfTurn,
+            affected,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }],
+            None,
+        );
+
+        // With the permission active, the looker sees the opponent's identity.
+        let granted_view = filter_state_for_viewer(&state, looker);
+        let granted_obj = granted_view.objects.get(&secret).unwrap();
+        assert!(
+            granted_obj.face_down,
+            "the permanent is still face down (CR 708.2)"
+        );
+        let granted_back = granted_obj.back_face.as_ref().expect(
+            "with the duration-bound permission, the looker must see the opponent's face-down identity",
+        );
+        assert_eq!(granted_back.name, "Laundered Spy");
+        assert_eq!(granted_back.power, Some(6));
+
+        // The opponent's own face-down creature must NOT have the permission
+        // stamped onto its own static definitions by the layer system (the
+        // permission is player-scoped, not an object grant). The opponent always
+        // sees their own permanent (CR 708.5) regardless.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&secret]
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd.mode == StaticMode::MayLookAtFaceDown),
+            "the look permission must not be applied to the opponent's creature as an object grant"
+        );
+
+        // CR 514.2: prune the UntilEndOfTurn effect at cleanup — the permission
+        // ends and the default redaction returns.
+        crate::game::layers::prune_end_of_turn_effects(&mut state);
+        let expired_view = filter_state_for_viewer(&state, looker);
+        assert!(
+            expired_view.objects[&secret].back_face.is_none(),
+            "after end of turn the duration-bound permission must expire and redact again"
+        );
+
+        // Sanity: a `StaticDefinition` carrying the same mode on the source as a
+        // PRINTED static (Found Footage path) would also expose the identity, so
+        // the duration-bound and permanent forms share one visibility authority.
+        let _ = StaticDefinition::new(StaticMode::MayLookAtFaceDown);
+    }
+
+    /// CR 608.2c: the controller of a resolved ability is the one its instructions
+    /// bind, so "you" is fixed to the player who controlled the ability at
+    /// resolution. CR 611.2c: as a rules-modifying continuous effect its affected
+    /// set stays dynamic, so it keeps re-evaluating against that latched "you". The
+    /// duration-bound look permission ("you may look at face-down creatures you
+    /// don't control") must keep evaluating its `ControllerRef::Opponent` filter
+    /// against the original looker even after Lumbering Laundry changes
+    /// controller, so the original looker keeps seeing the same opponents'
+    /// face-down creatures for the rest of the turn.
+    ///
+    /// Three players are needed to make the bug observable. The looker's OWN
+    /// face-down permanents are always visible to them under the CR 708.5 base
+    /// rule, so the wrong-side *gain* can't be seen on the looker's own creature.
+    /// The discriminator is the *loss* of access to a creature controlled by the
+    /// player the source moves to:
+    ///   - CR 608.2c: Correct (filter "you" = stored `tce.controller` = P0): `Opponent`
+    ///     matches every creature P0 doesn't control — both `p1_secret` and
+    ///     `p2_secret` stay visible.
+    ///   - Buggy (`from_source` rebinds "you" to the source's new controller P1):
+    ///     `Opponent` now excludes P1's own creature, so `p1_secret` redacts
+    ///     (`back_face` → `None`) and the first assertion fails. `p2_secret` is a
+    ///     positive control proving the permission is still active (not merely
+    ///     disabled), so a vacuous "permission turned off" regression can't pass.
+    #[test]
+    fn lumbering_laundry_look_permission_survives_source_control_change() {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, FilterProp, TargetFilter, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let looker = PlayerId(0);
+        let opp_a = PlayerId(1);
+        let opp_b = PlayerId(2);
+
+        // Each opponent manifests a face-down creature.
+        let p1_secret = create_object(
+            &mut state,
+            CardId(7),
+            opp_a,
+            "Laundered Spy".to_string(),
+            Zone::Library,
+        );
+        let p2_secret = create_object(
+            &mut state,
+            CardId(8),
+            opp_b,
+            "Pressed Shirt".to_string(),
+            Zone::Library,
+        );
+        for (id, p, t) in [(p1_secret, 6, 3), (p2_secret, 1, 1)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(p);
+            obj.toughness = Some(t);
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+        }
+        let mut events = Vec::new();
+        manifest(&mut state, opp_a, &mut events).unwrap();
+        manifest(&mut state, opp_b, &mut events).unwrap();
+        assert!(state.objects[&p1_secret].face_down);
+        assert!(state.objects[&p2_secret].face_down);
+
+        // The looker activates Lumbering Laundry: the resolved ability registers an
+        // UntilEndOfTurn MayLookAtFaceDown TCE over "face-down creatures you don't
+        // control", controlled by the looker.
+        let source = create_object(
+            &mut state,
+            CardId(0x1A5),
+            looker,
+            "Lumbering Laundry".to_string(),
+            Zone::Battlefield,
+        );
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::FaceDown]),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            looker,
+            Duration::UntilEndOfTurn,
+            affected,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }],
+            None,
+        );
+
+        // Lumbering Laundry changes controller to P1 after the ability resolves
+        // (e.g. a control-swap effect). The look permission belongs to the original
+        // looker for the rest of the turn (CR 608.2c) — the source's new controller
+        // is irrelevant to who "you" is.
+        state.objects.get_mut(&source).unwrap().controller = opp_a;
+
+        let view = filter_state_for_viewer(&state, looker);
+        // Discriminator: the original looker still sees P1's face-down creature even
+        // though the source is now controlled by P1.
+        let p1_back = view.objects[&p1_secret].back_face.as_ref().expect(
+            "after the source changes controller to P1, the original looker must still see P1's \
+             face-down identity (CR 608.2c fixes \"you\" to the resolution-time controller)",
+        );
+        assert_eq!(p1_back.name, "Laundered Spy");
+        // Positive control: P2's creature was visible before and stays visible,
+        // proving the permission is still active rather than merely disabled.
+        let p2_back = view.objects[&p2_secret]
+            .back_face
+            .as_ref()
+            .expect("the looker continues to see P2's face-down identity");
+        assert_eq!(p2_back.name, "Pressed Shirt");
     }
 
     /// CR 400.2 — Invoke Calamity's `FreeCastWindow` lists the controller's

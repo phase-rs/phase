@@ -1758,6 +1758,75 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
     ))
 }
 
+/// CR 614.1c + CR 122.1: Parse the "the creature cast this way enters with a
+/// [counter] counter on it" rider that follows a graveyard cast-permission grant
+/// (Osteomancer Adept "that creature enters with a finality counter on it"; The
+/// Tomb of Aclazotz "it enters with a finality counter on it"). Produces an
+/// `Effect::AddPendingETBCounters`; the runtime `CastFromZone` resolver consumes
+/// it as permission metadata (see `cast_from_zone::is_enters_with_counter_rider_subability`)
+/// rather than against the current trigger event, so the counter rides the
+/// *future* graveyard cast.
+///
+/// The subject is anaphoric ("that creature" or "it" — the spell just authorized
+/// to be cast), and the count is always one ("a [counter] counter").
+///
+/// CR 205.1b deferral: a trailing "and is a [subtype] in addition to its other
+/// types" clause (The Tomb of Aclazotz's "is a Vampire in addition to its other
+/// types") is an unmodeled continuous type grant. This function does NOT model
+/// it, so the *combined* sentence is rejected here (returns `None`) and falls
+/// through to `Effect::Unimplemented` — Tomb is left honestly unsupported rather
+/// than partially accepted as a bare counter that silently drops the type grant.
+/// Only the bare counter rider (no trailing clause) is accepted. Osteomancer
+/// Adept ("that creature enters with a finality counter on it", no tail) still
+/// parses to the counter effect.
+fn try_parse_cast_this_way_enters_with_counter(lower: &str) -> Option<Effect> {
+    // CR 608.2c: optional "if you cast a spell this way," / "if you do," gate.
+    // The rider only fires for a spell cast via the granted permission; the
+    // runtime gates on the actual cast, so the condition prefix carries no
+    // additional parse-time meaning here and is peeled if present (Osteomancer
+    // Adept uses "if you cast a spell this way," where Tomb uses "if you do,").
+    let lower = lower.trim_start();
+    let lower = alt((
+        tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
+        tag("if you cast it this way, "),
+        tag("if you do, "),
+    ))
+    .parse(lower)
+    .map(|(rest, _)| rest)
+    .unwrap_or(lower);
+    // Anaphoric subject for the spell just granted casting permission.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature enters with "),
+        tag("that permanent enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower)
+    .ok()?;
+    // CR 122.1: the printed rider is always a single counter ("a [counter]").
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
+        .parse(rest)
+        .ok()?;
+    // CR 205.1b deferral: accept the counter rider ONLY when nothing meaningful
+    // follows. A trailing "and is a [subtype] in addition to its other types"
+    // (The Tomb of Aclazotz's Vampire grant) is an unmodeled continuous type
+    // grant; accepting the sentence here would silently drop it. So a non-empty
+    // remainder (after trimming a trailing '.' and whitespace) makes this a
+    // different, not-yet-modeled sentence — return `None` and let it fall
+    // through to `Effect::Unimplemented` instead of partially accepting a bare
+    // counter.
+    if !rest.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    Some(Effect::AddPendingETBCounters {
+        counter_type,
+        count: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(
@@ -2697,6 +2766,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         resolution_cleanup: None,
                         duration: None,
                         exile_instead_of_graveyard_on_resolve: false,
+                        enters_with_counter: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -4234,6 +4304,89 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
     })
 }
 
+/// CR 608.2c + CR 105.1 / CR 205.2a: Parse the for-each-category exile clause —
+/// "for each color, you may exile a card of that color from among the revealed
+/// cards" (Sanar), "for each card type, you may exile a card of that type from
+/// among them" (Portent of Calamity). Composes the category axis (color vs card
+/// type) and the pool reference ("them" / "the revealed cards") rather than
+/// enumerating each full sentence. Emits [`Effect::ForEachCategoryExile`], the
+/// per-member pool-exile iteration building block.
+///
+/// Distinct from `try_parse_distinct_card_types_from_revealed` (a single
+/// distinct-types multi-select put-to-hand): this iterates each member, exiling
+/// one card of that member per iteration.
+fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+    use crate::types::ability::IterationCategory;
+
+    let (rest, _) = tag::<_, _, E>("for each ").parse(tp.lower).ok()?;
+    // CR 105.1 / CR 205.2a: the category axis. "of those colors" is the anaphoric
+    // form (Sanar's "For each of those colors"); the colors it refers to were
+    // bound by the preceding reveal clause, but for the per-member exile the
+    // engine iterates all five colors and skips members with no candidate.
+    let (rest, category) = alt((
+        // "of those colors" (anaphoric plural) before "color"/"card type".
+        value(
+            IterationCategory::Color,
+            (
+                opt(tag::<_, _, E>("of those ")),
+                tag("color"),
+                opt(tag::<_, _, E>("s")),
+            ),
+        ),
+        value(
+            IterationCategory::CardType,
+            (
+                opt(tag::<_, _, E>("of those ")),
+                tag("card type"),
+                opt(tag::<_, _, E>("s")),
+            ),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, E>(", you may exile ").parse(rest).ok()?;
+    let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, E>("card of that ").parse(rest).ok()?;
+    // The "that <member-noun>" must agree with the iterated category.
+    let (rest, _) = match category {
+        IterationCategory::Color => tag::<_, _, E>("color").parse(rest).ok()?,
+        IterationCategory::CardType => tag::<_, _, E>("type").parse(rest).ok()?,
+    };
+    let (rest, _) = tag::<_, _, E>(" from among ").parse(rest).ok()?;
+    // CR 608.2c: the pool reference — "them" (anaphor for the revealed cards) or
+    // an explicit "the/those revealed cards".
+    let (rest, _) = alt((
+        tag::<_, _, E>("them"),
+        tag("the revealed cards"),
+        tag("those revealed cards"),
+    ))
+    .parse(rest)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::ForEachCategoryExile {
+            category,
+            // The pool cards were revealed from the top of the library.
+            zone: Zone::Library,
+            chooser: crate::types::ability::Chooser::Controller,
+            up_to: true,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        // CR 608.2: "you may exile" — the iteration itself is optional per
+        // member; `up_to` carries the per-member optionality.
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // Phase 2: peel structural slots off the head of the clause before
@@ -5033,6 +5186,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
         return parsed_clause(effect);
     }
+    // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
+    // counter on it" — the enters-with-counter rider on a graveyard cast-
+    // permission grant (Osteomancer Adept, The Tomb of Aclazotz). Routed before
+    // the generic effect dispatch so the anaphoric "that creature/it enters
+    // with …" is recognized as a `CastFromZone` permission rider rather than
+    // falling through to `Effect::Unimplemented`.
+    if let Some(effect) = try_parse_cast_this_way_enters_with_counter(&lower) {
+        return parsed_clause(effect);
+    }
     // CR 614.1a + CR 608.2n + CR 607.2b: "exile it instead of putting it into a
     // graveyard as it resolves" — the resolving-spell exile rider applied by a
     // `WhenAPlayerCasts` trigger to the triggering spell (Rod of Absorption).
@@ -5183,6 +5345,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // for-each path; the `DistinctCounterKindsAmong` iteration source has already
     // been lifted onto the parent's `repeat_for` by `strip_for_each_prefix`.
     if let Some(clause) = try_parse_for_each_counter_kind_choice(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_for_each_category_exile(tp) {
         return clause;
     }
 
@@ -5703,6 +5869,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
+    // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
+    if let Some(effect) = try_parse_perpetual_base_pt(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
     if let Some(effect) = try_parse_spellbook_draft(tp) {
         return parsed_clause(effect);
@@ -5833,6 +6005,69 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::Intensify {
         scope: IntensityScope::Source,
         amount,
+    })
+}
+
+/// Digital-only Alchemy: parse the self-subject base-P/T "perpetually" form —
+/// "[~ / it / this creature / …] perpetually become(s)/has base power and
+/// toughness N/N" → [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster).
+///
+/// Increment 1 handles only the self-subject (resolved to the source). The
+/// referenced-object forms ("the duplicate"/"its base power and toughness
+/// perpetually become …", Three Tree Battalion, Blood Age Muster) are left to
+/// `Unimplemented` until the referenced-object target wiring lands. The clause
+/// tail must be fully consumed so riders (e.g. "… and gains flying") fall
+/// through instead of being silently dropped.
+fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
+    let lower = tp.lower;
+    // Only unambiguous self-subjects. The anaphoric "it " is intentionally
+    // excluded: after a prior object choice it refers to that object, not the
+    // source, so accepting it here would let a referenced-object perpetual clause
+    // parse as supported while mutating the wrong object. Referenced-object forms
+    // ("the duplicate"/"its …") are deferred until real referent binding lands.
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("becomes "),
+        tag::<_, _, OracleError<'_>>("become "),
+        tag::<_, _, OracleError<'_>>("has "),
+        tag::<_, _, OracleError<'_>>("have "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
+        .parse(rest)
+        .ok()?;
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+    if !(rest.is_empty() || rest == ".") {
+        return None;
+    }
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+            power: power as i32,
+            toughness: toughness as i32,
+        },
     })
 }
 
@@ -9769,8 +10004,10 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
             || nom_primitives::scan_contains(&lower, "mana of any type can be spent to cast")
         {
             return parsed_clause(Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor)
-                    .description(text.to_string())],
+                static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+                    spell_filter: None,
+                })
+                .description(text.to_string())],
                 duration: None,
                 target: Some(TargetFilter::Controller),
             });
@@ -13236,6 +13473,26 @@ fn extract_player_anchor(effect: &Effect) -> Option<TargetFilter> {
         Effect::ChangeZoneAll { target, .. } => target,
         _ => return None,
     };
+    // CR 608.2c + CR 108.3: Multi-zone name-hate search clauses lower to
+    // `ChangeZoneAll { Typed { controller: ParentTargetOwner|Controller } }`.
+    // The typed wrapper is not itself a player target slot — normalize to the
+    // parent-target owner/controller anaphor so a trailing "that player shuffles"
+    // (Surgical Extraction / Eradicate class) inherits the correct player axis.
+    let candidate = match candidate {
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.controller == Some(ControllerRef::ParentTargetOwner) =>
+        {
+            &TargetFilter::ParentTargetOwner
+        }
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.controller == Some(ControllerRef::ParentTargetController) =>
+        {
+            &TargetFilter::ParentTargetController
+        }
+        other => other,
+    };
     if !target_filter_can_target_player(candidate) {
         return None;
     }
@@ -13286,14 +13543,22 @@ fn player_filter_from_anchor_for_chooser(anchor: &TargetFilter) -> Option<Player
 /// "then shuffle" inherit the earlier subject ("its controller").
 ///
 /// Only overwrites effects whose player target is the caster default
-/// (`Controller`) and only when the anchor is a player-scope filter. Does not
-/// touch effects that already carry an explicit non-caster subject.
+/// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
+/// subject-parser default (`ParentTargetController`). Does not touch effects
+/// that already carry an explicit owner anaphor (`ParentTargetOwner`).
 fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
     if !target_filter_can_target_player(anchor) {
         return;
     }
     match effect {
-        Effect::Shuffle { target } if *target == TargetFilter::Controller => {
+        Effect::Shuffle { target }
+            if matches!(
+                *target,
+                TargetFilter::Controller
+                    | TargetFilter::Player
+                    | TargetFilter::ParentTargetController
+            ) =>
+        {
             *target = anchor.clone();
         }
         Effect::SearchLibrary {
@@ -22294,6 +22559,70 @@ mod tests {
             matches!(*parsed.abilities[0].effect, Effect::Unimplemented { .. }),
             "compound source group must defer to Unimplemented, got {:?}",
             parsed.abilities[0].effect
+        );
+    }
+
+    /// CR 205.2a + CR 608.2c: the card-type form of the for-each-category exile
+    /// building block — "for each card type, you may exile a card of that type
+    /// from among them" (Portent of Calamity) parses to
+    /// `ForEachCategoryExile { category: CardType }`.
+    #[test]
+    fn for_each_card_type_exile_from_among_them() {
+        use crate::types::ability::IterationCategory;
+        let effect =
+            parse_effect("for each card type, you may exile a card of that type from among them");
+        assert!(
+            matches!(
+                effect,
+                Effect::ForEachCategoryExile {
+                    category: IterationCategory::CardType,
+                    up_to: true,
+                    ..
+                }
+            ),
+            "expected ForEachCategoryExile(CardType), got {effect:?}"
+        );
+    }
+
+    /// CR 105.1 + CR 608.2c: the color form — "for each color, you may exile a
+    /// card of that color from among the revealed cards" — and its anaphoric
+    /// plural variant "for each of those colors …" (Sanar) both parse to
+    /// `ForEachCategoryExile { category: Color }`.
+    #[test]
+    fn for_each_color_exile_from_revealed_cards() {
+        use crate::types::ability::IterationCategory;
+        for text in [
+            "for each color, you may exile a card of that color from among the revealed cards",
+            "for each of those colors, you may exile a card of that color from among the revealed cards",
+        ] {
+            let effect = parse_effect(text);
+            assert!(
+                matches!(
+                    effect,
+                    Effect::ForEachCategoryExile {
+                        category: IterationCategory::Color,
+                        up_to: true,
+                        ..
+                    }
+                ),
+                "expected ForEachCategoryExile(Color) for {text:?}, got {effect:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c: the for-each-category EXILE parser must NOT swallow the
+    /// distinct-types PUT-to-hand form — "for each card type, you may put a card
+    /// of that type from among the revealed cards into your hand" is a different
+    /// instruction (put, not exile) and must still route to the distinct-types
+    /// `ChooseFromZone`, not the exile iterator.
+    #[test]
+    fn for_each_category_exile_does_not_shadow_put_to_hand() {
+        let effect = parse_effect(
+            "for each card type, you may put a card of that type from among the revealed cards into your hand",
+        );
+        assert!(
+            matches!(effect, Effect::ChooseFromZone { .. }),
+            "put-to-hand distinct-types form must stay ChooseFromZone, got {effect:?}"
         );
     }
 
@@ -48351,6 +48680,38 @@ mod tests {
     }
 
     #[test]
+    fn perpetual_parser_maps_self_base_pt() {
+        use crate::types::ability::PerpetualModification;
+        // Self-subject base-P/T form (High Fae Prankster); the card's own name
+        // normalizes to `~` in Oracle text.
+        let e = parse_effect("~ perpetually has base power and toughness 4/1.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 4,
+                    toughness: 1,
+                },
+                ..
+            }
+        ));
+
+        // "become(s)" verb variant. (Uses an unambiguous self-subject; the
+        // anaphoric "it" form is intentionally not accepted.)
+        let e = parse_effect("This creature perpetually becomes base power and toughness 2/2.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 2,
+                    toughness: 2,
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn intensify_parser_maps_source_and_owned_scopes() {
         let e = parse_effect("This creature intensifies by 2.");
         assert!(matches!(
@@ -49908,10 +50269,10 @@ mod tests {
         false
     }
 
-    /// CR 201.2 + CR 400.7 + CR 701.23 + CR 701.24: Name-hate spells search GY,
-    /// hand, and library for all cards sharing the exiled/countered/chosen card's
-    /// name and exile them, then shuffle. Issue #3436 — the runtime infra already
-    /// existed (`MultiZoneSameNameExile`); these cards gap'd on parser routing.
+    /// CR 201.2 + CR 400.7 + CR 701.23 + CR 701.24: Mandatory "all cards"
+    /// name-hate spells search GY, hand, and library and exile every match,
+    /// then shuffle. Issue #3436 — the runtime infra already existed
+    /// (`MultiZoneSameNameExile`); these cards gap'd on parser routing.
     #[test]
     fn name_hate_spells_parse_multi_zone_same_name_exile_chain() {
         for (label, text) in [
@@ -49927,14 +50288,6 @@ mod tests {
                 "Counterbore",
                 "Counter target spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
             ),
-            (
-                "Crumble to Dust",
-                "Exile target nonbasic land. Search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them. Then that player shuffles.",
-            ),
-            (
-                "Surgical Extraction",
-                "Choose target card in a graveyard. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
-            ),
         ] {
             let def = parse_effect_chain(text, AbilityKind::Spell);
             assert!(
@@ -49947,6 +50300,72 @@ mod tests {
                 "{label}: expected ChangeZoneAll {{ InAnyZone[GY,Hand,Lib], SameNameAsParentTarget }} in chain: {def:#?}"
             );
         }
+
+        let eradicate = parse_effect_chain(
+            "Exile target nonblack creature. Search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them. Then that player shuffles.",
+            AbilityKind::Spell,
+        );
+        let mut cursor = Some(&eradicate);
+        while let Some(def) = cursor {
+            if let Effect::Shuffle { target } = &*def.effect {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetController,
+                    "Eradicate shuffle must target the parent creature's controller"
+                );
+                return;
+            }
+            cursor = def.sub_ability.as_deref();
+        }
+        panic!("expected Shuffle sub-ability in Eradicate chain");
+    }
+
+    /// CR 107.1c: "Any number of cards" multi-zone name-hate must not auto-exile.
+    #[test]
+    fn name_hate_any_number_spells_do_not_auto_exile() {
+        for (label, text) in [
+            (
+                "Crumble to Dust",
+                "Exile target nonbasic land. Search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them. Then that player shuffles.",
+            ),
+            (
+                "Surgical Extraction",
+                "Choose target card in a graveyard. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !chain_contains_multi_zone_same_name_exile(&def),
+                "{label}: any-number variant must not lower to unconditional ChangeZoneAll: {def:#?}"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 108.3: Owner-axis "all cards" name-hate must propagate
+    /// ParentTargetOwner into the trailing shuffle clause.
+    #[test]
+    fn name_hate_owner_axis_shuffle_inherits_parent_target_owner() {
+        let def = parse_effect_chain(
+            "Choose target card in a graveyard. Search its owner's graveyard, hand, and library for all cards with the same name as that card and exile them. Then that player shuffles.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            chain_contains_multi_zone_same_name_exile(&def),
+            "owner-axis all-cards search must parse: {def:#?}"
+        );
+        let mut cursor = Some(&def);
+        while let Some(sub) = cursor {
+            if let Effect::Shuffle { target } = &*sub.effect {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetOwner,
+                    "owner-axis name-hate shuffle must target the parent card's owner"
+                );
+                return;
+            }
+            cursor = sub.sub_ability.as_deref();
+        }
+        panic!("expected Shuffle sub-ability in owner-axis name-hate chain");
     }
 
     /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
@@ -52707,6 +53126,178 @@ mod tests {
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
+    }
+
+    /// CR 614.1c + CR 122.1 — Osteomancer Adept / The Tomb of Aclazotz: the bare
+    /// "the creature cast this way enters with a finality counter on it" rider
+    /// must parse to `AddPendingETBCounters` (consumed by `CastFromZone` as
+    /// permission metadata), across both anaphoric subjects ("that creature",
+    /// "it") and both optional gate prefixes ("if you cast a spell this way,",
+    /// "if you do,").
+    ///
+    /// CR 205.1b deferral: when a trailing "and is a [subtype] in addition to its
+    /// other types" clause follows (The Tomb of Aclazotz's Vampire grant), the
+    /// *combined* sentence must NOT parse to a bare counter — the unmodeled type
+    /// grant would be silently dropped. It returns `None` so the whole sentence
+    /// falls through to `Effect::Unimplemented` (Tomb stays honestly unsupported).
+    #[test]
+    fn cast_this_way_enters_with_finality_counter_rider_parses() {
+        let finality = || Effect::AddPendingETBCounters {
+            counter_type: CounterType::Generic("finality".to_string()),
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+        for text in [
+            "that creature enters with a finality counter on it",
+            "it enters with a finality counter on it",
+            "if you cast a spell this way, that creature enters with a finality counter on it",
+            "if you do, it enters with a finality counter on it",
+        ] {
+            assert_eq!(
+                try_parse_cast_this_way_enters_with_counter(text),
+                Some(finality()),
+                "bare rider should parse for {text:?}"
+            );
+        }
+        // CR 205.1b deferral: the combined Tomb sentence (counter + type grant)
+        // must NOT be partially accepted as a bare counter — it returns `None`.
+        assert_eq!(
+            try_parse_cast_this_way_enters_with_counter(
+                "it enters with a finality counter on it and is a Vampire in addition to its other types"
+            ),
+            None,
+            "combined counter+type-grant sentence must not parse to a bare counter"
+        );
+    }
+
+    /// The rider generalizes beyond finality (typed `Option<CounterType>`): a
+    /// "+1/+1 counter" cast-this-way rider parses to the same effect with the
+    /// P/T counter — proving the building block is not a finality special case.
+    #[test]
+    fn cast_this_way_enters_with_counter_rider_is_counter_generic() {
+        assert_eq!(
+            try_parse_cast_this_way_enters_with_counter(
+                "that creature enters with a +1/+1 counter on it"
+            ),
+            Some(Effect::AddPendingETBCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+        );
+    }
+
+    /// Whole-card production-path parse: Osteomancer Adept's residual rider
+    /// sentence must surface as an `AddPendingETBCounters { finality }`
+    /// sub-ability on the activated `CastFromZone`, not `Unimplemented`.
+    #[test]
+    fn osteomancer_adept_finality_rider_parses_through_card() {
+        let parsed = parse_oracle_text(
+            "{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs. If you cast a spell this way, that creature enters with a finality counter on it.",
+            "Osteomancer Adept",
+            &[],
+            &["Creature".to_string()],
+            &["Skeleton".to_string(), "Wizard".to_string()],
+        );
+        let cast_abilities: Vec<_> = parsed
+            .abilities
+            .iter()
+            .filter(|a| matches!(&*a.effect, Effect::CastFromZone { .. }))
+            .collect();
+        let cast = cast_abilities
+            .last()
+            .expect("Osteomancer Adept should parse a CastFromZone ability");
+        let rider = cast
+            .sub_ability
+            .as_ref()
+            .expect("the finality rider must be linked as a sub-ability");
+        assert!(
+            matches!(
+                &*rider.effect,
+                Effect::AddPendingETBCounters {
+                    counter_type: CounterType::Generic(s),
+                    ..
+                } if s == "finality"
+            ),
+            "rider should be AddPendingETBCounters(finality), got {:?}",
+            rider.effect
+        );
+    }
+
+    /// CR 205.1b deferral — The Tomb of Aclazotz: the combined residual sentence
+    /// "...it enters with a finality counter on it and is a Vampire in addition to
+    /// its other types" carries an unmodeled continuous type grant. The parser
+    /// must NOT partially accept it as a bare `AddPendingETBCounters`; the whole
+    /// sentence must surface as `Effect::Unimplemented` so the cast-this-way
+    /// permission carries NO `enters_with_counter` rider (Tomb honestly
+    /// unsupported). A negative twin proves the bare-counter clause (no type tail)
+    /// still parses to the rider — discriminating the type-tail rejection from a
+    /// blanket "never parse a counter rider" regression.
+    #[test]
+    fn tomb_aclazotz_counter_plus_type_tail_is_unimplemented() {
+        // Collect every effect reachable from a parsed ability (top-level + the
+        // sub_ability chain) so the assertion does not depend on whether the
+        // residual sentence attaches as a sub-ability or a sibling ability.
+        fn collect_effects<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            // `effect` is `Box<Effect>`; `as_ref()` yields `&Effect`.
+            out.push(ability.effect.as_ref());
+            let mut cursor = ability.sub_ability.as_deref();
+            while let Some(sub) = cursor {
+                out.push(sub.effect.as_ref());
+                cursor = sub.sub_ability.as_deref();
+            }
+        }
+
+        // The Tomb residual clause carried on a graveyard cast-this-way grant of
+        // the exact shape Osteomancer uses, but with the deferred Vampire type tail.
+        let tomb = parse_oracle_text(
+            "{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs. If you cast a spell this way, it enters with a finality counter on it and is a Vampire in addition to its other types.",
+            "The Tomb of Aclazotz",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let mut tomb_effects = Vec::new();
+        for ability in &tomb.abilities {
+            collect_effects(ability, &mut tomb_effects);
+        }
+        assert!(
+            !tomb_effects
+                .iter()
+                .any(|e| matches!(e, Effect::AddPendingETBCounters { .. })),
+            "the combined counter+type-grant sentence must NOT yield a bare \
+             AddPendingETBCounters rider; got {tomb_effects:?}"
+        );
+        assert!(
+            tomb_effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "the unmodeled Tomb sentence must surface as Effect::Unimplemented; \
+             got {tomb_effects:?}"
+        );
+
+        // Negative twin: the SAME card without the type tail still parses the bare
+        // counter rider — proving the rejection is specific to the type-grant tail.
+        let no_tail = parse_oracle_text(
+            "{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs. If you cast a spell this way, it enters with a finality counter on it.",
+            "The Tomb of Aclazotz",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let mut no_tail_effects = Vec::new();
+        for ability in &no_tail.abilities {
+            collect_effects(ability, &mut no_tail_effects);
+        }
+        assert!(
+            no_tail_effects.iter().any(|e| matches!(
+                e,
+                Effect::AddPendingETBCounters {
+                    counter_type: CounterType::Generic(s),
+                    ..
+                } if s == "finality"
+            )),
+            "the bare-counter clause (no type tail) must still parse to the \
+             AddPendingETBCounters(finality) rider; got {no_tail_effects:?}"
+        );
     }
 
     /// CR 122.1 — Bare put-onto-battlefield without the counters suffix must

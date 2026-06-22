@@ -638,9 +638,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
-            // CR 609.4b: "You may spend mana as though it were mana of any color" —
-            // opt-in mana-color substitution, inherently optional by the "you may" surface.
-            | StaticMode::SpendManaAsAnyColor
+            // CR 609.4b: "You may spend mana as though it were mana of any color" /
+            // "you may spend mana of any type to cast [filtered] spells" — opt-in
+            // mana substitution, inherently optional by the "you may" surface.
+            | StaticMode::SpendManaAsAnyColor { .. }
             // CR 602.5a + CR 702.10c: "You may activate abilities of X as though those
             // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
             // activated abilities; the permission is opt-in by the "you may" surface.
@@ -2032,6 +2033,12 @@ fn detect_condition_if(
         // skip_serializing_if = is_none) IS the conditional gate (Teferi's
         // Response, Green Slime, Tishana's Tidebinder).
         "\"source_rider\":",
+        // CR 701.6a: Effect::Counter.countered_spell_zone encodes the
+        // "if that spell is countered this way, put it [on top of / on
+        // the bottom of its owner's library | into its owner's hand]"
+        // destination override. Its presence IS the conditional gate
+        // (Memory Lapse, Lapse of Certainty, Remand, Spell Crumple).
+        "\"countered_spell_zone\":",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
@@ -3041,10 +3048,10 @@ mod tests {
             &["Artifact"],
         );
         assert!(
-            parsed
-                .statics
-                .iter()
-                .any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor)),
+            parsed.statics.iter().any(|s| matches!(
+                s.mode,
+                StaticMode::SpendManaAsAnyColor { spell_filter: None }
+            )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
             parsed.statics
         );
@@ -3818,6 +3825,31 @@ mod tests {
             &["Creature"],
         );
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
+    }
+
+    /// CR 701.6a: "If that spell is countered this way, put it [somewhere]"
+    /// — the redirect destination is encoded as `countered_spell_zone` on the
+    /// Counter effect.  Its presence IS the conditional gate (Memory Lapse,
+    /// Lapse of Certainty, Remand, Spell Crumple).
+    #[test]
+    fn condition_if_accepts_countered_spell_zone_redirect() {
+        let memory_lapse = parse_named(
+            "Counter target spell. If that spell is countered this way, \
+             put it on top of its owner's library instead of into that \
+             player's graveyard.",
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&memory_lapse, "Condition_If"));
+
+        let remand = parse_named(
+            "Counter target spell. If that spell is countered this way, \
+             put it into its owner's hand instead of into that player's \
+             graveyard.\nDraw a card.",
+            "Remand",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&remand, "Condition_If"));
     }
 
     /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes

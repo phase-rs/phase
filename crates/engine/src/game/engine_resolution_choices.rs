@@ -2132,6 +2132,20 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
+            // CR 608.2c + CR 105.1 / CR 205.2a: A per-category-member
+            // `Effect::ForEachCategoryExile` iteration accumulates each pick into
+            // the chain's tracked set and prompts the next member, exactly like
+            // the per-player path (Sanar, Portent of Calamity). The continuation
+            // ("from among them" / "put the rest …") reads that tracked set.
+            if state.pending_per_category_zone_choice.is_some() {
+                effects::choose_from_zone::drain_pending_per_category_zone_choice(
+                    state, &chosen, events,
+                );
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             // CR 608.2c: When the parked continuation consumes the chain's
             // tracked set (a `GrantCastingPermission { target: TrackedSet }` /
             // any `TrackedSet`-referencing downstream effect — e.g. End-Blaze

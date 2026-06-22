@@ -271,6 +271,7 @@ fn synthesize_prepared_copy_object(
             resolution_cleanup: None,
             duration: None,
             exile_instead_of_graveyard_on_resolve: false,
+            enters_with_counter: None,
         });
     state.objects.insert(copy_id, copy_obj);
 
@@ -1011,6 +1012,7 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],

@@ -394,6 +394,13 @@ pub struct GameObject {
     #[serde(default)]
     pub intensity: u32,
 
+    /// Alchemy "perpetually" modifications applied to this card (digital-only, no
+    /// CR entry). Like `intensity`, these persist across zone changes (the object
+    /// keeps its id) and serialization, so a perpetual edit follows the card
+    /// through hand/library/stack/battlefield for the rest of the game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perpetual_mods: Vec<crate::types::ability::PerpetualModification>,
+
     // Characteristics
     pub name: String,
     pub power: Option<i32>,
@@ -991,6 +998,27 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    /// Apply an Alchemy "perpetually" modification to this card: record it on the
+    /// object (so it persists across zones/serialization and can be re-applied
+    /// after a copy rebuilds base characteristics) and edit the corresponding
+    /// persistent characteristic. Increment 1: base power/toughness.
+    pub fn apply_perpetual_modification(
+        &mut self,
+        modification: &crate::types::ability::PerpetualModification,
+    ) {
+        use crate::types::ability::PerpetualModification;
+        match modification {
+            PerpetualModification::SetBasePowerToughness { power, toughness } => {
+                // The base_* fields are the persistent baseline the layer pass
+                // copies into live P/T each recalc, so editing them here makes the
+                // change permanent and zone-independent.
+                self.base_power = Some(*power);
+                self.base_toughness = Some(*toughness);
+            }
+        }
+        self.perpetual_mods.push(modification.clone());
+    }
+
     pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
         additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
     }
@@ -1146,6 +1174,7 @@ impl GameObject {
             pair_controller: None,
             counters: HashMap::new(),
             intensity: 0,
+            perpetual_mods: Vec::new(),
             name: name.clone(),
             power: None,
             toughness: None,

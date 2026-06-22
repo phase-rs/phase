@@ -223,17 +223,30 @@ fn parse_reveal_hand_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefin
     )
 }
 
-/// CR 708.5: "You may look at face-down creatures [you don't control | your
-/// opponents control] any time." (Found Footage). Builds a
-/// `StaticMode::MayLookAtFaceDown` whose `affected` filter is the subject phrase
-/// (carrying `FilterProp::FaceDown` plus the controller scope), parsed via the
-/// shared `parse_target` so both scope wordings route through one handler.
-fn parse_may_look_at_face_down_static(tp: &TextPair<'_>) -> Option<StaticDefinition> {
-    let rest = nom_tag_tp(tp, "you may look at ")?;
+/// CR 708.5: Single authority for the "[you may ]look at face-down [permanents]
+/// [you don't control | your opponents control] any time" permission phrase.
+/// Strips an optional `"you may "` prefix (the static-line surface form carries
+/// it; the activated-ability effect form arrives already peeled of "you may " by
+/// the clause shell) and the required `"look at "` verb, parses the subject via
+/// the shared `parse_target` (so both controller-scope wordings route through one
+/// handler), and returns the affected filter only when it carries
+/// `FilterProp::FaceDown` and the trailing clause is exactly `"any time"`. Shared
+/// by the static-line builder (Found Footage's continuous permission) and the
+/// activated-ability effect intercept (Lumbering Laundry's `Until end of turn`
+/// grant), so the two surface forms never re-encode the grammar independently.
+pub(crate) fn parse_may_look_at_face_down_filter(
+    original: &str,
+    lower: &str,
+) -> Option<TargetFilter> {
+    let tp = TextPair::new(original, lower);
+    // "you may " is optional: the static line keeps it ("You may look at …"),
+    // while the activated-ability clause shell already peeled it.
+    let tp = nom_tag_tp(&tp, "you may ").unwrap_or(tp);
+    let rest = nom_tag_tp(&tp, "look at ")?;
     // `parse_target` consumes the original-cased subject phrase that the
     // lowercase tag matched past.
     let (filter, remainder) = parse_target(rest.original);
-    // The subject must be a face-down creature filter; "any time" is the only
+    // The subject must carry the face-down property; "any time" is the only
     // permitted trailing clause for this permission.
     let has_face_down = matches!(
         &filter,
@@ -246,6 +259,17 @@ fn parse_may_look_at_face_down_static(tp: &TextPair<'_>) -> Option<StaticDefinit
     if !tail.eq_ignore_ascii_case("any time") {
         return None;
     }
+    Some(filter)
+}
+
+/// CR 708.5: "You may look at face-down creatures [you don't control | your
+/// opponents control] any time." (Found Footage). Builds a
+/// `StaticMode::MayLookAtFaceDown` whose `affected` filter is the subject phrase
+/// (carrying `FilterProp::FaceDown` plus the controller scope), parsed via the
+/// shared [`parse_may_look_at_face_down_filter`] so both scope wordings — and
+/// the activated-ability duration-bound form — route through one handler.
+fn parse_may_look_at_face_down_static(tp: &TextPair<'_>) -> Option<StaticDefinition> {
+    let filter = parse_may_look_at_face_down_filter(tp.original, tp.lower)?;
     Some(
         StaticDefinition::new(StaticMode::MayLookAtFaceDown)
             .affected(filter)
@@ -644,10 +668,19 @@ pub(crate) fn parse_static_line_inner(
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
         return Some(
-            StaticDefinition::new(StaticMode::SpendManaAsAnyColor)
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor { spell_filter: None })
                 .affected(TargetFilter::Player)
                 .description(text.to_string()),
         );
+    }
+
+    // CR 609.4b: Spell-class-filtered any-type-mana spend —
+    // "You may/can spend mana of any type to cast <spell-filter> spells."
+    // (Vizier of the Menagerie: "creature spells"). Scoped to the matching
+    // spell class via `spell_filter`, so off-color mana never helps a spell
+    // outside the class.
+    if let Some(def) = try_parse_filtered_spend_any_type_to_cast(&text, tp.lower) {
+        return Some(def);
     }
 
     // CR 107.4f: K'rrik-class life-for-color payment substitution —

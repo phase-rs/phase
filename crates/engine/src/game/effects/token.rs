@@ -1049,6 +1049,7 @@ fn type_filter_core_types(filter: &TypeFilter) -> Option<Vec<CoreType>> {
         TypeFilter::Sorcery => Some(vec![CoreType::Sorcery]),
         TypeFilter::Planeswalker => Some(vec![CoreType::Planeswalker]),
         TypeFilter::Battle => Some(vec![CoreType::Battle]),
+        TypeFilter::Kindred => Some(vec![CoreType::Kindred]),
         TypeFilter::AnyOf(inner) => {
             let mut out = Vec::new();
             for f in inner {

@@ -2807,6 +2807,24 @@ pub(crate) fn gather_transient_continuous_effects(
             if is_combat_assignment_rule_modification(modification) {
                 continue;
             }
+            // CR 708.5: A `MayLookAtFaceDown` look permission (Lumbering Laundry's
+            // duration-bound grant) is a player-scoped visibility permission read
+            // directly off the TCE by `visibility::viewer_may_look_at_face_down`
+            // — never applied to an object's `static_definitions` through the
+            // layer system. Its `affected` filter (face-down creatures you don't
+            // control) matches OPPONENT permanents, so feeding it into the object
+            // layer gather would erroneously stamp the permission onto each
+            // opponent's face-down creature. Skip it here, mirroring the printed
+            // `MayLookAtFaceDown` static (built with empty `modifications`, read
+            // by mode in `battlefield_active_statics`).
+            if matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            ) {
+                continue;
+            }
             effects.push(ActiveContinuousEffect {
                 source_id: tce.source_id,
                 controller: tce.controller,

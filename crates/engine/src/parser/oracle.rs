@@ -6157,6 +6157,93 @@ mod tests {
         }
     }
 
+    /// CR 708.5: Lumbering Laundry's "{2}: Until end of turn, you may look at
+    /// face-down creatures you don't control any time." is the DURATION-BOUND form
+    /// of Found Footage's continuous look permission. The activated ability lowers
+    /// to an `Effect::GenericEffect` carrying the shared `MayLookAtFaceDown`
+    /// static-mode (over the same opponent-scoped face-down filter); no part of the
+    /// card is `Unimplemented`. The duration rides on the resolving ability (the
+    /// stripped "Until end of turn," prefix), and the `GenericEffect` resolution
+    /// path registers it as an `UntilEndOfTurn` transient continuous effect.
+    /// Runtime visibility + duration discrimination lives in
+    /// `game::visibility::tests::
+    /// lumbering_laundry_reveals_opponent_face_down_until_end_of_turn`.
+    #[test]
+    fn lumbering_laundry_look_at_face_down_until_eot_parses() {
+        use crate::types::ability::{ContinuousModification, ControllerRef, Duration, FilterProp};
+        use crate::types::statics::StaticMode;
+
+        let parsed = parse_oracle_text(
+            "Disguise {2}{G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its disguise cost.)\n{2}: Until end of turn, you may look at face-down creatures you don't control any time.",
+            "Lumbering Laundry",
+            &["Disguise".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        // No part of the card may be Unimplemented (the look line previously
+        // lowered to a "look" parse gap).
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|a| !matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "no ability should be Unimplemented: {:?}",
+            parsed.abilities
+        );
+        // (test-only) Iterator::find over the parsed abilities — not a parsing
+        // dispatch; this is a Vec<AbilityDefinition> lookup, not string matching.
+        let look = parsed
+            .abilities
+            .iter()
+            .find_map(|a| match &*a.effect {
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    ..
+                } => Some((static_abilities, duration)),
+                _ => None,
+            })
+            .expect("the activated ability must lower to a GenericEffect");
+        let (static_abilities, duration) = look;
+        // Duration is supplied by the resolving ability ("Until end of turn,");
+        // the GenericEffect itself carries None and resolution defaults it to
+        // UntilEndOfTurn (asserted at runtime below).
+        assert!(
+            duration.is_none() || *duration == Some(Duration::UntilEndOfTurn),
+            "duration must be unset or UntilEndOfTurn, got {duration:?}"
+        );
+        let static_def = static_abilities
+            .first()
+            .expect("GenericEffect must carry the look static");
+        assert_eq!(static_def.mode, StaticMode::MayLookAtFaceDown);
+        assert!(
+            static_def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            )),
+            "the static must carry the MayLookAtFaceDown mode modification, got {:?}",
+            static_def.modifications
+        );
+        match static_def.affected.as_ref() {
+            Some(TargetFilter::Typed(t)) => {
+                assert!(
+                    t.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::FaceDown)),
+                    "affected filter must carry FaceDown, got {t:?}"
+                );
+                assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::Opponent),
+                    "'you don't control' must scope to Opponent"
+                );
+            }
+            other => panic!("expected Typed affected filter, got {other:?}"),
+        }
+    }
+
     /// CR 116.2b + CR 708.7: Karlov Watchdog's "Permanents your opponents
     /// control can't be turned face up during your turn" lowers to a
     /// `CantBeTurnedFaceUp` static with the opponent-scoped affected filter and
