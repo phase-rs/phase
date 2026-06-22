@@ -38,6 +38,40 @@ function setup(value: Set<ObjectId>, cap: number, onChange = vi.fn()) {
 
 afterEach(cleanup);
 
+describe("SelectableCardGrid toolbar + keyboard", () => {
+  it("select-all fills to cap in display order", () => {
+    const onChange = setup(new Set(), 2);
+    fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+    expect(onChange).toHaveBeenCalledWith(new Set([1, 2]));
+  });
+
+  it("invert takes the capped complement", () => {
+    const onChange = setup(new Set([1]), 2);
+    fireEvent.click(screen.getByRole("button", { name: "Invert" }));
+    expect(onChange).toHaveBeenCalledWith(new Set([2, 3]));
+  });
+
+  it("clear empties the selection", () => {
+    const onChange = setup(new Set([1, 2]), 2);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(onChange).toHaveBeenCalledWith(new Set());
+  });
+
+  it("shift-click selects an inclusive range up to cap", () => {
+    const onChange = setup(new Set(), 3);
+    fireEvent.click(screen.getByRole("button", { name: /Alpha/i }));          // anchor idx 0
+    fireEvent.click(screen.getByRole("button", { name: /Cosmo/i }), { shiftKey: true }); // idx 2
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1, 2, 3]));
+  });
+
+  it("'a' key selects all, 'c' clears", () => {
+    const onChange = setup(new Set(), 2);
+    const grid = screen.getByRole("status").parentElement as HTMLElement;
+    fireEvent.keyDown(grid, { key: "a" });
+    expect(onChange).toHaveBeenCalledWith(new Set([1, 2]));
+  });
+});
+
 describe("SelectableCardGrid core", () => {
   it("renders one tile per card and a live counter", () => {
     setup(new Set(), 2);
