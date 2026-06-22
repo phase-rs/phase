@@ -294,6 +294,7 @@ mod issue_3300_counter_spell;
 mod issue_3301_izzet_charm_counter;
 mod issue_3302_breach_multiverse;
 mod issue_3303_adeline_tapped_attacking;
+mod issue_3305_blood_scrivener;
 mod issue_3309_rise_etb_returns;
 mod issue_3310_condemn_two_targets;
 mod issue_3311_manifest_dread_land;

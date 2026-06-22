@@ -1607,11 +1607,13 @@ fn draw_replacement_count(
         .as_deref()?;
 
     match &*execute.effect {
-        Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
+        Effect::Draw { count: qty, .. } => {
             // CR 121.2 + CR 614.11a: "draw N cards instead" replacements
             // (Teferi's Ageless Insight: Fixed(2)) apply to each card draw
             // in the draw sequence — Brainsurge drawing four becomes eight,
-            // not two.
+            // not two. Chained riders (Blood Scrivener's life loss, issue
+            // #3305) are resolved via the post-replacement continuation after
+            // the count-modified draw executes.
             let resolved = match qty {
                 QuantityExpr::Fixed { value } => value.saturating_mul(*count as i32),
                 _ => resolve_event_replacement_quantity(qty, *count)?,
@@ -5055,6 +5057,19 @@ fn apply_single_replacement(
                         Some(PostReplacementContinuation::Resolved(runtime))
                     } else {
                         repl_def.execute.as_deref().and_then(|def| {
+                            // CR 608.2c + CR 614.11: Draw-count replacements with
+                            // chained riders (Blood Scrivener: draw two, then lose
+                            // 1 life) modify the draw via `draw_replacement_count`
+                            // and stash only the rider chain for post-draw drain.
+                            if matches!(*def.effect, Effect::Draw { .. })
+                                && def.sub_ability.is_some()
+                                && matches!(proposed, ProposedEvent::Draw { .. })
+                                && draw_replacement_count(state, rid, &proposed).is_some()
+                            {
+                                return def.sub_ability.as_ref().map(|sub| {
+                                    PostReplacementContinuation::Template(Box::new(sub.as_ref().clone()))
+                                });
+                            }
                             // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
                             // PutCounter/ChangeZone) in the sub_ability chain to find
                             // the first non-modifier work. Covers both the existing
