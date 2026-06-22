@@ -69,7 +69,10 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     // Covers Obuun, Mul Daya Ancestor and similar patterns.
     // allow-noncombinator: case-insensitive phrase scan - nom lacks case-insensitive take_until
     if let Some(where_x_pos) = rest.to_lowercase().find("where x is ") {
-        let before_where = rest[..where_x_pos].trim_end_matches(',').trim();
+        // Trim whitespace first so the trailing comma (from ", where X is") is
+        // exposed for removal. Without this, "reach, " keeps the comma because
+        // trim_end_matches(',') doesn't see past the trailing space.
+        let before_where = rest[..where_x_pos].trim().trim_end_matches(',').trim();
         let after_where = &rest[where_x_pos + "where x is ".len()..];
         let after_where_lower = after_where.to_lowercase();
         rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
@@ -1459,6 +1462,33 @@ mod test_den_bugbear {
         assert!(
             spec.types.contains(&"Creature".to_string()),
             "must infer Creature"
+        );
+    }
+
+    /// #833 Cactus Preserve: "an X/X green Plant creature with reach, where X is ..."
+    /// — the trailing comma before "where X is" must not leak into the keyword
+    /// extraction, or the keyword clause is silently dropped.
+    #[test]
+    fn animation_spec_x_x_with_keyword_and_where_clause() {
+        let spec = parse_animation_spec(
+            "an X/X green Plant creature with reach, where X is the greatest mana value among your commanders",
+            &mut ParseContext::default(),
+        )
+        .expect("Cactus Preserve animation phrase must parse");
+
+        assert!(
+            // allow-raw-authority: test asserts the parser-output AnimationSpec.keywords vec; no GameState/live object exists at parse time
+            spec.keywords.contains(&Keyword::Reach),
+            "must include Reach keyword, got: {:?}",
+            spec.keywords
+        );
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must include Creature"
+        );
+        assert!(
+            spec.types.contains(&"Plant".to_string()),
+            "must include Plant"
         );
     }
 

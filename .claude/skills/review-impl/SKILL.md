@@ -22,6 +22,16 @@ Skip checks CI already enforces:
 - `scripts/coverage-regression-check.sh --fail-on-engine`
 - TypeScript `pnpm type-check` and `pnpm lint`
 
+## Engine-Implementer Matrix Mode
+
+Default review output is findings-only. Exception: when `/engine-implementer` invokes this skill with an executor maintainer-simulation matrix, emit one short line before findings:
+
+```text
+Maintainer-Simulation Gate: PASS|FAIL
+```
+
+Use `PASS` only if every changed seam has a concrete row covering production entry, first production branch reached, selected authority / bound value when applicable, binding time, live vs snapshotted semantics, storage, consuming function, invalidation behavior, hostile fixtures, and serialized-surface impact. Use `FAIL` when any row is missing, superficial, or contradicted by the diff, and report the specific gap as a normal finding. Outside this scoped mode, keep silence-as-LGTM behavior.
+
 ## Universal Lenses
 
 Two gates lead every review; apply them before the rest.
@@ -35,6 +45,10 @@ Two gates lead every review; apply them before the rest.
 - **Claim-to-test map:** For every behavior the PR claims to support, identify the changed seam/function, production entry point, and test that reaches it. Flag any behavior tested only through a helper, constructor, parsed AST, or direct resolver call when production reaches it through `apply()`, `WaitingFor`, `GameAction`, stack/casting, combat declaration, replacement handling, or the scenario runner. Parser shape tests do not satisfy runtime semantics or coverage-support claims; they are acceptable for parser-only work only when unsupported semantics remain red/honest.
 - **Fixture path-divergence:** A test can drive the *real* production entry point and still miss the bug if its fixtures are shaped so simply that they take a *different internal branch* than production inputs. Technique: trace the fix's entry through its first input-shape dispatches — `is_none()`/`is_some()`, `is_empty()`/`len()`, variant `match`, and "has-X" guards (e.g. `if ability_def.is_none() { return fast_path() }`). For each such branch the fix can reach, map every test fixture to the arm it triggers, and flag any production-reachable arm with **no** fixture. Smell: every fixture is degenerate in the same way (no ability/effect, no targets, empty or single-element collection, default/`None` field), so only the trivial shortcut arm runs while the arm real data takes ships untested. Name the unexercised arm and the minimal fixture change that would reach it.
 - **Coverage honesty:** If parser code accepts full Oracle text while intentionally ignoring any semantic rider, replacement, delayed trigger, restriction, granted ability, continuation, or other rules-bearing clause, coverage must remain honest. Flag changes that make `cargo coverage` mark a card/class supported while those semantics are deferred or dropped instead of preserved as `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
+- **Selected authority / provenance:** For "this way", "that source", "chosen", "cast using", "from among them", selected modes/targets, replacement predicates, duration-bound effects, or controller/owner-relative text, verify the selected authority is carried from the production choice point to the consuming function. Flag global rescans that can pick a different permission, source, cost, replacement, tracked set, controller, or owner unless a multi-authority fixture proves equivalence.
+- **Snapshot / latch semantics:** Flag live predicates where the CR requires a value or duration to be fixed when a spell/ability resolves, a replacement applies, or an effect's duration ends. Require tests for post-resolution value changes, controller changes, zone changes, and non-revival after duration expiry when relevant.
+- **Empty / decline / natural-event paths:** For optional choices and tracked sets, verify all-decline or empty selections publish/clear the same state a non-empty choice would. For resource/event counters, verify natural game progression is not counted as a created extra resource.
+- **Serialized-surface contracts:** If the diff changes an enum, `GameAction`, `WaitingFor`, game-state field, card-data export shape, or serialized AI/community scenario shape, verify existing repo-owned serialized data still loads via migration/defaults/fixture updates and protocol-visible changes bump the wire contract when required.
 - **Target/scope matrix:** For combat, targeting, controller, owner, protector, defender, or player-scope changes, enumerate the variants/scopes reachable at the touched production boundary. Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
 - **Edge cases:** Check empty inputs, multi-target/modal/repeat interactions, simultaneous events, eliminated players, `im::Vector::truncate(n)` bounds, and async races when relevant.
 - **Idiomatic code:** Flag new bools that should be typed enums, wildcard match arms that should be exhaustive, verbatim Oracle strings in parser logic, hand-rolled `starts_with` + index slicing that should be `strip_prefix`/`strip_suffix`/`TextPair`, `as any`, fresh `@ts-expect-error`, and unchecked casts.
@@ -93,3 +107,5 @@ Use this exact finding shape:
 Severity calibration: a latent bug — one not reachable today because a guard or parser blocks it — is still a finding. Rate it by what happens when the form is reached or the guard removed, not by today's reachability: if it then produces a wrong result for a card-class the feature appears to cover, it is at least MED, and "unreachable today" belongs in the evidence, not as a reason to downgrade to LOW. A feature that ships silently incorrect for a sub-class it looks like it handles (e.g. a multi-die roll that overwrites the stored result each iteration instead of supporting the aggregate) is a MED the maintainer must see — never a NIT.
 
 Findings first. No praise, no diff recap.
+
+Exception: in Engine-Implementer Matrix Mode, the single `Maintainer-Simulation Gate: PASS|FAIL` line precedes findings.

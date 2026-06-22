@@ -69,6 +69,9 @@ fn dark_confidant_upkeep_loses_life_equal_to_revealed_card_mana_value() {
     let confidant = scenario.add_real_card(P0, "Dark Confidant", Zone::Battlefield, db);
     // Cancel is {1}{U}{U} — mana value 3, distinct from Dark Confidant's 2.
     let revealed = scenario.add_real_card(P0, "Cancel", Zone::Library, db);
+    // Keep a card under Cancel so advancing through the draw step does not
+    // eliminate P0 after Dark Confidant moves the revealed card to hand.
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 

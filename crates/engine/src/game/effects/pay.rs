@@ -116,6 +116,35 @@ pub fn resolve(
                 pending_mana_ability: None,
             };
         }
+        // CR 119.4 + CR 118.3 + CR 119.8: "pay any amount of life" — suspend the
+        // chain and surface a `PayAmountChoice` prompt (mirrors the energy "any
+        // amount" arm above). `max` = payer's current life, clamped to 0 when a
+        // CantLoseLife / can't-pay-life lock applies (can_pay_life_cost is false
+        // for any amount > 0). On submit the engine deducts life via
+        // `life_costs::pay_life_as_cost` and stamps `last_effect_count` so the
+        // downstream "draw/look at that many" step reads the chosen amount.
+        AbilityCost::PayLife { amount } if is_pay_any_amount(amount) => {
+            let life = state
+                .players
+                .iter()
+                .find(|p| p.id == payer)
+                .map(|p| p.life)
+                .unwrap_or(0);
+            let max = if life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
+                u32::try_from(life).unwrap_or(0)
+            } else {
+                0
+            };
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: payer,
+                resource: PayableResource::Life,
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: ability.source_id,
+                pending_mana_ability: None,
+            };
+        }
         // CR 107.1c + CR 107.14: A fixed-amount energy payment routes through the
         // authority, then stamps `last_effect_count` so downstream chain steps
         // that reference `QuantityRef::EventContextAmount` (e.g. "deals that much
@@ -2421,5 +2450,270 @@ mod tests {
             generic: 0,
         };
         assert_eq!(scale_mana_cost(&colored, 0), ManaCost::zero());
+    }
+
+    /// CR 119.4 + CR 118.3: Install a CantLoseLife permanent for `owner`, used
+    /// to verify the "pay any amount of life" prompt clamps `max` to 0 (CR 119.8).
+    fn add_cant_lose_life_permanent(state: &mut GameState, owner: PlayerId) {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let id = create_object(
+            state,
+            CardId(900),
+            owner,
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+    }
+
+    fn pay_any_life_ability() -> Effect {
+        Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            scale: None,
+            payer: crate::types::ability::TargetFilter::Controller,
+        }
+    }
+
+    /// CR 119.4 + CR 118.3: "pay any amount of life" suspends on a
+    /// PayAmountChoice with `max` = current life and no life deducted yet
+    /// (mirrors `pay_any_amount_of_energy_pauses_for_choice`).
+    #[test]
+    fn pay_any_amount_of_life_pauses_for_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let ability = make_ability(pay_any_life_ability());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                min,
+                max,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*resource, PayableResource::Life);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 20);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+        assert_eq!(state.players[0].life, 20, "life must not be deducted yet");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
+            "no LifeChanged event until the player commits an amount"
+        );
+    }
+
+    /// CR 119.8: Under a CantLoseLife lock the "pay any amount of life" prompt
+    /// clamps `max` to 0 — the player can only decline (pay 0).
+    #[test]
+    fn pay_any_amount_of_life_clamps_max_under_cant_lose_life() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        let ability = make_ability(pay_any_life_ability());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(*resource, PayableResource::Life);
+                assert_eq!(*max, 0, "CantLoseLife clamps the payable life to 0");
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 119.4 + CR 603.7c + CR 608.2c: Necrodominance / Plunge into Darkness
+    /// shape — optional `PayCost { PayLife, Variable X } → IfYouDo Draw
+    /// { EventContextAmount }`. Accept the optional, submit 3 life: 3 life lost
+    /// AND 3 cards drawn (the chosen amount binds the downstream count).
+    ///
+    /// Fail-on-revert: with the prompt removed the PayLife{Variable X} resolves
+    /// to 0 (no prompt), `last_effect_count` is never stamped, the Draw reads 0,
+    /// and life is unchanged.
+    #[test]
+    fn pay_any_amount_of_life_optional_then_draw_that_many() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Necrodominance".to_string(),
+            Zone::Battlefield,
+        );
+        // Five library cards available to draw.
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        state.players[0].life = 20;
+
+        // IfYouDo SequentialSibling Draw { EventContextAmount } rider.
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(pay_any_life_ability(), vec![], source_id, PlayerId(0));
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+
+        // Step A: optional prompt.
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step B: accept → PayAmountChoice { resource: Life, max: 20 }.
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(*resource, PayableResource::Life);
+                assert_eq!(*max, 20);
+            }
+            other => panic!("expected PayAmountChoice after Yes, got {other:?}"),
+        }
+
+        // Step C: submit 3 → 3 life lost, 3 cards drawn, no residue.
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 3 },
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[0].life, 17,
+            "3 life paid via the life-loss authority"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            3,
+            "IfYouDo Draw{{EventContextAmount=3}} draws the chosen count"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "chain must fully resolve, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// CR 119.8: Under CantLoseLife the prompt clamps max=0; submitting 0
+    /// declines the payment — no life lost, the IfYouDo Draw reads 0.
+    #[test]
+    fn pay_any_amount_of_life_under_lock_submit_zero_draws_zero() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Necrodominance".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        state.players[0].life = 20;
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(pay_any_life_ability(), vec![], source_id, PlayerId(0));
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(*resource, PayableResource::Life);
+                assert_eq!(*max, 0, "CantLoseLife clamps max to 0");
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 0 },
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].life, 20, "no life lost under the lock");
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "paying 0 life draws 0 cards"
+        );
     }
 }

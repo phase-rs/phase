@@ -230,7 +230,11 @@ When the continuation is created, parent targets propagate down if the sub-abili
 
 - [ ] Resolver test: effect sets correct `WaitingFor` with expected choices
 - [ ] Engine round-trip test: set up waiting state → submit action → verify state change
+- [ ] Production setup test: when correctness depends on how the waiting state is produced, enter `WaitingFor` through the real effect / cast / ability / replacement path before submitting the action. A manually constructed waiting state is not enough for that claim.
 - [ ] Continuation test: effect with sub_ability → interactive pause → resume → sub_ability executes
+- [ ] Empty/decline test: for optional choices or "up to" selections, submit the empty choice through the real `GameAction` path and verify tracked sets, continuations, and final `waiting_for` state are correct.
+- [ ] Tracked-set test: if the choice feeds "those", "them", "this way", or a downstream tracked-set consumer, publish or clear a fresh tracked set on first choice resolution, including all-decline/empty paths, or prove no tracked-set consumer exists.
+- [ ] Resume-state test: verify downstream continuations execute and priority / next waiting state is restored; do not only assert that the pending queue was cleared.
 - [ ] AI test: `get_legal_actions()` returns valid options for the waiting state
 - [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
@@ -371,7 +375,10 @@ Note how many effects reuse `GameAction::SelectCards` — only create a new `Gam
 | Missing `acting_player()` arm in `session.rs` | Server rejects all actions for this state in multiplayer | Add the match arm |
 | Missing AI legal actions | AI hangs forever waiting for a response it can't generate | Add match arm in `engine/src/ai_support/candidates.rs` |
 | Not clearing revealed state after choice | Opponent's hidden cards remain visible permanently | Clear `state.revealed_cards` in the engine handler |
+| Testing only a manually constructed `WaitingFor` | Bypasses bugs in the real effect/cast/ability path that creates the choice | Add at least one production setup test that reaches the waiting state naturally |
 | Resuming continuation without checking `state.waiting_for` | Continuation might set another interactive state, but you overwrite it with Priority | Check waiting_for after `resolve_ability_chain` returns |
+| Clearing pending state without testing downstream continuation | The prompt disappears but the rest of the ability never resolves | Assert the continuation's effect and final waiting state |
+| Empty choice leaves an old tracked set bound | "Those/them/this way" can refer to a prior producer instead of the empty choice | Publish/clear a fresh tracked set even for all-decline paths when a consumer exists |
 | Not propagating targets to continuation | Sub-ability can't reference the chosen card | Copy parent targets when `sub_clone.targets.is_empty()` |
 | Creating new `GameAction` when `SelectCards` works | Unnecessary type proliferation | Reuse `SelectCards` unless response shape is genuinely different |
 

@@ -280,7 +280,6 @@ export function PlayerArea({
             side="left"
             className="justify-start px-0"
           />
-          {landColumnExtra}
         </>
       ),
     },
@@ -411,6 +410,15 @@ export function PlayerArea({
     </div>
   ) : null;
 
+  const landColumnExtraOverlay = landColumnExtra ? (
+    <div
+      className="pointer-events-none absolute bottom-0 left-2 z-30"
+      data-testid="land-column-extra"
+    >
+      <div className="pointer-events-auto">{landColumnExtra}</div>
+    </div>
+  ) : null;
+
   return (
     <div
       className={`relative flex min-h-0 min-w-0 flex-1 overflow-visible ${
@@ -434,6 +442,7 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
+              {landColumnExtraOverlay}
             </div>
             <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldZoneOverflow
@@ -456,6 +465,7 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
+              {landColumnExtraOverlay}
             </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
           </>
