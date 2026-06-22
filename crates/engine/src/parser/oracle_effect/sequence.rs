@@ -5200,6 +5200,20 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
         }
+        // CR 701.19c + CR 608.2c: "Creatures/A creature destroyed this way
+        // can't be regenerated" after any effect — including Token creation
+        // (e.g. Kirtar's Wrath threshold: DestroyAll → Token → this clause).
+        // Must be checked before the Effect::Token arm so a Token preceding
+        // this phrase doesn't shadow the catch-all guard. The Destroy/DestroyAll
+        // target is found by `apply_clause_continuation` walking backward.
+        _ if nom_primitives::scan_contains(&lower, "destroyed this way can't be regenerated")
+            || nom_primitives::scan_contains(
+                &lower,
+                "destroyed this way cannot be regenerated",
+            ) =>
+        {
+            Some(ContinuationAst::CantRegenerate)
+        }
         // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
         //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
         //     or "It enters with X +1/+1 counters on it[, where X is ...]"
@@ -5213,20 +5227,6 @@ pub(super) fn parse_followup_continuation_ast(
         // target the source ability via `SelfRef`/`ParentTarget`.
         Effect::Token { .. } => try_parse_token_enters_with_counters(&lower)
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
-        // CR 701.19c + CR 608.2c: "Creatures/A creature destroyed this way
-        // can't be regenerated" after a non-Destroy effect (e.g. Token
-        // creation in Kirtar's Wrath threshold) — the Destroy/DestroyAll is
-        // earlier in the chain; `apply_clause_continuation` walks backward
-        // to find it. The "destroyed this way" noun phrase unambiguously
-        // refers to a preceding destruction instruction.
-        _ if nom_primitives::scan_contains(&lower, "destroyed this way can't be regenerated")
-            || nom_primitives::scan_contains(
-                &lower,
-                "destroyed this way cannot be regenerated",
-            ) =>
-        {
-            Some(ContinuationAst::CantRegenerate)
-        }
         _ => None,
     }
 }
