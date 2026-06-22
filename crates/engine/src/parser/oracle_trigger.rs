@@ -1892,6 +1892,28 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
 
 fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
     let trailing = discard_tail.trim().trim_end_matches('.').trim();
+
+    // CR 118.12 + CR 701.9: Try numeric count first ("two cards", "three cards"),
+    // then fall back to article form ("a card", "an enchantment card").
+    if let Some((n, after_num)) = parse_number(trailing) {
+        let after_num = after_num.trim();
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_num) {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            if rest.is_empty()
+                || tag::<_, _, OracleError<'_>>("at random")
+                    .parse(rest)
+                    .is_ok()
+            {
+                return Some(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: n as i32 },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                });
+            }
+        }
+    }
+
     let trailing = alt((
         tag::<_, _, OracleError<'_>>("a "),
         tag::<_, _, OracleError<'_>>("an "),
@@ -1933,9 +1955,11 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
 /// text immediately after `" unless "`.
 ///
 /// Patterns recognized:
-/// - `you discard a card[ at random][.]`     → `UnlessCost::DiscardCard`
-/// - `you sacrifice [N] [filter][.]`         → `UnlessCost::Sacrifice { count, filter }`
-/// - `you pay N life[.]`                     → `UnlessCost::PayLife { amount }`
+/// - `you discard [N] card(s)[ at random][.]` → `AbilityCost::Discard { count, .. }`
+/// - `you sacrifice [N] [filter][.]`          → `AbilityCost::Sacrifice { count, filter }`
+/// - `you pay N life[.]`                      → `AbilityCost::PayLife { amount }`
+/// - `you mill [N] card(s)[.]`  → `AbilityCost::Mill { count }`
+/// - `you remove [N] [type] counter(s) from [target][.]` → `AbilityCost::RemoveCounter`
 ///
 /// Returns `None` for any other shape (mana costs and unknown forms fall
 /// through to the existing mana-cost path in `extract_unless_pay_modifier`).
@@ -2009,6 +2033,23 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         }
     }
 
+    // CR 118.12 + CR 701.17: "you mill [N] cards" — mill as unless cost.
+    // Cards: Deep Spawn.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you mill ").parse(after_unless) {
+        if let Some(cost) = parse_unless_mill_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    // CR 118.12 + CR 122.1: "you remove [N] [type] counter(s) from [target]"
+    // — remove counter(s) as unless cost. Cards: Chisei, Junk Golem, Magmatic
+    // Sprinter.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you remove ").parse(after_unless) {
+        if let Some(cost) = parse_unless_remove_counter_cost(rest) {
+            return Some(cost);
+        }
+    }
+
     None
 }
 
@@ -2032,6 +2073,118 @@ fn parse_unless_exile_cost(rest: &str) -> Option<AbilityCost> {
         count,
         zone: filter.extract_in_zone(),
         filter: Some(filter),
+    })
+}
+
+/// CR 118.12 + CR 701.17: Parse the tail of "you mill ..." unless costs.
+/// Expects "[N] card(s)" after the "you mill " prefix. Cards: Deep Spawn.
+fn parse_unless_mill_cost(rest: &str) -> Option<AbilityCost> {
+    let trimmed = rest.trim().trim_end_matches('.').trim();
+    let (count, after) = parse_number(trimmed)?;
+    let after = after.trim();
+    if tag::<_, _, OracleError<'_>>("cards").parse(after).is_ok()
+        || tag::<_, _, OracleError<'_>>("card").parse(after).is_ok()
+    {
+        return Some(AbilityCost::Mill { count });
+    }
+    None
+}
+
+/// CR 118.12 + CR 122.1: Parse the tail of "you remove ..." unless costs.
+/// Expects "[N] [counter_type] counter(s) from [target]".
+///
+/// - "a counter from a permanent you control" → `CounterMatch::Any`
+/// - "a +1/+1 counter from it" → `CounterMatch::OfType(Plus1Plus1)`, `SelfRef`
+/// - "two oil counters from it" → count 2, `CounterMatch::OfType(Oil)`, `SelfRef`
+///
+/// Cards: Chisei Heart of Oceans, Junk Golem, Magmatic Sprinter.
+fn parse_unless_remove_counter_cost(rest: &str) -> Option<AbilityCost> {
+    use crate::types::ability::CounterCostSelection;
+    use crate::types::counter::CounterMatch;
+
+    let trimmed = rest.trim().trim_end_matches('.').trim();
+
+    // Parse count: numeric word ("two") or article ("a"/"an" → 1).
+    let (count, after_count) = if let Some((n, after)) = parse_number(trimmed) {
+        (n, after.trim())
+    } else {
+        let after = alt((
+            tag::<_, _, OracleError<'_>>("a "),
+            tag::<_, _, OracleError<'_>>("an "),
+        ))
+        .parse(trimmed)
+        .map(|(rest, _)| rest)
+        .ok()?;
+        (1u32, after.trim())
+    };
+
+    // Parse counter type. Try bare "counter(s) from" first (→ CounterMatch::Any),
+    // because `parse_counter_type_typed` has a catch-all fallback that would
+    // consume "counter" as `CounterType::Generic("counter")`. Only after the
+    // bare-noun path fails do we try the typed combinator for "+1/+1 counter",
+    // "oil counters", etc.
+    let (counter_type, after_counter) = if let Ok((after, _)) = alt((
+        tag::<_, _, OracleError<'_>>("counters"),
+        tag::<_, _, OracleError<'_>>("counter"),
+    ))
+    .parse(after_count)
+    {
+        // Bare "counter"/"counters" without a type word → Any.
+        (CounterMatch::Any, after.trim())
+    } else if let Ok((after, ct)) = nom_primitives::parse_counter_type_typed(after_count) {
+        // Typed counter: consume trailing " counter" / " counters" suffix.
+        let after = after.trim();
+        let after = alt((
+            tag::<_, _, OracleError<'_>>("counters"),
+            tag::<_, _, OracleError<'_>>("counter"),
+        ))
+        .parse(after)
+        .map(|(rest, _)| rest)
+        .unwrap_or(after);
+        (CounterMatch::OfType(ct), after.trim())
+    } else {
+        return None;
+    };
+
+    // Expect "from " followed by a target reference.
+    let (after_from, _) = tag::<_, _, OracleError<'_>>("from ")
+        .parse(after_counter)
+        .ok()?;
+    let after_from = after_from.trim();
+
+    // "from it" / "from ~" → SelfRef.
+    let target = if tag::<_, _, OracleError<'_>>("it")
+        .parse(after_from)
+        .map(|(rest, _)| rest.trim().is_empty())
+        .unwrap_or(false)
+        || tag::<_, _, OracleError<'_>>("~")
+            .parse(after_from)
+            .map(|(rest, _)| rest.trim().is_empty())
+            .unwrap_or(false)
+    {
+        None // target = None encodes "self" for RemoveCounter
+    } else {
+        // Delegate to shared target parser for filter phrases like
+        // "a permanent you control".
+        let target_phrase = format!("target {after_from}");
+        let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+        if matches!(filter, TargetFilter::Any) {
+            return None;
+        }
+        let (_, _) = all_consuming((
+            opt(tag::<_, _, OracleError<'_>>(".")),
+            eof::<_, OracleError<'_>>,
+        ))
+        .parse(remainder.trim())
+        .ok()?;
+        Some(filter)
+    };
+
+    Some(AbilityCost::RemoveCounter {
+        count,
+        counter_type,
+        target,
+        selection: CounterCostSelection::default(),
     })
 }
 
@@ -22000,7 +22153,8 @@ mod tests {
         assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
     }
 
-    // NEGATIVE: documented non-goals must NOT be swallowed as unless-pay.
+    // NEGATIVE: bare "mill N" without "cards" suffix is NOT recognized as an
+    // unless-cost — it could be an effect-mill clause. Only "mill N cards" is.
     #[test]
     fn trigger_unless_you_mill_is_not_unless_pay() {
         let def = parse_trigger_line(
@@ -22009,9 +22163,121 @@ mod tests {
         );
         assert!(
             def.unless_pay.is_none(),
-            "mill is an unpayable unless-cost — must not be extracted, got {:?}",
+            "bare mill without 'cards' suffix must not be extracted, got {:?}",
             def.unless_pay
         );
+    }
+
+    // CR 118.12 + CR 701.17: "sacrifice ~ unless you mill two cards" — Deep
+    // Spawn. Mill word-count form recognized as unless-pay.
+    #[test]
+    fn trigger_unless_you_mill_two_cards() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice ~ unless you mill two cards.",
+            "Deep Spawn",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert!(
+            matches!(unless_pay.cost, AbilityCost::Mill { count: 2 }),
+            "expected Mill {{ count: 2 }}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // CR 118.12 + CR 701.9: "sacrifice it unless you discard two cards" —
+    // Avatar of Discord. Numeric discard count > 1.
+    #[test]
+    fn trigger_unless_you_discard_two_cards() {
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you discard two cards.",
+            "Avatar of Discord",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Discard { count, .. }
+                    if matches!(count, QuantityExpr::Fixed { value: 2 })
+            ),
+            "expected Discard count=2, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // CR 118.12 + CR 122.1: "sacrifice ~ unless you remove a counter from a
+    // permanent you control" — Chisei, Heart of Oceans. Untyped counter.
+    #[test]
+    fn trigger_unless_you_remove_counter_any() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice ~ unless you remove a counter from a permanent you control.",
+            "Chisei, Heart of Oceans",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::Any,
+                    ..
+                }
+            ),
+            "expected RemoveCounter Any, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // CR 118.12 + CR 122.1: "sacrifice ~ unless you remove a +1/+1 counter
+    // from it" — Junk Golem. Typed counter, self target.
+    #[test]
+    fn trigger_unless_you_remove_plus_counter() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice ~ unless you remove a +1/+1 counter from it.",
+            "Junk Golem",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    target: None,
+                    ..
+                }
+            ),
+            "expected RemoveCounter +1/+1, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // CR 118.12 + CR 122.1: "return ~ to its owner's hand unless you remove
+    // two oil counters from it" — Magmatic Sprinter. Numeric count, typed
+    // counter, self target.
+    #[test]
+    fn trigger_unless_you_remove_two_oil_counters() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, return ~ to its owner's hand unless you remove two oil counters from it.",
+            "Magmatic Sprinter",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target,
+                ..
+            } => {
+                assert_eq!(*count, 2);
+                assert!(
+                    matches!(counter_type, CounterMatch::OfType(ct) if ct == &crate::types::counter::parse_counter_type("oil")),
+                    "expected oil counter type, got {:?}",
+                    counter_type
+                );
+                assert_eq!(*target, None, "self target should be None");
+            }
+            other => panic!("expected RemoveCounter, got {:?}", other),
+        }
     }
 
     #[test]
