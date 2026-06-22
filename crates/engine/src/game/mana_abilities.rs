@@ -1991,6 +1991,26 @@ where
         Some(c) if is_self_contained_mana_subcost(c) => {
             super::costs::pay_ability_cost(state, player, source_id, c, events)?;
         }
+        // CR 122.1 + CR 601.2b: Standalone RemoveCounter-on-self mana-ability
+        // cost (Pentad Prism, Crystalline Crawler, Druids' Repository class).
+        // Mirrors the Composite sub-cost arm above.
+        Some(AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: None,
+            ..
+        }) => {
+            let count = match *count {
+                REMOVE_COUNTER_COST_ANY_NUMBER => chosen_counter_count.ok_or_else(|| {
+                    EngineError::InvalidAction("Missing counter count for mana ability".to_string())
+                })?,
+                REMOVE_COUNTER_COST_ALL => {
+                    removable_counter_count_for_mana_cost(state, source_id, counter_type)
+                }
+                count => count,
+            };
+            remove_counters_for_mana_cost(state, source_id, counter_type, count, events);
+        }
         Some(other) => {
             return Err(EngineError::InvalidAction(format!(
                 "Unsupported mana ability cost: {other:?}"
@@ -8631,5 +8651,140 @@ mod tests {
         assert_eq!(state.players[1].mana_pool.total(), 0);
         assert!(!state.objects.get(&forest).unwrap().tapped);
         assert!(events.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // Standalone RemoveCounter mana ability (Pentad Prism class)
+    // ---------------------------------------------------------------
+
+    /// Pentad Prism: `Remove a charge counter from ~: Add one mana of any color.`
+    /// The cost is a bare `RemoveCounter` (NOT inside `Composite`).
+    fn make_pentad_prism(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let prism = create_object(
+            state,
+            CardId(8100),
+            player,
+            "Pentad Prism".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&prism).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        let charge_key = crate::types::counter::parse_counter_type("charge");
+        obj.counters.insert(charge_key, 2);
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::RemoveCounter {
+            count: 1,
+            counter_type: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+            target: None,
+            selection: crate::types::ability::CounterCostSelection::SingleObject,
+        });
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        prism
+    }
+
+    #[test]
+    fn standalone_remove_counter_mana_ability_activates() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let prism = make_pentad_prism(&mut state, player);
+
+        let def = state
+            .objects
+            .get(&prism)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        // Readiness must pass — the prism has charge counters.
+        assert!(
+            can_activate_mana_ability_now(&state, player, prism, 0, &def),
+            "Pentad Prism must be activatable with charge counters"
+        );
+
+        // Activate: produce blue mana.
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            prism,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Blue)),
+        )
+        .expect("Standalone RemoveCounter mana ability must not fail");
+
+        // One blue mana in pool.
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Blue),
+            1,
+        );
+        // One charge counter removed (2 → 1).
+        let remaining = state
+            .objects
+            .get(&prism)
+            .unwrap()
+            .counters
+            .get(&CounterType::Generic("charge".to_string()))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(remaining, 1);
+        // Source is NOT tapped (no tap cost).
+        assert!(
+            !state.objects.get(&prism).unwrap().tapped,
+            "Pentad Prism must not be tapped — cost is only RemoveCounter"
+        );
+    }
+
+    #[test]
+    fn standalone_remove_counter_mana_ability_unpayable_without_counters() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let prism = make_pentad_prism(&mut state, player);
+
+        // Remove all charge counters.
+        state.objects.get_mut(&prism).unwrap().counters.clear();
+
+        let def = state
+            .objects
+            .get(&prism)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        // Readiness must fail — no counters to remove.
+        assert!(
+            !can_activate_mana_ability_now(&state, player, prism, 0, &def),
+            "Pentad Prism must not be activatable without charge counters"
+        );
     }
 }
