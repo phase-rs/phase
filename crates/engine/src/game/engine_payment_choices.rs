@@ -903,6 +903,122 @@ pub(super) fn handle_unless_payment(
                 // unpayable cost (CR 118.12: declining is equivalent).
                 payment_failed = true;
             }
+            // CR 701.17a + CR 118.12: "you mill N cards" as an unless-cost
+            // payment (Deep Spawn). Mill is deterministic — the paying player
+            // mills their own top N cards with no choice needed. Route
+            // through the replacement pipeline so Rest-in-Peace class
+            // redirects fire correctly. Partial mill (library has fewer than
+            // N cards) is an unpayable cost per CR 118.3 — effect fires.
+            // A replacement-effect pause (BatchMoveResult::Incomplete) also
+            // counts as payment failure so the unless-effect is not
+            // double-triggered; the paused replacement state is cleared.
+            AbilityCost::Mill { count } => {
+                let player_library_len = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| p.library.len())
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction("Player not found".to_string())
+                    })?;
+                if player_library_len < count as usize {
+                    payment_failed = true;
+                } else {
+                    let proposed = ProposedEvent::Mill {
+                        player_id: player,
+                        count,
+                        destination: Zone::Graveyard,
+                        applied: Default::default(),
+                    };
+                    match effects::mill::apply_mill_after_replacement(state, proposed, events)
+                        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?
+                    {
+                        true => {}
+                        false => {
+                            state.pending_replacement = None;
+                            payment_failed = true;
+                        }
+                    }
+                }
+            }
+            // CR 122.6 + CR 118.12: "you remove N [type] counter(s) from it"
+            // as an unless-cost payment (Junk Golem, Magmatic Sprinter).
+            // `target: None` encodes a self-reference — remove counters from
+            // the source object. `pay_ability_cost_for_resolution` has a
+            // resolution-scope guard that refuses RemoveCounter
+            // (`supported_at_resolution` → false), so we invoke the counter
+            // removal primitives directly. Insufficient counters is an
+            // unpayable cost per CR 118.3 → effect fires.
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: None,
+                ..
+            } => {
+                use crate::types::ability::REMOVE_COUNTER_COST_ALL;
+                let source_id = pending_effect.source_id;
+                // `REMOVE_COUNTER_COST_ALL` always succeeds (removes whatever
+                // is present). For fixed counts, verify enough counters exist.
+                let resolved_type = effects::counters::resolve_counter_match_for_removal(
+                    state,
+                    source_id,
+                    &counter_type,
+                );
+                let can_pay = if count == REMOVE_COUNTER_COST_ALL {
+                    true
+                } else {
+                    resolved_type
+                        .as_ref()
+                        .and_then(|ct| {
+                            state
+                                .objects
+                                .get(&source_id)?
+                                .counters
+                                .get(ct)
+                                .copied()
+                        })
+                        .is_some_and(|present| present >= count)
+                };
+                if !can_pay {
+                    payment_failed = true;
+                } else if count == REMOVE_COUNTER_COST_ALL
+                    && matches!(counter_type, crate::types::counter::CounterMatch::Any)
+                {
+                    // Remove all counters of all types from source.
+                    let all_counters: Vec<_> = state
+                        .objects
+                        .get(&source_id)
+                        .map(|obj| {
+                            obj.counters
+                                .iter()
+                                .map(|(ty, n)| (ty.clone(), *n))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for (ct, n) in all_counters {
+                        effects::counters::remove_counter_with_replacement(
+                            state, source_id, ct, n, events,
+                        );
+                    }
+                } else if let Some(resolved) = resolved_type {
+                    let actual = if count == REMOVE_COUNTER_COST_ALL {
+                        state
+                            .objects
+                            .get(&source_id)
+                            .and_then(|obj| obj.counters.get(&resolved))
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        count
+                    };
+                    effects::counters::remove_counter_with_replacement(
+                        state, source_id, resolved, actual, events,
+                    );
+                } else {
+                    // Counter type not present on source → unpayable.
+                    payment_failed = true;
+                }
+            }
             AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Unattach
@@ -912,8 +1028,12 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
             | AbilityCost::TapCreatures { .. }
-            | AbilityCost::RemoveCounter { .. }
-            | AbilityCost::Mill { .. }
+            // CR 122.6 + CR 118.12: `RemoveCounter { target: Some(_) }`
+            // (e.g., Chisei "a permanent you control") requires an
+            // interactive object-choice dialog not yet wired for
+            // unless-payment. Falls through to effect-fires as the
+            // rules-correct fallback for unpayable costs (CR 118.12).
+            | AbilityCost::RemoveCounter { target: Some(_), .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
             | AbilityCost::Reveal { .. }
@@ -2554,6 +2674,155 @@ mod tests {
         assert!(
             !state.players[0].library.contains(&top),
             "the exiled card has left the library"
+        );
+    }
+
+    /// CR 701.17a + CR 118.12: Unless-mill payment (Deep Spawn class).
+    /// Player has 3 library cards and pays a `Mill { count: 2 }` unless-cost.
+    /// Payment must mill the top 2 cards to graveyard and suppress the effect.
+    #[test]
+    fn unless_mill_cost_mills_cards_and_suppresses_effect() {
+        let mut state = GameState::new_two_player(42);
+        // Put 3 cards in P0's library.
+        for i in 0..3u64 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        let top_two: Vec<_> = state.players[0].library.iter().take(2).copied().collect();
+
+        let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(999), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Mill { count: 2 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, true, &mut events)
+            .expect("mill unless-cost should resolve");
+
+        assert_eq!(
+            state.players[0].library.len(),
+            1,
+            "1 card remains in library"
+        );
+        assert_eq!(
+            state.players[0].graveyard.len(),
+            2,
+            "2 cards milled to graveyard"
+        );
+        for id in &top_two {
+            assert!(
+                state.players[0].graveyard.contains(id),
+                "top 2 cards are in graveyard"
+            );
+        }
+        // Effect suppressed — P0's life unchanged from starting total.
+        assert_eq!(
+            state.players[0].life, 20,
+            "gain-life effect suppressed by payment"
+        );
+    }
+
+    /// CR 701.17a + CR 118.12: Unless-mill with an empty library is an
+    /// unpayable cost — effect fires (CR 118.3).
+    #[test]
+    fn unless_mill_cost_with_empty_library_fires_effect() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        assert!(state.players[0].library.is_empty());
+
+        let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(999), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Mill { count: 2 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, true, &mut events)
+            .expect("unless resolves even when unpayable");
+
+        // Library empty → unpayable → effect fires → P0 gains 4 life.
+        assert_eq!(
+            state.players[0].life, 24,
+            "gain-life fired because mill was unpayable"
+        );
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "nothing milled from empty library"
+        );
+    }
+
+    /// CR 122.6 + CR 118.12: Unless-remove-counter (self) payment (Junk Golem
+    /// class). Source has 2 +1/+1 counters; paying removes 1, suppresses effect.
+    #[test]
+    fn unless_remove_self_counter_cost_removes_counter_and_suppresses_effect() {
+        use crate::types::ability::CounterCostSelection;
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+
+        let source = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Junk Golem".to_string(),
+            Zone::Battlefield,
+        );
+        // Put 2 +1/+1 counters on the source.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+
+        let pending = ResolvedAbility::new(gain_life(4), vec![], source, PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+                target: None,
+                selection: CounterCostSelection::default(),
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, true, &mut events)
+            .expect("remove-counter unless-cost should resolve");
+
+        let remaining = state
+            .objects
+            .get(&source)
+            .and_then(|o| o.counters.get(&CounterType::Plus1Plus1))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(remaining, 1, "1 +1/+1 counter removed, 1 remains");
+        // Effect suppressed — P0's life unchanged.
+        assert_eq!(
+            state.players[0].life, 20,
+            "gain-life effect suppressed by payment"
         );
     }
 }
