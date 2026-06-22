@@ -1,5 +1,5 @@
 import { memo, useState, useCallback, useMemo, useRef } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useMotionValue, useSpring } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -17,7 +17,7 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
-import { computeHandInsertionSlot } from "./handInsertionSlot.ts";
+import { computeHandInsertionSlot, computeHandInsertionMarker } from "./handInsertionSlot.ts";
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
 // card leftward over the previous one. Tightens continuously as the hand grows
@@ -112,35 +112,67 @@ export function PlayerHand() {
 
   const hoveredSlotRef = useRef<number | null>(null);
 
-  const computeSlotFromX = useCallback(
-    (clientX: number, draggingId: number): number | null => {
-      const container = handContainerRef.current;
-      if (!container) return null;
-      const cards = Array.from(
-        container.querySelectorAll<HTMLElement>("[data-card-hover]"),
-      );
-      return computeHandInsertionSlot(
-        cards.map((el) => {
-          const r = el.getBoundingClientRect();
-          return {
-            objectId: Number(el.dataset.objectId),
-            left: r.left,
-            width: r.width,
-          };
-        }),
-        clientX,
-        draggingId,
-      );
-    },
-    [],
-  );
+  // Drop-position caret (drag-to-rearrange). Driven by MotionValues set
+  // imperatively in handleDrag — NOT React state — so the memoized fan never
+  // re-renders on pointer move. A short spring glides the caret between slots.
+  const caretXRaw = useMotionValue(0);
+  const caretYRaw = useMotionValue(0);
+  const caretX = useSpring(caretXRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretY = useSpring(caretYRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretOpacity = useMotionValue(0);
 
   const handleDrag = useCallback(
     (objectId: number, info: PanInfo) => {
-      const slot = computeSlotFromX(info.point.x, objectId);
+      const container = handContainerRef.current;
+      if (!container) return;
+
+      // One DOM sweep, reused for both the slot and the caret position.
+      const rects = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-card-hover]"),
+      ).map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          objectId: Number(el.dataset.objectId),
+          left: r.left,
+          width: r.width,
+          top: r.top,
+          height: r.height,
+        };
+      });
+
+      const slot = computeHandInsertionSlot(rects, info.point.x, objectId);
       hoveredSlotRef.current = slot;
+
+      // Position the caret whenever a target slot exists (so the spring tracks it
+      // even while hidden), then gate visibility separately.
+      const bounds = container.getBoundingClientRect();
+      const marker = slot == null ? null : computeHandInsertionMarker(rects, slot, objectId);
+      if (marker) {
+        // -1.5 centers the 3px line on the insertion boundary.
+        caretXRaw.set(marker.x - bounds.left - 1.5);
+        caretYRaw.set(marker.top - bounds.top);
+      }
+
+      // CR n/a — pure UI gating. Reorder is a sideways/inside gesture; an upward
+      // drag past the play threshold (or leaving the hand band) is a play, so hide
+      // the caret then. Suppress during a pending cast and on mobile, and on the
+      // no-op slot (releasing in place — mirrors the fromIdx === targetSlot guard).
+      const fromIdx = rects.findIndex((r) => r.objectId === objectId);
+      const insideHand =
+        info.point.x >= bounds.left &&
+        info.point.x <= bounds.right &&
+        info.point.y >= bounds.top &&
+        info.point.y <= bounds.bottom;
+      const show =
+        !isMobile &&
+        pendingObjectId == null &&
+        marker != null &&
+        insideHand &&
+        info.offset.y >= DRAG_PLAY_THRESHOLD &&
+        slot !== fromIdx;
+      caretOpacity.set(show ? 1 : 0);
     },
-    [computeSlotFromX],
+    [isMobile, pendingObjectId, caretXRaw, caretYRaw, caretOpacity],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -163,10 +195,11 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
+        caretOpacity.set(0);
         // Reorder is disabled while a cast is in progress: handObjects filters
         // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
-        // has N entries. The slot index from `computeSlotFromX` would map to
-        // the wrong position in the unfiltered hand.
+        // has N entries. The slot index from `computeHandInsertionSlot` would
+        // map to the wrong position in the unfiltered hand.
         if (pendingObjectId != null) return false;
         if (targetSlot == null || !player) return false;
         const currentOrder = player.hand.slice();
@@ -184,7 +217,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId],
+    [hasPriority, playCard, player, pendingObjectId, caretOpacity],
   );
 
   const handleCardClick = useCallback(
@@ -239,7 +272,10 @@ export function PlayerHand() {
   );
 
   const handleDragStart = useCallback((id: number) => setDraggingCardId(id), []);
-  const handleDragStop = useCallback(() => setDraggingCardId(null), []);
+  const handleDragStop = useCallback(() => {
+    setDraggingCardId(null);
+    caretOpacity.set(0);
+  }, [caretOpacity]);
   const handleMouseEnter = useCallback((id: number) => { setExpanded(true); inspectObject(id); }, [inspectObject]);
   const handleMouseLeave = useCallback(() => inspectObject(null), [inspectObject]);
 
@@ -267,7 +303,10 @@ export function PlayerHand() {
           animate target — lets the memoized HandCards skip re-rendering when the
           hand expands/collapses. The lift lives on an inner wrapper so the outer
           container (which owns onMouseLeave) stays put and its collapse hit-area
-          doesn't move under the cursor. */}
+          doesn't move under the cursor.
+          // The drag drop-caret below is likewise driven by MotionValues (not state)
+          // so pointer-move updates never re-render these memoized cards — do not
+          // lift the hovered slot into React state. */}
       <motion.div
         className="flex items-end justify-center"
         animate={{ y: expanded ? -50 : 0 }}
@@ -306,6 +345,16 @@ export function PlayerHand() {
         })}
         </AnimatePresence>
       </motion.div>
+      {/* Drop-position caret: a glowing insertion line marking where a dragged
+          card will land. x/y/opacity are MotionValues set in handleDrag, so the
+          memoized fan never re-renders. Hidden on mobile (drawer is the surface). */}
+      {!isMobile && (
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute left-0 top-0 z-50 w-[3px] rounded-full bg-cyan-400/90 shadow-[0_0_12px_3px_rgba(34,211,238,0.7)] h-[calc(var(--card-h)*1.14)] sm:h-[calc(var(--card-h)*1.34)] md:h-[calc(var(--card-h)*1.4)]"
+          style={{ x: caretX, y: caretY, opacity: caretOpacity }}
+        />
+      )}
     </div>
   );
 }
