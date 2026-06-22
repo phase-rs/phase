@@ -69,6 +69,8 @@ describe("SelectableCardGrid toolbar + keyboard", () => {
     const grid = screen.getByRole("status").parentElement as HTMLElement;
     fireEvent.keyDown(grid, { key: "a" });
     expect(onChange).toHaveBeenCalledWith(new Set([1, 2]));
+    fireEvent.keyDown(grid, { key: "c" });
+    expect(onChange).toHaveBeenCalledWith(new Set());
   });
 });
 

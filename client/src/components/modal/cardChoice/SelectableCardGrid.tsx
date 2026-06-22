@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -59,6 +59,16 @@ export default function SelectableCardGrid({
 
   const ordered = useMemo(() => orderCards(cards, objects, sort), [cards, objects, sort]);
   const groups = useMemo(() => groupCards(ordered, objects, group), [ordered, objects, group]);
+  const orderedIndexMap = useMemo(
+    () => new Map(ordered.map((id, i) => [id, i])),
+    [ordered],
+  );
+
+  // Reset the shift-range anchor when the display order changes, so a stale
+  // ordered-index can't anchor a range against a reordered list.
+  useEffect(() => {
+    lastIndexRef.current = null;
+  }, [sort, group]);
 
   const bulk = useCallback(
     (action: "all" | "invert" | "clear") => onChange(applyBulk(action, ordered, value, cap)),
@@ -141,7 +151,7 @@ export default function SelectableCardGrid({
               {g.ids.map((id) => {
                 const obj = objects[id];
                 if (!obj) return null;
-                const orderedIndex = ordered.indexOf(id);
+                const orderedIndex = orderedIndexMap.get(id) ?? -1;
                 const isSelected = value.has(id);
                 return (
                   <motion.button
