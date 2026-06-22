@@ -13,7 +13,6 @@ import type {
   CounterType,
   ExileCostSourceZone,
   GameObject,
-  ManaCost,
   ManaType,
   ObjectId,
   OutsideGameChoiceEntry,
@@ -69,6 +68,7 @@ import {
   searchChoiceSubtitle,
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
+import { manaValueOfObject } from "./cardChoice/manaValue.ts";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -2228,38 +2228,6 @@ function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
       confirmLabel={t("cardChoice.badges.exile")}
     />
   );
-}
-
-function manaValueOfShard(shard: string): number {
-  switch (shard) {
-    case "TwoWhite":
-    case "TwoBlue":
-    case "TwoBlack":
-    case "TwoRed":
-    case "TwoGreen":
-      return 2;
-    case "X":
-      return 0;
-    default:
-      return 1;
-  }
-}
-
-function manaValueOfCost(cost: ManaCost): number {
-  switch (cost.type) {
-    case "NoCost":
-    case "SelfManaCost":
-      return 0;
-    case "Cost":
-      return (
-        cost.generic +
-        cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0)
-      );
-  }
-}
-
-function manaValueOfObject(obj: { mana_cost: ManaCost }): number {
-  return manaValueOfCost(obj.mana_cost);
 }
 
 function CollectEvidenceModal({
