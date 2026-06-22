@@ -1395,6 +1395,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
+            excess_only,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1405,10 +1406,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
+            let excess_tag = if *excess_only { " excess" } else { "" };
             format!(
-                "{}{} damage dealt this turn ({} -> {}) [{group}]",
+                "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
                 kind,
+                excess_tag,
                 fmt_target(source),
                 fmt_target(target)
             )

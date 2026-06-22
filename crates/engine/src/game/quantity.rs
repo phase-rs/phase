@@ -2600,6 +2600,7 @@ fn resolve_ref(
             aggregate,
             group_by,
             damage_kind,
+            excess_only,
         } => resolve_damage_dealt_this_turn(
             state,
             controller,
@@ -2611,6 +2612,7 @@ fn resolve_ref(
             *aggregate,
             *group_by,
             *damage_kind,
+            *excess_only,
         ),
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| u32_to_i32_saturating(p.turns_taken)),
@@ -3087,6 +3089,10 @@ fn resolve_damage_dealt_this_turn(
     aggregate: AggregateFunction,
     group_by: Option<crate::types::ability::DamageGroupKey>,
     damage_kind: crate::types::ability::DamageKindFilter,
+    // CR 120.10: When true, only count records where excess > 0 — i.e. overkill
+    // damage beyond lethal/loyalty/defense. Used by the "was dealt excess damage
+    // this turn" intervening-if condition class (Maarika, Rith, etc.).
+    excess_only: bool,
 ) -> i32 {
     use crate::types::ability::DamageGroupKey;
 
@@ -3102,7 +3108,11 @@ fn resolve_damage_dealt_this_turn(
         |record: &DamageRecord| damage_record_source_matches(state, record, source, filter_ctx);
 
     let matching = state.damage_dealt_this_turn.iter().filter(|record| {
-        damage_record_matches_kind(record, damage_kind)
+        // CR 120.10: excess_only gates on the per-record excess amount captured at
+        // damage time, so a "was dealt excess damage" query never double-counts
+        // separate non-overkill hits to the same target.
+        (!excess_only || record.excess > 0)
+            && damage_record_matches_kind(record, damage_kind)
             && source_matches(record)
             && damage_record_target_matches(
                 state, record, controller, ctx, ability, target, filter_ctx,
@@ -6256,6 +6266,8 @@ mod tests {
                 aggregate: AggregateFunction::Max,
                 group_by: Some(crate::types::ability::DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
@@ -6309,6 +6321,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
@@ -6349,6 +6363,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
@@ -6441,6 +6457,8 @@ mod tests {
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
         // P0's single largest source contribution is 5 (Lightning Rig: 3+2),
@@ -6501,6 +6519,8 @@ mod tests {
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
         // P0 still sees their 4 damage even though the live source is now P1's.
@@ -6553,6 +6573,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         };
 
@@ -6613,6 +6635,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::NoncombatOnly,
+
+                excess_only: false,
             },
         };
         assert_eq!(
@@ -6643,12 +6667,17 @@ mod tests {
                 aggregate,
                 group_by,
                 damage_kind,
+                excess_only,
             } => {
                 assert_eq!(*source, TargetFilter::Any);
                 assert_eq!(*target, TargetFilter::SelfRef);
                 assert_eq!(aggregate, AggregateFunction::Sum);
                 assert_eq!(group_by, None);
                 assert_eq!(damage_kind, crate::types::ability::DamageKindFilter::Any);
+                assert!(
+                    !excess_only,
+                    "legacy JSON should default excess_only to false"
+                );
                 // Sanity: an explicit Max+SourceId still round-trips.
                 let new_form = QuantityRef::DamageDealtThisTurn {
                     source: Box::new(TargetFilter::Any),
@@ -6656,6 +6685,8 @@ mod tests {
                     aggregate: AggregateFunction::Max,
                     group_by: Some(DamageGroupKey::SourceId),
                     damage_kind: DamageKindFilter::Any,
+
+                    excess_only: false,
                 };
                 let round_trip: QuantityRef =
                     serde_json::from_str(&serde_json::to_string(&new_form).unwrap()).unwrap();
@@ -7816,6 +7847,8 @@ mod tests {
                         aggregate: AggregateFunction::Sum,
                         group_by: None,
                         damage_kind: DamageKindFilter::Any,
+
+                        excess_only: false,
                     },
                 },
                 PlayerId(0),

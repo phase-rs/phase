@@ -662,6 +662,11 @@ pub struct DamageRecord {
     /// (the common combat-damage case) for legacy records and test fixtures.
     #[serde(default = "default_source_zone")]
     pub source_zone: Zone,
+    /// CR 120.10: Excess damage beyond lethal for creatures/planeswalkers/battles.
+    /// Zero for players and for damage that does not overkill. Used by the
+    /// "was dealt excess damage this turn" intervening-if condition class.
+    #[serde(default)]
+    pub excess: u32,
 }
 
 /// CR 608.2i: Default damage-source zone. Combat damage — the overwhelmingly
@@ -697,6 +702,7 @@ impl Default for DamageRecord {
             source_controller_snapshot: PlayerId(0),
             source_owner: PlayerId(0),
             source_zone: Zone::Battlefield,
+            excess: 0,
         }
     }
 }

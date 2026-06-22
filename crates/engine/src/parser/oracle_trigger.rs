@@ -19120,6 +19120,72 @@ mod tests {
         ));
     }
 
+    /// CR 120.10 + CR 603.4: Maarika, Brutal Gladiator's "Whenever ~ deals
+    /// damage to a creature, if that creature was dealt excess damage this turn"
+    /// must hoist the excess-damage clause as a `TriggerCondition::QuantityComparison`
+    /// with `excess_only: true`, not silently drop it (condition: null).
+    #[test]
+    fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
+        let def = parse_trigger_line(
+            "Whenever Maarika deals damage to a creature, if that creature was dealt excess damage this turn, that creature's controller sacrifices a noncreature, nonland permanent.",
+            "Maarika, Brutal Gladiator",
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::DamageDealtThisTurn {
+                            excess_only: true,
+                            ..
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                })
+            ),
+            "expected excess-damage intervening-if, got: {:?}",
+            def.condition
+        );
+    }
+
+    /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's phase trigger with an
+    /// opponent-scoped excess-damage intervening-if must set `excess_only: true`
+    /// and produce a non-trivial target filter. `parse_type_phrase` emits
+    /// `TargetFilter::Or` for compound types, so we check excess_only and
+    /// that the condition is a QuantityComparison with DamageDealtThisTurn.
+    #[test]
+    fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if a creature or planeswalker an opponent controlled was dealt excess damage this turn, create a 4/4 red Dragon creature token with flying.",
+            "Rith, Liberated Primeval",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) = def.condition
+        else {
+            panic!(
+                "expected QuantityComparison(DamageDealtThisTurn), got: {:?}",
+                def.condition
+            );
+        };
+        assert!(excess_only, "excess_only must be true for Rith's trigger");
+        assert!(
+            !matches!(target.as_ref(), TargetFilter::Any),
+            "target filter must be non-Any, got: {target:?}"
+        );
+    }
+
     #[test]
     fn trigger_intervening_if_you_were_dealt_damage_threshold_this_turn() {
         let def = parse_trigger_line(

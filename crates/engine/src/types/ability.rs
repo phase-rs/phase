@@ -4131,6 +4131,11 @@ pub enum QuantityRef {
             skip_serializing_if = "is_default_damage_kind"
         )]
         damage_kind: DamageKindFilter,
+        /// CR 120.10: When true, only count records where `excess > 0` —
+        /// i.e. damage that was lethal-overkill. Used by the
+        /// "was dealt excess damage this turn" intervening-if class.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        excess_only: bool,
     },
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
