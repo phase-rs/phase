@@ -766,6 +766,29 @@ fn try_nom_condition_as_unless(
 
 pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    // CR 603.4 + CR 601.2: Negated form — "if you didn't cast it from your
+    // hand/graveyard/exile" (Epochrasite, Phage the Untouchable on effect-level
+    // paths). MUST precede the positive form to avoid partial prefix matching.
+    if let Some((zone, rest)) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(Zone::Hand, tag("if you didn't cast it from your hand")),
+            value(
+                Zone::Graveyard,
+                tag("if you didn't cast it from your graveyard"),
+            ),
+            value(Zone::Exile, tag("if you didn't cast it from exile")),
+        ))
+        .parse(input)
+    }) {
+        let rest = rest.strip_prefix(", ").unwrap_or(rest);
+        return (
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::CastFromZone { zone }),
+            }),
+            rest.to_string(),
+        );
+    }
+    // CR 603.4 + CR 601.2: Positive form — "if you cast it from your hand/exile/graveyard".
     if let Some((zone, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(Zone::Hand, tag("if you cast it from your hand")),
