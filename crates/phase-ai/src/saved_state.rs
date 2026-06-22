@@ -28,8 +28,11 @@ fn migrate_saved_state(value: &mut Value) {
             if let Some(condition) = map.get_mut("condition") {
                 migrate_condition(condition);
             }
+            if let Some(modification) = map.get_mut("quantity_modification") {
+                migrate_quantity_modification(modification);
+            }
             for (key, value) in map {
-                if key != "effect" && key != "condition" {
+                if key != "effect" && key != "condition" && key != "quantity_modification" {
                     migrate_saved_state(value);
                 }
             }
@@ -54,6 +57,15 @@ fn migrate_condition(condition: &mut Value) {
         }
     }
     migrate_saved_state(condition);
+}
+
+fn migrate_quantity_modification(modification: &mut Value) {
+    if let Value::Object(map) = modification {
+        if migrate_legacy_double_quantity(map) {
+            return;
+        }
+    }
+    migrate_saved_state(modification);
 }
 
 fn migrate_legacy_tap_effect(map: &mut Map<String, Value>) -> bool {
@@ -90,6 +102,20 @@ fn migrate_legacy_attackers_declared_min(map: &mut Map<String, Value>) -> bool {
     map.insert("subject".to_string(), Value::Object(subject));
     map.insert("comparator".to_string(), Value::String("GE".to_string()));
     map.insert("count".to_string(), count);
+    true
+}
+
+/// `QuantityModification::Double` (unit) was parameterized into `Times { factor }`
+/// (factor 2 = the former doubling; factor 3 = Ojer Taq, Deepest Foundation).
+/// Saved states captured before that change carry `{"type":"Double"}`; rewrite
+/// them to the equivalent `{"type":"Times","factor":2}` so old replacement
+/// definitions keep loading.
+fn migrate_legacy_double_quantity(map: &mut Map<String, Value>) -> bool {
+    let Some("Double") = map.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    map.insert("type".to_string(), Value::String("Times".to_string()));
+    map.insert("factor".to_string(), Value::from(2));
     true
 }
 
@@ -171,6 +197,37 @@ mod tests {
                 "scope": { "type": "All" },
                 "state": { "type": "Untap" }
             })
+        );
+    }
+
+    #[test]
+    fn migrates_legacy_double_quantity_modification_without_touching_effect_double() {
+        let mut value = json!({
+            "gameState": {
+                "replacement_definitions": [
+                    {
+                        "quantity_modification": { "type": "Double" }
+                    }
+                ],
+                "stack": [
+                    {
+                        "effect": { "type": "Double", "target_kind": { "type": "Tokens" } }
+                    }
+                ]
+            }
+        });
+
+        migrate_saved_state(&mut value);
+
+        // The renamed QuantityModification is rewritten to the parameterized form.
+        assert_eq!(
+            value["gameState"]["replacement_definitions"][0]["quantity_modification"],
+            json!({ "type": "Times", "factor": 2 })
+        );
+        // Effect::Double is a different (unchanged) enum and must be left intact.
+        assert_eq!(
+            value["gameState"]["stack"][0]["effect"],
+            json!({ "type": "Double", "target_kind": { "type": "Tokens" } })
         );
     }
 

@@ -14612,7 +14612,7 @@ its replicate cost was paid.)\nDraw a card.";
 
         // CR 614.1a: counter-doubling replacement effect (Doubling Season-class).
         let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         runner
             .state_mut()
             .objects

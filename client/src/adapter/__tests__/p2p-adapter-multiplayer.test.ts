@@ -460,7 +460,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
   });
 
-  it("starts grace-window timer on guest disconnect and auto-concedes on expiry", async () => {
+  it("holds the seat on guest disconnect and NEVER auto-concedes on grace expiry", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
     const g1 = await joinGuest(emitConnection, {
@@ -473,30 +473,50 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
     await adapter.initializeGame();
 
+    // Capture g1's token before it drops, to prove the seat stays reclaimable.
+    const setup = (await g1.getSentMessages()).find(
+      (m): m is { type: "game_setup"; playerToken: string } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
+    );
+    const token = setup!.playerToken;
+
     // Capture the disconnect-with-choice event.
     const events: Array<{ type: string }> = [];
     adapter.onEvent((e) => events.push(e));
 
     g1.simulateClose(); // guest 1 drops
 
-    // Adapter should have emitted the choice event and broadcast game_paused.
-    const choiceEvent = events.find(
-      (e) => e.type === "opponentDisconnectedWithChoice",
-    );
-    expect(choiceEvent).toBeDefined();
+    // Adapter emits the choice event so the host can decide — but takes no
+    // automatic action against the dropped player.
+    expect(
+      events.find((e) => e.type === "opponentDisconnectedWithChoice"),
+    ).toBeDefined();
 
-    // Advance past the grace window — auto-concede must fire.
+    // Advance well past the old grace window — a dropped player must NOT be
+    // auto-conceded. The seat is held indefinitely, waiting for them.
     mockSubmitAction.mockClear();
-    await vi.advanceTimersByTimeAsync(5_500);
-
-    // Concede submitted to engine for guest 1 (PlayerId 1).
-    expect(mockSubmitAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "Concede",
-        data: { player_id: 1 },
-      }),
-      1,
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockSubmitAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "Concede" }),
+      expect.anything(),
     );
+
+    // The seat is still reclaimable long after the old grace window: a
+    // reconnect with the original token still yields a reconnect_ack — proving
+    // the seat was held, not conceded or freed.
+    const g1Reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: token,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const ack = (await g1Reconnect.getSentMessages()).find(
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as { type: string }).type === "reconnect_ack",
+    );
+    expect(ack).toBeDefined();
   });
 
   it("cancels grace timer and resumes on reconnect with valid token", async () => {
