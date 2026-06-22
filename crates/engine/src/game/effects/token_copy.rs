@@ -1485,7 +1485,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }
@@ -1585,7 +1585,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }

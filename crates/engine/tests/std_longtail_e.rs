@@ -9,9 +9,18 @@
 //! Building-block win (named-token parsing): "Primo, the Indivisible, a legendary
 //! 0/0 … token" — a multi-comma legendary token name now parses.
 //!
+//! Building-block win (token-count multiplier): Ojer Taq, Deepest Foundation —
+//! "three times that many of those tokens are created instead" now parses to the
+//! parameterized `QuantityModification::Times { factor: 3 }` (the former ×2
+//! `Double` is now `Times { factor: 2 }`). See the runtime triplication +
+//! creature-gate tests in `game::replacement::tests`.
+//!
 //! Deferred (honest `Effect::unimplemented` / SwallowedClause retained, NOT
-//! asserted 0-unimpl): Ojer Taq (token-triplication replacement — heavy CR 616
-//! commute interaction), Vraska the Silencer (return-as-Treasure-with-ability —
+//! asserted 0-unimpl): Moonlit Meditation (first-time-each-turn optional
+//! CreateToken replacement that overrides the spec to copies of the enchanted
+//! permanent — needs a per-turn token-creation gate, an Optional CreateToken
+//! pipeline, and a dynamic host-copy spec; out of scope for the multiplier
+//! parameterization), Vraska the Silencer (return-as-Treasure-with-ability —
 //! heavy continuous-self-modification infra), Zimone (prime-number intervening-if
 //! condition — heavy primality predicate; the token+counter parse is fixed, the
 //! card stays honestly condition-unsupported via a SwallowedClause warning).
@@ -255,4 +264,43 @@ fn contested_game_ball_attacker_gains_control_and_untaps() {
     );
     // The recipient really came from the triggering source's controller.
     let _ = TargetFilter::TriggeringSourceController;
+}
+
+// ---------------------------------------------------------------------------
+// Ojer Taq, Deepest Foundation — token-count ×3 multiplier replacement
+// ---------------------------------------------------------------------------
+
+/// CR 614.1a + CR 111.1: The full front-face oracle parses with zero
+/// `Unimplemented` nodes. The previously-deferred token-triplication line
+/// ("three times that many of those tokens are created instead") now lowers to a
+/// `CreateToken` replacement carrying the parameterized
+/// `QuantityModification::Times { factor: 3 }` multiplier, gated to creature
+/// tokens. Vigilance and the dies-trigger already parsed; this asserts they
+/// stay clean alongside the new replacement. Reverting the multiplier parser
+/// leaves the line `Unimplemented`, flipping `assert_zero_unimplemented` and the
+/// replacement-shape assertions below.
+#[test]
+fn ojer_taq_token_triplication_full_card_parses() {
+    use engine::types::ability::QuantityModification;
+    use engine::types::replacements::ReplacementEvent;
+
+    let parsed = parse(
+        "Vigilance\nIf one or more creature tokens would be created under your control, three times that many of those tokens are created instead.\nWhen Ojer Taq, Deepest Foundation dies, return it transformed.",
+        "Ojer Taq, Deepest Foundation",
+        &["Vigilance"],
+        &["Legendary", "Creature"],
+        &["God"],
+    );
+    assert_zero_unimplemented(&parsed, "Ojer Taq, Deepest Foundation");
+
+    let token_repl = parsed
+        .replacements
+        .iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Ojer Taq must produce a CreateToken replacement");
+    assert_eq!(
+        token_repl.quantity_modification,
+        Some(QuantityModification::Times { factor: 3 }),
+        "Ojer Taq must triplicate (Times {{ factor: 3 }}), not double"
+    );
 }

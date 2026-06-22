@@ -1123,7 +1123,7 @@ fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDef
         let (i, _) = tag(", ").parse(i)?;
         let (i, quantity_modification) = alt((
             value(
-                Some(QuantityModification::Double),
+                Some(QuantityModification::DOUBLE),
                 terminated(parse_double_lose_life_consequence, opt(char('.'))),
             ),
             value(None, parse_lose_life_instead_consequence),
@@ -5628,9 +5628,11 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 }
 
 /// CR 614.1a: Parse token creation replacement effects.
-/// Handles "twice that many tokens" (Primal Vigor, Doubling Season, Parallel Lives)
-/// and "those tokens plus [spec]" (Chatterfang — "that many 1/1 green Squirrel
-/// creature tokens"; Donatello — "a Mutagen token").
+/// Handles the multiplicative family "twice that many tokens" (×2 — Primal Vigor,
+/// Doubling Season, Parallel Lives) and "<N> times that many" (×N — Ojer Taq,
+/// Deepest Foundation's "three times that many"), plus "those tokens plus [spec]"
+/// (Chatterfang — "that many 1/1 green Squirrel creature tokens"; Donatello —
+/// "a Mutagen token").
 fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
@@ -5640,8 +5642,8 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
         .description(original_text.to_string());
 
     match modification_mode {
-        TokenReplacementShape::Double => {
-            def = def.quantity_modification(QuantityModification::Double);
+        TokenReplacementShape::Times { factor } => {
+            def = def.quantity_modification(QuantityModification::Times { factor });
         }
         TokenReplacementShape::Half => {
             def = def.quantity_modification(QuantityModification::Half);
@@ -5657,15 +5659,18 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
             // `create_token_applier` resolves it to a TokenSpec and swaps it in,
             // preserving the event's count and owner.
             def = def.execute(AbilityDefinition::new(AbilityKind::Spell, *token));
-            // CR 111.1: gate the substitution on the proposed token's core card
-            // type ("if one or more CREATURE tokens would be created" — only
-            // creature tokens become Angels).
-            if let Some(core_type) = parse_token_core_type_gate(lower) {
-                def = def.condition(ReplacementCondition::TokenCoreTypeMatches {
-                    core_types: vec![core_type],
-                });
-            }
         }
+    }
+
+    // CR 111.1: gate on the proposed token's core card type when the trigger
+    // names one ("if one or more CREATURE tokens would be created" — Divine
+    // Visitation only affects creature tokens; Ojer Taq, Deepest Foundation
+    // only triplicates creature tokens). Untyped "one or more tokens"
+    // (Doubling Season) emits no gate and applies to every token type.
+    if let Some(core_type) = parse_token_core_type_gate(lower) {
+        def = def.condition(ReplacementCondition::TokenCoreTypeMatches {
+            core_types: vec![core_type],
+        });
     }
 
     // Scope: "under your control" → restrict to controller's tokens
@@ -5683,8 +5688,10 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
 }
 
 enum TokenReplacementShape {
-    /// "twice that many tokens … are created instead" (Doubling Season).
-    Double,
+    /// "twice that many tokens … are created instead" (Doubling Season, factor 2)
+    /// or "three times that many of those tokens are created instead" (Ojer Taq,
+    /// Deepest Foundation, factor 3) — the general ×N multiplier.
+    Times { factor: u32 },
     /// "half that many … tokens … instead, rounded down" (Halving Season).
     Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
@@ -5706,15 +5713,14 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
         return Some(TokenReplacementShape::Half);
     }
 
-    // "twice that many" → Doubling Season pattern.
-    if nom_on_lower(lower, lower, |i| {
-        let (i, _) = take_until::<_, _, OracleError<'_>>("twice that many").parse(i)?;
-        let (i, _) = tag("twice that many").parse(i)?;
-        Ok((i, ()))
-    })
-    .is_some()
-    {
-        return Some(TokenReplacementShape::Double);
+    // "twice that many" (factor 2) or "<N> times that many" (factor N) →
+    // multiplicative pattern. Doubling Season uses "twice"; Ojer Taq, Deepest
+    // Foundation uses "three times that many of those tokens are created
+    // instead." Composed along one axis (the multiplier phrase) via `alt`,
+    // delegating the number word to `parse_number`, so any future ×N card
+    // ("four times that many") is covered without a new tag.
+    if let Some(factor) = scan_token_multiplier_factor(lower) {
+        return Some(TokenReplacementShape::Times { factor });
     }
 
     // "those tokens plus <spec> (is|are) created instead" → Chatterfang / Donatello.
@@ -5734,6 +5740,36 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     }
 
     None
+}
+
+/// CR 614.1a: Scan for a multiplicative token-count phrase and return its
+/// factor. Recognizes "twice that many" (factor 2 — Doubling Season) and
+/// "<number> times that many" (factor N — Ojer Taq's "three times that many").
+/// The number word is parsed by the shared `parse_number` combinator, so the
+/// pattern covers every ×N multiplier card in the class, not just ×3.
+///
+/// The multiplier phrase appears mid-sentence (after "instead"), so the
+/// combinator is tried at each word boundary using the documented word-boundary
+/// scanning idiom — `parse_number` is anchored on the trailing `" times that
+/// many"` tag at each position rather than scanning the string for a substring.
+fn scan_token_multiplier_factor(lower: &str) -> Option<u32> {
+    // The multiplier head anchored at the current word boundary: either the ×2
+    // leaf "twice that many" or the general ×N form "<number> times that many"
+    // (number axis × fixed tail, so any ×N word is covered without per-factor
+    // tags). A standalone fn so it carries no capture lifetime into the scan.
+    fn multiplier_head(i: &str) -> OracleResult<'_, u32> {
+        let n_times = |i| {
+            let (i, factor) = nom_primitives::parse_number.parse(i)?;
+            let (i, _) = tag(" times that many").parse(i)?;
+            Ok((i, factor))
+        };
+        alt((value(2u32, tag("twice that many")), n_times)).parse(i)
+    }
+
+    // Input is already lowercase, so try `multiplier_head` at each word boundary
+    // via the shared scan helper (cf. `scan_for_phase`) rather than re-rolling
+    // the loop.
+    nom_primitives::scan_at_word_boundaries(lower, multiplier_head)
 }
 
 /// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
@@ -6152,7 +6188,7 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let modification = if nom_primitives::scan_contains(lower, "half that many") {
         QuantityModification::Half
     } else if nom_primitives::scan_contains(lower, "twice that many") {
-        QuantityModification::Double
+        QuantityModification::DOUBLE
     } else if let Some(rest) = strip_after(lower, "that many plus ") {
         // "that many plus one ... counters are put on it instead"
         // Delegate to nom_primitives::parse_number (input already lowercase)
@@ -8883,7 +8919,7 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::LoseLife);
         assert_eq!(
             def.quantity_modification,
-            Some(QuantityModification::Double)
+            Some(QuantityModification::DOUBLE)
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
     }
@@ -12276,9 +12312,47 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::CreateToken);
         assert_eq!(
             def.quantity_modification,
-            Some(QuantityModification::Double)
+            Some(QuantityModification::DOUBLE)
         );
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn ojer_taq_token_triplication_replacement() {
+        // CR 614.1a + CR 111.1: "three times that many" parameterizes the ×N
+        // token multiplier (factor 3), gated to creature tokens.
+        let def = parse_replacement_line(
+            "If one or more creature tokens would be created under your control, three times that many of those tokens are created instead.",
+            "Ojer Taq, Deepest Foundation",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Times { factor: 3 })
+        );
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        // CR 111.1: gated on creature tokens only.
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::TokenCoreTypeMatches { ref core_types })
+                if core_types == &vec![crate::types::card_type::CoreType::Creature]
+        ));
+    }
+
+    #[test]
+    fn token_doubling_via_twice_is_factor_two() {
+        // Regression: "twice that many" still parameterizes to factor 2 after
+        // the Double → Times { factor } migration.
+        let def = parse_replacement_line(
+            "If one or more tokens would be created under your control, twice that many tokens are created instead.",
+            "Parallel Lives",
+        )
+        .unwrap();
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Times { factor: 2 })
+        );
     }
 
     #[test]
@@ -12371,7 +12445,7 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::AddCounter);
         assert_eq!(
             def.quantity_modification,
-            Some(QuantityModification::Double)
+            Some(QuantityModification::DOUBLE)
         );
         assert!(matches!(
             def.valid_card,
@@ -13200,7 +13274,7 @@ mod tests {
         let def = parse_token_replacement(lower, lower).expect("double shape parses");
         assert!(matches!(
             def.quantity_modification,
-            Some(crate::types::ability::QuantityModification::Double)
+            Some(crate::types::ability::QuantityModification::DOUBLE)
         ));
         assert!(def.additional_token_spec.is_none());
     }

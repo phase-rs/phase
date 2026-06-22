@@ -6315,7 +6315,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Optional { decline: None };
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 
@@ -6328,7 +6328,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Mandatory;
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 
