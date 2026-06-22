@@ -5377,6 +5377,126 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
     }
 }
 
+/// CR 613.1f: "each other creature with a +1/+1 counter on it" (Experiment Kraj)
+/// — all creatures with at least one +1/+1 counter, excluding self.
+#[test]
+fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::counter::{CounterMatch, CounterType};
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Counters {
+                        counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                ])),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SelfRef),
+                },
+            ],
+        },
+    };
+    for predicate in [
+        "all activated abilities of each other creature with a +1/+1 counter on it",
+        "has all activated abilities of each other creature with a +1/+1 counter on it",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 613.1f: "all creatures your opponents control" (Drana and Linvala)
+#[test]
+fn parse_grant_all_activated_abilities_opponents_creatures() {
+    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+    };
+    for predicate in [
+        "all activated abilities of all creatures your opponents control",
+        "has all activated abilities of all creatures your opponents control",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
+#[test]
+fn parse_grant_all_activated_abilities_creature_cards_in_graveyards() {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }])),
+    };
+    for predicate in [
+        "all activated abilities of all creature cards in all graveyards",
+        "has all activated abilities of all creature cards in all graveyards",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
+#[test]
+fn parse_grant_all_activated_abilities_all_lands() {
+    use crate::types::ability::{TargetFilter, TypedFilter};
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(TypedFilter::land()),
+    };
+    for predicate in [
+        "all activated abilities of all lands on the battlefield",
+        "has all activated abilities of all lands on the battlefield",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
+#[test]
+fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::card_type::Supertype;
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasSupertype {
+                    value: Supertype::Legendary,
+                }]),
+        ),
+    };
+    for predicate in [
+        "all activated abilities of all legendary creatures you control",
+        "has all activated abilities of all legendary creatures you control",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
 /// CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" (and the
 /// has/have/are/is copula variants) maps to `AddAllBasicLandTypes`; "gain all
 /// land types" maps to `AddAllLandTypes`. Building-block coverage for the whole
