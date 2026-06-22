@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Voltar ao deck",
     "listView": "Visualização em lista",
-    "stackView": "Visualização em pilha"
+    "stackView": "Visualização em pilha",
+    "groupType": "Tipo",
+    "groupColor": "Cor",
+    "groupByType": "Agrupar por tipo",
+    "groupByColor": "Agrupar por cor"
   },
   "tabs": {
     "ariaLabel": "Superfície do construtor de decks",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Passe o mouse sobre uma carta do deck principal e clique em → para movê-la para cá.",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Mágicas",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Mágicas Instantâneas",
+      "Sorceries": "Feitiços",
+      "Artifacts": "Artefatos",
+      "Enchantments": "Encantamentos",
+      "Battles": "Batalhas",
+      "Lands": "Terrenos",
+      "Other": "Outros"
+    },
+    "colorGroup": {
+      "White": "Branco",
+      "Blue": "Azul",
+      "Black": "Preto",
+      "Red": "Vermelho",
+      "Green": "Verde",
+      "Multicolor": "Multicolorido",
+      "Colorless": "Incolor",
       "Lands": "Terrenos"
     },
     "importModalTitle": "Importar Deck",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} cartas",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Mágicas",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Mágicas Instantâneas",
+      "Sorceries": "Feitiços",
+      "Artifacts": "Artefatos",
+      "Enchantments": "Encantamentos",
+      "Battles": "Batalhas",
+      "Lands": "Terrenos",
+      "Other": "Outros"
+    },
+    "colorGroup": {
+      "White": "Branco",
+      "Blue": "Azul",
+      "Black": "Preto",
+      "Red": "Vermelho",
+      "Green": "Verde",
+      "Multicolor": "Multicolorido",
+      "Colorless": "Incolor",
       "Lands": "Terrenos"
     },
     "sideboardGroup": "Sideboard",

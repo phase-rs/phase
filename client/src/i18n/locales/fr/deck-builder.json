@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Retour au deck",
     "listView": "Vue en liste",
-    "stackView": "Vue en pile"
+    "stackView": "Vue en pile",
+    "groupType": "Type",
+    "groupColor": "Couleur",
+    "groupByType": "Grouper par type",
+    "groupByColor": "Grouper par couleur"
   },
   "tabs": {
     "ariaLabel": "Surface du constructeur de deck",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Survolez une carte du deck principal et cliquez sur → pour la déplacer ici.",
     "group": {
       "Creatures": "Créatures",
-      "Spells": "Sorts",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Éphémères",
+      "Sorceries": "Rituels",
+      "Artifacts": "Artefacts",
+      "Enchantments": "Enchantements",
+      "Battles": "Batailles",
+      "Lands": "Terrains",
+      "Other": "Autres"
+    },
+    "colorGroup": {
+      "White": "Blanc",
+      "Blue": "Bleu",
+      "Black": "Noir",
+      "Red": "Rouge",
+      "Green": "Vert",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terrains"
     },
     "importModalTitle": "Importer un deck",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} cartes",
     "group": {
       "Creatures": "Créatures",
-      "Spells": "Sorts",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Éphémères",
+      "Sorceries": "Rituels",
+      "Artifacts": "Artefacts",
+      "Enchantments": "Enchantements",
+      "Battles": "Batailles",
+      "Lands": "Terrains",
+      "Other": "Autres"
+    },
+    "colorGroup": {
+      "White": "Blanc",
+      "Blue": "Bleu",
+      "Black": "Noir",
+      "Red": "Rouge",
+      "Green": "Vert",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terrains"
     },
     "sideboardGroup": "Réserve",

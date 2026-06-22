@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Zurück zum Deck",
     "listView": "Listenansicht",
-    "stackView": "Stapelansicht"
+    "stackView": "Stapelansicht",
+    "groupType": "Typ",
+    "groupColor": "Farbe",
+    "groupByType": "Nach Typ gruppieren",
+    "groupByColor": "Nach Farbe gruppieren"
   },
   "tabs": {
     "ariaLabel": "Deckbuilder-Oberfläche",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Fahre über eine Hauptdeck-Karte und klicke auf →, um sie hierher zu verschieben.",
     "group": {
       "Creatures": "Kreaturen",
-      "Spells": "Zaubersprüche",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Spontanzauber",
+      "Sorceries": "Hexereien",
+      "Artifacts": "Artefakte",
+      "Enchantments": "Verzauberungen",
+      "Battles": "Schlachten",
+      "Lands": "Länder",
+      "Other": "Sonstige"
+    },
+    "colorGroup": {
+      "White": "Weiß",
+      "Blue": "Blau",
+      "Black": "Schwarz",
+      "Red": "Rot",
+      "Green": "Grün",
+      "Multicolor": "Mehrfarbig",
+      "Colorless": "Farblos",
       "Lands": "Länder"
     },
     "importModalTitle": "Deck importieren",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} Karten",
     "group": {
       "Creatures": "Kreaturen",
-      "Spells": "Zaubersprüche",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Spontanzauber",
+      "Sorceries": "Hexereien",
+      "Artifacts": "Artefakte",
+      "Enchantments": "Verzauberungen",
+      "Battles": "Schlachten",
+      "Lands": "Länder",
+      "Other": "Sonstige"
+    },
+    "colorGroup": {
+      "White": "Weiß",
+      "Blue": "Blau",
+      "Black": "Schwarz",
+      "Red": "Rot",
+      "Green": "Grün",
+      "Multicolor": "Mehrfarbig",
+      "Colorless": "Farblos",
       "Lands": "Länder"
     },
     "sideboardGroup": "Sideboard",

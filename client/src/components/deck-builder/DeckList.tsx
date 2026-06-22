@@ -4,9 +4,11 @@ import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
+import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
+import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
@@ -33,25 +35,12 @@ interface DeckListProps {
   commanders?: string[];
   /** Demotes a commander back into the main deck. Paired with `commanders`. */
   onRemoveCommander?: (name: string) => void;
+  /** Card data used to classify each main-deck entry into its group. */
+  cardDataCache: Map<string, ScryfallCard>;
+  /** Whether the main deck is sub-grouped by card type or by color. */
+  groupMode: GroupMode;
 }
 
-
-interface GroupedEntries {
-  Creatures: DeckEntry[];
-  Spells: DeckEntry[];
-  Lands: DeckEntry[];
-}
-
-function groupByType(entries: DeckEntry[]): GroupedEntries {
-  const groups: GroupedEntries = { Creatures: [], Spells: [], Lands: [] };
-  for (const entry of entries) {
-    // Without full card data, we use name heuristics; actual categorization
-    // will be enhanced when Scryfall data is cached.
-    // For now, all go to Spells unless we integrate card type data.
-    groups.Spells.push(entry);
-  }
-  return groups;
-}
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
@@ -72,6 +61,8 @@ export function DeckList({
   onOpenArtPicker,
   commanders = [],
   onRemoveCommander,
+  cardDataCache,
+  groupMode,
 }: DeckListProps) {
   const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -83,7 +74,16 @@ export function DeckList({
   const [viewMode, setViewMode] = useState<"main" | "sideboard">("main");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
-  const mainGroups = groupByType(deck.main);
+  const mainGroups = useMemo(() => {
+    const buckets = new Map<string, DeckEntry[]>();
+    for (const entry of deck.main) {
+      const key = groupKey(groupMode, cardDataCache.get(entry.name));
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(entry);
+      else buckets.set(key, [entry]);
+    }
+    return buckets;
+  }, [deck.main, groupMode, cardDataCache]);
 
   // CR 100.4a: Ask the engine for the format's sideboard policy rather than
   // hardcoding 15. The engine is the single authority for format rules; the
@@ -276,11 +276,12 @@ export function DeckList({
           → Maybeboard / → Main) so the move target is explicit on touch. */}
       <div>
         {viewMode === "main"
-          ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
+          ? groupOrder(groupMode).map((key) => (
               <MoveList
-                key={group}
-                title={t(`deckList.group.${group}`)}
-                entries={mainGroups[group]}
+                key={key}
+                title={t(`deckList.${groupTitleKey(groupMode, key)}`)}
+                accent={groupAccent(key)}
+                entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
                 onMove={onMoveCard}

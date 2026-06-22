@@ -21,6 +21,8 @@ describe("DeckList commander section", () => {
         onImport={vi.fn()}
         commanders={["Krenko, Mob Boss"]}
         onRemoveCommander={onRemoveCommander}
+        cardDataCache={new Map()}
+        groupMode="type"
       />,
     );
 
@@ -38,6 +40,8 @@ describe("DeckList commander section", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
+        cardDataCache={new Map()}
+        groupMode="type"
       />,
     );
     expect(screen.queryByText(/as commander/i)).not.toBeInTheDocument();

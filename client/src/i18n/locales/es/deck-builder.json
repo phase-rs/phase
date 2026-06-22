@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Volver al mazo",
     "listView": "Vista de lista",
-    "stackView": "Vista de pila"
+    "stackView": "Vista de pila",
+    "groupType": "Tipo",
+    "groupColor": "Color",
+    "groupByType": "Agrupar por tipo",
+    "groupByColor": "Agrupar por color"
   },
   "tabs": {
     "ariaLabel": "Superficie del constructor de mazos",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Pasa el cursor sobre una carta del mazo principal y haz clic en → para moverla aquí.",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Hechizos",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instantáneos",
+      "Sorceries": "Conjuros",
+      "Artifacts": "Artefactos",
+      "Enchantments": "Encantamientos",
+      "Battles": "Batallas",
+      "Lands": "Tierras",
+      "Other": "Otros"
+    },
+    "colorGroup": {
+      "White": "Blanco",
+      "Blue": "Azul",
+      "Black": "Negro",
+      "Red": "Rojo",
+      "Green": "Verde",
+      "Multicolor": "Multicolor",
+      "Colorless": "Incoloro",
       "Lands": "Tierras"
     },
     "importModalTitle": "Importar mazo",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} cartas",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Hechizos",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instantáneos",
+      "Sorceries": "Conjuros",
+      "Artifacts": "Artefactos",
+      "Enchantments": "Encantamientos",
+      "Battles": "Batallas",
+      "Lands": "Tierras",
+      "Other": "Otros"
+    },
+    "colorGroup": {
+      "White": "Blanco",
+      "Blue": "Azul",
+      "Black": "Negro",
+      "Red": "Rojo",
+      "Green": "Verde",
+      "Multicolor": "Multicolor",
+      "Colorless": "Incoloro",
       "Lands": "Tierras"
     },
     "sideboardGroup": "Banquillo",

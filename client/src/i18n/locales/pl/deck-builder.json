@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Powrót do talii",
     "listView": "Widok listy",
-    "stackView": "Widok stosu"
+    "stackView": "Widok stosu",
+    "groupType": "Typ",
+    "groupColor": "Kolor",
+    "groupByType": "Grupuj według typu",
+    "groupByColor": "Grupuj według koloru"
   },
   "tabs": {
     "ariaLabel": "Powierzchnia kreatora talii",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Najedź na kartę z talii głównej i kliknij →, aby ją tu przenieść.",
     "group": {
       "Creatures": "Stwory",
-      "Spells": "Czary",
+      "Planeswalkers": "Planeswalkery",
+      "Instants": "Sztuczki",
+      "Sorceries": "Czary",
+      "Artifacts": "Artefakty",
+      "Enchantments": "Zaklęcia",
+      "Battles": "Bitwy",
+      "Lands": "Ziemie",
+      "Other": "Inne"
+    },
+    "colorGroup": {
+      "White": "Biały",
+      "Blue": "Niebieski",
+      "Black": "Czarny",
+      "Red": "Czerwony",
+      "Green": "Zielony",
+      "Multicolor": "Wielokolorowy",
+      "Colorless": "Bezbarwny",
       "Lands": "Ziemie"
     },
     "importModalTitle": "Importuj talię",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} kart",
     "group": {
       "Creatures": "Stwory",
-      "Spells": "Czary",
+      "Planeswalkers": "Planeswalkery",
+      "Instants": "Sztuczki",
+      "Sorceries": "Czary",
+      "Artifacts": "Artefakty",
+      "Enchantments": "Zaklęcia",
+      "Battles": "Bitwy",
+      "Lands": "Ziemie",
+      "Other": "Inne"
+    },
+    "colorGroup": {
+      "White": "Biały",
+      "Blue": "Niebieski",
+      "Black": "Czarny",
+      "Red": "Czerwony",
+      "Green": "Zielony",
+      "Multicolor": "Wielokolorowy",
+      "Colorless": "Bezbarwny",
       "Lands": "Ziemie"
     },
     "sideboardGroup": "Zaplecze",

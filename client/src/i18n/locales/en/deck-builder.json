@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Back to deck",
     "listView": "List view",
-    "stackView": "Stack view"
+    "stackView": "Stack view",
+    "groupType": "Type",
+    "groupColor": "Color",
+    "groupByType": "Group by type",
+    "groupByColor": "Group by color"
   },
   "tabs": {
     "ariaLabel": "Deck builder surface",
@@ -105,7 +109,23 @@
     "maybeboardEmptyHint": "Cards you're considering. Tap → Maybeboard on a deck card to park one here.",
     "group": {
       "Creatures": "Creatures",
-      "Spells": "Spells",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instants",
+      "Sorceries": "Sorceries",
+      "Artifacts": "Artifacts",
+      "Enchantments": "Enchantments",
+      "Battles": "Battles",
+      "Lands": "Lands",
+      "Other": "Other"
+    },
+    "colorGroup": {
+      "White": "White",
+      "Blue": "Blue",
+      "Black": "Black",
+      "Red": "Red",
+      "Green": "Green",
+      "Multicolor": "Multicolor",
+      "Colorless": "Colorless",
       "Lands": "Lands"
     },
     "importModalTitle": "Import Deck",
@@ -145,7 +165,23 @@
     "groupCards_other": "{{count}} cards",
     "group": {
       "Creatures": "Creatures",
-      "Spells": "Spells",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instants",
+      "Sorceries": "Sorceries",
+      "Artifacts": "Artifacts",
+      "Enchantments": "Enchantments",
+      "Battles": "Battles",
+      "Lands": "Lands",
+      "Other": "Other"
+    },
+    "colorGroup": {
+      "White": "White",
+      "Blue": "Blue",
+      "Black": "Black",
+      "Red": "Red",
+      "Green": "Green",
+      "Multicolor": "Multicolor",
+      "Colorless": "Colorless",
       "Lands": "Lands"
     },
     "sideboardGroup": "Sideboard",

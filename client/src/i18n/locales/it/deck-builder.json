@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Torna al mazzo",
     "listView": "Vista elenco",
-    "stackView": "Vista pila"
+    "stackView": "Vista pila",
+    "groupType": "Tipo",
+    "groupColor": "Colore",
+    "groupByType": "Raggruppa per tipo",
+    "groupByColor": "Raggruppa per colore"
   },
   "tabs": {
     "ariaLabel": "Superficie del costruttore di mazzi",
@@ -99,7 +103,23 @@
     "sideboardEmptyHint": "Passa il mouse su una carta del mazzo principale e clicca → per spostarla qui.",
     "group": {
       "Creatures": "Creature",
-      "Spells": "Magie",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Istantanei",
+      "Sorceries": "Stregonerie",
+      "Artifacts": "Artefatti",
+      "Enchantments": "Incantesimi",
+      "Battles": "Battaglie",
+      "Lands": "Terre",
+      "Other": "Altri"
+    },
+    "colorGroup": {
+      "White": "Bianco",
+      "Blue": "Blu",
+      "Black": "Nero",
+      "Red": "Rosso",
+      "Green": "Verde",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terre"
     },
     "importModalTitle": "Importa mazzo",
@@ -140,7 +160,23 @@
     "groupCards_other": "{{count}} carte",
     "group": {
       "Creatures": "Creature",
-      "Spells": "Magie",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Istantanei",
+      "Sorceries": "Stregonerie",
+      "Artifacts": "Artefatti",
+      "Enchantments": "Incantesimi",
+      "Battles": "Battaglie",
+      "Lands": "Terre",
+      "Other": "Altri"
+    },
+    "colorGroup": {
+      "White": "Bianco",
+      "Blue": "Blu",
+      "Black": "Nero",
+      "Red": "Rosso",
+      "Green": "Verde",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terre"
     },
     "sideboardGroup": "Sideboard",

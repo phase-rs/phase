@@ -21,6 +21,7 @@ import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import type { CardSearchFilters } from "./CardSearch";
 import { hasSearchCriteria } from "./searchFilters";
+import type { GroupMode } from "./deckGrouping";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
 import type { CommanderBracket } from "../../types/bracket";
@@ -79,6 +80,8 @@ export function useDeckBuilder({
   const [activeSurface, setActiveSurface] = useState<"deck" | "info">("deck");
   // Visual representation of the deck within the main canvas.
   const [deckView, setDeckView] = useState<"list" | "stack">("list");
+  // How the main deck is sub-grouped within the canvas (by card type or color).
+  const [groupMode, setGroupMode] = useState<GroupMode>("type");
   // Unsaved-changes flag: set on any deck mutation, cleared on save/clone/load.
   // Drives the leave/load confirmation and the beforeunload guard.
   const [dirty, setDirty] = useState(false);
@@ -677,6 +680,8 @@ export function useDeckBuilder({
     setActiveSurface,
     deckView,
     setDeckView,
+    groupMode,
+    setGroupMode,
     dirty,
     cardDataCache,
     compatibility,
