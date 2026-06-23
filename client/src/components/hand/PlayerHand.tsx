@@ -61,6 +61,10 @@ function getArcCoefficient(handSize: number): number {
 // Rendered size (px) of the bouncing drop-arrow's square box. Fixed (not
 // card-relative) so the imperative center / above-slot offsets stay exact in px.
 const DROP_ARROW_PX = 28;
+// Fraction of the box height at which the arrow's TIP (chevron point) sits —
+// viewBox y=20/24. The arrow is anchored and pivots about this point so the tip
+// stays on the gap center for any fan tilt.
+const ARROW_TIP_FRAC = 20 / 24;
 
 export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
@@ -151,6 +155,9 @@ export function PlayerHand() {
   // VISIBLE_GAP_FRACTION of the card width between the flanking cards (set in
   // handleDragStart from the rendered card geometry). Each HandCard halves it.
   const gapPxMV = useMotionValue(0);
+  // Rendered card height (transform-free), measured once per drag. Half of it
+  // lifts the arrow from the gap center up to the slot's top edge along the fan.
+  const cardHeightMV = useMotionValue(0);
 
   const handleDrag = useCallback(
     (objectId: number, info: PanInfo) => {
@@ -173,24 +180,41 @@ export function PlayerHand() {
 
       const slot = computeHandInsertionSlot(rects, info.point.x, objectId);
       hoveredSlotRef.current = slot;
+      const fromIdx = rects.findIndex((r) => r.objectId === objectId);
+
+      // Average fan tilt of the flanking card(s) (single neighbor at an edge) —
+      // drives both the arrow's lean and the direction it lifts to reach the
+      // (tilted) slot's top edge.
+      let angle = 0;
+      if (slot != null) {
+        const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
+        const rotations = [left, right]
+          .filter((idx): idx is number => idx != null)
+          .map((idx) => getCardRotation(idx, rects.length));
+        if (rotations.length) angle = rotations.reduce((a, b) => a + b, 0) / rotations.length;
+      }
 
       // Position the arrow whenever a target slot exists (so the spring tracks it
-      // even while hidden), then gate visibility separately. Center it on the gap
-      // and lift it one arrow-height above the top edge of the cards so it points
-      // down into the slot.
+      // even while hidden), then gate visibility separately. Anchor the tip at the
+      // TOP-center of the slot: take the gap-center point (cards' vertical center)
+      // and lift it UP ALONG the fan tilt by half a card height, so the tip rides
+      // the tilted corridor to its top edge. The tilt pivots about the tip
+      // (overlay originX/originY), keeping it centered at any fan angle.
       const bounds = container.getBoundingClientRect();
-      const marker =
-        slot == null ? null : computeHandInsertionMarker(rects, slot, objectId, gapPxMV.get());
+      const marker = slot == null ? null : computeHandInsertionMarker(rects, slot, objectId);
       if (marker) {
-        arrowXRaw.set(marker.x - bounds.left - DROP_ARROW_PX / 2);
-        arrowYRaw.set(marker.top - bounds.top - DROP_ARROW_PX);
+        const aRad = (angle * Math.PI) / 180;
+        const lift = cardHeightMV.get() / 2;
+        const tipX = marker.x + Math.sin(aRad) * lift;
+        const tipY = marker.y - Math.cos(aRad) * lift;
+        arrowXRaw.set(tipX - bounds.left - DROP_ARROW_PX / 2);
+        arrowYRaw.set(tipY - bounds.top - DROP_ARROW_PX * ARROW_TIP_FRAC);
       }
 
       // CR n/a — pure UI gating. Reorder is a sideways/inside gesture; an upward
       // drag past the play threshold (or leaving the hand band) is a play, so hide
       // the arrow then. Suppress during a pending cast and on mobile, and on the
       // no-op slot (releasing in place — mirrors the fromIdx === targetSlot guard).
-      const fromIdx = rects.findIndex((r) => r.objectId === objectId);
       const insideHand =
         info.point.x >= bounds.left &&
         info.point.x <= bounds.right &&
@@ -205,17 +229,9 @@ export function PlayerHand() {
         slot !== fromIdx;
       arrowOpacity.set(show ? 1 : 0);
 
-      // Tilt the arrow to the average fan rotation of the two cards flanking the
-      // gap (single neighbor at an edge), and open the slide-apart gap by
-      // publishing the active slot + dragged index. -1 == inactive (no gap).
+      // Lean the arrow to the fan tilt and open the slide-apart gap by publishing
+      // the active slot + dragged index. -1 == inactive (no gap).
       if (show && slot != null) {
-        const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
-        const rotations = [left, right]
-          .filter((idx): idx is number => idx != null)
-          .map((idx) => getCardRotation(idx, rects.length));
-        const angle = rotations.length
-          ? rotations.reduce((a, b) => a + b, 0) / rotations.length
-          : 0;
         arrowRotateRaw.set(angle);
         draggingIndexMV.set(fromIdx);
         insertionSlotMV.set(slot);
@@ -225,7 +241,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, gapPxMV],
+    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -337,15 +353,18 @@ export function PlayerHand() {
       const container = handContainerRef.current;
       const cards = container?.querySelectorAll<HTMLElement>("[data-card-hover]");
       if (cards && cards.length >= 2) {
-        const cardWidthPx = parseFloat(getComputedStyle(cards[0]).width);
+        const cs0 = getComputedStyle(cards[0]);
+        const cardWidthPx = parseFloat(cs0.width);
+        const cardHeightPx = parseFloat(cs0.height);
         // cards[0] has margin-left 0; any later card carries the overlap margin.
         const edgeOverlapPx = Math.abs(parseFloat(getComputedStyle(cards[1]).marginLeft));
         if (Number.isFinite(cardWidthPx) && Number.isFinite(edgeOverlapPx)) {
           gapPxMV.set(computeGapPx(cardWidthPx, edgeOverlapPx));
         }
+        if (Number.isFinite(cardHeightPx)) cardHeightMV.set(cardHeightPx);
       }
     },
-    [gapPxMV],
+    [gapPxMV, cardHeightMV],
   );
   const handleDragStop = useCallback(() => {
     setDraggingCardId(null);
@@ -435,8 +454,23 @@ export function PlayerHand() {
       {!isMobile && (
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute left-0 top-0 z-50"
-          style={{ x: arrowX, y: arrowY, rotate: arrowRotate, opacity: arrowOpacity }}
+          // Above the dragged card (whileDrag z-9999), which shares this
+          // container's stacking context, so the drop arrow is never occluded.
+          className="pointer-events-none absolute left-0 top-0 z-[10000]"
+          // Pivot the tilt around the arrow's TIP (chevron point, ARROW_TIP_FRAC
+          // down the box), not its center. framer-motion manages the transform,
+          // so the pivot must be set via originX/originY (a `transformOrigin`
+          // style string is ignored). Rotating about the center swings the tip
+          // sideways off the gap; pinning the tip keeps it on the gap-center for
+          // any fan angle while the body leans with the fan.
+          style={{
+            x: arrowX,
+            y: arrowY,
+            rotate: arrowRotate,
+            opacity: arrowOpacity,
+            originX: 0.5,
+            originY: ARROW_TIP_FRAC,
+          }}
         >
           <motion.div
             animate={shouldReduceMotion ? undefined : { y: [0, 9, 0] }}
@@ -451,11 +485,10 @@ export function PlayerHand() {
               height={DROP_ARROW_PX}
               viewBox="0 0 24 24"
               fill="none"
-              stroke="rgb(34 211 238)"
               strokeWidth={3}
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="drop-shadow-[0_0_8px_rgba(34,211,238,0.85)]"
+              className="stroke-ember-bright drop-shadow-[0_0_8px_rgba(251,146,60,0.9)]"
             >
               {/* Downward arrow: stem + chevron head pointing into the slot. */}
               <path d="M12 3 V19 M5 12 l7 8 7-8" />
@@ -657,12 +690,12 @@ const HandCard = memo(function HandCard({
             the slid-apart edge and the fan tilt. */}
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-full bg-cyan-300 shadow-[0_0_10px_3px_rgba(34,211,238,0.85)]"
+          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-full bg-ember-bright shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
           style={{ opacity: leftEdgeOpacity }}
         />
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 right-0 w-[3px] rounded-full bg-cyan-300 shadow-[0_0_10px_3px_rgba(34,211,238,0.85)]"
+          className="pointer-events-none absolute inset-y-0 right-0 w-[3px] rounded-full bg-ember-bright shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
           style={{ opacity: rightEdgeOpacity }}
         />
         <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />

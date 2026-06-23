@@ -16,52 +16,50 @@ const cardRects = [
 ];
 
 const markerRects = [
+  // centers: card1 (50,80), card2 (130,70), card3 (210,80)
   { objectId: 1, left: 0, width: 100, top: 10, height: 140 },
   { objectId: 2, left: 80, width: 100, top: 0, height: 140 },
   { objectId: 3, left: 160, width: 100, top: 10, height: 140 },
 ];
 
 describe("computeHandInsertionMarker", () => {
-  it("centers the marker in the gap between the two flanking cards (drag-excluded space)", () => {
-    // dragging id 2 -> remaining [card1(left0,w100,right100), card3(left160)];
-    // slot 1 -> gap between card1 and card3 -> midpoint of 100 and 160 = 130.
-    // Interior slots are unaffected by gapPx (the flank split is symmetric).
-    expect(computeHandInsertionMarker(markerRects, 1, 2, 40)).toEqual({ x: 130, top: 10, height: 140 });
+  it("returns the midpoint of the two flanking cards' CENTERS for an interior slot", () => {
+    // dragging id 2 -> remaining [card1 center (50,80), card3 center (210,80)];
+    // slot 1 -> midpoint of the centers = (130, 80). Tilt-proof: centers, not edges.
+    expect(computeHandInsertionMarker(markerRects, 1, 2)).toEqual({ x: 130, y: 80 });
   });
 
-  it("centers the marker in the opened gap before the first card for slot 0", () => {
-    // slot 0 shifts the whole fan right by gapPx/2, opening a gapPx/2-wide gap to
-    // the LEFT of the first remaining card. The marker sits at that gap's center =
-    // first.left - gapPx/4 = 0 - 10 = -10 (not hugging the card's leading edge).
-    expect(computeHandInsertionMarker(markerRects, 0, 2, 40)).toEqual({ x: -10, top: 10, height: 140 });
+  it("extrapolates half a step BEFORE the first card's center for slot 0", () => {
+    // remaining centers c0 (50,80), c1 (210,80); step = (160,0);
+    // slot 0 -> c0 - step/2 = (50-80, 80-0) = (-30, 80). Follows the fan's spacing/arc.
+    expect(computeHandInsertionMarker(markerRects, 0, 2)).toEqual({ x: -30, y: 80 });
   });
 
-  it("centers the marker in the opened gap after the last card for the append slot", () => {
-    // append shifts the fan left by gapPx/2, opening a gapPx/2-wide gap to the
-    // RIGHT of the last card. Center = last.right + gapPx/4 = 260 + 10 = 270.
-    expect(computeHandInsertionMarker(markerRects, 2, 2, 40)).toEqual({ x: 270, top: 10, height: 140 });
+  it("extrapolates half a step AFTER the last card's center for the append slot", () => {
+    // remaining centers c0 (50,80), cLast (210,80); step = (160,0);
+    // append -> cLast + step/2 = (210+80, 80) = (290, 80).
+    expect(computeHandInsertionMarker(markerRects, 2, 2)).toEqual({ x: 290, y: 80 });
+  });
+
+  it("carries the fan's vertical arc into the extrapolated edge point", () => {
+    // Drag id 1: remaining c0=card2 (130,70), c1=card3 (210,80); step=(80,10).
+    // append -> cLast(210,80) + step/2 (40,5) = (250, 85): the arc tilts the point down.
+    expect(computeHandInsertionMarker(markerRects, 2, 1)).toEqual({ x: 250, y: 85 });
   });
 
   it("clamps an out-of-range slot to the append position", () => {
-    expect(computeHandInsertionMarker(markerRects, 99, 2, 40)).toEqual({ x: 270, top: 10, height: 140 });
-  });
-
-  it("does not offset the edge marker when no gap is open (gapPx 0)", () => {
-    expect(computeHandInsertionMarker(markerRects, 0, 2, 0)).toEqual({ x: 0, top: 10, height: 140 });
+    expect(computeHandInsertionMarker(markerRects, 99, 2)).toEqual({ x: 290, y: 80 });
   });
 
   it("returns null when no cards remain after excluding the dragged card", () => {
     expect(
-      computeHandInsertionMarker([{ objectId: 5, left: 0, width: 100, top: 0, height: 10 }], 0, 5, 40),
+      computeHandInsertionMarker([{ objectId: 5, left: 0, width: 100, top: 0, height: 10 }], 0, 5),
     ).toBeNull();
   });
 
-  it("defaults missing top/height to 0", () => {
-    expect(computeHandInsertionMarker([{ objectId: 1, left: 40, width: 100 }], 0, 9, 40)).toEqual({
-      x: 30,
-      top: 0,
-      height: 0,
-    });
+  it("returns the lone remaining card's center (no neighbor to extrapolate from)", () => {
+    expect(computeHandInsertionMarker([{ objectId: 1, left: 40, width: 100 }, { objectId: 9, left: 0, width: 100 }], 0, 9))
+      .toEqual({ x: 90, y: 0 });
   });
 });
 

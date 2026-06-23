@@ -55,53 +55,55 @@ export function computeHandInsertionSlot(
 }
 
 /**
- * Screen position of the drop-position marker (the bouncing arrow) for a given
- * insertion `slot`, passed the active `gapPx` so the marker lands at the CENTER
- * of the opened gap at every slot.
+ * Center POINT of the drop slot for a given insertion `slot`, as a viewport
+ * (x, y). The caller anchors the arrow's tip here and tilts it about that tip,
+ * so the arrow sits dead-center in the (tilted) gap corridor at every position.
  *
- * Operates in the SAME drag-excluded ("remaining") space as
- * `computeHandInsertionSlot`: the dragged card is filtered out first.
+ * Works entirely in card-CENTER space, which is tilt-proof: the bounding box of
+ * a rotated card is inflated and its left/right EDGES no longer match the visual
+ * edges, but the box CENTER is still the card's true center. Using edges (the
+ * old midpoint-of-facing-edges formula) drifts as the fan tilt grows toward the
+ * ends; using centers does not.
  *
- * - Interior slot: the marker sits at the MIDPOINT between the trailing edge of
- *   the card before `slot` and the leading edge of the card at `slot`. The two
- *   flanks split symmetrically (each ±gapPx/2) around that midpoint, so it stays
- *   the gap center with no further offset.
- * - Edge slot (slot 0 / append): there is only ONE flanking card, so only one
- *   rigid block moves — by gapPx/2 — opening a gapPx/2-wide gap on the outer
- *   side. The flanking card's inner edge is that gap's INNER boundary, so the
- *   marker must be pushed OUTWARD (away from the hand body) by half the opened
- *   gap, gapPx/4, to sit at its center instead of hugging the card.
+ * Operates in the drag-excluded ("remaining") space — the dragged card is
+ * filtered out first.
  *
- * Returns viewport coordinates; the caller converts to container-local space.
- * Returns null when no cards remain (the dragged card was the only one).
+ * - Interior slot s: midpoint of the centers of the two flanking cards (their
+ *   symmetric ±gapPx/2 slide keeps that midpoint fixed at the gap center).
+ * - Edge slot (slot 0 / append): there is no second flank, so extrapolate half
+ *   an inter-card step beyond the end card's center, continuing the fan's
+ *   spacing and arc — the slot the dragged card will occupy.
+ *
+ * Returns null when no cards remain; the lone-card case returns that card's
+ * center (no neighbor to define a direction).
  */
 export function computeHandInsertionMarker(
   cards: HandSlotRect[],
   slot: number,
   draggingId: number,
-  gapPx: number,
-): { x: number; top: number; height: number } | null {
+): { x: number; y: number } | null {
   const remaining = cards.filter((card) => card.objectId !== draggingId);
-  if (remaining.length === 0) return null;
-  const clamped = Math.max(0, Math.min(slot, remaining.length));
-  // Half of the gapPx/2-wide gap an edge slot opens — recenters the marker.
-  const edgeCenterOffset = gapPx / 4;
+  const n = remaining.length;
+  if (n === 0) return null;
+  const center = (c: HandSlotRect) => ({
+    x: c.left + c.width / 2,
+    y: (c.top ?? 0) + (c.height ?? 0) / 2,
+  });
+  if (n === 1) return center(remaining[0]);
+  const clamped = Math.max(0, Math.min(slot, n));
   if (clamped === 0) {
-    const first = remaining[0];
-    return { x: first.left - edgeCenterOffset, top: first.top ?? 0, height: first.height ?? 0 };
+    const c0 = center(remaining[0]);
+    const c1 = center(remaining[1]);
+    return { x: c0.x - (c1.x - c0.x) / 2, y: c0.y - (c1.y - c0.y) / 2 };
   }
-  if (clamped >= remaining.length) {
-    const last = remaining[remaining.length - 1];
-    return {
-      x: last.left + last.width + edgeCenterOffset,
-      top: last.top ?? 0,
-      height: last.height ?? 0,
-    };
+  if (clamped >= n) {
+    const cl = center(remaining[n - 1]);
+    const cp = center(remaining[n - 2]);
+    return { x: cl.x + (cl.x - cp.x) / 2, y: cl.y + (cl.y - cp.y) / 2 };
   }
-  const leftCard = remaining[clamped - 1];
-  const rightCard = remaining[clamped];
-  const x = (leftCard.left + leftCard.width + rightCard.left) / 2;
-  return { x, top: rightCard.top ?? 0, height: rightCard.height ?? 0 };
+  const a = center(remaining[clamped - 1]);
+  const b = center(remaining[clamped]);
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
 /**
