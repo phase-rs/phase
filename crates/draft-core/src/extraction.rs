@@ -68,8 +68,8 @@ impl MtgjsonBooster {
     fn draftable(&self) -> Option<&MtgjsonBoosterConfig> {
         self.play
             .as_ref()
-            .or(self.draft.as_ref())
-            .or(self.default.as_ref())
+            .or_else(|| self.draft.as_ref())
+            .or_else(|| self.default.as_ref())
     }
 }
 
@@ -242,8 +242,16 @@ fn extract_set_pool_indexed(
         })
         .collect();
 
-    // Build prints: cards that have boosterTypes containing "play" or appear in any sheet.
+    // Build prints: cards tagged for the booster pool or appearing in any sheet.
     // Set-local: this is *this* set's print run, not the cross-set index.
+    //
+    // `booster_eligible` means "can be opened in a pack of this set", which is
+    // exactly sheet membership — the same ground truth across every era. The
+    // per-card MTGJSON `boosterTypes` field cannot answer this: it carries pool
+    // tags (`default`/`deck`), never the set-level product key, so the old
+    // `contains("play")` check was `false` for every card in every set (Play
+    // Boosters included) and is unrelated to the `play`/`draft`/`default`
+    // product fallback in `MtgjsonBooster::draftable`.
     let prints: Vec<LimitedCardPrint> = data
         .cards
         .iter()
@@ -257,7 +265,7 @@ fn extract_set_pool_indexed(
             set_code: c.set_code.clone(),
             collector_number: c.number.clone(),
             rarity: parse_rarity(&c.rarity),
-            booster_eligible: c.booster_types.contains(&"play".to_string()),
+            booster_eligible: uuids_in_sheets.contains(c.uuid.as_str()),
         })
         .collect();
 
@@ -539,6 +547,9 @@ mod tests {
         assert_eq!(pool.sheets["common"].cards.len(), 2);
         assert_eq!(pool.pack_variants.len(), 1);
         assert_eq!(pool.prints.len(), 2);
+        // Cards carry no `boosterTypes` tag yet are on the draft sheet, so they
+        // are booster-eligible: eligibility is sheet membership, not a tag.
+        assert!(pool.prints.iter().all(|p| p.booster_eligible));
     }
 
     #[test]
@@ -572,6 +583,7 @@ mod tests {
         assert_eq!(pool.code, "ICE");
         assert_eq!(pool.sheets["common"].cards.len(), 2);
         assert_eq!(pool.prints.len(), 2);
+        assert!(pool.prints.iter().all(|p| p.booster_eligible));
     }
 
     #[test]
