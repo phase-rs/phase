@@ -2164,20 +2164,15 @@ fn parse_unless_remove_counter_cost(rest: &str) -> Option<AbilityCost> {
     {
         None // target = None encodes "self" for RemoveCounter
     } else {
-        // Delegate to shared target parser for filter phrases like
-        // "a permanent you control".
-        let target_phrase = format!("target {after_from}");
-        let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
-        if matches!(filter, TargetFilter::Any) {
-            return None;
-        }
-        let (_, _) = all_consuming((
-            opt(tag::<_, _, OracleError<'_>>(".")),
-            eof::<_, OracleError<'_>>,
-        ))
-        .parse(remainder.trim())
-        .ok()?;
-        Some(filter)
+        // CR 122.6 + CR 118.12: a TARGETED remove-counter unless-cost
+        // (`RemoveCounter { target: Some(_) }`, e.g. Chisei's "from a permanent
+        // you control") has no runtime payment path — `handle_unless_payment`
+        // leaves it in the unsupported fall-through, so emitting it would make
+        // the card worse than unsupported (paying the cost still resolves the
+        // punishment). Only the self-reference form ("from it"/"~", target None)
+        // is payable. Leave the targeted form unsupported (coverage honesty)
+        // until a target-choice payment flow exists.
+        return None;
     };
 
     Some(AbilityCost::RemoveCounter {
@@ -22204,26 +22199,22 @@ mod tests {
         );
     }
 
-    // CR 118.12 + CR 122.1: "sacrifice ~ unless you remove a counter from a
-    // permanent you control" — Chisei, Heart of Oceans. Untyped counter.
+    // CR 122.6 + CR 118.12: "sacrifice ~ unless you remove a counter from a
+    // permanent you control" — Chisei, Heart of Oceans. The TARGETED
+    // remove-counter form has no runtime payment path (handle_unless_payment
+    // leaves `RemoveCounter { target: Some(_) }` unsupported), so the parser
+    // must NOT extract it — leaving the clause cleanly unsupported instead of
+    // emitting an unpayable cost. Self-reference ("from it") remains supported.
     #[test]
-    fn trigger_unless_you_remove_counter_any() {
+    fn trigger_unless_you_remove_targeted_counter_is_not_extracted() {
         let def = parse_trigger_line(
             "At the beginning of your upkeep, sacrifice ~ unless you remove a counter from a permanent you control.",
             "Chisei, Heart of Oceans",
         );
-        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert!(
-            matches!(
-                &unless_pay.cost,
-                AbilityCost::RemoveCounter {
-                    count: 1,
-                    counter_type: CounterMatch::Any,
-                    ..
-                }
-            ),
-            "expected RemoveCounter Any, got {:?}",
-            unless_pay.cost
+            def.unless_pay.is_none(),
+            "targeted remove-counter unless-cost must not be extracted (unpayable), got {:?}",
+            def.unless_pay
         );
     }
 
