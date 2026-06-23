@@ -199,6 +199,68 @@ jobs:
             data/coverage-data.json \
             --fail-on-engine
 
+      - name: Parse-detail diff vs base baseline
+        # PR-only review aid (NEVER blocks — continue-on-error): surfaces the
+        # field-level parse changes this PR introduces, for the reviewing LLM.
+        # Unlike the regression check above (supported flips only), this diffs
+        # the full parse_details tree.
+        #
+        # Baseline = the PR's base.sha published coverage, fetched by its
+        # engine-source hash; head = the coverage built above from the merge
+        # commit (base.sha + PR). So head - baseline isolates EXACTLY this PR's
+        # parse changes, with no second coverage build and no cross-PR
+        # contamination — even when the PR is behind main (both sides move in
+        # lockstep). Path filter: identical engine-source hash => no parse
+        # change is possible => skip before the bin build. --features cli keeps
+        # the same [tool, cli] engine fingerprint as the steps above (lib cache
+        # hit; only the new bin links).
+        id: parsediff
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
+          HEAD_HASH="$(./scripts/engine-source-hash.sh HEAD)"
+          if [ "$BASE_HASH" = "$HEAD_HASH" ]; then
+            echo "Engine source unchanged vs base ($BASE_HASH) — no parse change possible; skipping."
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$PR_NUMBER" > pr-number.txt
+          URL="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
+          if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
+            cargo run --profile tool --features cli --bin coverage-parse-diff -- \
+              coverage-base.json data/coverage-data.json \
+              --base-sha "$BASE_SHA" \
+              --markdown parse-diff.md --json parse-diff.json
+          else
+            # Baseline not published yet (base.sha only just merged) or aged out
+            # of retention. NEVER fall back to the lagging preview/ snapshot —
+            # that reintroduces cross-PR contamination. Emit a pending marker;
+            # the comment job only UPDATES an existing sticky, never creates one
+            # for a pending note.
+            printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending for `%s` — this populates once main publishes its coverage snapshot (a few minutes after that commit landed)._\n' "$BASE_SHA" > parse-diff.md
+          fi
+          echo "produced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload parse-diff artifact
+        # Consumed by .github/workflows/coverage-parse-diff-comment.yml, which
+        # posts the sticky PR comment from the trusted workflow_run context.
+        if: github.event_name == 'pull_request' && steps.parsediff.outputs.produced == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parse-diff
+          if-no-files-found: ignore
+          retention-days: 3
+          path: |
+            parse-diff.md
+            parse-diff.json
+            pr-number.txt
+
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
         # that parse cleanly but disagree semantically with their Oracle text.
@@ -233,6 +295,28 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+
+      - name: Publish immutable parse-diff baseline to R2
+        # Content-addressed sibling of the mutable preview/coverage-data.json
+        # write above: an immutable copy keyed by THIS commit's engine-source
+        # hash. The PR-side "Parse-detail diff" step fetches the copy matching
+        # its base.sha's hash, so its baseline is the exact main it forked onto
+        # — never the lagging preview/ snapshot (which mixes in other PRs'
+        # changes). Identical-source commits dedupe to one object, so storage is
+        # bounded by distinct parser states, not commit count. best-effort
+        # (continue-on-error): a missed publish just defers a PR's comment to
+        # "baseline pending" until the next main push, never wedges main.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          HASH="$(./scripts/engine-source-hash.sh HEAD)"
+          npx wrangler r2 object put "phase-rs-data/parse-baselines/coverage-data-${HASH}.json" \
+            --file data/coverage-data.json --remote --content-type application/json \
+            --cache-control "public, max-age=31536000, immutable"
 
   draft-pools:
     # Split out of card-data-gate because draft-pool-gen lives in draft-core and
