@@ -209,6 +209,7 @@ export function PlayerHand() {
       } else {
         caretRotateRaw.set(0);
         insertionSlotMV.set(-1);
+        draggingIndexMV.set(-1);
       }
     },
     [isMobile, pendingObjectId, caretXRaw, caretYRaw, caretRotateRaw, caretOpacity, insertionSlotMV, draggingIndexMV],
@@ -464,8 +465,8 @@ const HandCard = memo(function HandCard({
   // Slide-apart displacement: derive this card's signed x offset from the shared
   // insertion signal. useTransform updates imperatively when the MotionValues
   // change (pointer move) and never re-renders this memoized component; the
-  // transformer closure is refreshed on every real re-render, so index/handSize
-  // stay current after a reorder. A gentle spring keeps cards from oscillating;
+  // transformer closure is refreshed on every real re-render, so index stays
+  // current after a reorder. A gentle spring keeps cards from oscillating;
   // prefers-reduced-motion binds the raw target so the gap snaps open/closed.
   const shouldReduceMotion = useReducedMotion();
   const displaceTarget = useTransform(
