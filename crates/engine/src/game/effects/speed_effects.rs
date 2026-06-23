@@ -263,8 +263,10 @@ fn players_for_filter(
                 .filter(|player| !player.is_eliminated)
                 .filter(|player| {
                     crate::game::players::matches_relation(state, player.id, controller, *relation)
-                        && crate::game::effects::candidate_player_scalar(player, attr)
-                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        && crate::game::effects::candidate_player_scalar_with_state(
+                            state, player, controller, attr,
+                        )
+                        .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                 })
                 .map(|player| player.id)
                 .collect()
@@ -332,4 +334,65 @@ pub fn resolve_change_speed(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{
+        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetRef,
+    };
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::ObjectId;
+
+    /// CR 119.1 + CR 810.9a: `players_for_filter` with a `PlayerAttribute`
+    /// life-total predicate reads each candidate's TEAM total through the
+    /// migrated `candidate_player_scalar_with_state` call (Site 6). Controller
+    /// P0 (team A); opposing team B {2,3} has members at 5 and 6 (team 11).
+    /// A `LifeTotal >= 10` opponent predicate counts BOTH team-B members
+    /// because each reads the team total (11 >= 10), even though neither
+    /// individual reaches 10. Reverting Site 6 (stateless `Some(p.life)`)
+    /// reads 5 and 6 individually and the filter selects NOBODY.
+    #[test]
+    fn player_attribute_life_total_reads_team_total_in_2hg() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[2].life = 5;
+        state.players[3].life = 6; // team B total = 11
+
+        let filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: 10 }),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+
+        let mut selected = players_for_filter(&state, &filter, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(2), PlayerId(3)],
+            "both team-B members count: each reads the team total (11 >= 10)"
+        );
+
+        // Sibling: raise the threshold above the team total → neither counts.
+        let filter_high = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: 12 }),
+        };
+        assert!(players_for_filter(&state, &filter_high, &ability).is_empty());
+    }
 }

@@ -75,6 +75,17 @@ jobs:
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
 
+      - name: Test card-data load gate
+        # Diff-based gate: new test code must not reparse the full ~90 MB
+        # client/public/card-data.json (tens of seconds/test under nextest, and
+        # it self-skips in CI). Use support::shared_card_db() (fixture-backed).
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="origin/main"
+          fi
+          ./scripts/check-test-card-data-load.sh "$BASE"
+
   rust-test:
     name: Rust tests
     runs-on: ubuntu-latest
