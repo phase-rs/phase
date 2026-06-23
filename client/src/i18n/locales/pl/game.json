@@ -1218,6 +1218,22 @@
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
     },
+    "bulk": {
+      "selectAll": "Zaznacz wszystko",
+      "invert": "Odwróć",
+      "clear": "Wyczyść",
+      "sortLabel": "Sortuj",
+      "groupLabel": "Grupuj",
+      "optNone": "Brak",
+      "optName": "Nazwa",
+      "optCmc": "Wartość many",
+      "optType": "Typ",
+      "optColor": "Kolor",
+      "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
+      "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
+      "keepInstead": "Zatrzymaj zamiast tego",
+      "discardInstead": "Odrzuć zamiast tego"
+    },
     "discard": {
       "title": "Odrzuć",
       "titleAdditionalCost": "Odrzuć jako koszt dodatkowy",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",
       "subtitleExact_one": "Wybierz {{count}} kartę do odrzucenia",
-      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia"
+      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia",
+      "subtitleKeep_one": "Wybierz 1 kartę do zatrzymania — reszta zostaje odrzucona",
+      "subtitleKeep_other": "Wybierz {{count}} kart do zatrzymania — reszta zostaje odrzucona"
     },
     "harmonize": {
       "title": "Harmonize",

@@ -1218,6 +1218,22 @@
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
     },
+    "bulk": {
+      "selectAll": "Seleccionar todo",
+      "invert": "Invertir",
+      "clear": "Limpiar",
+      "sortLabel": "Ordenar",
+      "groupLabel": "Agrupar",
+      "optNone": "Ninguno",
+      "optName": "Nombre",
+      "optCmc": "Valor de maná",
+      "optType": "Tipo",
+      "optColor": "Color",
+      "counterDiscard": "Descartar {{selected}} de {{cap}}",
+      "counterKeep": "Conservar {{selected}} de {{cap}}",
+      "keepInstead": "Conservar en su lugar",
+      "discardInstead": "Descartar en su lugar"
+    },
     "discard": {
       "title": "Descartar",
       "titleAdditionalCost": "Descartar como coste adicional",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Elige hasta {{count}} cartas para descartar",
       "subtitleUnless": "Elige {{count}} cartas o 1 carta que coincida para descartar",
       "subtitleExact_one": "Elige {{count}} carta para descartar",
-      "subtitleExact_other": "Elige {{count}} cartas para descartar"
+      "subtitleExact_other": "Elige {{count}} cartas para descartar",
+      "subtitleKeep_one": "Elige 1 carta para conservar — el resto se descarta",
+      "subtitleKeep_other": "Elige {{count}} cartas para conservar — el resto se descarta"
     },
     "harmonize": {
       "title": "Armonizar",

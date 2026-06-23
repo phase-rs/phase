@@ -1218,6 +1218,22 @@
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
     },
+    "bulk": {
+      "selectAll": "Tout sélectionner",
+      "invert": "Inverser",
+      "clear": "Effacer",
+      "sortLabel": "Trier",
+      "groupLabel": "Grouper",
+      "optNone": "Aucun",
+      "optName": "Nom",
+      "optCmc": "Valeur de mana",
+      "optType": "Type",
+      "optColor": "Couleur",
+      "counterDiscard": "Défausser {{selected}} sur {{cap}}",
+      "counterKeep": "Garder {{selected}} sur {{cap}}",
+      "keepInstead": "Garder plutôt",
+      "discardInstead": "Défausser plutôt"
+    },
     "discard": {
       "title": "Défausser",
       "titleAdditionalCost": "Défausser comme coût supplémentaire",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à défausser",
       "subtitleUnless": "Choisissez {{count}} cartes ou 1 carte correspondante à défausser",
       "subtitleExact_one": "Choisissez {{count}} carte à défausser",
-      "subtitleExact_other": "Choisissez {{count}} cartes à défausser"
+      "subtitleExact_other": "Choisissez {{count}} cartes à défausser",
+      "subtitleKeep_one": "Choisissez 1 carte à garder — le reste est défaussé",
+      "subtitleKeep_other": "Choisissez {{count}} cartes à garder — le reste est défaussé"
     },
     "harmonize": {
       "title": "Harmoniser",
