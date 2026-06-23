@@ -3122,7 +3122,13 @@ fn parse_first_time_tapped_intervening_if(input: &str) -> OracleResult<'_, Trigg
 /// Epochrasite). Nom combinator consumed by `scan_preceded` in
 /// `extract_if_condition`.
 fn parse_negated_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
-    let (rest, _) = tag("if you didn't cast it from ").parse(input)?;
+    // Accept both the ASCII (`didn't`) and curly (`didn’t`, U+2019) apostrophe —
+    // Scryfall/Oracle text uses the curly form for some printings.
+    let (rest, _) = alt((
+        tag("if you didn't cast it from "),
+        tag("if you didn’t cast it from "),
+    ))
+    .parse(input)?;
     let (rest, zone) = alt((
         value(Zone::Hand, tag("your hand")),
         value(Zone::Graveyard, tag("your graveyard")),
@@ -3132,13 +3138,30 @@ fn parse_negated_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, 
     Ok((
         rest,
         TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::WasCast {
-                zone: Some(zone),
-                controller: None,
-                owner: None,
-            }),
+            condition: Box::new(scoped_you_cast_from_zone(zone)),
         },
     ))
+}
+
+/// CR 601.2 + CR 400.3 + CR 404.1: Build the caster/owner-scoped `WasCast` for a
+/// "you cast it from <zone>" intervening-if. The CASTER axis is always you
+/// ("you cast it"); the ORIGIN-ZONE-OWNER axis is you only for owner-specific
+/// zones ("your hand"/"your graveyard", CR 404.1) and stays unscoped for the
+/// shared exile zone ("from exile" carries no possessive). Mirrors the scoped
+/// cast arm of `graveyard_origin_or_condition` so both axes remain separately
+/// resolvable — an opponent casting your card, or you casting from someone
+/// else's owner-specific zone, must not satisfy the scoped condition.
+fn scoped_you_cast_from_zone(zone: Zone) -> TriggerCondition {
+    // CR 400.3 + CR 404.1: hand/graveyard/library are owner-specific; exile is shared.
+    let owner = match zone {
+        Zone::Hand | Zone::Graveyard | Zone::Library => Some(ControllerRef::You),
+        _ => None,
+    };
+    TriggerCondition::WasCast {
+        zone: Some(zone),
+        controller: Some(ControllerRef::You),
+        owner,
+    }
 }
 
 /// CR 603.4 + CR 601.2: Parse "if you cast it from your hand/exile" or
@@ -3152,14 +3175,7 @@ fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerC
         value(Zone::Exile, tag("exile")),
     ))
     .parse(rest)?;
-    Ok((
-        rest,
-        TriggerCondition::WasCast {
-            zone: Some(zone),
-            controller: None,
-            owner: None,
-        },
-    ))
+    Ok((rest, scoped_you_cast_from_zone(zone)))
 }
 
 /// Extract an intervening-if condition from effect text.
@@ -16342,9 +16358,10 @@ mod tests {
         );
     }
 
-    /// CR 603.4 + CR 601.2: "if you didn't cast it from your hand" —
+    /// CR 603.4 + CR 601.2 + CR 404.1: "if you didn't cast it from your hand" —
     /// negated zone-specific cast check (Chainer, Nightmare Adept; Phage the
-    /// Untouchable). Must hoist as `Not(WasCast { zone: Hand })`.
+    /// Untouchable). Must hoist as `Not(WasCast { zone: Hand, caster=you,
+    /// owner=you })` — both the caster and owner-specific axes are scoped.
     #[test]
     fn extract_if_condition_negated_cast_from_hand() {
         let (cleaned, cond) = extract_if_condition(
@@ -16359,12 +16376,12 @@ mod tests {
                     condition.as_ref(),
                     TriggerCondition::WasCast {
                         zone: Some(Zone::Hand),
-                        controller: None,
-                        owner: None,
+                        controller: Some(ControllerRef::You),
+                        owner: Some(ControllerRef::You),
                     }
                 )
             ),
-            "expected Not(WasCast {{ zone: Hand }}), got {cond:?}",
+            "expected Not(WasCast {{ zone: Hand, you/you }}), got {cond:?}",
         );
         assert!(
             // allow-noncombinator: test assertion verifying clause excision
@@ -16373,8 +16390,9 @@ mod tests {
         );
     }
 
-    /// CR 603.4 + CR 601.2: "if you cast it from your hand" — positive
-    /// zone-specific cast check hoisted as `WasCast { zone: Hand }`.
+    /// CR 603.4 + CR 601.2 + CR 404.1: "if you cast it from your hand" — positive
+    /// zone-specific cast check hoisted as `WasCast { zone: Hand, caster=you,
+    /// owner=you }`. The owner-specific zone scopes both axes.
     #[test]
     fn extract_if_condition_cast_from_hand() {
         let (cleaned, cond) =
@@ -16384,16 +16402,35 @@ mod tests {
                 cond,
                 Some(TriggerCondition::WasCast {
                     zone: Some(Zone::Hand),
-                    controller: None,
-                    owner: None,
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
                 })
             ),
-            "expected WasCast {{ zone: Hand }}, got {cond:?}",
+            "expected WasCast {{ zone: Hand, you/you }}, got {cond:?}",
         );
         assert!(
             // allow-noncombinator: test assertion verifying clause excision
             !cleaned.contains("cast it from"),
             "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 601.2 + CR 404.1: "if you cast it from exile" scopes the CASTER axis
+    /// to you but leaves the ORIGIN-ZONE-OWNER unscoped — exile is a shared
+    /// zone ("from exile" has no possessive), unlike hand/graveyard.
+    #[test]
+    fn extract_if_condition_cast_from_exile_owner_unscoped() {
+        let (_, cond) = extract_if_condition("if you cast it from exile, draw a card.");
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::WasCast {
+                    zone: Some(Zone::Exile),
+                    controller: Some(ControllerRef::You),
+                    owner: None,
+                })
+            ),
+            "expected WasCast {{ zone: Exile, caster=you, owner=None }}, got {cond:?}",
         );
     }
 

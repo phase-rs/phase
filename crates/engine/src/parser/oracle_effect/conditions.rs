@@ -770,17 +770,22 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
     // hand/graveyard/exile" (Epochrasite, Phage the Untouchable on effect-level
     // paths). MUST precede the positive form to avoid partial prefix matching.
     if let Some((zone, rest)) = nom_on_lower(text, &lower, |input| {
+        // Decompose into prefix + zone: the prefix accepts both the ASCII
+        // (`didn't`) and curly (`didn’t`, U+2019) apostrophe used by Scryfall
+        // printings; the zone is the shared owner-specific/exile alternation.
+        let (input, _) = alt((
+            tag("if you didn't cast it from "),
+            tag("if you didn’t cast it from "),
+        ))
+        .parse(input)?;
         alt((
-            value(Zone::Hand, tag("if you didn't cast it from your hand")),
-            value(
-                Zone::Graveyard,
-                tag("if you didn't cast it from your graveyard"),
-            ),
-            value(Zone::Exile, tag("if you didn't cast it from exile")),
+            value(Zone::Hand, tag("your hand")),
+            value(Zone::Graveyard, tag("your graveyard")),
+            value(Zone::Exile, tag("exile")),
         ))
         .parse(input)
     }) {
-        let rest = rest.strip_prefix(", ").unwrap_or(rest);
+        let rest = remainder_after_optional_comma(rest);
         return (
             Some(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::CastFromZone { zone }),
@@ -797,7 +802,7 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
         ))
         .parse(input)
     }) {
-        let rest = rest.strip_prefix(", ").unwrap_or(rest);
+        let rest = remainder_after_optional_comma(rest);
         return (
             Some(AbilityCondition::CastFromZone { zone }),
             rest.to_string(),

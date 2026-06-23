@@ -16048,6 +16048,94 @@ pub mod tests {
         }
     }
 
+    /// CR 601.2 + CR 404.1 + CR 603.4: "if you cast it from your graveyard"
+    /// ("you cast it" + owner-specific zone) scopes BOTH axes — caster=you AND
+    /// origin-zone owner=you. Drives the parser-emitted condition through
+    /// `check_trigger_condition` across all four owner × caster rows relative to
+    /// the trigger controller (P0): only the row where you cast your own card
+    /// from your graveyard satisfies it. Before the scope fix the parser emitted
+    /// `controller: None, owner: None`, which wrongly passed every row.
+    #[test]
+    fn you_cast_from_your_graveyard_scopes_both_caster_and_owner() {
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "When this creature enters, if you cast it from your graveyard, put a +1/+1 counter on it.",
+            "Gravecaster",
+        );
+        let condition = trigger
+            .condition
+            .expect("scoped gravecast intervening-if must parse");
+        assert_eq!(
+            condition,
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Graveyard),
+                controller: Some(ControllerRef::You),
+                owner: Some(ControllerRef::You),
+            },
+            "'you cast it from your graveyard' must scope both caster and owner to you"
+        );
+
+        // (owner, caster, expected) relative to trigger controller P0.
+        let cases = [
+            (
+                PlayerId(0),
+                PlayerId(0),
+                true,
+                "you cast your card from your graveyard",
+            ),
+            (
+                PlayerId(0),
+                PlayerId(1),
+                false,
+                "opponent cast your card from your graveyard",
+            ),
+            (
+                PlayerId(1),
+                PlayerId(0),
+                false,
+                "you cast a card from an opponent's graveyard",
+            ),
+            (
+                PlayerId(1),
+                PlayerId(1),
+                false,
+                "opponent cast their card from their graveyard",
+            ),
+        ];
+        for (owner, caster, expected, label) in cases {
+            let mut state = setup();
+            let entering = create_object(
+                &mut state,
+                CardId(1),
+                owner,
+                "Gravecaster".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&entering).unwrap();
+                obj.cast_from_zone = Some(Zone::Graveyard);
+                obj.cast_controller = Some(caster);
+            }
+            let event = zone_changed_event(
+                entering,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            assert_eq!(
+                check_trigger_condition(
+                    &state,
+                    &condition,
+                    PlayerId(0),
+                    Some(entering),
+                    Some(&event),
+                ),
+                expected,
+                "both-axes-scoped gravecast mismatch: {label}"
+            );
+        }
+    }
+
     /// CR 603.4 + CR 601.2h: Satoru's intervening-if must fail at resolution
     /// re-check when the entering creature was cast for mana, even after
     /// `clear_post_collection_transients` clears the transient boolean.
