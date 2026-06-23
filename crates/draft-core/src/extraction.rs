@@ -66,10 +66,12 @@ impl MtgjsonBooster {
     /// intent. Platform-only products (`arena`, `mtgo`) and non-draft products
     /// (`set`, `collector`, `jumpstart`) are deliberately excluded.
     fn draftable(&self) -> Option<&MtgjsonBoosterConfig> {
+        // Eager `.or()` (not `.or_else`): `as_ref()` is trivial and side-effect
+        // free, so clippy::unnecessary_lazy_evaluations rejects a lazy closure.
         self.play
             .as_ref()
-            .or_else(|| self.draft.as_ref())
-            .or_else(|| self.default.as_ref())
+            .or(self.draft.as_ref())
+            .or(self.default.as_ref())
     }
 }
 
