@@ -199,7 +199,13 @@
     "unknown": "Unknown {{count}}",
     "unknownCardsTitle": "Unknown cards:\n{{cards}}",
     "unsupportedTitle": "Unsupported ({{unique}} unique, {{copies}} copies):\n{{cards}}",
-    "setIconAlt": "{{code}} set icon"
+    "setIconAlt": "{{code}} set icon",
+    "actionsMenu": "Deck options",
+    "star": "Star",
+    "unstar": "Unstar",
+    "moveToFolder": "Move to folder",
+    "unfiled": "Unfiled",
+    "newFolder": "New folder…"
   },
   "myDecks": {
     "headingManage": "My Decks",
@@ -254,7 +260,11 @@
     "loadMore": "Load More",
     "selectedDeck": "Selected deck",
     "chooseDeckToContinue": "Choose a deck to continue",
-    "filterAll": "All"
+    "filterAll": "All",
+    "sectionStarred": "Starred",
+    "sectionUnfiled": "Unfiled",
+    "collapseAll": "Collapse all",
+    "expandAll": "Expand all"
   },
   "subscriptions": {
     "emptyTitle": "No feed subscriptions",
@@ -281,5 +291,16 @@
     "alpha": "Alpha",
     "profile": "Profile",
     "settings": "Settings"
+  },
+  "folder": {
+    "actionsMenu": "Folder options",
+    "rename": "Rename",
+    "delete": "Delete",
+    "newFolder": "New folder",
+    "newFolderPrompt": "Folder name:",
+    "renamePrompt": "Rename folder:",
+    "deleteConfirm": "Delete folder \"{{name}}\"? Its decks move to Unfiled.",
+    "emptyHint": "This folder is empty.",
+    "unfiledEmptyHint": "No unfiled decks."
   }
 }

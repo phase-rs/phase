@@ -6333,6 +6333,99 @@ mod tests {
         }
     }
 
+    /// CR 301.5a + CR 613.4c: Winter Soldier, Icy Assassin — "Winter Soldier gets
+    /// +2/+0 for each Equipment attached to him." The source-anaphoric pronoun "him"
+    /// must resolve to AttachedToSource so the +2 boost scales dynamically with the
+    /// equipped count. Fail-before: "attached to him" was unparseable, the for-each
+    /// multiplier dropped, and the static degraded to a FIXED AddPower(2). The
+    /// graveyard-return activated ability (ChangeZone gy→battlefield) must remain.
+    #[test]
+    fn winter_soldier_equipment_count_scales_power_dynamically() {
+        use crate::types::ability::{
+            ContinuousModification, FilterProp, QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
+        };
+        let parsed = parse_oracle_text(
+            "Vigilance, menace\nWinter Soldier gets +2/+0 for each Equipment attached to him.\n{3}{W}{B}: Return this card from your graveyard to the battlefield with a finality counter on him. Then you may attach an Equipment you control to him. (If a creature with a finality counter on it would die, exile it instead.)",
+            "Winter Soldier, Icy Assassin",
+            &["Vigilance".to_string(), "Menace".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Assassin".to_string()],
+        );
+        // The dynamic power modification: Multiply { factor: 2, Ref(ObjectCount{
+        // Equipment, AttachedToSource }) }.
+        let dynamic_power = parsed
+            .statics
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("expected AddDynamicPower, got statics {:?}", parsed.statics)
+            });
+        match dynamic_power {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2, "power multiplier must be 2");
+                match inner.as_ref() {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter:
+                                    TargetFilter::Typed(TypedFilter {
+                                        type_filters,
+                                        properties,
+                                        ..
+                                    }),
+                            },
+                    } => {
+                        assert_eq!(*type_filters, vec![TypeFilter::Subtype("Equipment".into())]);
+                        assert!(
+                            properties.contains(&FilterProp::AttachedToSource),
+                            "must carry AttachedToSource, got {properties:?}"
+                        );
+                    }
+                    other => panic!("expected Ref(ObjectCount), got {other:?}"),
+                }
+            }
+            other => panic!("expected Multiply{{factor:2}}, got {other:?}"),
+        }
+        // "+0" toughness produces NO AddDynamicToughness (push_dynamic_pt_modifications
+        // skips a 0 component) — deviation from the original plan, which expected a
+        // factor-0 toughness mod that the architecture never emits.
+        assert!(
+            !parsed
+                .statics
+                .iter()
+                .flat_map(|s| s.modifications.iter())
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "no AddDynamicToughness for +0, got {:?}",
+            parsed.statics
+        );
+        // No part of the static may be a fixed AddPower (the fail-before misparse).
+        assert!(
+            !parsed
+                .statics
+                .iter()
+                .flat_map(|s| s.modifications.iter())
+                .any(|m| matches!(m, ContinuousModification::AddPower { .. })),
+            "must not degrade to a fixed AddPower, got {:?}",
+            parsed.statics
+        );
+        // Regression: the graveyard-return activated ability survives.
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::ChangeZone {
+                    destination: crate::types::zones::Zone::Battlefield,
+                    ..
+                }
+            )),
+            "graveyard-return ChangeZone activated ability must remain, got {:?}",
+            parsed.abilities
+        );
+    }
+
     /// CR 116.2b + CR 708.7: Etrata, Deadly Fugitive grants face-down creatures
     /// "{2}{U}{B}: Turn this creature face up. ...". The granted activated
     /// ability's head clause lowers to `Effect::TurnFaceUp { SelfRef }` (the

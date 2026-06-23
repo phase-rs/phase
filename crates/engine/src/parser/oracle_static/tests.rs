@@ -19204,6 +19204,69 @@ fn self_pronoun_combat_state_exact_match_excludes_attacking_alone() {
 }
 
 #[test]
+fn self_static_resolves_it_pronoun_equipped_enchanted_to_source() {
+    // CR 301.5a / CR 303.4: "it" in a self-referential static gate refers to the
+    // source, so "as long as it's equipped/enchanted" must type to
+    // SourceIsEquipped/SourceIsEnchanted (Merry "as long as it's equipped";
+    // Fledgling Osprey "as long as it's enchanted"). Discriminating: before adding
+    // "equipped"/"enchanted" to the rewrite exact-match list these came back
+    // StaticCondition::Unrecognized { text: "it's equipped"/"it's enchanted" },
+    // which evaluates always-true. Fails on revert.
+    let equipped = parse_static_line("This creature gets +1/+0 as long as it's equipped.")
+        .expect("self static def");
+    assert_eq!(
+        equipped.condition,
+        Some(StaticCondition::SourceIsEquipped),
+        "expected SourceIsEquipped, got {:?}",
+        equipped.condition
+    );
+
+    let enchanted = parse_static_line("This creature has flying as long as it's enchanted.")
+        .expect("self static def");
+    assert_eq!(
+        enchanted.condition,
+        Some(StaticCondition::SourceIsEnchanted),
+        "expected SourceIsEnchanted, got {:?}",
+        enchanted.condition
+    );
+}
+
+#[test]
+fn self_static_resolves_it_pronoun_untapped_still_works() {
+    // REGRESSION: the pre-existing rewrite entries are untouched — "it's untapped"
+    // still types to Not(SourceIsTapped).
+    let def = parse_static_line("This creature has hexproof as long as it's untapped.")
+        .expect("self static def");
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn aura_static_does_not_bind_it_pronoun_equipped_enchanted_to_source() {
+    // NEG (SelfRef gate proof): a non-SelfRef attached-subject static keeps "it"
+    // bound to the recipient, so "as long as it's enchanted" must NOT collapse to
+    // SourceIsEnchanted (Awaken-the-Sleeper-class anaphor trap). Reaches the
+    // non-rewrite `else` branch (affected != SelfRef).
+    let defs = parse_static_line_multi("Enchanted creature gets +1/+1 as long as it's enchanted.");
+    assert!(!defs.is_empty(), "expected at least one static def");
+    for d in &defs {
+        assert_ne!(
+            d.condition,
+            Some(StaticCondition::SourceIsEnchanted),
+            "Aura 'it' must not resolve to the source, got {:?}",
+            d.condition
+        );
+    }
+}
+
+#[test]
 fn self_static_resolves_this_creature_is_modified_to_source_filter() {
     // CR 700.9 / CR 611.3a: "as long as this creature is modified" (Orochi
     // Merge-Keeper) must type to SourceMatchesFilter on a creature filter carrying

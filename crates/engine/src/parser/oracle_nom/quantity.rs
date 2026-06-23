@@ -3744,6 +3744,19 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
     // `FilterProp` from a typed pair.
     let (rest, prop) = alt((
         value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        // CR 301.5a + CR 303.4: source-anaphoric gendered pronoun denotes the
+        // ability source (same id as `~`) — Winter Soldier, Captain America
+        // (MSH templates). Maps to AttachedToSource, identical to the `~` arm.
+        // Distinct from the recipient pronoun "it"/"that creature" arm below.
+        // Only the unambiguously source-anaphoric "him"/"her" are accepted; the
+        // singular-they "them" is excluded because it is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" =
+        // the enchanted player, not the Aura source), which would bind the wrong
+        // object set.
+        value(
+            FilterProp::AttachedToSource,
+            alt((tag(" attached to him"), tag(" attached to her"))),
+        ),
         value(
             FilterProp::AttachedToRecipient,
             alt((tag(" attached to it"), tag(" attached to that creature"))),
@@ -4475,6 +4488,86 @@ mod tests {
                 other => panic!("expected Typed filter, got {other:?}"),
             },
             other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_gendered_animate_pronoun() {
+        // CR 301.5a + CR 303.4: MSH/Marvel templates phrase the attachment count
+        // with the source-anaphoric gendered pronoun "him"/"her"
+        // (Winter Soldier "for each Equipment attached to him"). These denote the
+        // SAME object id as `~`, so the combinator must emit `AttachedToSource`.
+        // Fail-before: no "attached to him/her" arm → Err.
+        for pronoun in ["him", "her"] {
+            let clause = format!("equipment attached to {pronoun}");
+            let (rest, q) = parse_for_each_clause_ref(&clause)
+                .unwrap_or_else(|e| panic!("expected Ok for {clause:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {clause:?}");
+            match q {
+                QuantityRef::ObjectCount { filter } => match filter {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert_eq!(controller, None, "controller for {clause:?}");
+                        assert_eq!(
+                            properties,
+                            vec![FilterProp::AttachedToSource],
+                            "properties for {clause:?}"
+                        );
+                        assert_eq!(
+                            type_filters,
+                            vec![TypeFilter::Subtype("Equipment".into())],
+                            "type_filters for {clause:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter for {clause:?}, got {other:?}"),
+                },
+                other => panic!("expected ObjectCount for {clause:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_them_not_source_bound() {
+        // CR 301.5a + CR 303.4: the singular-they "them" is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" = the
+        // enchanted player), so it must NOT bind to the source. The gendered arm
+        // deliberately omits "them"; this combinator therefore does not produce an
+        // AttachedToSource count for it (the clause is left unconsumed). Guards
+        // against a future re-add that would silently count the wrong object set.
+        let result = parse_for_each_attached_to_source("curse attached to them");
+        match result {
+            Err(_) => {}
+            Ok((rest, q)) => {
+                // If some other arm consumes it, it must not be AttachedToSource.
+                if let QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                } = &q
+                {
+                    assert!(
+                        !properties.contains(&FilterProp::AttachedToSource),
+                        "\"attached to them\" must not bind to the source, got {q:?} (rest {rest:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_it_preserved_after_gendered_arm() {
+        // Discrimination/regression: the recipient authority ("it") must stay
+        // AttachedToRecipient even with the new source-pronoun arm above it.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => {
+                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+            }
+            other => panic!("expected recipient ObjectCount, got {other:?}"),
         }
     }
 

@@ -132,6 +132,55 @@ describe("MenuSelect", () => {
     spy.mockRestore();
   });
 
+  it("filters options as the user types and focuses the search box on open", () => {
+    render(
+      <MenuSelect
+        label="Load deck..."
+        items={items}
+        onSelect={vi.fn()}
+        filterable
+        filterPlaceholder="Search decks…"
+        noMatchesLabel="No decks match"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load deck..." }));
+
+    const search = screen.getByPlaceholderText("Search decks…");
+    expect(search).toHaveFocus();
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+
+    fireEvent.change(search, { target: { value: "azor" } });
+    const filtered = screen.getAllByRole("option");
+    expect(filtered.map((o) => o.textContent)).toEqual(["Azorius Control"]);
+
+    fireEvent.change(search, { target: { value: "zzz" } });
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.getByText("No decks match")).toBeInTheDocument();
+  });
+
+  it("filters grouped options and drops groups with no matches", () => {
+    render(
+      <MenuSelect
+        label="Switch deck"
+        groups={[
+          { label: "Starred", items: [{ value: "Atraxa", label: "Atraxa" }] },
+          { label: "Aggro", items: [{ value: "Mono Red", label: "Mono Red" }] },
+        ]}
+        onSelect={vi.fn()}
+        filterable
+        filterPlaceholder="Search decks…"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Switch deck" }));
+    fireEvent.change(screen.getByPlaceholderText("Search decks…"), {
+      target: { value: "atra" },
+    });
+
+    expect(screen.getByText("Starred")).toBeInTheDocument();
+    expect(screen.queryByText("Aggro")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Atraxa"]);
+  });
+
   it("does not apply content-based minWidth when fitContainer is set", () => {
     const longLabel = "Option ".repeat(12).trimEnd();
     const items = [{ value: "option-a", label: longLabel }];

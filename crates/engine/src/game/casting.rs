@@ -10693,6 +10693,7 @@ fn can_feasibly_pay_mana_cost_without_x(
         cost,
         spell_ctx.as_ref(),
         any_color,
+        None,
     );
 
     let (residual_shards, residual_generic) = match &residual {
@@ -11057,9 +11058,11 @@ pub(super) fn pay_ability_mana_cost(
         ability_tag,
         events,
         &HashSet::new(),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn pay_ability_mana_cost_excluding(
     state: &mut GameState,
     player: PlayerId,
@@ -11068,6 +11071,11 @@ pub(super) fn pay_ability_mana_cost_excluding(
     ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
+    // CR 107.4b + CR 118.10: When this ability is paying its mana sub-cost while
+    // funding an outer cost on the call stack, the outer cost's colored shard
+    // demand is threaded so the sub-cost's generic pips are funded from
+    // non-demanded mana. `None` for ordinary top-level ability activations.
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
     pay_ability_mana_cost_with_choices_excluding(
         state,
@@ -11078,6 +11086,7 @@ pub(super) fn pay_ability_mana_cost_excluding(
         None,
         events,
         excluded_sources,
+        sub_cost_demand,
     )
 }
 
@@ -11091,6 +11100,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
@@ -11110,6 +11120,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
         phyrexian_choices,
         events,
         excluded_sources,
+        sub_cost_demand,
     )?;
 
     Ok(())
@@ -11259,6 +11270,7 @@ fn auto_tap_and_pay_cost(
         phyrexian_choices,
         events,
         &HashSet::new(),
+        None,
     )
 }
 
@@ -11272,6 +11284,7 @@ fn auto_tap_and_pay_cost_excluding(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
     let events_before = events.len();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding(
@@ -11309,7 +11322,25 @@ fn auto_tap_and_pay_cost_excluding(
         }
     }
 
+    // CR 107.4b + CR 601.2f: The real spend is demand-aware. The hand demand
+    // (other cards in hand needing colors) is the existing soft hybrid-resolution
+    // signal; the incoming `sub_cost_demand` is the outer cost's reserved colored
+    // shards when this payment is a nested mana sub-cost (CR 118.10). Combine the
+    // two by element-wise max so a color reserved by EITHER is deprioritized when
+    // paying a generic pip — preventing the spend from consuming a floated color
+    // the outer cost still needs (Dimir/Gruul Signet bug). Computed BEFORE the
+    // mutable pool borrow below to avoid a borrow-checker conflict (WATCH-ITEM #2).
     let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
+    let combined_demand: mana_payment::ColorDemand = match sub_cost_demand {
+        Some(outer) => {
+            let mut d = hand_demand;
+            for (slot, &reserved) in d.iter_mut().zip(outer.iter()) {
+                *slot = (*slot).max(reserved);
+            }
+            d
+        }
+        None => hand_demand,
+    };
     let player_data = state
         .players
         .iter_mut()
@@ -11318,7 +11349,7 @@ fn auto_tap_and_pay_cost_excluding(
     let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
         &mut player_data.mana_pool,
         cost,
-        Some(&hand_demand),
+        Some(&combined_demand),
         ctx,
         permissions.any_color,
         phyrexian_choices,

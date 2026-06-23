@@ -22609,6 +22609,7 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+    use crate::types::ability::AttachmentKind;
 
     /// CR 510.1a + CR 613.11: The Kingpin of Crime's attack ability — "Whenever you
     /// attack, you may pay 2 life. If you do, until end of turn, creatures you
@@ -24689,6 +24690,106 @@ mod tests {
                 sub.effect
             );
         }
+    }
+
+    /// MSH-A C2 — Whiplash, Vengeful Engineer. After Fix A2, the where-X clause
+    /// "where X is the number of Equipment attached to him" binds BOTH the LoseLife
+    /// and GainLife amounts to a typed `ObjectCount{Equipment, AttachedToSource}`
+    /// (fail-before: `QuantityRef::Variable("the number of Equipment attached to
+    /// him")` string fallback). This is the in-scope win.
+    ///
+    /// GATE (recorded, NOT met by parser-only A2+B1): the clean each-opponent form
+    /// Both the each-opponent form (`player_scope == Some(Opponent)`,
+    /// `LoseLife.target == None`) and the intervening-if `condition` are now
+    /// produced. The follow-up bridge maps `StaticCondition::SourceIsEquipped`
+    /// to `TriggerCondition::SourceMatchesFilter { HasAttachment(Equipment) }`
+    /// (oracle_trigger.rs `static_condition_to_trigger_condition`), so
+    /// `try_extract_intervening` succeeds, `strip_condition_clause` removes
+    /// "if he's equipped," and the body once again starts with "each opponent ",
+    /// letting `strip_each_player_subject` (lower.rs:2542) fire. This closed the
+    /// two previously recorded gaps.
+    #[test]
+    fn whiplash_where_x_binds_equipment_count_to_life_loss_and_gain() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        let def = parse_trigger_line(
+            "Whenever Whiplash attacks, if he's equipped, each opponent loses X life and you gain X life, where X is the number of Equipment attached to him.",
+            "Whiplash, Vengeful Engineer",
+        );
+        let execute = def.execute.expect("attack execute");
+
+        let expected_amount = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .properties(vec![FilterProp::AttachedToSource]),
+                ),
+            },
+        };
+        // The in-scope A2 win: LoseLife amount is the typed ObjectCount, NOT Variable.
+        match &*execute.effect {
+            Effect::LoseLife { amount, target, .. } => {
+                assert_eq!(
+                    amount, &expected_amount,
+                    "LoseLife amount must bind to typed ObjectCount(Equipment+AttachedToSource)"
+                );
+                // Each-opponent form: the life loss is player-scoped, not targeted.
+                assert_eq!(
+                    target, &None,
+                    "each-opponent LoseLife must not carry a target (player_scope drives it)"
+                );
+                // Reinforce the discriminating property (AttachedToSource present).
+                match amount {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => assert!(
+                        tf.properties.contains(&FilterProp::AttachedToSource),
+                        "amount filter must carry AttachedToSource, got {:?}",
+                        tf.properties
+                    ),
+                    other => panic!("expected ObjectCount amount, got {other:?}"),
+                }
+            }
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        // The sibling GainLife shares the same typed binding (CR 107.3i).
+        let gain = execute.sub_ability.expect("gain_life sibling");
+        match &*gain.effect {
+            Effect::GainLife { amount, .. } => assert_eq!(
+                amount, &expected_amount,
+                "GainLife amount must share the typed ObjectCount binding"
+            ),
+            other => panic!("expected GainLife, got {other:?}"),
+        }
+
+        // Bridge follow-up (closed): the intervening-if condition is now carried
+        // as SourceMatchesFilter{HasAttachment(Equipment)} (CR 603.4 + CR 301.5a),
+        // and stripping it lets the each-opponent subject be recognized.
+        match def.condition {
+            Some(TriggerCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(ref tf),
+            }) => assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasAttachment {
+                        kind: AttachmentKind::Equipment,
+                        ..
+                    }
+                )),
+                "condition filter must carry HasAttachment(Equipment), got {:?}",
+                tf.properties
+            ),
+            other => panic!("expected SourceMatchesFilter(HasAttachment Equipment), got {other:?}"),
+        }
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "each-opponent scope is now produced once the 'if he's equipped,' clause \
+             is stripped, letting strip_each_player_subject fire"
+        );
     }
 
     /// Issue #1424 — The Scarab God upkeep: opponent life loss and scry share

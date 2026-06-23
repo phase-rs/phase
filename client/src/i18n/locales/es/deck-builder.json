@@ -271,5 +271,11 @@
     "minimumCount": "El mazo tiene {{count}} cartas (mínimo 60)",
     "maxCopies": "{{name}}: {{count}} copias (máx. 4)",
     "companionInMain": "{{name}} es tu compañero pero también está en el mazo principal — esto infringe su condición de construcción de mazo. Quítalo del mazo principal para usarlo como compañero."
+  },
+  "switcher": {
+    "starred": "Destacados",
+    "unfiled": "Sin clasificar",
+    "searchPlaceholder": "Buscar mazos…",
+    "noMatches": "No hay mazos"
   }
 }

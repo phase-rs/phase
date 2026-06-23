@@ -271,5 +271,11 @@
     "minimumCount": "Deck has {{count}} cards (minimum 60)",
     "maxCopies": "{{name}}: {{count}} copies (max 4)",
     "companionInMain": "{{name}} is your companion but is also in the main deck — this violates its deckbuilding condition. Remove it from the main deck to use it as a companion."
+  },
+  "switcher": {
+    "starred": "Starred",
+    "unfiled": "Unfiled",
+    "searchPlaceholder": "Search decks…",
+    "noMatches": "No decks match"
   }
 }

@@ -271,5 +271,11 @@
     "minimumCount": "Il mazzo ha {{count}} carte (minimo 60)",
     "maxCopies": "{{name}}: {{count}} copie (max 4)",
     "companionInMain": "{{name}} è il tuo compagno ma è anche nel mazzo principale — questo viola la sua condizione di costruzione del mazzo. Rimuovilo dal mazzo principale per usarlo come compagno."
+  },
+  "switcher": {
+    "starred": "Preferiti",
+    "unfiled": "Senza cartella",
+    "searchPlaceholder": "Cerca mazzi…",
+    "noMatches": "Nessun mazzo trovato"
   }
 }

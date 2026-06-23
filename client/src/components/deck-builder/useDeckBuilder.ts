@@ -10,9 +10,11 @@ import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../s
 import {
   ACTIVE_DECK_KEY,
   STORAGE_KEY_PREFIX,
+  getDeckMeta,
   loadSavedDeck,
   loadSavedDeckBracket,
-  removeDeckMeta,
+  migrateDeckMeta,
+  setDeckFolder,
   stampDeckMeta,
 } from "../../constants/storage";
 import { BASIC_LAND_NAMES } from "../../constants/game";
@@ -443,7 +445,13 @@ export function useDeckBuilder({
       && localStorage.getItem(STORAGE_KEY_PREFIX + savedDeckName) !== null
     ) {
       localStorage.removeItem(STORAGE_KEY_PREFIX + savedDeckName);
-      removeDeckMeta(savedDeckName);
+      // Carry folder/star membership + timestamps to the new name; the
+      // trailing stampDeckMeta(nextName) then no-ops since the entry exists.
+      // If nextName already names another deck, the setItem below overwrites
+      // its data (pre-existing Save behavior) and this migration likewise
+      // replaces its metadata — both correctly reflect the surviving deck's
+      // identity now living under nextName.
+      migrateDeckMeta(savedDeckName, nextName);
       if (localStorage.getItem(ACTIVE_DECK_KEY) === savedDeckName) {
         localStorage.setItem(ACTIVE_DECK_KEY, nextName);
       }
@@ -484,6 +492,12 @@ export function useDeckBuilder({
     if (bracket !== null) payload.bracket = bracket;
     localStorage.setItem(STORAGE_KEY_PREFIX + cloneName, JSON.stringify(payload));
     stampDeckMeta(cloneName);
+    // A clone lands beside its source: inherit the folder, but start unstarred
+    // (the star is a deliberate per-deck pin, not a copyable property).
+    const sourceFolderId = savedDeckName
+      ? getDeckMeta(savedDeckName)?.folderId ?? null
+      : null;
+    if (sourceFolderId) setDeckFolder(cloneName, sourceFolderId);
     setDeckName(cloneName);
     setSavedDeckName(cloneName);
     setSavedDecks(listSavedDecks());
@@ -493,7 +507,7 @@ export function useDeckBuilder({
       title: t("toolbar.clonedToastTitle"),
       description: t("toolbar.clonedToastDescription", { name: cloneName }),
     });
-  }, [deckName, currentDeck, format, bracket, showNotification, t]);
+  }, [deckName, currentDeck, format, bracket, savedDeckName, showNotification, t]);
 
   useEffect(() => {
     if (!justSaved) return;

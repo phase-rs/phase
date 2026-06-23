@@ -74,6 +74,17 @@ export interface MenuSelectProps {
   /** Highlights the matching option in the open menu. */
   selectedValue?: string;
   /**
+   * When true, render a search box at the top of the open menu that filters
+   * items/groups by label substring. Focus lands on the input when the menu
+   * opens (instead of the first option). Off by default — existing call sites
+   * keep their plain listbox behavior.
+   */
+  filterable?: boolean;
+  /** Placeholder for the filter input (only used when `filterable`). */
+  filterPlaceholder?: string;
+  /** Message shown when a `filterable` search matches no options. */
+  noMatchesLabel?: string;
+  /**
    * `auto` (default): bottom sheet below 820px, anchored dropdown at wider
    * widths. `dropdown`: always anchor below/above the trigger like a native
    * select — use inside scrollable panels (e.g. deck-builder filters).
@@ -192,6 +203,9 @@ export function MenuSelect({
   disabled = false,
   ariaLabel,
   selectedValue,
+  filterable = false,
+  filterPlaceholder,
+  noMatchesLabel,
   menuLayout = "auto",
   fitContainer = false,
   wrapperClassName = "",
@@ -208,11 +222,39 @@ export function MenuSelect({
   const mobileSheet = useMobileSheetLayout();
   const useBottomSheet = menuLayout === "auto" && mobileSheet;
   const [open, setOpen] = useState(false);
+  const [filterText, setFilterText] = useState("");
   const [minWidthPx, setMinWidthPx] = useState<number | undefined>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const allItems = useMemo(() => flattenMenuItems(items, groups), [items, groups]);
+
+  // When filterable, narrow items/groups by label substring; empty groups drop.
+  const filterQuery = filterable ? filterText.trim().toLowerCase() : "";
+  const visibleItems = useMemo(
+    () =>
+      filterQuery
+        ? (items ?? []).filter((item) => item.label.toLowerCase().includes(filterQuery))
+        : items,
+    [items, filterQuery],
+  );
+  const visibleGroups = useMemo(
+    () =>
+      filterQuery
+        ? (groups ?? [])
+            .map((group) => ({
+              ...group,
+              items: group.items.filter((item) =>
+                item.label.toLowerCase().includes(filterQuery),
+              ),
+            }))
+            .filter((group) => group.items.length > 0)
+        : groups,
+    [groups, filterQuery],
+  );
+  const hasVisibleOptions =
+    (visibleItems?.length ?? 0) > 0 || (visibleGroups?.length ?? 0) > 0;
   const [menuStyle, setMenuStyle] = useState<AnchoredMenuStyle>({
     top: 0,
     bottom: "auto",
@@ -253,6 +295,7 @@ export function MenuSelect({
 
   const closeMenu = useCallback(() => {
     setOpen(false);
+    setFilterText("");
     onOptionHoverRef.current?.(null);
   }, []);
 
@@ -272,6 +315,12 @@ export function MenuSelect({
   useLayoutEffect(() => {
     if (!open) return;
     updatePosition();
+    // When filterable, focus the search box so the user can type-to-narrow
+    // immediately; ArrowDown then drops into the option list.
+    if (filterable) {
+      filterInputRef.current?.focus();
+      return;
+    }
     // APG listbox pattern: move focus into the menu so the keyboard path
     // (Arrow keys + Enter) works like the native select this replaces.
     const menu = menuRef.current;
@@ -281,7 +330,7 @@ export function MenuSelect({
         : null;
     (selectedOption ?? menu?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus();
     selectedOption?.scrollIntoView({ block: "nearest" });
-  }, [open, selectedValue, updatePosition, useBottomSheet]);
+  }, [open, selectedValue, updatePosition, useBottomSheet, filterable]);
 
   useEffect(() => {
     if (!open) return;
@@ -438,8 +487,21 @@ export function MenuSelect({
                     }
               }
             >
-              {items?.map((item) => renderOption(item))}
-              {groups?.map((group) => (
+              {filterable && (
+                <div className="sticky top-0 z-10 border-b border-white/10 bg-[#0a0f1b] px-2 pb-1.5 pt-1.5">
+                  <input
+                    ref={filterInputRef}
+                    type="text"
+                    value={filterText}
+                    onChange={(event) => setFilterText(event.target.value)}
+                    placeholder={filterPlaceholder ?? ""}
+                    aria-label={filterPlaceholder ?? ariaLabel ?? label}
+                    className="w-full rounded-md bg-black/40 px-2 py-1.5 text-sm text-slate-200 outline-none ring-1 ring-white/10 placeholder:text-slate-500 focus:ring-white/25"
+                  />
+                </div>
+              )}
+              {visibleItems?.map((item) => renderOption(item))}
+              {visibleGroups?.map((group) => (
                 <div key={group.label}>
                   <div
                     role="presentation"
@@ -450,6 +512,11 @@ export function MenuSelect({
                   {group.items.map((item) => renderOption(item))}
                 </div>
               ))}
+              {filterable && !hasVisibleOptions && noMatchesLabel && (
+                <div className="px-3 py-3 text-center text-xs text-slate-500">
+                  {noMatchesLabel}
+                </div>
+              )}
             </div>
           </>,
           document.body,

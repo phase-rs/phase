@@ -2770,10 +2770,15 @@ pub(super) fn parse_hand_reveal_ast(
     {
         if let Some((_, qty_text)) = lower.split_once("equal to ") {
             let qty_text = qty_text.trim_end_matches('.');
-            if let Some(qty) = super::super::oracle_quantity::parse_quantity_ref(qty_text) {
-                return Some(HandRevealImperativeAst::RevealPartial {
-                    count: crate::types::ability::QuantityExpr::Ref { qty },
-                });
+            // CR 701.20a: "reveals a number of cards ... equal to X" — the reveal
+            // count is a full dynamic quantity expression, not just a bare ref.
+            // CR 107.1: integer arithmetic; parse_cda_quantity composes the
+            // offset/arithmetic grammar ("one plus the number of creature cards in
+            // your graveyard" -> Offset{ Ref(ZoneCardCount), +1 }, Klaw) and
+            // subsumes the single-ref case. CR 107.1b: a negative result is
+            // clamped to 0 at resolution (reveal_hand.rs .max(0)).
+            if let Some(count) = super::super::oracle_quantity::parse_cda_quantity(qty_text) {
+                return Some(HandRevealImperativeAst::RevealPartial { count });
             }
         }
     }
@@ -16013,5 +16018,101 @@ mod tests {
             }
             other => panic!("expected ExchangeLifeTotals, got {other:?}"),
         }
+    }
+
+    /// Walk an `AbilityDefinition`'s effect + sub_ability chain (descending into
+    /// `CreateDelayedTrigger`'s wrapped effect) and return the first
+    /// `Effect::RevealHand`'s `count` (cloned). Returns `None` if no RevealHand
+    /// is present.
+    fn find_reveal_hand_count(def: &AbilityDefinition) -> Option<Option<QuantityExpr>> {
+        let mut cur = Some(def);
+        while let Some(d) = cur {
+            match &*d.effect {
+                Effect::RevealHand { count, .. } => return Some(count.clone()),
+                // Klaw's ETB ability synthesizes as a CreateDelayedTrigger whose
+                // wrapped effect carries the RevealHand chain.
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    if let Some(found) = find_reveal_hand_count(effect) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+            cur = d.sub_ability.as_deref();
+        }
+        None
+    }
+
+    /// CR 701.20a + CR 107.1: Klaw's full ETB ability — "When ~ enters, target
+    /// player reveals a number of cards from their hand equal to one plus the
+    /// number of creature cards in your graveyard. You choose one of them. That
+    /// player discards that card." — must synthesize Effect::RevealHand with a
+    /// full `Offset` count. Before the fix this delegated to `parse_quantity_ref`,
+    /// which returns `None` for the compound "N plus ..." form, so the count was
+    /// dropped (count == None) — measured baseline.
+    #[test]
+    fn parse_hand_reveal_compound_offset_count() {
+        // Production entry: the full Klaw oracle flows through `parse_effect_chain`,
+        // strips the "target player" subject, and lowers to Effect::RevealHand
+        // nested in the CreateDelayedTrigger. Before the fix count was None;
+        // after, it is the full Offset.
+        let def = super::super::parse_effect_chain(
+            "When ~ enters, target player reveals a number of cards from their hand equal to one plus the number of creature cards in your graveyard. You choose one of them. That player discards that card.",
+            AbilityKind::Activated,
+        );
+        let count = find_reveal_hand_count(&def).unwrap_or_else(|| {
+            panic!("expected Effect::RevealHand in chain, got {:?}", def.effect)
+        });
+        let Some(QuantityExpr::Offset { inner, offset }) = count else {
+            panic!("expected Some(Offset) count, got {count:?}");
+        };
+        assert_eq!(offset, 1);
+        let QuantityExpr::Ref { qty } = *inner else {
+            panic!("expected Ref inner, got {inner:?}");
+        };
+        match qty {
+            QuantityRef::ZoneCardCount {
+                zone,
+                card_types,
+                scope,
+                ..
+            } => {
+                assert_eq!(zone, crate::types::ability::ZoneRef::Graveyard);
+                assert!(card_types.contains(&TypeFilter::Creature));
+                assert_eq!(scope, crate::types::ability::CountScope::Controller);
+            }
+            other => panic!("expected ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1: Bare-ref subsumption regression — "equal to the number of
+    /// creature cards in your graveyard" (no offset) must still lower to
+    /// RevealPartial with a plain `Ref(ZoneCardCount)`, NOT an `Offset`. Proves
+    /// `parse_cda_quantity` still handles the single-ref case the old
+    /// `parse_quantity_ref` covered (would regress if the delegate dropped bare
+    /// refs).
+    #[test]
+    fn parse_hand_reveal_bare_ref_count_subsumed() {
+        // `parse_hand_reveal_ast` receives the verb-led clause (the "target
+        // player" subject is stripped upstream), so call it with the production
+        // input shape directly.
+        let input =
+            "reveals a number of cards from their hand equal to the number of creature cards in your graveyard";
+        let lower = input.to_lowercase();
+        let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+        let Some(HandRevealImperativeAst::RevealPartial { count }) = result else {
+            panic!("{input}: expected RevealPartial, got {result:?}");
+        };
+        let QuantityExpr::Ref { qty } = count else {
+            panic!("expected bare Ref count (not Offset), got {count:?}");
+        };
+        assert!(matches!(
+            qty,
+            QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+                scope: crate::types::ability::CountScope::Controller,
+                ..
+            }
+        ));
     }
 }

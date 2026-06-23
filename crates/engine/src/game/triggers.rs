@@ -12436,6 +12436,189 @@ pub mod tests {
         ));
     }
 
+    /// CR 603.4 + CR 301.5a: runtime gate for the equipped intervening-if bridge
+    /// (oracle_trigger.rs `static_condition_to_trigger_condition`,
+    /// `SourceIsEquipped → SourceMatchesFilter{HasAttachment(Equipment)}`).
+    /// Discriminates: false with no attachment, false with only an Aura attached
+    /// (proves kind matters), true once an Equipment is attached.
+    #[test]
+    fn source_matches_filter_gates_on_equipped() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Equipped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let cond = TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: crate::types::ability::AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        };
+
+        // No attachment → does not fire.
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Hostile: an Aura attached must NOT satisfy the Equipment predicate.
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(aura);
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Equipment attached → fires.
+        let equip = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let equip_obj = state.objects.get_mut(&equip).unwrap();
+            equip_obj.card_types.core_types.push(CoreType::Artifact);
+            equip_obj.card_types.subtypes.push("Equipment".to_string());
+            equip_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(equip);
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    /// CR 603.4 + CR 303.4: runtime gate for the enchanted intervening-if bridge on
+    /// a NON-creature source (a bare Artifact). CR 303.4 allows an Aura to enchant
+    /// any object, so the source-object-wide bridge must fire when an Aura is
+    /// attached even though the source is not a creature.
+    ///
+    /// Drives the PRODUCTION bridge
+    /// (`parser::oracle_trigger::static_condition_to_trigger_condition`) rather than
+    /// a hand-built filter, so the test discriminates against the bridge code.
+    /// Fail-before: the bridge produced `TypedFilter::creature()`, so the
+    /// non-creature artifact source failed the card-type gate and
+    /// `check_trigger_condition` returned `false` even with the Aura attached.
+    /// Hostile negatives: no attachment → false; an Equipment (wrong kind) on the
+    /// non-creature source → false.
+    #[test]
+    fn source_matches_filter_gates_on_enchanted_noncreature() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Enchanted Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        // Artifact only — deliberately NOT a Creature.
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let cond = crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+            &StaticCondition::SourceIsEnchanted,
+        )
+        .expect("SourceIsEnchanted should bridge to a TriggerCondition");
+
+        // No attachment → does not fire.
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Hostile: an Equipment attached to the non-creature source must NOT
+        // satisfy the Aura predicate (attachment-kind discrimination).
+        let equip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let equip_obj = state.objects.get_mut(&equip).unwrap();
+            equip_obj.card_types.core_types.push(CoreType::Artifact);
+            equip_obj.card_types.subtypes.push("Equipment".to_string());
+            equip_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(equip);
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Aura attached to the non-creature source → fires (the revert-failing case).
+        let aura = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(aura);
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
     // === CR 701.27g + CR 708.2: Source-state predicates (Transformed/FaceUp/FaceDown) ===
 
     #[test]

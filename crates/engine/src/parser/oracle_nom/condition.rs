@@ -1221,9 +1221,41 @@ fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondit
     .parse(rest)
 }
 
+/// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+/// contraction subject ("he's"/"she's" = "_ is", "they're" = "they are") is
+/// source-anaphoric — binds the ability source. Whiplash ("if he's equipped");
+/// The Incredible Hulk ("if he's attacking"). Composes the copula + BARE-predicate
+/// shape of `parse_recipient_is_filter_condition` (the contraction already supplies
+/// the verb, so a BARE predicate tag is matched, NOT "is equipped"). The copula is
+/// paired to its pronoun so the ungrammatical cross-products ("they's"/"he're")
+/// cannot parse. Bare "it's" is deliberately excluded (target-anaphoric in spell
+/// bodies — Awaken the Sleeper); source "it's" is handled by the context-gated
+/// SelfRef rewrite. Straight ASCII apostrophe (0x27) only.
+fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        preceded(alt((tag("he"), tag("she"))), tag("'s ")),
+        preceded(tag("they"), tag("'re ")),
+    ))
+    .parse(input)?;
+    alt((
+        value(StaticCondition::SourceIsEquipped, tag("equipped")),
+        value(StaticCondition::SourceIsEnchanted, tag("enchanted")),
+        value(StaticCondition::SourceIsTapped, tag("tapped")),
+        value(StaticCondition::SourceIsMonstrous, tag("monstrous")),
+        value(StaticCondition::SourceIsAttacking, tag("attacking")),
+        value(StaticCondition::SourceIsBlocking, tag("blocking")),
+        value(StaticCondition::SourceIsBlocked, tag("blocked")),
+    ))
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 301.5a/303.4/508.1k/509.1g/509.1h: gendered/plural contraction subject
+        // ("he's equipped", "she's enchanted", "they're attacking"). Source-only
+        // (never target-anaphoric for a gendered/plural pronoun in MTG templates).
+        parse_contraction_source_state_condition,
         // CR 611.2b: Tapped/untapped — composed as subject × predicate.
         // Parse subject ("~ is", "this creature is", etc.) then branch on "tapped"/"untapped".
         parse_tapped_untapped,
@@ -8218,6 +8250,77 @@ mod tests {
         let (rest, c) = parse_inner_condition("this creature is equipped").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceIsEquipped);
+    }
+
+    // CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+    // contraction subject ("he's"/"she's"/"they're <state>") binds the ability
+    // source. Fail-before: `parse_source_subject` rejects "he's" → no Source
+    // condition (Whiplash "if he's equipped" trigger condition dropped).
+    #[test]
+    fn test_contraction_source_state_pronouns() {
+        for subj in ["he's equipped", "she's equipped", "they're equipped"] {
+            let (rest, c) = parse_inner_condition(subj)
+                .unwrap_or_else(|e| panic!("expected Ok for {subj:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {subj:?}");
+            assert_eq!(c, StaticCondition::SourceIsEquipped, "for {subj:?}");
+        }
+    }
+
+    // CR 508.1k / CR 303.4: the contraction combinator covers the whole source-state
+    // class, not just "equipped" (The Incredible Hulk shape "if he's attacking").
+    #[test]
+    fn test_contraction_source_state_siblings() {
+        let (rest, c) = parse_inner_condition("he's attacking").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsAttacking);
+
+        let (rest, c) = parse_inner_condition("he's enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsEnchanted);
+    }
+
+    // BLOCKER-2 guard (discriminating, REACHABLE): bare "it's" is target-anaphoric
+    // in spell bodies (Awaken the Sleeper reaches this same combinator at
+    // oracle_effect/conditions.rs). It MUST NOT yield a Source condition — fails if
+    // anyone later adds a blanket "it's" source arm.
+    #[test]
+    fn test_bare_its_not_source_equipped() {
+        match parse_inner_condition("it's equipped") {
+            Err(_) => {}
+            Ok((rest, c)) => {
+                assert_ne!(
+                    c,
+                    StaticCondition::SourceIsEquipped,
+                    "bare \"it's equipped\" must not bind the source (rest={rest:?})"
+                );
+            }
+        }
+    }
+
+    // Over-acceptance guard: the copula is paired to its pronoun, so the
+    // ungrammatical cross-products "they's"/"he're" cannot parse a Source condition.
+    #[test]
+    fn test_contraction_cross_products_rejected() {
+        for subj in ["they's equipped", "he're equipped"] {
+            match parse_inner_condition(subj) {
+                Err(_) => {}
+                Ok((rest, c)) => {
+                    assert!(
+                        !matches!(
+                            c,
+                            StaticCondition::SourceIsEquipped
+                                | StaticCondition::SourceIsEnchanted
+                                | StaticCondition::SourceIsTapped
+                                | StaticCondition::SourceIsMonstrous
+                                | StaticCondition::SourceIsAttacking
+                                | StaticCondition::SourceIsBlocking
+                                | StaticCondition::SourceIsBlocked
+                        ),
+                        "ungrammatical {subj:?} must not yield a Source condition (rest={rest:?}, c={c:?})"
+                    );
+                }
+            }
+        }
     }
 
     // CR 303.4: bare SourceIsEnchanted predicate across subjects.

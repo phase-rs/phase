@@ -199,7 +199,13 @@
     "unknown": "Sconosciute {{count}}",
     "unknownCardsTitle": "Carte sconosciute:\n{{cards}}",
     "unsupportedTitle": "Non supportate ({{unique}} uniche, {{copies}} copie):\n{{cards}}",
-    "setIconAlt": "Icona set {{code}}"
+    "setIconAlt": "Icona set {{code}}",
+    "actionsMenu": "Opzioni mazzo",
+    "star": "Aggiungi ai preferiti",
+    "unstar": "Rimuovi dai preferiti",
+    "moveToFolder": "Sposta nella cartella",
+    "unfiled": "Senza cartella",
+    "newFolder": "Nuova cartella…"
   },
   "myDecks": {
     "headingManage": "I miei mazzi",
@@ -254,7 +260,11 @@
     "loadMore": "Carica altri",
     "selectedDeck": "Mazzo selezionato",
     "chooseDeckToContinue": "Scegli un mazzo per continuare",
-    "filterAll": "Tutti"
+    "filterAll": "Tutti",
+    "sectionStarred": "Preferiti",
+    "sectionUnfiled": "Senza cartella",
+    "collapseAll": "Comprimi tutto",
+    "expandAll": "Espandi tutto"
   },
   "subscriptions": {
     "emptyTitle": "Nessuna iscrizione ai feed",
@@ -281,5 +291,16 @@
     "alpha": "Alpha",
     "profile": "Profilo",
     "settings": "Impostazioni"
+  },
+  "folder": {
+    "actionsMenu": "Opzioni cartella",
+    "rename": "Rinomina",
+    "delete": "Elimina",
+    "newFolder": "Nuova cartella",
+    "newFolderPrompt": "Nome della cartella:",
+    "renamePrompt": "Rinomina cartella:",
+    "deleteConfirm": "Eliminare la cartella «{{name}}»? I mazzi verranno spostati in Senza cartella.",
+    "emptyHint": "Questa cartella è vuota.",
+    "unfiledEmptyHint": "Nessun mazzo senza cartella."
   }
 }
