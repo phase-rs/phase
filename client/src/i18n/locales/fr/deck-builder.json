@@ -271,5 +271,11 @@
     "minimumCount": "Le deck contient {{count}} cartes (minimum 60)",
     "maxCopies": "{{name}} : {{count}} copies (max 4)",
     "companionInMain": "{{name}} est votre compagnon mais figure aussi dans le deck principal — cela enfreint sa condition de construction. Retirez-le du deck principal pour l'utiliser comme compagnon."
+  },
+  "switcher": {
+    "starred": "Favoris",
+    "unfiled": "Non classé",
+    "searchPlaceholder": "Rechercher des decks…",
+    "noMatches": "Aucun deck trouvé"
   }
 }

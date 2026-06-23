@@ -271,5 +271,11 @@
     "minimumCount": "O deck tem {{count}} cartas (mínimo de 60)",
     "maxCopies": "{{name}}: {{count}} cópias (máx. 4)",
     "companionInMain": "{{name}} é seu companheiro, mas também está no deck principal — isso viola sua condição de construção. Remova-o do deck principal para usá-lo como companheiro."
+  },
+  "switcher": {
+    "starred": "Destacados",
+    "unfiled": "Sem pasta",
+    "searchPlaceholder": "Buscar baralhos…",
+    "noMatches": "Nenhum baralho"
   }
 }

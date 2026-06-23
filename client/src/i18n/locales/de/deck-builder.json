@@ -271,5 +271,11 @@
     "minimumCount": "Das Deck hat {{count}} Karten (Minimum 60)",
     "maxCopies": "{{name}}: {{count}} Kopien (max. 4)",
     "companionInMain": "{{name}} ist dein Gefährte, befindet sich aber auch im Hauptdeck — das verstößt gegen seine Deckbau-Bedingung. Entferne ihn aus dem Hauptdeck, um ihn als Gefährten zu nutzen."
+  },
+  "switcher": {
+    "starred": "Favoriten",
+    "unfiled": "Nicht zugeordnet",
+    "searchPlaceholder": "Decks suchen…",
+    "noMatches": "Keine Decks gefunden"
   }
 }

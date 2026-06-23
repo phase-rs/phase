@@ -271,5 +271,11 @@
     "minimumCount": "Talia ma {{count}} kart (minimum 60)",
     "maxCopies": "{{name}}: {{count}} kopii (maks. 4)",
     "companionInMain": "{{name}} jest twoim towarzyszem, ale znajduje się też w talii głównej — to narusza jego warunek budowy talii. Usuń go z talii głównej, aby użyć go jako towarzysza."
+  },
+  "switcher": {
+    "starred": "Ulubione",
+    "unfiled": "Bez folderu",
+    "searchPlaceholder": "Szukaj talii…",
+    "noMatches": "Brak talii"
   }
 }

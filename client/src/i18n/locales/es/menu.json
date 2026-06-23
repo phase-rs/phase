@@ -199,7 +199,13 @@
     "unknown": "Desconocidas {{count}}",
     "unknownCardsTitle": "Cartas desconocidas:\n{{cards}}",
     "unsupportedTitle": "No compatibles ({{unique}} únicas, {{copies}} copias):\n{{cards}}",
-    "setIconAlt": "Icono de la colección {{code}}"
+    "setIconAlt": "Icono de la colección {{code}}",
+    "actionsMenu": "Opciones del mazo",
+    "star": "Destacar",
+    "unstar": "Quitar destacado",
+    "moveToFolder": "Mover a carpeta",
+    "unfiled": "Sin clasificar",
+    "newFolder": "Nueva carpeta…"
   },
   "myDecks": {
     "headingManage": "Mis mazos",
@@ -254,7 +260,11 @@
     "loadMore": "Cargar más",
     "selectedDeck": "Mazo seleccionado",
     "chooseDeckToContinue": "Elige un mazo para continuar",
-    "filterAll": "Todos"
+    "filterAll": "Todos",
+    "sectionStarred": "Destacados",
+    "sectionUnfiled": "Sin clasificar",
+    "collapseAll": "Contraer todo",
+    "expandAll": "Expandir todo"
   },
   "subscriptions": {
     "emptyTitle": "Sin suscripciones a feeds",
@@ -281,5 +291,16 @@
     "alpha": "Alfa",
     "profile": "Perfil",
     "settings": "Ajustes"
+  },
+  "folder": {
+    "actionsMenu": "Opciones de carpeta",
+    "rename": "Renombrar",
+    "delete": "Eliminar",
+    "newFolder": "Nueva carpeta",
+    "newFolderPrompt": "Nombre de la carpeta:",
+    "renamePrompt": "Renombrar carpeta:",
+    "deleteConfirm": "¿Eliminar la carpeta «{{name}}»? Los mazos pasarán a Sin clasificar.",
+    "emptyHint": "Esta carpeta está vacía.",
+    "unfiledEmptyHint": "No hay mazos sin clasificar."
   }
 }
