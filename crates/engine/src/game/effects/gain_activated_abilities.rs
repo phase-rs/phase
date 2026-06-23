@@ -107,8 +107,20 @@ pub fn resolve(
             // multiple recipients (or multiple sequential grants) never collide
             // or overwrite each other (CR 611.2c fixes each affected set
             // independently).
+            //
+            // CR 112.6a: "you control" must resolve against the resolving
+            // ability's controller, not whatever player currently controls the
+            // live source object. `FilterContext::from_ability` binds
+            // `source_controller` to `ability.controller` (captured when the
+            // ability was put on the stack), so the grant still lands on the
+            // correct player's Horrors even if the source's controller has
+            // since changed or the source has left the battlefield entirely
+            // (`FilterContext::from_source` would instead read the live
+            // object's controller, or `None` if the source object no longer
+            // exists in `state.objects` — silently matching the wrong
+            // player, or no one).
             _ => {
-                let ctx = FilterContext::from_source(state, ability.source_id);
+                let ctx = FilterContext::from_ability(ability);
                 let recipient_ids: Vec<_> = state
                     .battlefield
                     .iter()
@@ -598,6 +610,158 @@ mod tests {
         assert!(
             state.objects[&bear].abilities.is_empty(),
             "the non-Horror must NOT gain the ability"
+        );
+    }
+
+    // ── Regression: group recipients must resolve against the resolving
+    // ability's controller (CR 112.6a), not the live source object's current
+    // controller. Simulates the source (Grell) leaving the battlefield before
+    // its triggered ability resolves — `state.objects` no longer holds it, so
+    // `FilterContext::from_source` would read `source_controller: None` and
+    // silently match nobody. `FilterContext::from_ability` must instead use
+    // `ability.controller`, captured when the ability was put on the stack. ──
+    #[test]
+    fn group_recipient_resolves_against_ability_controller_when_source_left_play() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Opponent Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.base_name = "Opponent Artifact".to_string();
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            obj.card_types = obj.base_card_types.clone();
+            obj.base_abilities = Arc::new(vec![draw_ability()]);
+        }
+
+        let horror = create_creature(&mut state, 2, P0, "Horror A");
+        {
+            let obj = state.objects.get_mut(&horror).unwrap();
+            obj.base_card_types.subtypes = vec!["Horror".to_string()];
+            obj.card_types.subtypes = vec!["Horror".to_string()];
+        }
+        let grell = create_creature(&mut state, 3, P0, "Grell Philosopher");
+        evaluate_layers(&mut state);
+
+        let horror_filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Horror".to_string())
+                .controller(ControllerRef::You),
+        );
+        // The ability's controller is captured (P0) at trigger-resolution
+        // setup time, exactly as `ResolvedAbility::controller` would hold it
+        // on the stack — independent of whatever happens to the source object
+        // afterward.
+        let ability = make_gain_ability(
+            donor,
+            grell,
+            horror_filter,
+            P0,
+            Some(Duration::UntilEndOfTurn),
+        );
+
+        // The source (Grell) leaves the battlefield entirely before the
+        // triggered ability resolves (e.g., destroyed in response, while its
+        // "at the beginning of your upkeep" trigger is still on the stack).
+        // `state.objects` no longer has an entry for it.
+        state.objects.remove(&grell);
+        state.battlefield.retain(|id| *id != grell);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&horror]
+                .abilities
+                .iter()
+                .any(|a| *a == draw_ability()),
+            "CR 112.6a: the grant must still land on the ORIGINAL ability \
+             controller's (P0) Horror even though the source has left play \
+             and `state.objects` no longer has an entry for it"
+        );
+    }
+
+    // ── Regression: group recipients must use the ability's captured
+    // controller even when the live source object's controller has since
+    // changed (e.g. a control-change effect resolved between the ability
+    // being put on the stack and it resolving). ──
+    #[test]
+    fn group_recipient_resolves_against_ability_controller_when_source_controller_changed() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Opponent Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.base_name = "Opponent Artifact".to_string();
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            obj.card_types = obj.base_card_types.clone();
+            obj.base_abilities = Arc::new(vec![draw_ability()]);
+        }
+
+        // P0's Horror — must gain the ability, because the ability was put on
+        // the stack under P0's control.
+        let horror_p0 = create_creature(&mut state, 2, P0, "P0 Horror");
+        // P1's Horror — must NOT gain the ability, even though P1 now controls
+        // the live source object.
+        let horror_p1 = create_creature(&mut state, 3, P1, "P1 Horror");
+        for h in [horror_p0, horror_p1] {
+            let obj = state.objects.get_mut(&h).unwrap();
+            obj.base_card_types.subtypes = vec!["Horror".to_string()];
+            obj.card_types.subtypes = vec!["Horror".to_string()];
+        }
+        let grell = create_creature(&mut state, 4, P0, "Grell Philosopher");
+        evaluate_layers(&mut state);
+
+        let horror_filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Horror".to_string())
+                .controller(ControllerRef::You),
+        );
+        let ability = make_gain_ability(
+            donor,
+            grell,
+            horror_filter,
+            P0,
+            Some(Duration::UntilEndOfTurn),
+        );
+
+        // Control of Grell changes to P1 after the triggered ability was put
+        // on the stack (with P0 as its captured controller) but before it
+        // resolves.
+        state.objects.get_mut(&grell).unwrap().controller = P1;
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&horror_p0]
+                .abilities
+                .iter()
+                .any(|a| *a == draw_ability()),
+            "the grant must land on the ORIGINAL ability controller's (P0) Horror"
+        );
+        assert!(
+            state.objects[&horror_p1].abilities.is_empty(),
+            "the grant must NOT follow the source's new controller (P1)"
         );
     }
 }
