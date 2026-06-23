@@ -2090,6 +2090,11 @@ fn build_superlative_comparison(
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::EventSource,
         },
+        // ManaSymbolCount is only produced via `QuantityRef::Aggregate` (chroma
+        // sum over a zone filter), never as a single-object EventSource value.
+        ObjectProperty::ManaSymbolCount(_) => unreachable!(
+            "ManaSymbolCount is aggregated via QuantityRef::Aggregate, not a per-object scope"
+        ),
     };
     let aggregate_filter = attach_other_than_trigger_object(filter);
     StaticCondition::QuantityComparison {

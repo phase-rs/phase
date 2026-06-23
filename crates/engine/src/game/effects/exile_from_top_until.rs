@@ -223,6 +223,11 @@ fn extract_property(state: &GameState, obj_id: ObjectId, property: ObjectPropert
         // CR 202.3e: `mana_value()` excludes X (treats X as 0 outside the stack).
         ObjectProperty::ManaValue => i32::try_from(obj.mana_cost.mana_value()).unwrap_or(i32::MAX),
         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
+        // CR 107.4a + CR 202.1: colored mana symbols of `color` in the cost.
+        ObjectProperty::ManaSymbolCount(color) => i32::try_from(
+            crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
+        )
+        .unwrap_or(i32::MAX),
     }
 }
 

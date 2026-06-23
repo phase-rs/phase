@@ -1236,6 +1236,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectProperty::Power => "power",
                 ObjectProperty::Toughness => "toughness",
                 ObjectProperty::ManaValue => "mana value",
+                ObjectProperty::ManaSymbolCount(_) => "mana symbols",
             };
             format!("{func} {prop} of {}", fmt_target(filter))
         }
@@ -1246,9 +1247,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
-        QuantityRef::GraveyardChroma { color, .. } => {
-            format!("graveyard chroma ({})", fmt_mana_color_full(color))
-        }
         QuantityRef::DistinctCardTypes { source } => match source {
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
@@ -1334,6 +1332,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectProperty::Power => "power",
                 ObjectProperty::Toughness => "toughness",
                 ObjectProperty::ManaValue => "mana value",
+                ObjectProperty::ManaSymbolCount(_) => "mana symbols",
             };
             format!("{func} {prop} of those cards")
         }
@@ -2693,6 +2692,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                                 ObjectProperty::Power => "power",
                                 ObjectProperty::Toughness => "toughness",
                                 ObjectProperty::ManaValue => "mana value",
+                                ObjectProperty::ManaSymbolCount(_) => "mana symbols",
                             },
                             match comparator {
                                 crate::types::ability::Comparator::GE => "≥",
@@ -5922,7 +5922,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
-        QuantityRef::GraveyardChroma { .. } => ("GraveyardChroma", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),

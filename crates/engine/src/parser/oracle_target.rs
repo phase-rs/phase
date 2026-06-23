@@ -3591,6 +3591,11 @@ fn superlative_property_filter_prop(
             comparator: Comparator::EQ,
             value,
         },
+        // ManaSymbolCount is a zone-aggregated chroma property (`QuantityRef::
+        // Aggregate`), never a per-object superlative comparison filter.
+        ObjectProperty::ManaSymbolCount(_) => unreachable!(
+            "ManaSymbolCount is aggregated via QuantityRef::Aggregate, not a superlative filter"
+        ),
     }
 }
 

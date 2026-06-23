@@ -2342,6 +2342,9 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
+        // ManaSymbolCount is produced only via `QuantityRef::Aggregate`, never
+        // as a single cost-paid-object reference.
+        ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
     Ok((rest, qty))
 }
@@ -2404,8 +2407,11 @@ fn parse_cost_paid_object_chosen_revealed_ref(input: &str) -> OracleResult<'_, Q
         ObjectProperty::Toughness => QuantityRef::Toughness {
             scope: ObjectScope::CostPaidObject,
         },
-        // The leading `alt` only emits Power/Toughness; ManaValue is unreachable.
-        ObjectProperty::ManaValue => return Err(oracle_err(input)),
+        // The leading `alt` only emits Power/Toughness; ManaValue and
+        // ManaSymbolCount are unreachable here.
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            return Err(oracle_err(input))
+        }
     };
     Ok((rest, qty))
 }
@@ -2499,7 +2505,7 @@ fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, Qua
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::Target,
         },
-        ObjectProperty::Power | ObjectProperty::Toughness => {
+        ObjectProperty::Power | ObjectProperty::Toughness | ObjectProperty::ManaSymbolCount(_) => {
             return Err(nom::Err::Error(OracleError::new(
                 input,
                 nom::error::ErrorKind::Tag,
@@ -2728,11 +2734,23 @@ fn parse_graveyard_chroma_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, color) = super::primitives::parse_color(rest)?;
     let (rest, _) =
         tag(" mana symbols in the mana costs of cards in your graveyard").parse(rest)?;
+    // CR 107.4a + CR 202.1: graveyard-scope chroma is the SUM of per-card
+    // colored-mana-symbol counts over cards in the controller's graveyard —
+    // expressed via the zone-general `Aggregate` / `ObjectProperty::ManaSymbolCount`
+    // building block rather than a graveyard-specific `QuantityRef` leaf. The
+    // `InZone { Graveyard }` filter makes `Aggregate` scan the graveyard.
     Ok((
         rest,
-        QuantityRef::GraveyardChroma {
-            color,
-            scope: CountScope::Controller,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::ManaSymbolCount(color),
+            filter: TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
         },
     ))
 }
@@ -7265,9 +7283,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             q,
-            QuantityRef::GraveyardChroma {
-                color: ManaColor::Black,
-                scope: CountScope::Controller,
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
+                filter: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
             }
         );
         assert_eq!(rest, "");

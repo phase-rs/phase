@@ -32,26 +32,22 @@ pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor])
     total
 }
 
-/// CR 700.5: Count colored mana symbols of the given color among mana costs of
-/// cards in a player's graveyard (graveyard-scope Chroma). This is the graveyard
-/// sibling of `count_devotion`, which counts permanents on the battlefield.
-pub fn count_graveyard_chroma(state: &GameState, player: PlayerId, color: ManaColor) -> u32 {
-    let graveyard = match state.players.iter().find(|p| p.id == player) {
-        Some(p) => &p.graveyard,
-        None => return 0,
+/// CR 107.4a + CR 107.4e + CR 202.1: Count colored mana symbols of `color` in a
+/// single mana cost. Hybrid symbols contribute to each of their colors (so {W/U}
+/// counts toward both white and blue), Phyrexian colored symbols count for their
+/// color, and generic/colorless symbols never count. This is the per-object
+/// building block behind chroma in any zone: summed over a zone-scoped filter via
+/// `QuantityRef::Aggregate` + `ObjectProperty::ManaSymbolCount` (e.g. Umbra
+/// Stalker's "black mana symbols among cards in your graveyard"). `count_devotion`
+/// is the battlefield-permanent analogue (CR 700.5).
+pub fn count_cost_color_symbols(cost: &ManaCost, color: ManaColor) -> u32 {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return 0;
     };
     let mut total = 0u32;
-    for &id in graveyard {
-        let obj = match state.objects.get(&id) {
-            Some(o) => o,
-            None => continue,
-        };
-        if let ManaCost::Cost { ref shards, .. } = obj.mana_cost {
-            for shard in shards {
-                if shard.contributes_to(color) {
-                    total += 1;
-                }
-            }
+    for shard in shards {
+        if shard.contributes_to(color) {
+            total += 1;
         }
     }
     total
@@ -282,18 +278,11 @@ mod tests {
         assert!(!ManaCostShard::X.contributes_to(ManaColor::Red));
     }
 
+    // CR 107.4a + CR 202.1: per-cost colored-symbol counting building block.
     #[test]
-    fn graveyard_chroma_counts_matching_shards() {
-        let mut state = setup();
-        // Card in graveyard with cost {B}{B}{B} → 3 black symbols
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Dark Ritual".to_string(),
-            Zone::Graveyard,
-        );
-        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+    fn cost_color_symbols_counts_matching_shards() {
+        // {B}{B}{B} → 3 black symbols, 0 red.
+        let cost = ManaCost::Cost {
             shards: vec![
                 ManaCostShard::Black,
                 ManaCostShard::Black,
@@ -301,82 +290,29 @@ mod tests {
             ],
             generic: 0,
         };
-
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
-            3
-        );
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Red),
-            0
-        );
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 3);
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Red), 0);
     }
 
+    // CR 107.4e: a hybrid symbol is all of its component colors, so it counts
+    // toward each color (but is still a single symbol).
     #[test]
-    fn graveyard_chroma_sums_across_cards() {
-        let mut state = setup();
-        for i in 0..3 {
-            let id = create_object(
-                &mut state,
-                CardId(i),
-                PlayerId(0),
-                format!("Card {i}"),
-                Zone::Graveyard,
-            );
-            state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
-                shards: vec![ManaCostShard::Black, ManaCostShard::Blue],
-                generic: 1,
-            };
-        }
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
-            3
-        );
-    }
-
-    #[test]
-    fn graveyard_chroma_ignores_battlefield() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "On Battlefield".to_string(),
-            Zone::Battlefield,
-        );
-        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Black],
-            generic: 0,
-        };
-
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
-            0
-        );
-    }
-
-    #[test]
-    fn graveyard_chroma_hybrid_counts_for_each_color() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Hybrid Card".to_string(),
-            Zone::Graveyard,
-        );
-        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+    fn cost_color_symbols_hybrid_counts_for_each_color() {
+        let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::BlueBlack, ManaCostShard::BlueBlack],
             generic: 1,
         };
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 2);
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Blue), 2);
+    }
 
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Black),
-            2
-        );
-        assert_eq!(
-            count_graveyard_chroma(&state, PlayerId(0), ManaColor::Blue),
-            2
-        );
+    // Generic-only mana costs contribute no colored symbols.
+    #[test]
+    fn cost_color_symbols_zero_for_generic_only() {
+        let cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        };
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 0);
     }
 }
