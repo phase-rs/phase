@@ -963,40 +963,54 @@ pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantWinTheGame)
 }
 
-/// CR 119.7: Check if a player has active `CantGainLife` protection.
+/// Single-player check shared by `player_has_cant_gain_life` and
+/// `player_has_cant_lose_life`: does `player_id` itself (battlefield permanent
+/// or spell-applied transient effect) have an active static of `mode`?
+fn life_lock_active_for(state: &GameState, player_id: PlayerId, mode: StaticMode) -> bool {
+    check_static_ability(
+        state,
+        mode.clone(),
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &mode)
+}
+
+/// CR 119.7 + CR 810.9g: Check if a player has active `CantGainLife`
+/// protection.
 ///
 /// When `true`, effects that would cause the player to gain life have no effect
 /// (CR 119.7: "a replacement effect that would replace a life gain event
 /// affecting that player won't do anything"). Callers must short-circuit BEFORE
 /// invoking the replacement pipeline.
 ///
-/// Checks both battlefield permanents and spell-applied transient effects.
+/// Checks both battlefield permanents and spell-applied transient effects. CR
+/// 810.9g: "If an effect says that a player can't gain life, no player on
+/// that player's team can gain life" — in team-based formats the lock also
+/// propagates from either teammate.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::CantGainLife,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantGainLife)
+    life_lock_active_for(state, player_id, StaticMode::CantGainLife)
+        || super::players::teammates(state, player_id)
+            .into_iter()
+            .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife))
 }
 
-/// CR 119.8: Check if a player has active `CantLoseLife` protection.
+/// CR 119.8 + CR 810.9h: Check if a player has active `CantLoseLife`
+/// protection.
 ///
 /// When `true`, effects that would cause the player to lose life (including
 /// damage-to-life-loss conversion per CR 120.3) have no effect.
 ///
-/// Checks both battlefield permanents and spell-applied transient effects.
+/// Checks both battlefield permanents and spell-applied transient effects. CR
+/// 810.9h: "If an effect says that a player can't lose life, no player on
+/// that player's team can lose life or pay any amount of life other than 0"
+/// — in team-based formats the lock also propagates from either teammate.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::CantLoseLife,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
+    life_lock_active_for(state, player_id, StaticMode::CantLoseLife)
+        || super::players::teammates(state, player_id)
+            .into_iter()
+            .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife))
 }
 
 /// CR 702.11e: Check if `player_id` may target creatures as though they didn't

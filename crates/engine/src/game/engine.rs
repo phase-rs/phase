@@ -1641,7 +1641,7 @@ fn apply_action(
             state.cancelled_casts.clear();
             // CR 116.2a: Playing a land is a special action — sorcery-speed, once per turn, stack must be empty.
             // CR 305.2: Playing a land is a special action, not a spell.
-            handle_play_land(state, object_id, card_id, &mut events)?
+            handle_play_land(state, *player, object_id, card_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::TapLandForMana { object_id }) => {
             if state.priority_player
@@ -1853,7 +1853,7 @@ fn apply_action(
                     .contains(&crate::types::card_type::CoreType::Land)
             });
             if active_is_land {
-                handle_play_land(state, *object_id, *card_id, &mut events)?
+                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
                 casting::handle_cast_spell_with_payment_mode(
                     state,
@@ -2088,7 +2088,7 @@ fn apply_action(
             let is_land_play = slot == crate::types::card_type::CoreType::Land;
             if is_land_play {
                 state.pending_permanent_type_slot = Some((*source, slot));
-                handle_play_land(state, *object_id, *card_id, &mut events)?
+                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
                 casting::handle_permanent_type_slot_choice_with_payment_mode(
                     state,
@@ -5392,6 +5392,7 @@ fn record_land_played_from_zone(
 
 fn handle_play_land(
     state: &mut GameState,
+    acting_player: PlayerId,
     object_id: ObjectId,
     card_id: CardId,
     events: &mut Vec<GameEvent>,
@@ -5409,7 +5410,20 @@ fn handle_play_land(
     // CR 305.2 + CR 505.6b: Validate land limit.
     // Base limit is max_lands_per_turn (normally 1), plus any additional drops
     // from static abilities like Exploration or Azusa.
-    let player = turn_control::turn_resource_owner(state);
+    //
+    // CR 805.4c: "Each player on a team may play a land during each of that
+    // team's turns" — under the shared team turns option, the nonactive
+    // teammate plays from their OWN hand against their OWN once-per-turn
+    // allowance, not the turn's nominal resource owner (`active_player`).
+    // `turn_resource_owner` stays correct for turn-control effects (CR 723,
+    // e.g. Mindslaver), which always act on the active player's own
+    // resources regardless of who submits the choice — that path is
+    // unaffected since it never sets `team_based`.
+    let player = if state.format_config.team_based {
+        acting_player
+    } else {
+        turn_control::turn_resource_owner(state)
+    };
     // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
     if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
         return Err(EngineError::ActionNotAllowed(
@@ -5418,7 +5432,21 @@ fn handle_play_land(
     }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);
-    if state.lands_played_this_turn >= effective_limit {
+    // CR 805.4c: per-player land count under team turns (each teammate has
+    // their own allowance); the legacy single-counter `lands_played_this_turn`
+    // is correct outside team-based formats, where only the active player
+    // ever plays lands during their own turn.
+    let lands_played = if state.format_config.team_based {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if lands_played >= effective_limit {
         return Err(EngineError::ActionNotAllowed(
             "Already played maximum lands this turn".to_string(),
         ));
@@ -8637,6 +8665,93 @@ mod tests {
             "result.waiting_for={:?}, stack={:?}",
             result.waiting_for,
             state.stack
+        );
+    }
+
+    #[test]
+    fn two_headed_giant_each_teammate_plays_own_land() {
+        // CR 805.4c: "Each player on a team may play a land during each of
+        // that team's turns" — both the active player and their nonactive
+        // teammate get their own one-land-per-turn allowance during the
+        // SAME team turn. Before this fix, `handle_play_land` resolved the
+        // resource owner as `turn_resource_owner` (always `active_player`)
+        // and gated against the single shared `lands_played_this_turn`
+        // counter, so the teammate's land play would have been attributed
+        // to the active player and blocked once that counter hit 1.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let land0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land0)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Active player (P0) plays their land.
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land0,
+                card_id: CardId(1),
+            },
+        )
+        .unwrap();
+        assert!(state.battlefield.contains(&land0));
+        assert_eq!(state.players[0].lands_played_this_turn, 1);
+
+        // Nonactive teammate (P1) now holds priority and plays their OWN land
+        // — must succeed against P1's own allowance, not P0's.
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(2),
+            },
+        )
+        .unwrap();
+
+        assert!(state.battlefield.contains(&land1));
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+        assert_eq!(
+            state.players[0].lands_played_this_turn, 1,
+            "P0's allowance must be unaffected by P1's land play"
         );
     }
 

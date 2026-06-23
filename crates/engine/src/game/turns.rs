@@ -440,6 +440,14 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
 
 /// Begin the next player's turn (CR 500.1 / CR 101.4 seat order).
 pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 805.4b: defensively drop any stale draw-step queue entries. The
+    // queue is normally drained to empty before a turn ends, but a turn
+    // ended early (e.g. `Effect::EndTheTurn` — Time Stop, Obeka) could in
+    // principle leave it non-empty; without this it would be wrongly
+    // resumed at the START of the next turn's Draw step instead of being
+    // re-seeded for the new active player.
+    state.pending_team_draw_step.clear();
+
     let completed_player = state.active_player;
     if state.turn_decision_controller.is_some() {
         let mut grant_extra_turn_after = false;
@@ -1230,9 +1238,60 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 /// CR 504.1: During the draw step, the active player draws a card.
 /// CR 614.1a: Routes through the replacement pipeline so effects like Dredge apply.
 /// Returns `Some(WaitingFor)` if a replacement effect needs player interaction.
+/// CR 504.1: The active player's mandatory draw-step draw. CR 805.4b: under
+/// the shared team turns option, every player on the active team draws
+/// during the team's draw step — so the active player's teammate(s) also
+/// draw here.
+///
+/// Seeds `state.pending_team_draw_step` with the players who owe a draw
+/// THIS step (skipped if the queue is already non-empty — that means a
+/// caller is resuming a step that paused mid-draw, and re-seeding would
+/// redraw an already-completed player) and delegates to
+/// `drain_pending_team_draw_step`, the single authority for actually
+/// performing the queued draws. That function is also called directly by
+/// `handle_replacement_choice`'s resume epilogue, so a draw that pauses on a
+/// CR 616.1 competing-replacement choice still reaches every queued
+/// teammate once the choice resolves — this function only needs to run once
+/// per step, at first entry.
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
-    let active = state.active_player;
+    if state.pending_team_draw_step.is_empty() {
+        state.pending_team_draw_step.push(state.active_player);
+        if state.format_config.team_based {
+            state
+                .pending_team_draw_step
+                .extend(super::players::teammates(state, state.active_player));
+        }
+    }
+    drain_pending_team_draw_step(state, events)
+}
 
+/// CR 504.1 + CR 805.4b: Drain `state.pending_team_draw_step` front-to-back,
+/// performing each queued player's turn-based draw-step draw exactly once.
+///
+/// A draw that pauses on a CR 616.1 competing-replacement choice (`Some`
+/// returned) leaves its player at the FRONT of the queue — NOT popped — so
+/// the next call (from `handle_replacement_choice`'s epilogue, once the
+/// choice resolves) retries exactly that player's draw rather than skipping
+/// it or re-drawing a player who already completed. Only a fully completed
+/// draw (`None` from `execute_draw_for`) advances the queue.
+pub(crate) fn drain_pending_team_draw_step(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    while let Some(&player) = state.pending_team_draw_step.first() {
+        if let Some(wf) = execute_draw_for(state, player, events) {
+            return Some(wf);
+        }
+        state.pending_team_draw_step.remove(0);
+    }
+    None
+}
+
+fn execute_draw_for(
+    state: &mut GameState,
+    active: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     // CR 121.1 + CR 614.1a + CR 614.6 + CR 704.3: Route through the
     // single-authority `draw_through_replacement` helper so post-replacement
     // continuations (Jace WinTheGame, Abundance reveal-until) drain in the
@@ -4508,6 +4567,89 @@ mod tests {
         assert!(state.players[0].hand.contains(&id));
         assert!(!state.players[0].library.contains(&id));
         assert!(state.players[0].has_drawn_this_turn);
+    }
+
+    /// CR 805.4b: "Each player on a team draws a card during that team's
+    /// draw step." A single `execute_draw` call must seed the queue with
+    /// both active-team members and drain it to completion in the common
+    /// (no-pause) case.
+    #[test]
+    fn execute_draw_two_headed_giant_both_teammates_draw() {
+        let mut state = GameState::new(crate::types::FormatConfig::two_headed_giant(), 4, 0);
+        state.active_player = PlayerId(0);
+        let card0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card0".to_string(),
+            Zone::Library,
+        );
+        let card1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Card1".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let result = execute_draw(&mut state, &mut events);
+
+        assert!(result.is_none(), "no replacement pause expected here");
+        assert!(state.players[0].hand.contains(&card0));
+        assert!(state.players[1].hand.contains(&card1));
+        assert!(state.players[0].has_drawn_this_turn);
+        assert!(state.players[1].has_drawn_this_turn);
+        assert!(
+            state.pending_team_draw_step.is_empty(),
+            "the draw-step queue must be fully drained, not left with stale entries"
+        );
+    }
+
+    /// CR 805.4b + CR 616.1: regression for the resumption gap flagged in
+    /// review — if the active player's draw-step draw paused on a
+    /// competing-replacement choice and was then resumed (popping the active
+    /// player off the queue's front), the teammate left in the queue must
+    /// still be drawn for by a later `drain_pending_team_draw_step` call
+    /// (the exact call `handle_replacement_choice`'s resume epilogue makes),
+    /// not silently dropped.
+    #[test]
+    fn drain_pending_team_draw_step_resumes_remaining_queued_teammate() {
+        let mut state = GameState::new(crate::types::FormatConfig::two_headed_giant(), 4, 0);
+        state.active_player = PlayerId(0);
+        let card0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card0".to_string(),
+            Zone::Library,
+        );
+        let card1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Card1".to_string(),
+            Zone::Library,
+        );
+
+        // Simulate "P0's draw already completed and was popped off the
+        // front; P1 is still owed their draw" — the exact state the queue
+        // is in immediately after a resumed P0 draw, before P1 has drawn.
+        state.pending_team_draw_step = vec![PlayerId(1)];
+
+        let mut events = Vec::new();
+        let result = drain_pending_team_draw_step(&mut state, &mut events);
+
+        assert!(result.is_none());
+        assert!(
+            state.players[0].hand.is_empty() && state.players[0].library.contains(&card0),
+            "P0 already drew in this scenario — this call must not draw for them again"
+        );
+        assert!(
+            state.players[1].hand.contains(&card1),
+            "P1's queued draw must still happen on resume"
+        );
+        assert!(state.pending_team_draw_step.is_empty());
     }
 
     #[test]
