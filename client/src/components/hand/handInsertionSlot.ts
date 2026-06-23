@@ -56,15 +56,22 @@ export function computeHandInsertionSlot(
 
 /**
  * Screen position of the drop-position marker (the bouncing arrow) for a given
- * insertion `slot`.
+ * insertion `slot`, passed the active `gapPx` so the marker lands at the CENTER
+ * of the opened gap at every slot.
  *
  * Operates in the SAME drag-excluded ("remaining") space as
- * `computeHandInsertionSlot`: the dragged card is filtered out first. For an
- * interior slot the marker sits at the MIDPOINT between the trailing edge of the
- * card now before `slot` and the leading edge of the card now at `slot` — i.e.
- * the center of the gap the flanking cards open (symmetric displacement keeps
- * that center fixed at the resting midpoint). For slot 0 it sits at the leading
- * edge of the first remaining card; for the append slot, just past the last.
+ * `computeHandInsertionSlot`: the dragged card is filtered out first.
+ *
+ * - Interior slot: the marker sits at the MIDPOINT between the trailing edge of
+ *   the card before `slot` and the leading edge of the card at `slot`. The two
+ *   flanks split symmetrically (each ±gapPx/2) around that midpoint, so it stays
+ *   the gap center with no further offset.
+ * - Edge slot (slot 0 / append): there is only ONE flanking card, so only one
+ *   rigid block moves — by gapPx/2 — opening a gapPx/2-wide gap on the outer
+ *   side. The flanking card's inner edge is that gap's INNER boundary, so the
+ *   marker must be pushed OUTWARD (away from the hand body) by half the opened
+ *   gap, gapPx/4, to sit at its center instead of hugging the card.
+ *
  * Returns viewport coordinates; the caller converts to container-local space.
  * Returns null when no cards remain (the dragged card was the only one).
  */
@@ -72,17 +79,24 @@ export function computeHandInsertionMarker(
   cards: HandSlotRect[],
   slot: number,
   draggingId: number,
+  gapPx: number,
 ): { x: number; top: number; height: number } | null {
   const remaining = cards.filter((card) => card.objectId !== draggingId);
   if (remaining.length === 0) return null;
   const clamped = Math.max(0, Math.min(slot, remaining.length));
+  // Half of the gapPx/2-wide gap an edge slot opens — recenters the marker.
+  const edgeCenterOffset = gapPx / 4;
   if (clamped === 0) {
     const first = remaining[0];
-    return { x: first.left, top: first.top ?? 0, height: first.height ?? 0 };
+    return { x: first.left - edgeCenterOffset, top: first.top ?? 0, height: first.height ?? 0 };
   }
   if (clamped >= remaining.length) {
     const last = remaining[remaining.length - 1];
-    return { x: last.left + last.width, top: last.top ?? 0, height: last.height ?? 0 };
+    return {
+      x: last.left + last.width + edgeCenterOffset,
+      top: last.top ?? 0,
+      height: last.height ?? 0,
+    };
   }
   const leftCard = remaining[clamped - 1];
   const rightCard = remaining[clamped];

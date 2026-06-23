@@ -179,7 +179,8 @@ export function PlayerHand() {
       // and lift it one arrow-height above the top edge of the cards so it points
       // down into the slot.
       const bounds = container.getBoundingClientRect();
-      const marker = slot == null ? null : computeHandInsertionMarker(rects, slot, objectId);
+      const marker =
+        slot == null ? null : computeHandInsertionMarker(rects, slot, objectId, gapPxMV.get());
       if (marker) {
         arrowXRaw.set(marker.x - bounds.left - DROP_ARROW_PX / 2);
         arrowYRaw.set(marker.top - bounds.top - DROP_ARROW_PX);
@@ -224,7 +225,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV],
+    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, gapPxMV],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the

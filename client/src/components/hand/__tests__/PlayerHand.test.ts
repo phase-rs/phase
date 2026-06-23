@@ -25,31 +25,40 @@ describe("computeHandInsertionMarker", () => {
   it("centers the marker in the gap between the two flanking cards (drag-excluded space)", () => {
     // dragging id 2 -> remaining [card1(left0,w100,right100), card3(left160)];
     // slot 1 -> gap between card1 and card3 -> midpoint of 100 and 160 = 130.
-    expect(computeHandInsertionMarker(markerRects, 1, 2)).toEqual({ x: 130, top: 10, height: 140 });
+    // Interior slots are unaffected by gapPx (the flank split is symmetric).
+    expect(computeHandInsertionMarker(markerRects, 1, 2, 40)).toEqual({ x: 130, top: 10, height: 140 });
   });
 
-  it("places the marker at the leading edge of the first remaining card for slot 0", () => {
-    expect(computeHandInsertionMarker(markerRects, 0, 2)).toEqual({ x: 0, top: 10, height: 140 });
+  it("centers the marker in the opened gap before the first card for slot 0", () => {
+    // slot 0 shifts the whole fan right by gapPx/2, opening a gapPx/2-wide gap to
+    // the LEFT of the first remaining card. The marker sits at that gap's center =
+    // first.left - gapPx/4 = 0 - 10 = -10 (not hugging the card's leading edge).
+    expect(computeHandInsertionMarker(markerRects, 0, 2, 40)).toEqual({ x: -10, top: 10, height: 140 });
   });
 
-  it("places the marker after the last remaining card for the append slot", () => {
-    // dragging id 2 -> remaining [card1, card3] (len 2); slot 2 -> append = card3.left + card3.width = 260.
-    expect(computeHandInsertionMarker(markerRects, 2, 2)).toEqual({ x: 260, top: 10, height: 140 });
+  it("centers the marker in the opened gap after the last card for the append slot", () => {
+    // append shifts the fan left by gapPx/2, opening a gapPx/2-wide gap to the
+    // RIGHT of the last card. Center = last.right + gapPx/4 = 260 + 10 = 270.
+    expect(computeHandInsertionMarker(markerRects, 2, 2, 40)).toEqual({ x: 270, top: 10, height: 140 });
   });
 
   it("clamps an out-of-range slot to the append position", () => {
-    expect(computeHandInsertionMarker(markerRects, 99, 2)).toEqual({ x: 260, top: 10, height: 140 });
+    expect(computeHandInsertionMarker(markerRects, 99, 2, 40)).toEqual({ x: 270, top: 10, height: 140 });
+  });
+
+  it("does not offset the edge marker when no gap is open (gapPx 0)", () => {
+    expect(computeHandInsertionMarker(markerRects, 0, 2, 0)).toEqual({ x: 0, top: 10, height: 140 });
   });
 
   it("returns null when no cards remain after excluding the dragged card", () => {
     expect(
-      computeHandInsertionMarker([{ objectId: 5, left: 0, width: 100, top: 0, height: 10 }], 0, 5),
+      computeHandInsertionMarker([{ objectId: 5, left: 0, width: 100, top: 0, height: 10 }], 0, 5, 40),
     ).toBeNull();
   });
 
   it("defaults missing top/height to 0", () => {
-    expect(computeHandInsertionMarker([{ objectId: 1, left: 40, width: 100 }], 0, 9)).toEqual({
-      x: 40,
+    expect(computeHandInsertionMarker([{ objectId: 1, left: 40, width: 100 }], 0, 9, 40)).toEqual({
+      x: 30,
       top: 0,
       height: 0,
     });
