@@ -1,4 +1,7 @@
-use tauri::{Manager, WebviewWindowBuilder};
+use tauri::WebviewWindowBuilder;
+// `Manager` is only needed for `app.path()` in the Windows-gated block below.
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
@@ -6,22 +9,30 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            // `create: false` on the "main" window in tauri.conf.json defers window
-            // creation to here so we can pin an explicit, always-writable
-            // `data_directory`. Without it, WebView2 (Windows) falls back to a
-            // folder derived from the install path; when that path is read-only
-            // (e.g. a per-machine install under Program Files) WebView2 silently
-            // uses a temp profile that's discarded every launch, so the Supabase
-            // session in localStorage never survives a restart even though
-            // `persistSession: true` is set. Pointing it at the app's per-user
-            // local-data dir keeps it stable and writable regardless of where the
-            // app is installed. No-op on macOS/Linux, where the webview already
-            // persists storage under the user's profile.
-            let data_dir = app.path().app_local_data_dir()?.join("webview");
+            // `create: false` on the "main" window in tauri.conf.json defers
+            // window creation to here so we can pin an explicit, always-writable
+            // `data_directory` on Windows. WebView2 otherwise derives its
+            // user-data folder from the install path; on a read-only per-machine
+            // install (e.g. under Program Files) that folder can't be written, so
+            // WebView2 falls back to a throwaway profile that's discarded every
+            // launch and the Supabase session in localStorage never survives a
+            // restart even though `persistSession: true` is set. Pinning it to the
+            // per-user local-data dir keeps it stable and writable regardless of
+            // install location.
+            //
+            // Windows-only: WKWebView (macOS) ignores `data_directory`, and
+            // webkit2gtk (Linux) already persists under the user's profile by
+            // default — overriding it there would only relocate existing storage
+            // and force a one-time re-login, so we leave those platforms on their
+            // defaults and just build the window straight from config.
             let main_config = &app.config().app.windows[0];
-            WebviewWindowBuilder::from_config(app, main_config)?
-                .data_directory(data_dir)
-                .build()?;
+            let builder = WebviewWindowBuilder::from_config(app, main_config)?;
+            #[cfg(target_os = "windows")]
+            let builder = {
+                let data_dir = app.path().app_local_data_dir()?.join("webview");
+                builder.data_directory(data_dir)
+            };
+            builder.build()?;
             Ok(())
         })
         .run(tauri::generate_context!())
