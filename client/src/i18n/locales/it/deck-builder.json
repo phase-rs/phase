@@ -126,6 +126,8 @@
     "pastePlaceholder": "Incolla la lista del mazzo (formato MTGA o .dck)...",
     "fromFile": "Da file",
     "parse": "Analizza",
+    "parsing": "Analisi…",
+    "parseError": "Nessuna carta trovata. Incolla un mazzo in formato MTGA o .dck.",
     "exportModalTitle": "Esporta mazzo",
     "saveToFile": "Salva su file",
     "copied": "Copiato!",

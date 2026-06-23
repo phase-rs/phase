@@ -132,6 +132,8 @@
     "pastePlaceholder": "Paste deck list (MTGA or .dck format)...",
     "fromFile": "From File",
     "parse": "Parse",
+    "parsing": "Parsing…",
+    "parseError": "Couldn't find any cards. Paste a deck in MTGA or .dck format.",
     "exportModalTitle": "Export Deck",
     "saveToFile": "Save to File",
     "copied": "Copied!",

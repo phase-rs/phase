@@ -8,6 +8,7 @@ import {
   repairParsedDeck,
   resolveCommander,
   expandParsedDeck,
+  parsedDeckHasCards,
 } from '../deckParser';
 
 vi.mock('../engineRuntime', () => ({
@@ -678,5 +679,15 @@ describe('expandParsedDeck', () => {
       sideboard: [],
     });
     expect(result.commander).toEqual([]);
+  });
+});
+
+describe('parsedDeckHasCards', () => {
+  it('returns false when no deck lines were recognized', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('asdasd'))).toBe(false);
+  });
+
+  it('returns true when main-deck cards were parsed', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('4 Lightning Bolt'))).toBe(true);
   });
 });

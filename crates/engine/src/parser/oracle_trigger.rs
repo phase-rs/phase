@@ -3209,6 +3209,68 @@ fn parse_first_time_tapped_intervening_if(input: &str) -> OracleResult<'_, Trigg
     Ok((rest, TriggerCondition::FirstTimeObjectTappedThisTurn))
 }
 
+/// CR 603.4 + CR 601.2: Parse "if you didn't cast it from your hand/exile" or
+/// "if you didn't cast it from your graveyard" — negated zone-specific cast
+/// provenance intervening-if (Chainer, Nightmare Adept; Phage the Untouchable;
+/// Epochrasite). Nom combinator consumed by `scan_preceded` in
+/// `extract_if_condition`.
+fn parse_negated_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    // Accept both the ASCII (`didn't`) and curly (`didn’t`, U+2019) apostrophe —
+    // Scryfall/Oracle text uses the curly form for some printings.
+    let (rest, _) = alt((
+        tag("if you didn't cast it from "),
+        tag("if you didn’t cast it from "),
+    ))
+    .parse(input)?;
+    let (rest, zone) = alt((
+        value(Zone::Hand, tag("your hand")),
+        value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::Not {
+            condition: Box::new(scoped_you_cast_from_zone(zone)),
+        },
+    ))
+}
+
+/// CR 601.2 + CR 400.3 + CR 404.1: Build the caster/owner-scoped `WasCast` for a
+/// "you cast it from <zone>" intervening-if. The CASTER axis is always you
+/// ("you cast it"); the ORIGIN-ZONE-OWNER axis is you only for owner-specific
+/// zones ("your hand"/"your graveyard", CR 404.1) and stays unscoped for the
+/// shared exile zone ("from exile" carries no possessive). Mirrors the scoped
+/// cast arm of `graveyard_origin_or_condition` so both axes remain separately
+/// resolvable — an opponent casting your card, or you casting from someone
+/// else's owner-specific zone, must not satisfy the scoped condition.
+fn scoped_you_cast_from_zone(zone: Zone) -> TriggerCondition {
+    // CR 400.3 + CR 404.1: hand/graveyard/library are owner-specific; exile is shared.
+    let owner = match zone {
+        Zone::Hand | Zone::Graveyard | Zone::Library => Some(ControllerRef::You),
+        _ => None,
+    };
+    TriggerCondition::WasCast {
+        zone: Some(zone),
+        controller: Some(ControllerRef::You),
+        owner,
+    }
+}
+
+/// CR 603.4 + CR 601.2: Parse "if you cast it from your hand/exile" or
+/// "if you cast it from your graveyard" — positive zone-specific cast
+/// provenance intervening-if (Myojin cycle enters-with-counter gate).
+fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if you cast it from ").parse(input)?;
+    let (rest, zone) = alt((
+        value(Zone::Hand, tag("your hand")),
+        value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(rest)?;
+    Ok((rest, scoped_you_cast_from_zone(zone)))
+}
+
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
@@ -3250,6 +3312,38 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 
     // --- Source-referential patterns (cannot be StaticConditions) ---
     // These require trigger-source context that StaticCondition can't express.
+
+    // CR 603.4 + CR 601.2: "if you didn't cast it from your hand/graveyard/exile"
+    // — negated zone-specific cast check (Chainer, Nightmare Adept; Phage the
+    // Untouchable). The entering object must NOT have been cast from the named
+    // zone. MUST precede the zoneless "if you cast it" arm: the negated form
+    // contains "cast it from" which the zoneless arm's guard would skip, but the
+    // negated phrase would otherwise fall through to the effect parser and be
+    // misinterpreted as `Not(EffectOutcome(OptionalEffectPerformed))`.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_negated_cast_from_zone_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
+    // CR 603.4 + CR 601.2: "if you cast it from your hand/graveyard/exile" —
+    // positive zone-specific cast check. The entering object must have been cast
+    // from the named zone. MUST precede the zoneless "if you cast it" arm.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_cast_from_zone_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
 
     // CR 701.57a: "if you cast it" — zoneless cast check (Discover ETBs).
     // Guard: must not be followed by " from" (zone-specific variant).
@@ -14109,6 +14203,37 @@ mod tests {
         }
     }
 
+    /// Issue #3682 — Chainer, Nightmare Adept: "if you didn't cast it from your
+    /// hand" must hoist as `Not(WasCast { zone: Hand, caster=you, owner=you })`,
+    /// NOT as `Not(EffectOutcome(OptionalEffectPerformed))`. CR 404.1: "your
+    /// hand" scopes both the caster and the owner-specific zone to you.
+    #[test]
+    fn trigger_intervening_if_negated_cast_from_hand_chainer() {
+        let def = parse_trigger_line(
+            "Whenever a nontoken creature you control enters, if you didn't cast it from your hand, it gains haste until your next turn.",
+            "Chainer, Nightmare Adept",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        match &def.condition {
+            Some(TriggerCondition::Not { condition }) => {
+                assert!(
+                    matches!(
+                        condition.as_ref(),
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Hand),
+                            controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
+                        }
+                    ),
+                    "expected WasCast {{ zone: Hand, you/you }}, got {:?}",
+                    condition
+                );
+            }
+            other => panic!("expected Not(WasCast {{ zone: Hand, you/you }}), got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
         let def = parse_trigger_line(
@@ -16324,6 +16449,82 @@ mod tests {
             // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
             !cleaned.contains("put onto the battlefield with this ability"),
             "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 603.4 + CR 601.2 + CR 404.1: "if you didn't cast it from your hand" —
+    /// negated zone-specific cast check (Chainer, Nightmare Adept; Phage the
+    /// Untouchable). Must hoist as `Not(WasCast { zone: Hand, caster=you,
+    /// owner=you })` — both the caster and owner-specific axes are scoped.
+    #[test]
+    fn extract_if_condition_negated_cast_from_hand() {
+        let (cleaned, cond) = extract_if_condition(
+            "if you didn't cast it from your hand, it gains haste until your next turn.",
+        );
+        assert!(
+            matches!(
+                &cond,
+                Some(TriggerCondition::Not {
+                    condition
+                }) if matches!(
+                    condition.as_ref(),
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Hand),
+                        controller: Some(ControllerRef::You),
+                        owner: Some(ControllerRef::You),
+                    }
+                )
+            ),
+            "expected Not(WasCast {{ zone: Hand, you/you }}), got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision
+            !cleaned.contains("didn't cast"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 603.4 + CR 601.2 + CR 404.1: "if you cast it from your hand" — positive
+    /// zone-specific cast check hoisted as `WasCast { zone: Hand, caster=you,
+    /// owner=you }`. The owner-specific zone scopes both axes.
+    #[test]
+    fn extract_if_condition_cast_from_hand() {
+        let (cleaned, cond) =
+            extract_if_condition("if you cast it from your hand, put a counter on it.");
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::WasCast {
+                    zone: Some(Zone::Hand),
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
+                })
+            ),
+            "expected WasCast {{ zone: Hand, you/you }}, got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision
+            !cleaned.contains("cast it from"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 601.2 + CR 404.1: "if you cast it from exile" scopes the CASTER axis
+    /// to you but leaves the ORIGIN-ZONE-OWNER unscoped — exile is a shared
+    /// zone ("from exile" has no possessive), unlike hand/graveyard.
+    #[test]
+    fn extract_if_condition_cast_from_exile_owner_unscoped() {
+        let (_, cond) = extract_if_condition("if you cast it from exile, draw a card.");
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::WasCast {
+                    zone: Some(Zone::Exile),
+                    controller: Some(ControllerRef::You),
+                    owner: None,
+                })
+            ),
+            "expected WasCast {{ zone: Exile, caster=you, owner=None }}, got {cond:?}",
         );
     }
 
@@ -19341,6 +19542,72 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             }) if *source == TargetFilter::Any && *target == TargetFilter::SelfRef
         ));
+    }
+
+    /// CR 120.10 + CR 603.4: Maarika, Brutal Gladiator's "Whenever ~ deals
+    /// damage to a creature, if that creature was dealt excess damage this turn"
+    /// must hoist the excess-damage clause as a `TriggerCondition::QuantityComparison`
+    /// with `excess_only: true`, not silently drop it (condition: null).
+    #[test]
+    fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
+        let def = parse_trigger_line(
+            "Whenever Maarika deals damage to a creature, if that creature was dealt excess damage this turn, that creature's controller sacrifices a noncreature, nonland permanent.",
+            "Maarika, Brutal Gladiator",
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::DamageDealtThisTurn {
+                            excess_only: true,
+                            ..
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                })
+            ),
+            "expected excess-damage intervening-if, got: {:?}",
+            def.condition
+        );
+    }
+
+    /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's phase trigger with an
+    /// opponent-scoped excess-damage intervening-if must set `excess_only: true`
+    /// and produce a non-trivial target filter. `parse_type_phrase` emits
+    /// `TargetFilter::Or` for compound types, so we check excess_only and
+    /// that the condition is a QuantityComparison with DamageDealtThisTurn.
+    #[test]
+    fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if a creature or planeswalker an opponent controlled was dealt excess damage this turn, create a 4/4 red Dragon creature token with flying.",
+            "Rith, Liberated Primeval",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) = def.condition
+        else {
+            panic!(
+                "expected QuantityComparison(DamageDealtThisTurn), got: {:?}",
+                def.condition
+            );
+        };
+        assert!(excess_only, "excess_only must be true for Rith's trigger");
+        assert!(
+            !matches!(target.as_ref(), TargetFilter::Any),
+            "target filter must be non-Any, got: {target:?}"
+        );
     }
 
     #[test]
@@ -25038,6 +25305,22 @@ mod tests {
             def.condition,
             Some(TriggerCondition::CastVariantPaid {
                 variant: CastVariantPaid::Spectacle,
+            })
+        );
+    }
+
+    #[test]
+    fn cast_variant_paid_prowl_condition() {
+        // CR 702.76a + CR 603.4: "if its prowl cost was paid" intervening-if
+        // (Latchkey Faerie) → CastVariantPaid { variant: Prowl }.
+        let def = parse_trigger_line(
+            "When this creature enters, if its prowl cost was paid, draw a card.",
+            "Test Prowl",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Prowl,
             })
         );
     }

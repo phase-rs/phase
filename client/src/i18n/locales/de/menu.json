@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Gib eine gültige Moxfield- oder Archidekt-Deck-URL ein.",
     "errorNetworkFailure": "Der Deck-Import-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
     "errorGeneric": "Deck-Import fehlgeschlagen.",
+    "errorNoCards": "Keine Karten gefunden. Füge ein Deck im MTGA- oder .dck-Format ein.",
     "fileSupports": "Unterstützt .dck, .dec, .txt und MTGA-Format",
     "chooseFile": "Datei wählen",
     "importedSuccessTitle": "Deck importiert",

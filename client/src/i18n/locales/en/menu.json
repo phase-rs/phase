@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Enter a valid Moxfield or Archidekt deck URL.",
     "errorNetworkFailure": "Couldn't reach the deck import service. Check your connection and try again.",
     "errorGeneric": "Failed to import deck.",
+    "errorNoCards": "Couldn't find any cards. Paste a deck in MTGA or .dck format.",
     "fileSupports": "Supports .dck, .dec, .txt, and MTGA format",
     "chooseFile": "Choose File",
     "importedSuccessTitle": "Deck imported",
