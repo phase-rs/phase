@@ -268,7 +268,15 @@ impl GameFormat {
 
     /// Authoritative list of user-selectable formats. The frontend consumes
     /// this (via the `get_format_registry` WASM export) to render format
-    /// pickers, default configs, and badges.
+    /// pickers, default configs, and badges. `TwoHeadedGiant` is intentionally
+    /// omitted — the CR 810 team-play rules (shared life/poison, per-teammate
+    /// land drops and draws, team-combined combat) are implemented and
+    /// covered by tests, but the format is held back from end users until
+    /// the surrounding surfaces catch up: `client/src/data/formatRegistry.ts`
+    /// has no 2HG entry, `server-core`/`lobby-broker` have no team-seat
+    /// assignment in the multiplayer protocol, and `phase-ai` has no
+    /// teammate-awareness (it would misplay against/around its own
+    /// teammate). Re-add the `FormatMetadata` entry here once those land.
     pub fn registry() -> Vec<FormatMetadata> {
         vec![
             FormatMetadata {
@@ -422,14 +430,6 @@ impl GameFormat {
                 description: "60 snow basic lands, random creature tokens",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::momir(),
-            },
-            FormatMetadata {
-                format: GameFormat::TwoHeadedGiant,
-                label: "Two-Headed Giant",
-                short_label: "2HG",
-                description: "Teams of 2 share a turn, life, and poison",
-                group: FormatGroup::Multiplayer,
-                default_config: FormatConfig::two_headed_giant(),
             },
         ]
     }

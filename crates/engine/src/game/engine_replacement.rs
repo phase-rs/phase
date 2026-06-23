@@ -554,6 +554,22 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 805.4b: a draw-step draw that paused on the choice just
+            // resolved above may have queued teammate(s) still owed their
+            // own draw this step (`turns::execute_draw` seeds the queue;
+            // `drain_pending_team_draw_step` is the single authority that
+            // empties it). Drain before falling through to the generic
+            // Priority reset so a 2HG teammate's mandatory draw is never
+            // silently dropped when the active player's own draw needed a
+            // CR 616.1 competing-replacement choice.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && !state.pending_team_draw_step.is_empty()
+            {
+                if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
+                    waiting_for = wf;
+                }
+            }
+
             // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
             // leading Draw link parked this just-resolved ReplacementChoice. The
             // draw fully delivered above (Draw arm), so "draw a card, THEN that

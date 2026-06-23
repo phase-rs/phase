@@ -681,4 +681,39 @@ mod tests {
         eliminate(&mut state, PlayerId(1));
         assert!(teammates(&state, PlayerId(0)).is_empty());
     }
+
+    // --- team_life_total / team_poison_total ---
+
+    /// CR 810.4: "Each team has a shared life total, which starts at 30
+    /// life" — the TEAM's combined total at game start must be 30, not 30
+    /// per player (60 per team). Regression for a bug where `GameState::new`
+    /// gave every player the full `starting_life` regardless of team size.
+    #[test]
+    fn team_life_total_at_game_start_is_30_not_60() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        assert_eq!(team_life_total(&state, PlayerId(0)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(1)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(3)), 30);
+    }
+
+    /// Outside team-based formats, `team_life_total` degenerates to the
+    /// player's own (full, unsplit) starting life — no regression from the
+    /// 2HG even-split fix.
+    #[test]
+    fn team_life_total_non_team_format_is_full_starting_life() {
+        let state = GameState::new(FormatConfig::commander(), 4, 0);
+        assert_eq!(team_life_total(&state, PlayerId(0)), 40);
+    }
+
+    #[test]
+    fn team_poison_total_sums_living_teammates() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].poison_counters = 6;
+        state.players[1].poison_counters = 9;
+        assert_eq!(team_poison_total(&state, PlayerId(0)), 15);
+        assert_eq!(team_poison_total(&state, PlayerId(1)), 15);
+        // Opposing team is unaffected.
+        assert_eq!(team_poison_total(&state, PlayerId(2)), 0);
+    }
 }

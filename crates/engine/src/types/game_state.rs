@@ -6674,6 +6674,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
 
+    /// CR 805.4b: queue of players who still owe their turn-based draw-step
+    /// draw THIS step. Seeded by `turns::enter_phase`'s `Phase::Draw` arm on
+    /// first entry (`[active_player]` normally, or `[active_player,
+    /// teammate]` under the shared team turns option) and drained front-to-
+    /// back by `turns::drain_pending_team_draw_step`. A draw that pauses on
+    /// a CR 616.1 competing-replacement choice leaves its player at the
+    /// front of the queue (not popped) so resumption — via
+    /// `handle_replacement_choice`'s epilogue, which also calls the same
+    /// drain function — retries exactly that player's draw and then
+    /// continues to any still-queued teammate, instead of either redrawing
+    /// a completed player or silently dropping a queued one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_team_draw_step: Vec<PlayerId>,
+
     /// CR 502.3: Transient untap-step carry. When a `MaxUntapPerType` cap
     /// (Smoke / Stoic Angel / Damping Field) raises `WaitingFor::ChooseUntapSubset`,
     /// the permanents the active player already chose not to untap (from the
@@ -7149,10 +7163,25 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
+        // CR 810.4 + CR 810.11: `FormatConfig::starting_life` is the TEAM's
+        // shared total in a team-based format (Two-Headed Giant: 30, not 30
+        // per player / 60 per team). `game::players::team_life_total` derives
+        // the shared total by summing each living teammate's own `life`
+        // field, so the individual starting values must already split the
+        // shared total rather than each duplicating it. The engine currently
+        // only models 2-player teams (seats paired {0,1}, {2,3}, ... — see
+        // `game::players::teammates`/`team_index`), so the split is an even
+        // halving; CR 810.11 (3+-player teams) would need this to divide by
+        // the actual team size instead.
+        let per_player_life = if config.team_based {
+            config.starting_life / 2
+        } else {
+            config.starting_life
+        };
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: config.starting_life,
+                life: per_player_life,
                 ..Player::default()
             })
             .collect();
@@ -7358,6 +7387,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             current_trigger_match_count: None,
