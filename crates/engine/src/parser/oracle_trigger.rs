@@ -16415,7 +16415,7 @@ mod tests {
             "expected Not(WasCast {{ zone: Hand }}), got {cond:?}",
         );
         assert!(
-            !cleaned.contains("didn't cast"),
+            !cleaned.contains("didn't cast"), // allow-noncombinator: test assertion, not parsing dispatch
             "condition clause must be stripped from effect text: {cleaned}",
         );
     }

@@ -7651,8 +7651,10 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
+        // allow-noncombinator: first-word verb dispatch arm (sibling of "double" above)
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
         // CR 701.56a: "time travel" / "time travel N times"
+        // allow-noncombinator: first-word verb dispatch arm (sibling of "double" above)
         "time" => {
             if tag::<_, _, OracleError<'_>>("time travel")
                 .parse(lower)
