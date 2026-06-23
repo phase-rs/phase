@@ -212,6 +212,7 @@ pub fn resolve_mana_ability(
         events,
         color_override,
         &HashSet::new(),
+        None,
     )
 }
 
@@ -222,6 +223,7 @@ pub fn resolve_mana_ability(
 /// ancestor activation is synchronously suspended mid-payment on the Rust call
 /// stack and must not be re-activated, or the auto-tap recurses infinitely
 /// (two cross-paying Signets, an N-source chain, or a self-loop).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_mana_ability_excluding(
     state: &mut GameState,
     source_id: ObjectId,
@@ -230,6 +232,12 @@ pub(super) fn resolve_mana_ability_excluding(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
     excluded_sources: &HashSet<ObjectId>,
+    // CR 107.4b + CR 118.10: When this ability is being activated to fund an
+    // outer cost (nested Phase-3 auto-tap), the outer cost's colored shard demand
+    // is threaded here so this ability's own mana sub-cost is funded from
+    // non-demanded mana, never a floated color the outer cost still needs. `None`
+    // at the top-level entry — there is no outer cost on the stack.
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
     // Pay the full ability cost (tap, sacrifice, etc.)
     let waiting_before_cost = state.waiting_for.clone();
@@ -240,6 +248,7 @@ pub(super) fn resolve_mana_ability_excluding(
         &ability_def.cost,
         events,
         excluded_sources,
+        sub_cost_demand,
     )?;
     if state.waiting_for != waiting_before_cost {
         return Ok(());
@@ -1415,6 +1424,10 @@ pub(super) fn advance_mana_ability_activation(
                 // activation on the call stack to exclude, so the chain is
                 // empty here.
                 &HashSet::new(),
+                // CR 107.4b + CR 118.10: The interactive resume path is a
+                // top-level activation with no outer cost on the stack, so there
+                // is no colored demand to honor — `None`.
+                None,
             )?;
             if state.waiting_for != waiting_before_cost {
                 return Ok(state.waiting_for.clone());
@@ -1492,6 +1505,7 @@ pub(super) fn advance_mana_ability_activation(
 /// Pay the full cost of a mana ability. This is the single authority for mana ability
 /// cost resolution — callers dispatch activation, they never inspect individual cost
 /// components. Handles `Tap`, `Composite { Tap, Sacrifice }`, and future cost variants.
+#[allow(clippy::too_many_arguments)]
 fn pay_mana_ability_cost(
     state: &mut GameState,
     source_id: ObjectId,
@@ -1499,6 +1513,7 @@ fn pay_mana_ability_cost(
     cost: &Option<AbilityCost>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
     pay_mana_ability_cost_with_choices(
         state,
@@ -1514,6 +1529,7 @@ fn pay_mana_ability_cost(
         None,
         None,
         excluded_sources,
+        sub_cost_demand,
     )
 }
 
@@ -1553,6 +1569,9 @@ fn resolve_mana_ability_with_selected_choices(
         chosen_counter_count,
         chosen_x,
         excluded_sources,
+        // CR 107.4b + CR 118.10: Selected-choices resume is a top-level
+        // activation with no outer cost on the stack — no colored demand.
+        None,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -1766,6 +1785,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     chosen_counter_count: Option<u32>,
     chosen_x: Option<u32>,
     excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -1786,6 +1806,7 @@ where
                 chosen_hybrid_payment,
                 events,
                 excluded_sources,
+                sub_cost_demand,
             )?;
         }
         // CR 605.1a + CR 701.17a: Bare `Mill` mana-ability cost. The Millikin
@@ -2132,6 +2153,7 @@ where
                             chosen_hybrid_payment,
                             events,
                             excluded_sources,
+                            sub_cost_demand,
                         )?;
                     }
                     // CR 605.1a + CR 701.17a: `Mill` sub-cost inside a Composite
@@ -2588,6 +2610,7 @@ fn mana_type_to_single_shard(color: ManaType) -> crate::types::mana::ManaCostSha
 /// colors chosen by `PayManaAbilityMana` and debited from the current pool.
 /// Otherwise, use the shared activation mana-payment building block so the
 /// player may activate other mana abilities while paying this activation cost.
+#[allow(clippy::too_many_arguments)]
 fn pay_mana_sub_cost(
     state: &mut GameState,
     source_id: ObjectId,
@@ -2596,6 +2619,7 @@ fn pay_mana_sub_cost(
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
     if hybrid_plan.is_none() {
         // CR 605.3c: Every source already in `excluded_sources` is an ancestor
@@ -2621,6 +2645,7 @@ fn pay_mana_sub_cost(
             None,
             events,
             &excluded_sources,
+            sub_cost_demand,
         );
     }
 

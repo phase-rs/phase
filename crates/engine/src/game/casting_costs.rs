@@ -6308,6 +6308,7 @@ pub(super) fn auto_tap_mana_sources_excluding(
         deprioritize_source,
         excluded_sources,
         None,
+        None,
     );
 }
 
@@ -6347,9 +6348,11 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
         deprioritize_source,
         excluded_sources,
         payment_context,
+        None,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn auto_tap_mana_sources_inner(
     state: &mut GameState,
     player: PlayerId,
@@ -6358,6 +6361,7 @@ fn auto_tap_mana_sources_inner(
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
+    sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
 ) {
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
@@ -6388,7 +6392,15 @@ fn auto_tap_mana_sources_inner(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| mana_payment::reduce_cost_by_pool(&p.mana_pool, cost, effective_ctx, any_color))
+        .map(|p| {
+            mana_payment::reduce_cost_by_pool(
+                &p.mana_pool,
+                cost,
+                effective_ctx,
+                any_color,
+                sub_cost_demand,
+            )
+        })
         .unwrap_or_else(|| cost.clone());
 
     let (shards, generic) = match &residual {
@@ -6694,11 +6706,31 @@ fn auto_tap_mana_sources_inner(
                 // it, so clone-and-extend only when a mana sub-cost is present and
                 // otherwise forward the caller's set unchanged — skipping a heap
                 // allocation per selected source on this auto-tap hot path.
+                //
+                // CR 118.10: Each payment of a cost applies to only one spell or
+                // ability, so a source the OUTER plan reserved for the outer cost
+                // (every id in `used_sources`, a superset of `to_tap` that already
+                // contains `option.object_id`) must be excluded from the nested
+                // sub-cost auto-tap. Phase 3 does not re-verify a source is untapped
+                // before resolving, so without this the sub-cost could grab a source
+                // the outer cost still needs. Unioning `used_sources` supersedes the
+                // prior `excluded.insert(option.object_id)`.
                 let sub_cost = mana_sub_cost_of(&ability_def.cost);
-                let mut excluded_buf;
+                let excluded_buf;
+                // CR 107.4b + CR 118.10: The outer cost's colored shards are
+                // reserved; computed once (only when a mana sub-cost is present, so
+                // the `None` / no-sub-cost path adds zero work) and threaded into
+                // both the nested sub-cost auto-tap and the ability's own resolution
+                // so the sub-cost's generic pips are funded from non-demanded mana,
+                // never a floated color the outer cost still needs (the Dimir/Gruul
+                // Signet over-consumption bug).
+                let demand: Option<mana_payment::ColorDemand> =
+                    sub_cost.map(|_| mana_payment::outer_cost_color_demand(cost));
                 let excluded: &HashSet<ObjectId> = if sub_cost.is_some() {
-                    excluded_buf = excluded_sources.clone();
-                    excluded_buf.insert(option.object_id);
+                    excluded_buf = excluded_sources
+                        .union(&used_sources)
+                        .copied()
+                        .collect::<HashSet<ObjectId>>();
                     &excluded_buf
                 } else {
                     excluded_sources
@@ -6719,6 +6751,7 @@ fn auto_tap_mana_sources_inner(
                         Some(option.object_id),
                         excluded,
                         Some(&activation_ctx),
+                        demand.as_ref(),
                     );
                 }
                 // color_override tells resolve_mana_ability how to resolve the
@@ -6743,6 +6776,7 @@ fn auto_tap_mana_sources_inner(
                     events,
                     override_value,
                     excluded,
+                    demand.as_ref(),
                 );
             }
         } else {
@@ -7511,6 +7545,8 @@ pub fn finalize_mana_payment(
             super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
+            // Interactive activation resume: top-level, no outer cost on the stack.
+            None,
         )?;
         return push_activated_ability_to_stack(
             state,
@@ -7677,6 +7713,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             Some(phyrexian_choices),
             events,
             &excluded_sources,
+            // Interactive Phyrexian-choice resume: top-level activation, no outer cost.
+            None,
         )?;
         return push_activated_ability_to_stack(
             state,

@@ -427,6 +427,8 @@ fn pay_ability_cost_inner(
                         *ability_tag,
                         events,
                         excluded_sources,
+                        // Top-level ability cost payment: no outer cost on the stack.
+                        None,
                     )?;
                 }
             }
