@@ -12,7 +12,7 @@ use engine::types::ability::{
     ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
     TapStateChange, TargetFilter, TypedFilter,
 };
-use engine::types::card_type::Supertype;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
@@ -1794,7 +1794,7 @@ fn build_replacement_exec(
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -1890,17 +1890,31 @@ fn build_replacement_exec(
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // artifact, enchantment, instant, sorcery, or planeswalker", Archon
+        // of Valor's Reach) is a narrowed `ChoiceType::CardType`, not a
+        // free-form `Labeled` choice — it must persist as
+        // `ChosenAttribute::CardType` so `FilterProp::IsChosenCardType`
+        // (the "can't cast spells of the chosen type" prohibition) binds.
+        // The `excluded` set is the complement of the listed types within
+        // the engine's seven choosable types (`CoreType::CHOOSABLE_TYPES`).
         A::ChooseACardtypeFromList(opts) => {
             if opts.is_empty() {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "ChoiceType::Labeled",
+                    engine_type: "ChoiceType::CardType",
                     needed_variant: "ChooseACardtypeFromList with empty option list".into(),
                 });
             }
+            let mut allowed = Vec::with_capacity(opts.len());
+            for opt in opts {
+                allowed.push(crate::convert::condition::card_type_to_core(opt)?);
+            }
+            let excluded = CoreType::CHOOSABLE_TYPES
+                .into_iter()
+                .filter(|core_type| !allowed.contains(core_type))
+                .collect();
             Effect::Choose {
-                choice_type: ChoiceType::Labeled {
-                    options: opts.iter().map(|c| format!("{c:?}")).collect(),
-                },
+                choice_type: ChoiceType::card_type_excluding(excluded),
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
@@ -3288,6 +3302,40 @@ mod tests {
                 } if *target == TargetFilter::SelfRef
             )
         ));
+    }
+
+    // Issue #4201 — Archon of Valor's Reach's "choose artifact, enchantment,
+    // instant, sorcery, or planeswalker" ETB action must lower to a
+    // restricted `ChoiceType::CardType` (excluding Creature and Land), not a
+    // free-form `Labeled` choice, so the companion "can't cast spells of the
+    // chosen type" prohibition (`FilterProp::IsChosenCardType`) can bind.
+    #[test]
+    fn choose_a_cardtype_from_list_lowers_to_restricted_card_type_choice() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::ChooseACardtypeFromList(vec![
+                CardType::Artifact,
+                CardType::Enchantment,
+                CardType::Instant,
+                CardType::Sorcery,
+                CardType::Planeswalker,
+            ])],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        let exec = defs[0].execute.as_ref().expect("execute must be set");
+        match exec.effect.as_ref() {
+            Effect::Choose {
+                choice_type: engine::types::ability::ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(*persist);
+                assert_eq!(excluded, &vec![CoreType::Creature, CoreType::Land]);
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
     }
 
     #[test]

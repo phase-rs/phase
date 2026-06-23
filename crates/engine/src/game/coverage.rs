@@ -1712,7 +1712,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         }
         ChoiceType::OddOrEven => "odd or even",
         ChoiceType::BasicLandType => "basic land type",
-        ChoiceType::CardType => "card type",
+        ChoiceType::CardType { excluded } => {
+            if excluded.is_empty() {
+                "card type"
+            } else {
+                "restricted card type"
+            }
+        }
         ChoiceType::CardName => "card name",
         ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),

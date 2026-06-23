@@ -722,7 +722,7 @@ pub fn build_prompt(
             match choice_type {
                 ChoiceType::Color { .. } => "chooseColor",
                 ChoiceType::CreatureType
-                | ChoiceType::CardType
+                | ChoiceType::CardType { .. }
                 | ChoiceType::LandType
                 | ChoiceType::BasicLandType => "chooseType",
                 ChoiceType::CardName => "chooseCardName",

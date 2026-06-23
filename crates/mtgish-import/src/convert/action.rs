@@ -3891,7 +3891,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         // CR 205.2: choose a card type from the bounded card-type set.
         Action::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },

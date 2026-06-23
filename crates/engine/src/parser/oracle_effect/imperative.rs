@@ -3899,7 +3899,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 choice_type,
                 ChoiceType::CardName
                     | ChoiceType::CreatureType
-                    | ChoiceType::CardType
+                    | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
             ),

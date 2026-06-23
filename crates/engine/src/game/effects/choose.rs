@@ -5,6 +5,7 @@ use crate::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
     TargetSelectionMode,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -208,7 +209,7 @@ pub(crate) fn bind_named_choice(
                     choice_type,
                     ChoiceType::CardName
                         | ChoiceType::CreatureType
-                        | ChoiceType::CardType
+                        | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
                         | ChoiceType::Keyword { .. }
@@ -324,8 +325,17 @@ fn compute_options(
         ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
         // CR 205.2a: The card types are artifact, battle, conspiracy, creature,
         // dungeon, enchantment, instant, land, phenomenon, plane, planeswalker,
-        // scheme, sorcery, kindred, and vanguard.
-        ChoiceType::CardType => to_strings(CARD_TYPES),
+        // scheme, sorcery, kindred, and vanguard. `excluded` narrows the offered
+        // set (e.g. Archon of Valor's Reach restricts to artifact, enchantment,
+        // instant, sorcery, planeswalker by excluding creature and land).
+        ChoiceType::CardType { excluded } => CARD_TYPES
+            .iter()
+            .filter(|name| {
+                name.parse::<CoreType>()
+                    .is_ok_and(|core_type| !excluded.contains(&core_type))
+            })
+            .map(|name| name.to_string())
+            .collect(),
         // CardName options are provided by the frontend from its local card database.
         // The engine sends an empty list to avoid serializing 30k+ names every state update.
         ChoiceType::CardName => Vec::new(),
@@ -524,7 +534,7 @@ mod tests {
     #[test]
     fn choose_card_type_offers_seven_types() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardType);
+        let ability = make_choose_ability(ChoiceType::card_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -533,6 +543,30 @@ mod tests {
                 assert_eq!(options.len(), 7);
                 assert!(options.contains(&"Creature".to_string()));
                 assert!(options.contains(&"Instant".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    // CR 205.2a: Archon of Valor's Reach restricts the card-type choice to
+    // "artifact, enchantment, instant, sorcery, or planeswalker" by excluding
+    // Creature and Land from the offered set.
+    #[test]
+    fn choose_card_type_excludes_restricted_types() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::card_type_excluding(vec![
+            CoreType::Creature,
+            CoreType::Land,
+        ]));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 5);
+                assert!(!options.contains(&"Creature".to_string()));
+                assert!(!options.contains(&"Land".to_string()));
+                assert!(options.contains(&"Planeswalker".to_string()));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }

@@ -16093,7 +16093,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("a basic land type").parse(rest).is_ok() {
         Some(ChoiceType::BasicLandType)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
-        Some(ChoiceType::CardType)
+        Some(ChoiceType::card_type())
     } else if is_card_type_enumeration(rest) {
         // CR 205.2: Older "choose a card type" cards (Cloud Key) spell out the
         // options ("artifact, creature, enchantment, instant, or sorcery")
@@ -16101,7 +16101,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // as the same CardType choice so the chosen type persists for downstream
         // `IsChosenCardType` reads (cost reduction, protection from the chosen
         // type, etc.).
-        Some(ChoiceType::CardType)
+        Some(ChoiceType::card_type())
     } else if alt((
         tag::<_, _, E>("a card name"),
         tag("a nonland card name"),
@@ -57712,16 +57712,16 @@ mod snapshot_tests {
         // IsChosenCardType reads (CR 205.2).
         assert!(matches!(
             try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
         assert!(matches!(
             try_parse_named_choice("choose a card type"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
         // Trailing period, as it appears in oracle text.
         assert!(matches!(
             try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery."),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
     }
 
@@ -57733,7 +57733,7 @@ mod snapshot_tests {
         assert!(!is_card_type_enumeration("a creature"));
         assert!(!matches!(
             try_parse_named_choice("choose a creature type"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
     }
 }

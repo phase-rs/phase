@@ -289,7 +289,13 @@ pub enum ChoiceType {
     },
     OddOrEven,
     BasicLandType,
-    CardType,
+    /// CR 205.2a: A choice among card types. `excluded` narrows the offered
+    /// set below the full seven-type list (e.g. Archon of Valor's Reach
+    /// excludes Creature and Land, leaving "artifact, enchantment, instant,
+    /// sorcery, or planeswalker") — mirrors the `Color { excluded }` axis.
+    CardType {
+        excluded: Vec<CoreType>,
+    },
     CardName,
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
     NumberRange {
@@ -346,6 +352,16 @@ impl ChoiceType {
         Self::Color { excluded }
     }
 
+    pub fn card_type() -> Self {
+        Self::CardType {
+            excluded: Vec::new(),
+        }
+    }
+
+    pub fn card_type_excluding(excluded: Vec<CoreType>) -> Self {
+        Self::CardType { excluded }
+    }
+
     /// Whether the player supplies the chosen value at runtime rather than the
     /// engine enumerating a fixed option set.
     ///
@@ -392,7 +408,19 @@ impl Serialize for ChoiceType {
             Self::BasicLandType => {
                 serializer.serialize_unit_variant("ChoiceType", 3, "BasicLandType")
             }
-            Self::CardType => serializer.serialize_unit_variant("ChoiceType", 4, "CardType"),
+            // Serialize the unrestricted form as the legacy unit variant
+            // "CardType" so existing card-data JSON stays byte-stable; only
+            // emit the struct form when a restriction is present.
+            Self::CardType { excluded } => {
+                if excluded.is_empty() {
+                    serializer.serialize_unit_variant("ChoiceType", 4, "CardType")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 4, "CardType", 1)?;
+                    variant.serialize_field("excluded", excluded)?;
+                    variant.end()
+                }
+            }
             Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
             Self::NumberRange { min, max } => {
                 let mut variant =
@@ -452,6 +480,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default)]
                 excluded: Vec<ManaColor>,
             },
+            CardType {
+                #[serde(default)]
+                excluded: Vec<CoreType>,
+            },
             NumberRange {
                 min: u8,
                 max: u8,
@@ -474,7 +506,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "Color" => Ok(Self::color()),
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
-                "CardType" => Ok(Self::CardType),
+                "CardType" => Ok(Self::card_type()),
                 "CardName" => Ok(Self::CardName),
                 "LandType" => Ok(Self::LandType),
                 "Opponent" => Ok(Self::Opponent { restriction: None }),
@@ -502,6 +534,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             ChoiceTypeRepr::Data(data) => match data {
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
+                ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
@@ -822,7 +855,7 @@ impl ChosenAttribute {
             Self::Color(_) => ChoiceType::color(),
             Self::CreatureType(_) => ChoiceType::CreatureType,
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
-            Self::CardType(_) => ChoiceType::CardType,
+            Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
             Self::Number(_) => ChoiceType::NumberRange { min: 0, max: 20 },
@@ -909,7 +942,10 @@ impl ChoiceValue {
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
             }
-            ChoiceType::CardType => value.parse::<CoreType>().ok().map(Self::CardType),
+            ChoiceType::CardType { excluded } => {
+                let core_type = value.parse::<CoreType>().ok()?;
+                (!excluded.contains(&core_type)).then_some(Self::CardType(core_type))
+            }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
             ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
