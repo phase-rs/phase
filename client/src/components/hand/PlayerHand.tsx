@@ -1,5 +1,5 @@
 import { memo, useState, useCallback, useMemo, useRef } from "react";
-import { AnimatePresence, motion, useMotionValue, useSpring } from "framer-motion";
+import { AnimatePresence, motion, useMotionValue, useSpring, useReducedMotion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -17,7 +17,11 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
-import { computeHandInsertionSlot, computeHandInsertionMarker } from "./handInsertionSlot.ts";
+import {
+  computeHandInsertionSlot,
+  computeHandInsertionMarker,
+  flankingHandIndices,
+} from "./handInsertionSlot.ts";
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
 // card leftward over the previous one. Tightens continuously as the hand grows
@@ -111,15 +115,29 @@ export function PlayerHand() {
   );
 
   const hoveredSlotRef = useRef<number | null>(null);
+  const shouldReduceMotion = useReducedMotion();
 
   // Drop-position caret (drag-to-rearrange). Driven by MotionValues set
   // imperatively in handleDrag — NOT React state — so the memoized fan never
-  // re-renders on pointer move. A short spring glides the caret between slots.
+  // re-renders on pointer move. A short spring glides the caret between slots;
+  // when prefers-reduced-motion is set we bind the raw values so it snaps.
   const caretXRaw = useMotionValue(0);
   const caretYRaw = useMotionValue(0);
-  const caretX = useSpring(caretXRaw, { stiffness: 900, damping: 48, mass: 0.4 });
-  const caretY = useSpring(caretYRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretRotateRaw = useMotionValue(0);
+  const caretXSpring = useSpring(caretXRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretYSpring = useSpring(caretYRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretRotateSpring = useSpring(caretRotateRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const caretX = shouldReduceMotion ? caretXRaw : caretXSpring;
+  const caretY = shouldReduceMotion ? caretYRaw : caretYSpring;
+  const caretRotate = shouldReduceMotion ? caretRotateRaw : caretRotateSpring;
   const caretOpacity = useMotionValue(0);
+
+  // Shared slide-apart signal: the active insertion slot (drag-excluded space)
+  // and the dragged card's handObjects index, both -1 when no reorder drag is in
+  // flight. Each HandCard derives its own displacement from these via
+  // useTransform (Task 3) — set imperatively here so the fan never re-renders.
+  const insertionSlotMV = useMotionValue(-1);
+  const draggingIndexMV = useMotionValue(-1);
 
   const handleDrag = useCallback(
     (objectId: number, info: PanInfo) => {
@@ -171,8 +189,27 @@ export function PlayerHand() {
         info.offset.y >= DRAG_PLAY_THRESHOLD &&
         slot !== fromIdx;
       caretOpacity.set(show ? 1 : 0);
+
+      // Tilt the caret to the average fan rotation of the two cards flanking the
+      // gap (single neighbor at an edge), and open the slide-apart gap by
+      // publishing the active slot + dragged index. -1 == inactive (no gap).
+      if (show && slot != null) {
+        const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
+        const rotations = [left, right]
+          .filter((idx): idx is number => idx != null)
+          .map((idx) => getCardRotation(idx, rects.length));
+        const angle = rotations.length
+          ? rotations.reduce((a, b) => a + b, 0) / rotations.length
+          : 0;
+        caretRotateRaw.set(angle);
+        draggingIndexMV.set(fromIdx);
+        insertionSlotMV.set(slot);
+      } else {
+        caretRotateRaw.set(0);
+        insertionSlotMV.set(-1);
+      }
     },
-    [isMobile, pendingObjectId, caretXRaw, caretYRaw, caretOpacity],
+    [isMobile, pendingObjectId, caretXRaw, caretYRaw, caretRotateRaw, caretOpacity, insertionSlotMV, draggingIndexMV],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -184,6 +221,9 @@ export function PlayerHand() {
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
       caretOpacity.set(0);
+      caretRotateRaw.set(0);
+      insertionSlotMV.set(-1);
+      draggingIndexMV.set(-1);
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -217,7 +257,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, caretOpacity],
+    [hasPriority, playCard, player, pendingObjectId, caretOpacity, caretRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
@@ -275,7 +315,10 @@ export function PlayerHand() {
   const handleDragStop = useCallback(() => {
     setDraggingCardId(null);
     caretOpacity.set(0);
-  }, [caretOpacity]);
+    caretRotateRaw.set(0);
+    insertionSlotMV.set(-1);
+    draggingIndexMV.set(-1);
+  }, [caretOpacity, caretRotateRaw, insertionSlotMV, draggingIndexMV]);
   const handleMouseEnter = useCallback((id: number) => { setExpanded(true); inspectObject(id); }, [inspectObject]);
   const handleMouseLeave = useCallback(() => inspectObject(null), [inspectObject]);
 
@@ -352,7 +395,7 @@ export function PlayerHand() {
         <motion.div
           aria-hidden
           className="pointer-events-none absolute left-0 top-0 z-50 w-[3px] rounded-full bg-cyan-400/90 shadow-[0_0_12px_3px_rgba(34,211,238,0.7)] h-[calc(var(--card-h)*1.14)] sm:h-[calc(var(--card-h)*1.34)] md:h-[calc(var(--card-h)*1.4)]"
-          style={{ x: caretX, y: caretY, opacity: caretOpacity }}
+          style={{ x: caretX, y: caretY, rotate: caretRotate, opacity: caretOpacity }}
         />
       )}
     </div>
