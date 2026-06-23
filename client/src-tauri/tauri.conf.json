@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "create": false,
+        "label": "main",
         "title": "phase.rs",
         "width": 1280,
         "height": 800,
