@@ -1,6 +1,7 @@
 pub mod augment;
 pub mod bracket_lists;
 pub mod card_db;
+pub mod contraptions;
 pub mod embalm_eternalize;
 pub mod encore;
 #[cfg(feature = "forge")]

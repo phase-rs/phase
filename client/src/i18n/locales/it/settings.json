@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Cancella tutte le sostituzioni di illustrazione ({{count}})",
     "clearArtOverridesConfirm_one": "Cancellare tutte le {{count}} sostituzione di illustrazione?",
     "clearArtOverridesConfirm_other": "Cancellare tutte le {{count}} sostituzioni di illustrazione?",
+    "clearArtOverridesAction": "Cancella",
     "vfxQualityOptions": {
       "full": "Completa",
       "reduced": "Ridotta",
@@ -160,6 +161,10 @@
     "description": "L'esportazione raccoglie le tue preferenze, i mazzi importati e le iscrizioni ai feed in un unico file JSON. L'importazione li ripristina su un'altra macchina. Le cache di IndexedDB (cache dei feed, cache audio, partite salvate) non sono incluse — quelle si ricostruiscono automaticamente.",
     "exportBackup": "Esporta backup…",
     "importBackup": "Importa backup…",
+    "importModeTitle": "Importa backup",
+    "importModeMessage": "Sostituire tutto con il backup (distruttivo) o unire — mantenere i mazzi esistenti e aggiungere quelli nuovi dal backup.",
+    "importOverwrite": "Sostituisci tutto",
+    "importMerge": "Unisci",
     "importConfirm": "Sovrascrivere le preferenze e i mazzi esistenti?\n\nOK: sostituisci tutto con il backup (distruttivo).\nAnnulla: unisci — mantieni i mazzi esistenti, aggiungi quelli nuovi dal backup.",
     "backupDownloaded": "Backup scaricato.",
     "imported_one": "Importato {{count}} mazzo.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "Reimpostare tutte le preferenze ai valori predefiniti? Questo cancella ogni impostazione in questa finestra.",
-    "button": "Reimposta tutte le preferenze"
+    "button": "Reimposta tutte le preferenze",
+    "confirmAction": "Reimposta"
   },
   "pacing": {
     "title": "Ritmo",

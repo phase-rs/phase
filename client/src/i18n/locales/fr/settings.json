@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverridesConfirm_one": "Effacer les {{count}} remplacement d'illustration ?",
     "clearArtOverridesConfirm_other": "Effacer les {{count}} remplacements d'illustration ?",
+    "clearArtOverridesAction": "Effacer",
     "vfxQualityOptions": {
       "full": "Complète",
       "reduced": "Réduite",
@@ -160,6 +161,10 @@
     "description": "L'export regroupe vos préférences, decks importés et abonnements à des flux dans un seul fichier JSON. L'import les restaure sur une autre machine. Les caches IndexedDB (cache de flux, cache audio, parties enregistrées) ne sont pas inclus — ils se reconstruisent automatiquement.",
     "exportBackup": "Exporter une sauvegarde…",
     "importBackup": "Importer une sauvegarde…",
+    "importModeTitle": "Importer une sauvegarde",
+    "importModeMessage": "Tout remplacer par la sauvegarde (destructif), ou fusionner — conserver les decks existants et ajouter ceux de la sauvegarde.",
+    "importOverwrite": "Tout remplacer",
+    "importMerge": "Fusionner",
     "importConfirm": "Écraser les préférences et decks existants ?\n\nOK : tout remplacer par la sauvegarde (destructif).\nAnnuler : fusionner — conserver les decks existants, ajouter les nouveaux de la sauvegarde.",
     "backupDownloaded": "Sauvegarde téléchargée.",
     "imported_one": "{{count}} deck importé.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "Réinitialiser toutes les préférences aux valeurs par défaut ? Cela efface tous les paramètres de cette boîte de dialogue.",
-    "button": "Réinitialiser toutes les préférences"
+    "button": "Réinitialiser toutes les préférences",
+    "confirmAction": "Réinitialiser"
   },
   "pacing": {
     "title": "Rythme",

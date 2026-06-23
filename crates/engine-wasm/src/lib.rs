@@ -1347,6 +1347,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
                 attraction_deck: deck_data.attraction_deck,
+                contraption_deck: deck_data.contraption_deck,
                 sticker_sheets: deck_data.sticker_sheets,
                 signature_spell: deck_data.signature_spell,
                 bracket_tier: deck_data.bracket_tier,

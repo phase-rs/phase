@@ -401,6 +401,7 @@ impl GameSession {
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
+                contraption_deck: deck.contraption_deck.clone(),
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: deck.signature_spell.clone(),
                 bracket_tier: deck.bracket_tier,

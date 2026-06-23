@@ -43,13 +43,41 @@ struct MtgjsonSetData {
 
 #[derive(Deserialize)]
 struct MtgjsonBooster {
+    /// Play Booster product (MKM 2024 onward). Preferred when present.
     #[serde(default)]
-    play: Option<MtgjsonBoosterPlay>,
+    play: Option<MtgjsonBoosterConfig>,
+    /// Draft Booster product (the legacy limited product, ~2018–2024). Sets
+    /// printed before Play Boosters carry `draft` but no `play`.
+    #[serde(default)]
+    draft: Option<MtgjsonBoosterConfig>,
+    /// The unnamed "standard" booster MTGJSON emits for the oldest expansions
+    /// (Ice Age, Antiquities, Legends, …) that predate the draft/set/collector
+    /// product split. It is the de-facto draft booster for those sets.
+    #[serde(default)]
+    default: Option<MtgjsonBoosterConfig>,
+}
+
+impl MtgjsonBooster {
+    /// The draftable booster configuration, in product-recency order: modern
+    /// Play Booster, else legacy Draft Booster, else the `default` booster the
+    /// oldest expansions carry. All three share an identical MTGJSON shape
+    /// (sheets + weighted boosters), so any one drives extraction. The three
+    /// are mutually exclusive across the corpus, so the order only documents
+    /// intent. Platform-only products (`arena`, `mtgo`) and non-draft products
+    /// (`set`, `collector`, `jumpstart`) are deliberately excluded.
+    fn draftable(&self) -> Option<&MtgjsonBoosterConfig> {
+        // Eager `.or()` (not `.or_else`): `as_ref()` is trivial and side-effect
+        // free, so clippy::unnecessary_lazy_evaluations rejects a lazy closure.
+        self.play
+            .as_ref()
+            .or(self.draft.as_ref())
+            .or(self.default.as_ref())
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MtgjsonBoosterPlay {
+struct MtgjsonBoosterConfig {
     sheets: HashMap<String, MtgjsonSheet>,
     boosters: Vec<MtgjsonBoosterVariant>,
     boosters_total_weight: u32,
@@ -130,8 +158,8 @@ fn build_card_index(sets: &[MtgjsonSetData]) -> HashMap<&str, &MtgjsonCard> {
 
 /// Extract a [`LimitedSetPool`] from raw MTGJSON per-set JSON content.
 ///
-/// Returns `Ok(None)` if the set has no `booster.play` section (not draftable).
-/// Sheet UUIDs are resolved against this set's own cards only — use
+/// Returns `Ok(None)` if the set has no draftable booster (`play`, `draft`, or
+/// `default`). Sheet UUIDs are resolved against this set's own cards only — use
 /// [`extract_all_set_pools`] when supplemental sheets need cross-set resolution.
 pub fn extract_set_pool(json_content: &str) -> Result<Option<LimitedSetPool>, ExtractionError> {
     let file: MtgjsonSetFile = serde_json::from_str(json_content)?;
@@ -141,20 +169,20 @@ pub fn extract_set_pool(json_content: &str) -> Result<Option<LimitedSetPool>, Ex
 
 /// Extract a [`LimitedSetPool`] from one set's parsed data, resolving sheet UUIDs
 /// against `card_index` (which may span multiple sets). Returns `None` if the set
-/// has no `booster.play` config. `prints` and `basic_lands` stay set-local — they
-/// describe *this* set's print run, not the corpus.
+/// has no draftable booster config (`play`/`draft`/`default`). `prints` and
+/// `basic_lands` stay set-local — they describe *this* set's print run, not the corpus.
 fn extract_set_pool_indexed(
     data: &MtgjsonSetData,
     card_index: &HashMap<&str, &MtgjsonCard>,
 ) -> Option<LimitedSetPool> {
-    let play = data.booster.as_ref().and_then(|b| b.play.as_ref())?;
+    let booster = data.booster.as_ref().and_then(MtgjsonBooster::draftable)?;
 
     // Track which UUIDs appear in any sheet (for prints eligibility).
     let mut uuids_in_sheets: HashSet<&str> = HashSet::new();
 
     // Build sheets, resolving UUIDs against the (possibly cross-set) index.
     let mut sheets = BTreeMap::new();
-    for (sheet_name, mtg_sheet) in &play.sheets {
+    for (sheet_name, mtg_sheet) in &booster.sheets {
         let mut cards = Vec::new();
         for (uuid, &weight) in &mtg_sheet.cards {
             uuids_in_sheets.insert(uuid.as_str());
@@ -191,7 +219,7 @@ fn extract_set_pool_indexed(
     }
 
     // Build pack variants
-    let pack_variants: Vec<PackVariant> = play
+    let pack_variants: Vec<PackVariant> = booster
         .boosters
         .iter()
         .map(|variant| {
@@ -216,8 +244,16 @@ fn extract_set_pool_indexed(
         })
         .collect();
 
-    // Build prints: cards that have boosterTypes containing "play" or appear in any sheet.
+    // Build prints: cards tagged for the booster pool or appearing in any sheet.
     // Set-local: this is *this* set's print run, not the cross-set index.
+    //
+    // `booster_eligible` means "can be opened in a pack of this set", which is
+    // exactly sheet membership — the same ground truth across every era. The
+    // per-card MTGJSON `boosterTypes` field cannot answer this: it carries pool
+    // tags (`default`/`deck`), never the set-level product key, so the old
+    // `contains("play")` check was `false` for every card in every set (Play
+    // Boosters included) and is unrelated to the `play`/`draft`/`default`
+    // product fallback in `MtgjsonBooster::draftable`.
     let prints: Vec<LimitedCardPrint> = data
         .cards
         .iter()
@@ -231,7 +267,7 @@ fn extract_set_pool_indexed(
             set_code: c.set_code.clone(),
             collector_number: c.number.clone(),
             rarity: parse_rarity(&c.rarity),
-            booster_eligible: c.booster_types.contains(&"play".to_string()),
+            booster_eligible: uuids_in_sheets.contains(c.uuid.as_str()),
         })
         .collect();
 
@@ -268,7 +304,7 @@ fn extract_set_pool_indexed(
         name: data.name.clone(),
         release_date: data.release_date.clone(),
         pack_variants,
-        pack_variants_total_weight: play.boosters_total_weight,
+        pack_variants_total_weight: booster.boosters_total_weight,
         sheets,
         prints,
         basic_lands,
@@ -411,6 +447,37 @@ mod tests {
         .to_string()
     }
 
+    /// Pre-Play-Booster set: carries a legacy `draft` booster but no `play`.
+    /// This is the shape of the entire pre-2024 back catalog (DOM, ELD, WAR, …).
+    fn minimal_set_with_draft_booster() -> String {
+        r#"{
+            "data": {
+                "code": "OLD",
+                "name": "Old Set",
+                "releaseDate": "2019-01-01",
+                "booster": {
+                    "draft": {
+                        "sheets": {
+                            "common": {
+                                "cards": { "uuid-c1": 10, "uuid-c2": 10 },
+                                "totalWeight": 20
+                            }
+                        },
+                        "boosters": [
+                            { "contents": { "common": 10 }, "weight": 1 }
+                        ],
+                        "boostersTotalWeight": 1
+                    }
+                },
+                "cards": [
+                    { "uuid": "uuid-c1", "name": "Old Common A", "rarity": "common", "number": "1", "setCode": "OLD", "boosterTypes": [], "supertypes": [] },
+                    { "uuid": "uuid-c2", "name": "Old Common B", "rarity": "common", "number": "2", "setCode": "OLD", "boosterTypes": [], "supertypes": [] }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
     fn minimal_set_without_booster() -> String {
         r#"{
             "data": {
@@ -465,6 +532,92 @@ mod tests {
         assert!(
             result.is_none(),
             "set without booster.play should return None"
+        );
+    }
+
+    #[test]
+    fn test_extract_set_falls_back_to_draft_booster() {
+        // Pre-Play-Booster sets have only `booster.draft`; they must still be
+        // draftable. This covers the entire pre-2024 back catalog.
+        let json = minimal_set_with_draft_booster();
+        let pool = extract_set_pool(&json)
+            .unwrap()
+            .expect("set with only a draft booster should yield a pool");
+
+        assert_eq!(pool.code, "OLD");
+        assert_eq!(pool.sheets.len(), 1);
+        assert_eq!(pool.sheets["common"].cards.len(), 2);
+        assert_eq!(pool.pack_variants.len(), 1);
+        assert_eq!(pool.prints.len(), 2);
+        // Cards carry no `boosterTypes` tag yet are on the draft sheet, so they
+        // are booster-eligible: eligibility is sheet membership, not a tag.
+        assert!(pool.prints.iter().all(|p| p.booster_eligible));
+    }
+
+    #[test]
+    fn test_extract_set_falls_back_to_default_booster() {
+        // The oldest expansions (Ice Age, Antiquities, Legends, …) carry only a
+        // `default` booster — no `play`/`draft`. They must still be draftable.
+        let json = r#"{
+            "data": {
+                "code": "ICE",
+                "name": "Ice Age",
+                "releaseDate": "1995-06-01",
+                "booster": {
+                    "default": {
+                        "sheets": {
+                            "common": { "cards": { "uuid-c1": 1, "uuid-c2": 1 }, "totalWeight": 2 }
+                        },
+                        "boosters": [{ "contents": { "common": 2 }, "weight": 1 }],
+                        "boostersTotalWeight": 1
+                    }
+                },
+                "cards": [
+                    { "uuid": "uuid-c1", "name": "Ice Common A", "rarity": "common", "number": "1", "setCode": "ICE", "boosterTypes": [], "supertypes": [] },
+                    { "uuid": "uuid-c2", "name": "Ice Common B", "rarity": "common", "number": "2", "setCode": "ICE", "boosterTypes": [], "supertypes": [] }
+                ]
+            }
+        }"#;
+
+        let pool = extract_set_pool(json)
+            .unwrap()
+            .expect("set with only a default booster should yield a pool");
+        assert_eq!(pool.code, "ICE");
+        assert_eq!(pool.sheets["common"].cards.len(), 2);
+        assert_eq!(pool.prints.len(), 2);
+        assert!(pool.prints.iter().all(|p| p.booster_eligible));
+    }
+
+    #[test]
+    fn test_play_booster_preferred_over_draft() {
+        // A transitional set carrying both products must draft from `play`.
+        let json = r#"{
+            "data": {
+                "code": "DUAL",
+                "name": "Dual Set",
+                "booster": {
+                    "play": {
+                        "sheets": { "p": { "cards": { "uuid-p": 1 }, "totalWeight": 1 } },
+                        "boosters": [{ "contents": { "p": 1 }, "weight": 1 }],
+                        "boostersTotalWeight": 1
+                    },
+                    "draft": {
+                        "sheets": { "d": { "cards": { "uuid-d": 1 }, "totalWeight": 1 } },
+                        "boosters": [{ "contents": { "d": 1 }, "weight": 1 }],
+                        "boostersTotalWeight": 1
+                    }
+                },
+                "cards": [
+                    { "uuid": "uuid-p", "name": "Play Card", "rarity": "common", "number": "1", "setCode": "DUAL", "boosterTypes": [], "supertypes": [] },
+                    { "uuid": "uuid-d", "name": "Draft Card", "rarity": "common", "number": "2", "setCode": "DUAL", "boosterTypes": [], "supertypes": [] }
+                ]
+            }
+        }"#;
+
+        let pool = extract_set_pool(json).unwrap().unwrap();
+        assert!(
+            pool.sheets.contains_key("p") && !pool.sheets.contains_key("d"),
+            "play booster sheets must win over draft when both are present"
         );
     }
 

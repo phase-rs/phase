@@ -1327,6 +1327,17 @@ pub enum BatchCompletion {
         object_id: ObjectId,
         remaining: u32,
     },
+    /// Unstable Contraptions: a Contraption being assembled paused on a
+    /// battlefield-entry replacement-ordering choice. Defer the assembled
+    /// object's bookkeeping and any remaining assembles of the same effect
+    /// until the paused entry resolves.
+    ContraptionAssembleRemainder {
+        player: PlayerId,
+        source_id: ObjectId,
+        object_id: ObjectId,
+        sprocket: u8,
+        remaining_after: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

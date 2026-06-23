@@ -1,4 +1,4 @@
-use crate::types::ability::{ControllerRef, PlayerRelation, SeatDirection};
+use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
@@ -303,8 +303,41 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     }
 }
 
-fn team_index(player: PlayerId) -> u8 {
+pub(crate) fn team_index(player: PlayerId) -> u8 {
     player.0 / 2
+}
+
+/// CR 810.9a + CR 810.9d: Fold a player population into one i32 by aggregating
+/// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
+/// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
+/// Empty population → 0. Off-team every player is its own singleton team, so
+/// this matches a per-individual fold: the dedup key falls back to `pid.0`,
+/// which is distinct per player even when two players share a `team_index`
+/// (e.g. a 1v1 where players 0 and 1 are both `team_index == 0`).
+/// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
+/// reads each team's total once, not each member.
+pub(crate) fn aggregate_over_teams<I>(
+    state: &GameState,
+    players: I,
+    aggregate: AggregateFunction,
+) -> i32
+where
+    I: IntoIterator<Item = PlayerId>,
+{
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let team_totals = players.into_iter().filter_map(|pid| {
+        let key = if state.format_config.team_based {
+            team_index(pid) as u32
+        } else {
+            pid.0 as u32
+        };
+        seen.insert(key).then(|| team_life_total(state, pid))
+    });
+    match aggregate {
+        AggregateFunction::Max => team_totals.max().unwrap_or(0),
+        AggregateFunction::Min => team_totals.min().unwrap_or(0),
+        AggregateFunction::Sum => team_totals.sum(),
+    }
 }
 
 /// CR 810.4 + CR 810.9a: A player's team's shared life total. In non-team
@@ -715,5 +748,69 @@ mod tests {
         assert_eq!(team_poison_total(&state, PlayerId(1)), 15);
         // Opposing team is unaffected.
         assert_eq!(team_poison_total(&state, PlayerId(2)), 0);
+    }
+
+    // --- aggregate_over_teams ---
+
+    /// CR 810.9a + CR 810.9d: aggregating life over a population folds each
+    /// DISTINCT team's shared total exactly once. Over the two opponents of
+    /// team A (players 2 and 3 with 9 and 5 = team total 14), Sum/Max/Min all
+    /// read 14 ONCE — not 28 (double-counted) and not 9 (individual). This is
+    /// the byte-distinguishing regression for Malignus-style off-team reads.
+    #[test]
+    fn aggregate_over_teams_dedups_a_shared_team() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[2].life = 9;
+        state.players[3].life = 5;
+        let opp_team = vec![PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team.clone(), AggregateFunction::Sum),
+            14,
+            "Sum must count the shared team total once, not 28"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team.clone(), AggregateFunction::Max),
+            14
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team, AggregateFunction::Min),
+            14
+        );
+    }
+
+    /// The dedup key falls back to `pid.0` off-team so two players that share a
+    /// `team_index` in a NON-team format are NOT collapsed. In Commander,
+    /// players 0 and 1 both have `team_index == 0` (0/2 and 1/2); a bare
+    /// `team_index` key would drop one and break Sum. With the `pid.0` guard,
+    /// Sum over [11, 7] is 18 (both counted as singleton teams).
+    #[test]
+    fn aggregate_over_teams_non_team_format_keeps_players_distinct() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 0);
+        state.players[0].life = 11;
+        state.players[1].life = 7;
+        assert_eq!(
+            aggregate_over_teams(
+                &state,
+                vec![PlayerId(0), PlayerId(1)],
+                AggregateFunction::Sum
+            ),
+            18,
+            "non-team players sharing a team_index must stay distinct via the pid.0 guard"
+        );
+    }
+
+    /// Empty population → 0 for every aggregate.
+    #[test]
+    fn aggregate_over_teams_empty_population_is_zero() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let empty: Vec<PlayerId> = Vec::new();
+        assert_eq!(
+            aggregate_over_teams(&state, empty.clone(), AggregateFunction::Max),
+            0
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, empty, AggregateFunction::Sum),
+            0
+        );
     }
 }

@@ -716,6 +716,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// Unstable Contraptions: a Contraption was assembled from a player's
+    /// supplementary Contraption deck onto a sprocket.
+    ContraptionAssembled {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        sprocket: u8,
+    },
     StickerPlaced {
         player_id: PlayerId,
         object_id: ObjectId,
@@ -731,6 +738,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         roll: u8,
         attraction_id: ObjectId,
+    },
+    /// Unstable Contraptions: a specific Contraption on a sprocket was
+    /// cranked. `TriggerMode::CrankContraption` listens to this event.
+    ContraptionCranked {
+        player_id: PlayerId,
+        sprocket: u8,
+        contraption_id: ObjectId,
     },
     /// Avatar crossover: A firebending ability resolved and produced mana.
     Firebend {
