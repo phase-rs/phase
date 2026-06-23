@@ -4515,12 +4515,9 @@ fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
     if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, 1) {
         return 0;
     }
-    state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| u32::try_from(p.life.max(0)).unwrap_or(0))
-        .unwrap_or(0)
+    // CR 119.4a: in a team format the max X payable via life is bounded by the
+    // team's shared total (off-team this is the player's own life).
+    u32::try_from(super::players::team_life_total(state, player).max(0)).unwrap_or(0)
 }
 
 pub(super) fn effective_casualty_additional_cost(
@@ -15838,5 +15835,39 @@ its replicate cost was paid.)\nDraw a card.";
             true,
             &mut events,
         );
+    }
+
+    /// CR 119.4a + CR 810.9a: in 2HG the max X payable via a "pay X life"
+    /// additional cost is bounded by the TEAM total. Team A at 3 + 9 = 12 → max
+    /// X is 12, not the controller's individual 3. Reverting Site 8 to `p.life`
+    /// reads 3. A `CantLoseLife` lock short-circuits to 0.
+    #[test]
+    fn max_pay_life_x_team_bounded_in_2hg() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 3;
+        state.players[1].life = 9; // team total 12
+
+        assert_eq!(max_pay_life_x(&state, PlayerId(0)), 12);
+
+        // CR 119.8: a CantLoseLife lock on the payer forces 0.
+        let lock = create_object(
+            &mut state,
+            CardId(7777),
+            PlayerId(0),
+            "Life Lock".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+        assert_eq!(max_pay_life_x(&state, PlayerId(0)), 0);
     }
 }
