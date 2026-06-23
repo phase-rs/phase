@@ -1457,6 +1457,39 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     }
 }
 
+/// CR 301.5 / CR 301.6: The permanent core type a non-Aura attacher's
+/// subtype structurally requires its host to have, if any. An Equipment
+/// "can't legally be attached to anything that isn't a creature" (CR
+/// 301.5c); a Fortification "can't legally be attached to an object that
+/// isn't a land" (CR 301.6, applying CR 301.5c by analogy). Unlike an Aura's
+/// per-card `Keyword::Enchant` filter, this requirement is fixed by the
+/// subtype itself — every Equipment requires a creature host and every
+/// Fortification requires a land host, with no Oracle-text exception to
+/// either. A card with neither subtype (or only the Aura subtype, whose
+/// requirement is carried by `Keyword::Enchant` instead) has no requirement
+/// here.
+fn required_attachment_host_core_type(
+    attacher: &crate::game::game_object::GameObject,
+) -> Option<CoreType> {
+    if attacher
+        .card_types
+        .subtypes
+        .iter()
+        .any(|s| s == "Equipment")
+    {
+        Some(CoreType::Creature)
+    } else if attacher
+        .card_types
+        .subtypes
+        .iter()
+        .any(|s| s == "Fortification")
+    {
+        Some(CoreType::Land)
+    } else {
+        None
+    }
+}
+
 /// CR 303.4c: An Aura is enchanting an illegal object or player when its
 /// enchant ability (and other applicable effects) does not admit the host.
 /// The Aura's `Keyword::Enchant(filter)` is the single authority — exactly
@@ -1472,8 +1505,10 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 /// Spellweaver Volute, Don't Worry About It), that zone IS the legal host
 /// zone and the battlefield default is suspended.
 ///
-/// CR 301.5: Equipment carries no `Keyword::Enchant`, so legality reduces to
-/// the printed "on the battlefield" requirement.
+/// CR 301.5 / CR 301.6: Equipment and Fortification carry no
+/// `Keyword::Enchant`, so legality reduces to the printed "on the
+/// battlefield" requirement plus the host-type check from
+/// `required_attachment_host_core_type`.
 pub(crate) fn is_valid_attachment_target(
     state: &GameState,
     attacher_id: crate::types::identifiers::ObjectId,
@@ -1500,8 +1535,20 @@ pub(crate) fn is_valid_attachment_target(
         _ => None,
     });
     let Some(filter) = enchant_filter else {
-        // Equipment / non-Enchant attacher: only the battlefield is a legal host.
-        return target.zone == Zone::Battlefield;
+        // Equipment / Fortification (non-Enchant attacher): the battlefield
+        // is a legal host, AND CR 301.5c / CR 301.6 each require the host to
+        // actually be of the matching permanent type — "An Equipment ...
+        // can't legally be attached to anything that isn't a creature" /
+        // "A Fortification ... can't legally be attached to an object that
+        // isn't a land." Unlike Auras (whose host filter is the per-card
+        // `Keyword::Enchant`), this constraint is structural to the subtype
+        // itself, so it is checked here rather than via a per-card filter —
+        // this re-check fires regardless of how the illegal attachment was
+        // produced (the host changed type after attaching, a buggy effect,
+        // etc.), not just at initial Equip/Fortify activation.
+        return target.zone == Zone::Battlefield
+            && required_attachment_host_core_type(attacher)
+                .is_none_or(|core_type| target.card_types.core_types.contains(&core_type));
     };
 
     // CR 702.5a battlefield default: if the filter does not opt into a
@@ -2706,6 +2753,83 @@ mod tests {
         assert_eq!(
             state.objects.get(&fort).unwrap().attached_to,
             Some(land.into())
+        );
+    }
+
+    #[test]
+    fn sba_fortification_unattaches_when_attached_to_a_nonland_permanent() {
+        // CR 704.5n + CR 301.6: "A Fortification ... can't legally be
+        // attached to an object that isn't a land" — this must hold
+        // continuously, not just at the moment Fortify chose its target.
+        // Here the Fortification is wired directly onto a creature host
+        // (bypassing Fortify activation entirely) to prove the SBA itself
+        // repairs the illegal state regardless of how it was produced —
+        // `is_valid_attachment_target`'s non-Enchant branch must check the
+        // host's permanent type, not just its zone.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
+        state.objects.get_mut(&fort).unwrap().attached_to = Some(creature.into());
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(fort);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&fort),
+            "Fortification stays on the battlefield (CR 704.5n)"
+        );
+        assert_eq!(
+            state.objects.get(&fort).unwrap().attached_to,
+            None,
+            "a Fortification attached to a non-land permanent must unattach (CR 301.6)"
+        );
+    }
+
+    #[test]
+    fn sba_equipment_unattaches_when_attached_to_a_noncreature_permanent() {
+        // Symmetric Equipment case for the same CR 301.5c host-type axis:
+        // "An Equipment ... can't legally be attached to anything that isn't
+        // a creature." Wired directly onto a land host (bypassing Equip
+        // activation) to isolate the SBA re-check.
+        let mut state = setup();
+        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
+        let equip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(land.into());
+        }
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .attachments
+            .push(equip);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&equip),
+            "Equipment stays on the battlefield (CR 704.5n)"
+        );
+        assert_eq!(
+            state.objects.get(&equip).unwrap().attached_to,
+            None,
+            "Equipment attached to a non-creature permanent must unattach (CR 301.5c)"
         );
     }
 
