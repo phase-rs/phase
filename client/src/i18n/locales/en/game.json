@@ -451,7 +451,8 @@
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
     "resourceMana": "mana",
-    "resourceCounters": "counters"
+    "resourceCounters": "counters",
+    "resourceSpeed": "speed"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",
@@ -1429,6 +1430,10 @@
     "spectacleNormalLabel": "Cast Normally",
     "spectacleAltLabel": "Cast with Spectacle",
     "spectacleSubtitle": "Cast {{name}} normally, or pay its Spectacle cost (available because an opponent lost life this turn).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Cast Normally",
+    "prowlAltLabel": "Cast with Prowl",
+    "prowlSubtitle": "Cast {{name}} normally, or pay its Prowl cost (available because a matching creature dealt combat damage to a player this turn).",
     "overloadEyebrow": "Overload",
     "overloadNormalLabel": "Cast Normally",
     "overloadAltLabel": "Cast with Overload",

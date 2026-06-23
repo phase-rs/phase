@@ -14,7 +14,7 @@ use crate::types::keywords::{
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
@@ -228,24 +228,36 @@ fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &Mana
             .get(&object_id)
             .map(|obj| obj.mana_cost.clone())
             .unwrap_or(ManaCost::NoCost),
+        // CR 202.3: Mana value is a single number; keyword costs bound to mana
+        // value resolve to that much generic mana, not the card's colored cost.
+        ManaCost::SelfManaValue => state
+            .objects
+            .get(&object_id)
+            .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
+            .unwrap_or(ManaCost::NoCost),
         _ => cost.clone(),
     }
 }
 
-/// CR 702.128a / CR 702.129a + CR 602.1a: Resolve a `ManaCost::SelfManaCost`
-/// payload carried by a granted Embalm / Eternalize keyword to the recipient
-/// card's concrete mana cost. Embalm / Eternalize are graveyard *activated*
+/// CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a: Resolve a
+/// `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload carried by a
+/// granted graveyard activated keyword to the recipient card's concrete mana
+/// sub-cost. Encore / Scavenge / Embalm / Eternalize are graveyard *activated*
 /// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
-/// payment path treats `SelfManaCost` as a free cost — so a self-cost grant must
-/// be concretized before the activated ability is synthesized. Non-self-cost
-/// keywords (printed Embalm `{3}{W}`, or any other keyword) pass through
-/// unchanged.
+/// payment path treats self-referential placeholders as free — so they must be
+/// concretized before the activated ability is synthesized. Non-self-referential
+/// keywords (printed Embalm `{3}{W}`, Encore `{5}`, or any other keyword) pass
+/// through unchanged.
 pub fn resolve_self_cost_graveyard_activated_keyword(
     state: &GameState,
     object_id: ObjectId,
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
+        Keyword::Encore(cost) => Keyword::Encore(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Scavenge(cost) => {
+            Keyword::Scavenge(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         Keyword::Embalm(EmbalmCost::Mana(cost)) => Keyword::Embalm(EmbalmCost::Mana(
             resolve_keyword_mana_cost(state, object_id, cost),
         )),
@@ -795,12 +807,20 @@ fn apply_ability_cost_reduction(
             continue;
         }
         if let StaticMode::ReduceAbilityCost {
+            ref mode,
             ref keyword,
             amount,
             ref dynamic_count,
             ..
         } = static_def.mode
         {
+            // CR 118.7: This ninjutsu-cost path only subtracts. A directional
+            // static in the `Raise` direction keyed on the same keyword must not
+            // reach the subtraction below — skip it (cost increases on ninjutsu
+            // are not modeled here; this path is reduction-only by construction).
+            if !matches!(mode, CostModifyMode::Reduce) {
+                continue;
+            }
             if keyword == ability_keyword {
                 // CR 601.2f: When dynamic_count is present, the total reduction is
                 // amount * resolve_quantity(dynamic_count). E.g., "cost {1} less for each Dragon".
@@ -999,6 +1019,114 @@ mod tests {
         assert_eq!(
             toxic_count, 2,
             "both printed and granted Toxic instances must remain on the keyword list"
+        );
+    }
+
+    /// CR 702.138a (#3281): card-data export encodes compound escape as
+    /// `EscapeCost::NonMana`; hydrating a face from that export shape must
+    /// resolve `effective_escape_data`, not collapse to the bare MTGJSON placeholder.
+    #[test]
+    fn compound_escape_export_hydrates_effective_escape_data() {
+        use crate::game::deck_loading::create_object_from_card_face;
+        use crate::types::card::CardFace;
+        use crate::types::card_type::{CardType, CoreType, Supertype};
+        use crate::types::keywords::{EscapeCost, KeywordKind};
+        use crate::types::PtValue;
+
+        // Byte-shaped like Uro's `keywords[0]` entry in card-data export.
+        let escape_kw: Keyword = serde_json::from_value(serde_json::json!({
+            "Escape": {
+                "type": "NonMana",
+                "data": {
+                    "type": "Composite",
+                    "costs": [
+                        {
+                            "type": "Mana",
+                            "cost": {
+                                "type": "Cost",
+                                "shards": ["Green", "Green", "Blue", "Blue"],
+                                "generic": 0
+                            }
+                        },
+                        {
+                            "type": "Exile",
+                            "count": 5,
+                            "zone": "Graveyard",
+                            "filter": {
+                                "type": "Typed",
+                                "type_filters": ["Card"],
+                                "controller": "You",
+                                "properties": [
+                                    {"type": "Another"},
+                                    {"type": "InZone", "zone": "Graveyard"}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }))
+        .expect("card-data export escape keyword shape");
+
+        assert!(
+            matches!(escape_kw, Keyword::Escape(EscapeCost::NonMana(_))),
+            "export escape must deserialize as compound NonMana"
+        );
+
+        let face = CardFace {
+            name: "Uro, Titan of Nature's Wrath".to_string(),
+            mana_cost: ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+            },
+            card_type: CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Elder".to_string(), "Giant".to_string()],
+            },
+            power: Some(PtValue::Fixed(6)),
+            toughness: Some(PtValue::Fixed(6)),
+            loyalty: None,
+            defense: None,
+            oracle_text: None,
+            non_ability_text: None,
+            flavor_name: None,
+            keywords: vec![escape_kw],
+            abilities: vec![],
+            triggers: vec![],
+            static_abilities: vec![],
+            replacements: vec![],
+            cleave_variant: None,
+            color_override: None,
+            color_identity: vec![],
+            scryfall_oracle_id: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            solve_condition: None,
+            parse_warnings: vec![],
+            brawl_commander: false,
+            is_commander: false,
+            is_oathbreaker: false,
+            deck_copy_limit: None,
+            metadata: Default::default(),
+            rarities: Default::default(),
+            attraction_lights: vec![],
+        };
+
+        let mut state = GameState::new_two_player(1);
+        let id = create_object_from_card_face(&mut state, &face, PlayerId(0));
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut Vec::new());
+
+        assert!(
+            object_has_effective_keyword_kind(&state, id, KeywordKind::Escape),
+            "graveyard object must have effective Escape"
+        );
+        assert!(
+            effective_escape_data(&state, id).is_some(),
+            "effective_escape_data must resolve compound export escape"
         );
     }
 

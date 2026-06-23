@@ -204,15 +204,18 @@ fn doubler_disjunct_connector(input: &str) -> OracleResult<'_, ()> {
 /// restrictive when it carries a concrete type/subtype restriction or any
 /// property (subtype designations, "another", "of the chosen type", etc.).
 fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
-    let TargetFilter::Typed(tf) = filter else {
-        return false;
-    };
-    tf.type_filters.iter().any(|t| {
-        !matches!(
-            t,
-            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
-        )
-    }) || !tf.properties.is_empty()
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.iter().any(|t| {
+                !matches!(
+                    t,
+                    TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
+                )
+            }) || !tf.properties.is_empty()
+        }
+        TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        _ => false,
+    }
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -1531,6 +1534,32 @@ pub(crate) fn try_parse_compound_subtypes(
     Some(TargetFilter::Or { filters })
 }
 
+/// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness
+/// rather than <poss> power" predicate, in both the singular ("assigns … its …
+/// its") and plural ("assign … their … their") surface forms. CR 510.1a is the
+/// default ("assigns combat damage equal to its power"); this is a continuous
+/// rule-modification effect (CR 613.11) that substitutes toughness for power.
+///
+/// Both forms map to the same [`ContinuousModification::AssignDamageFromToughness`]
+/// rule — only the subject's grammatical number differs (singular "each creature
+/// … assigns" vs plural "creatures you control … assign"). Centralizing the
+/// phrase here keeps the static-line parser and the one-shot continuous-effect
+/// parser (`parse_continuous_modifications`) in lockstep so a new subject scope
+/// never silently drops the plural form. Returns the post-phrase remainder.
+pub(crate) fn parse_assigns_damage_from_toughness_predicate(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            tag("assigns combat damage equal to its toughness rather than its power"),
+        ),
+        value(
+            (),
+            tag("assign combat damage equal to their toughness rather than their power"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 510.1c: Parse "each creature [you control] [with condition] assigns combat damage
 /// equal to its toughness rather than its power" patterns.
 ///
@@ -1976,6 +2005,10 @@ fn parse_crew_contribution_predicate_nom(
             tag("crews vehicles and stations permanents"),
         ),
         value(vec![CrewAction::Crew], tag("crews vehicles")),
+        // CR 702.184a: bare "stations permanents" — station-only contribution
+        // modifier (Tapestry Warden: "… stations permanents using its toughness
+        // rather than its power").
+        value(vec![CrewAction::Station], tag("stations permanents")),
     ))
     .parse(input)?;
     let (input, _) = space1.parse(input)?;

@@ -1,6 +1,8 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{CollectEvidenceResume, GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{
+    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -41,6 +43,27 @@ fn waiting_state(
         cards: graveyard_cards(state, player),
         resume: Box::new(resume),
     }
+}
+
+/// CR 605.2 + CR 701.59: begin collect-evidence payment for a mana ability's
+/// activation cost (Cryptex's `{T}, Collect evidence 3: Add one mana...`).
+/// Mirrors `begin_cost_payment` but resumes a parked `PendingManaAbility`
+/// rather than a `PendingCast`. Payability (CR 701.59b graveyard-MV threshold)
+/// is checked by the caller before this is reached.
+pub(crate) fn begin_cost_payment_for_mana_ability(
+    state: &GameState,
+    player: PlayerId,
+    amount: u32,
+    pending: PendingManaAbility,
+) -> WaitingFor {
+    waiting_state(
+        state,
+        player,
+        amount,
+        CollectEvidenceResume::ManaAbility {
+            pending_mana_ability: Box::new(pending),
+        },
+    )
 }
 
 /// CR 701.59a: Collect evidence N — exile graveyard cards with total mana value >= N.
@@ -202,6 +225,17 @@ pub(crate) fn handle_choice(
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             Ok(state.waiting_for.clone())
         }
+        // CR 605.2 + CR 701.59: Resume the parked mana-ability activation with
+        // the exiled cards stamped in. `resume` is a shared borrow, so clone the
+        // boxed pending (mirrors the `Casting` arm) — moving out of `*` would be
+        // E0507. The exile loop above already moved the chosen cards to exile.
+        CollectEvidenceResume::ManaAbility {
+            pending_mana_ability,
+        } => {
+            let mut pending = pending_mana_ability.as_ref().clone();
+            pending.collected_evidence = chosen.to_vec();
+            super::super::mana_abilities::advance_mana_ability_activation(state, pending, events)
+        }
     }
 }
 
@@ -209,7 +243,7 @@ pub(crate) fn handle_choice(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
 
@@ -462,5 +496,83 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    fn mana_pending(source_id: ObjectId) -> PendingManaAbility {
+        PendingManaAbility {
+            player: PlayerId(0),
+            source_id,
+            ability_index: 0,
+            color_override: None,
+            resume: crate::types::game_state::ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collect_evidence_cost_amount_recurses_composite() {
+        use crate::game::mana_abilities;
+        // Bare collect-evidence cost.
+        assert_eq!(
+            mana_abilities::collect_evidence_cost_amount(&AbilityCost::CollectEvidence {
+                amount: 3
+            }),
+            Some(3)
+        );
+        // Composite[Tap, CollectEvidence{3}] — Cryptex's shape — recurses.
+        assert_eq!(
+            mana_abilities::collect_evidence_cost_amount(&AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, AbilityCost::CollectEvidence { amount: 3 },],
+            }),
+            Some(3)
+        );
+        // No collect-evidence component anywhere.
+        assert_eq!(
+            mana_abilities::collect_evidence_cost_amount(&AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap],
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn begin_cost_payment_for_mana_ability_produces_prompt_with_cards() {
+        let mut state = GameState::new_two_player(42);
+        let a = add_graveyard_card(&mut state, PlayerId(0), 1, "One", 2);
+        let b = add_graveyard_card(&mut state, PlayerId(0), 2, "Two", 2);
+
+        let waiting = begin_cost_payment_for_mana_ability(
+            &state,
+            PlayerId(0),
+            3,
+            mana_pending(ObjectId(100)),
+        );
+
+        let (minimum_mana_value, cards, resume) = match waiting {
+            WaitingFor::CollectEvidenceChoice {
+                minimum_mana_value,
+                cards,
+                resume,
+                ..
+            } => (minimum_mana_value, cards, resume),
+            other => panic!("Expected CollectEvidenceChoice, got {:?}", other),
+        };
+
+        assert_eq!(minimum_mana_value, 3);
+        assert!(cards.contains(&a) && cards.contains(&b));
+        assert!(!cards.is_empty());
+        assert!(matches!(
+            resume.as_ref(),
+            CollectEvidenceResume::ManaAbility { .. }
+        ));
     }
 }

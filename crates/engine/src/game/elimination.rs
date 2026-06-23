@@ -12,7 +12,7 @@ use super::players;
 ///
 /// - Marks the player as eliminated
 /// - Removes their spells from the stack
-/// - Exiles all permanents they own on the battlefield
+/// - Exiles all objects they own (all zones)
 /// - Emits PlayerEliminated event
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
@@ -272,6 +272,35 @@ fn drain_or_clear_deferred_triggers_after_elimination(
     }
 }
 
+/// CR 800.4a: Exile every object `player` owns, regardless of zone.
+fn exile_owned_objects_on_player_left_game(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let zones = [
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Hand,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+        Zone::Stack,
+    ];
+    let mut to_exile: Vec<_> = zones
+        .into_iter()
+        .flat_map(|zone| super::targeting::zone_object_ids(state, zone))
+        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
+        .collect();
+    to_exile.sort_by_key(|id| id.0);
+    to_exile.dedup();
+
+    for id in to_exile {
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
+        crate::game::zone_pipeline::move_object(state, req, events);
+    }
+}
+
 /// Perform the actual elimination of a single player (CR 800.4).
 fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     // Mark as eliminated
@@ -323,29 +352,12 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         state.pending_cast = None;
     }
 
-    // CR 800.4a: Exile permanents they own from the battlefield
-    let to_exile: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.owner == player)
-                .unwrap_or(false)
-        })
-        .collect();
-
-    // CR 800.4a: route the owner's objects to exile through the zone pipeline
-    // under the `PlayerLeftGame` exempt cause — "This is not a state-based
-    // action", and no replacement effect applies to a player leaving the game,
-    // so the consult is skipped while the unconditional primitive guards still
-    // run (PLAN §3).
-    for id in to_exile {
-        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
-        crate::game::zone_pipeline::move_object(state, req, events);
-    }
+    // CR 800.4a: All objects the player owns leave the game (exiled). Route each
+    // through the zone pipeline under the `PlayerLeftGame` exempt cause — "This
+    // is not a state-based action", and no replacement effect applies to a
+    // player leaving the game, so the consult is skipped while the
+    // unconditional primitive guards still run (PLAN §3).
+    exile_owned_objects_on_player_left_game(state, player, events);
 
     state.auto_pass.remove(&player);
 
@@ -747,6 +759,39 @@ mod tests {
         // Permanent should be exiled, not on battlefield
         assert!(!state.battlefield.contains(&id));
         assert!(state.exile.contains(&id));
+    }
+
+    #[test]
+    fn elimination_exiles_owned_graveyard_and_library_cards() {
+        let mut state = setup_three_player();
+        let graveyard_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        let library_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Library Bear".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            !state.players[1].graveyard.contains(&graveyard_id),
+            "eliminated player's graveyard cards must leave the game (CR 800.4a)"
+        );
+        assert!(
+            !state.players[1].library.contains(&library_id),
+            "eliminated player's library cards must leave the game (CR 800.4a)"
+        );
+        assert!(state.exile.contains(&graveyard_id));
+        assert!(state.exile.contains(&library_id));
     }
 
     /// Build a mid-cast spell (on the stack, awaiting payment) controlled by

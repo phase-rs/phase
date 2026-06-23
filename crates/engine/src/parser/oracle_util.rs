@@ -1513,7 +1513,46 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
         }
     }
 
+    // Try regular "-ies" plural: subtypes ending in consonant + "y" pluralize by
+    // replacing "y" with "ies" (e.g. "Mercenary" → "Mercenaries", "Berserker"
+    // is unaffected). Words ending in vowel + "y" take a plain "-s" ("Monkey" →
+    // "Monkeys") and are covered by the "-s" rule above. Matching the plural
+    // surface form requires stripping the trailing "y" from the subtype stem and
+    // matching "ies" at the boundary; only the canonical singular is returned.
+    if takes_ies_plural(subtype) {
+        let stem_len = subtype.len() - 1; // drop trailing "y"
+        let ies_plural_len = stem_len + 3; // stem + "ies"
+        if text.len() >= ies_plural_len
+            && text.is_char_boundary(stem_len)
+            && text[..stem_len].eq_ignore_ascii_case(&subtype[..stem_len])
+            && text[stem_len..ies_plural_len].eq_ignore_ascii_case("ies")
+        {
+            let after = &text[ies_plural_len..];
+            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Some((subtype.to_string(), ies_plural_len));
+            }
+        }
+    }
+
     None
+}
+
+/// Whether an English noun pluralizes by replacing a trailing "-y" with "-ies":
+/// nouns ending in consonant + "y" (e.g. "Mercenary" → "Mercenaries"). Nouns
+/// ending in vowel + "y" take a plain "-s" ("Monkey" → "Monkeys") and are
+/// excluded so the regular "-s" rule handles them.
+fn takes_ies_plural(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    // A one-letter "y" has no preceding consonant, so the "-ies" rule cannot
+    // apply; the `len() < 2` guard also makes the penultimate index safe without
+    // `saturating_sub`/`get`.
+    if bytes.len() < 2 || !matches!(bytes.last(), Some(b'y' | b'Y')) {
+        return false;
+    }
+    !matches!(
+        bytes[bytes.len() - 2].to_ascii_lowercase(),
+        b'a' | b'e' | b'i' | b'o' | b'u'
+    )
 }
 
 /// Whether an English noun forms its plural by appending "-es" rather than

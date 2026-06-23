@@ -422,7 +422,8 @@
     "payAmount": "Zapłać {{value}} {{resource}}",
     "resourceEnergy": "energii",
     "resourceMana": "many",
-    "resourceCounters": "znaczników"
+    "resourceCounters": "znaczników",
+    "resourceSpeed": "prędkości"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
@@ -1377,6 +1378,10 @@
     "spectacleNormalLabel": "Rzuć normalnie",
     "spectacleAltLabel": "Rzuć z Spectacle",
     "spectacleSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Spectacle (dostępny, ponieważ przeciwnik stracił życie w tej turze).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Rzuć normalnie",
+    "prowlAltLabel": "Rzuć z Prowl",
+    "prowlSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Prowl (dostępny, ponieważ pasujący stwór zadał graczowi obrażenia bojowe w tej turze).",
     "overloadEyebrow": "Overload",
     "overloadNormalLabel": "Rzuć normalnie",
     "overloadAltLabel": "Rzuć z Overload",

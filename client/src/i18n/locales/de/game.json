@@ -422,7 +422,8 @@
     "payAmount": "{{value}} {{resource}} bezahlen",
     "resourceEnergy": "Energie",
     "resourceMana": "Mana",
-    "resourceCounters": "Marken"
+    "resourceCounters": "Marken",
+    "resourceSpeed": "Tempo"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
@@ -1377,6 +1378,10 @@
     "spectacleNormalLabel": "Normal wirken",
     "spectacleAltLabel": "Mit Spektakel wirken",
     "spectacleSubtitle": "Wirke {{name}} normal oder zahle seine Spektakel-Kosten (verfügbar, weil ein Gegner in diesem Zug Lebenspunkte verloren hat).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Normal wirken",
+    "prowlAltLabel": "Mit Prowl wirken",
+    "prowlSubtitle": "Wirke {{name}} normal oder zahle seine Prowl-Kosten (verfügbar, weil eine passende Kreatur einem Spieler in diesem Zug Kampfschaden zugefügt hat).",
     "overloadEyebrow": "Überladen",
     "overloadNormalLabel": "Normal wirken",
     "overloadAltLabel": "Mit Überladen wirken",

@@ -3,7 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// CR 205.4: Supertypes — Legendary, Basic, Snow, World, Ongoing.
+/// CR 205.4: Supertypes — Legendary, Basic, Snow, World, Ongoing, plus
+/// supplemental set-specific supertypes such as Host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Supertype {
     Legendary,
@@ -11,6 +12,7 @@ pub enum Supertype {
     Snow,
     World,
     Ongoing,
+    Host,
 }
 
 impl FromStr for Supertype {
@@ -23,6 +25,7 @@ impl FromStr for Supertype {
             "Snow" => Ok(Supertype::Snow),
             "World" => Ok(Supertype::World),
             "Ongoing" => Ok(Supertype::Ongoing),
+            "Host" => Ok(Supertype::Host),
             _ => Err(()),
         }
     }
@@ -36,6 +39,7 @@ impl fmt::Display for Supertype {
             Supertype::Snow => write!(f, "Snow"),
             Supertype::World => write!(f, "World"),
             Supertype::Ongoing => write!(f, "Ongoing"),
+            Supertype::Host => write!(f, "Host"),
         }
     }
 }

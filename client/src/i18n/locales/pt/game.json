@@ -422,7 +422,8 @@
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energia",
     "resourceMana": "mana",
-    "resourceCounters": "marcadores"
+    "resourceCounters": "marcadores",
+    "resourceSpeed": "velocidade"
   },
   "hand": {
     "viewFullHand_one": "Ver mão completa ({{count}} carta)",
@@ -1377,6 +1378,10 @@
     "spectacleNormalLabel": "Conjurar Normalmente",
     "spectacleAltLabel": "Conjurar com Espetáculo",
     "spectacleSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Espetáculo (disponível porque um oponente perdeu pontos de vida neste turno).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Conjurar Normalmente",
+    "prowlAltLabel": "Conjurar com Prowl",
+    "prowlSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Prowl (disponível porque uma criatura correspondente causou dano de combate a um jogador neste turno).",
     "overloadEyebrow": "Sobrecarregar",
     "overloadNormalLabel": "Conjurar Normalmente",
     "overloadAltLabel": "Conjurar com Sobrecarregar",

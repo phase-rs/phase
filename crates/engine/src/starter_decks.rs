@@ -15,6 +15,9 @@ pub struct DeckData {
     /// CR 717.2: Supplementary Attraction deck (Unfinity) as card names.
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    /// CR 123.2c: The sticker sheets selected for this deck/game.
+    #[serde(default)]
+    pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,

@@ -88,14 +88,14 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
       <div className="absolute inset-0 bg-black/60" />
       <motion.div
         ref={panelRef}
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.15 }}
-        className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md"
+        className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-2xl backdrop-blur-md sm:p-6"
       >
         <h2 className="text-base font-semibold text-white">{t("serverPicker.title")}</h2>
         <p className="mt-1 text-xs text-slate-400">
@@ -117,14 +117,14 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                     : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
                 }
               >
-                <span className="flex items-center gap-2 font-medium">
+                <span className="flex min-w-0 items-center gap-2 font-medium">
                   <ServerFlag
                     flag={preset.flag}
                     className="h-3.5 w-auto rounded-[2px] shadow-sm ring-1 ring-black/20"
                   />
                   {preset.label}
                 </span>
-                <span className="font-mono text-[10px] text-slate-500">
+                <span className="min-w-0 truncate pl-2 font-mono text-[10px] text-slate-500">
                   {preset.url.replace(/^wss?:\/\//, "")}
                 </span>
               </button>
@@ -149,7 +149,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
             }
           >
             <span className="font-medium">{t("serverPicker.noneLabel")}</span>
-            <span className="font-mono text-[10px] text-slate-500">
+            <span className="shrink-0 pl-2 font-mono text-[10px] text-slate-500">
               {t("serverPicker.directCodes")}
             </span>
           </button>
@@ -164,7 +164,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
               e.preventDefault();
               if (customUrl.trim()) applyUrl(customUrl);
             }}
-            className="mt-2 flex gap-2"
+            className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center"
           >
             <input
               type="text"
@@ -175,31 +175,35 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                 setConnTest("idle");
               }}
               placeholder={t("serverPicker.customUrlPlaceholder")}
-              className="flex-1 rounded-[14px] bg-black/18 px-3 py-1.5 font-mono text-xs text-white placeholder-gray-600 outline-none ring-1 ring-white/10 focus:ring-white/20"
+              className="min-w-0 flex-1 rounded-[14px] bg-black/18 px-3 py-1.5 font-mono text-xs text-white placeholder-gray-600 outline-none ring-1 ring-white/10 focus:ring-white/20"
             />
-            <button
-              type="button"
-              onClick={() => testUrl(customUrl)}
-              disabled={!customUrl.trim() || connTest === "testing"}
-              className={menuButtonClass({
-                tone: "neutral",
-                size: "sm",
-                disabled: !customUrl.trim() || connTest === "testing",
-              })}
-            >
-              {t("serverPicker.test")}
-            </button>
-            <button
-              type="submit"
-              disabled={!customUrl.trim()}
-              className={menuButtonClass({
-                tone: "cyan",
-                size: "sm",
-                disabled: !customUrl.trim(),
-              })}
-            >
-              {t("serverPicker.use")}
-            </button>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={() => testUrl(customUrl)}
+                disabled={!customUrl.trim() || connTest === "testing"}
+                className={menuButtonClass({
+                  tone: "neutral",
+                  size: "sm",
+                  disabled: !customUrl.trim() || connTest === "testing",
+                  className: "flex-1 sm:flex-none",
+                })}
+              >
+                {t("serverPicker.test")}
+              </button>
+              <button
+                type="submit"
+                disabled={!customUrl.trim()}
+                className={menuButtonClass({
+                  tone: "cyan",
+                  size: "sm",
+                  disabled: !customUrl.trim(),
+                  className: "flex-1 sm:flex-none",
+                })}
+              >
+                {t("serverPicker.use")}
+              </button>
+            </div>
           </form>
           {error && (
             <p className="mt-2 text-xs text-rose-300">{error}</p>

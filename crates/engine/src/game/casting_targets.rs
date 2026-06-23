@@ -487,6 +487,8 @@ fn pay_activation_costs_after_target_selection(
             super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
+            // Top-level ability activation: no outer cost on the stack.
+            None,
         )?;
     }
 

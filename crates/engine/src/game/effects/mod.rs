@@ -109,15 +109,18 @@ pub mod forage;
 pub mod force_attack;
 pub mod force_block;
 pub mod free_cast_from_zones;
+pub mod gain_activated_abilities;
 pub mod gain_control;
 pub mod gift_delivery;
 pub mod goad;
 pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
+pub mod harness;
 pub mod heist;
 pub mod hideaway;
 pub mod incubate;
 pub mod intensify;
+pub mod perpetual;
 // Tests for `heist` live in a sibling file (declared here, not in `heist.rs`,
 // so `heist.rs` stays implementation-only — no inline `#[cfg(test)]` token).
 #[cfg(test)]
@@ -181,6 +184,7 @@ pub mod solve_case;
 pub mod specialize;
 pub mod speed_effects;
 pub mod spellbook;
+pub mod stickers;
 pub mod turn_face_up;
 // Tests for `spellbook` live in a sibling file (declared here, not in
 // `spellbook.rs`, so `spellbook.rs` stays implementation-only).
@@ -212,6 +216,7 @@ pub(crate) fn effect_object_targets(
     fallback_targets: &[TargetRef],
 ) -> Vec<ObjectId> {
     match target_filter {
+        TargetFilter::SpecificObject { id } => vec![*id],
         TargetFilter::ParentTargetSlot { index } => fallback_targets
             .get(*index)
             .and_then(|target| match target {
@@ -1697,7 +1702,14 @@ pub(super) fn resolve_optional_effect_decision(
                         || (sub.sub_link == SubAbilityLink::SequentialSibling
                             && !sub_ability_is_reflexive(sub)
                             && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                                && cast_from_zone::is_graveyard_exile_rider_subability(sub)))
+                                && (cast_from_zone::is_graveyard_exile_rider_subability(sub)
+                                    // CR 614.1c + CR 122.1: the enters-with-counter
+                                    // rider is permission metadata (Osteomancer
+                                    // Adept, The Tomb of Aclazotz), not a printed
+                                    // follow-up to execute on decline.
+                                    || cast_from_zone::is_enters_with_counter_rider_subability(
+                                        sub,
+                                    ))))
                 })
             });
             if let Some(branch) = decline_branch {
@@ -2665,12 +2677,21 @@ pub fn resolve_effect(
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
+        Effect::CombineHost { .. } => {
+            crate::game::augment::resolve_combine_host(state, ability, events)
+        }
+        Effect::ChooseAugmentAndCombineWithHost { .. } => {
+            crate::game::augment::resolve_choose_augment_and_combine(state, ability, events)
+        }
         Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
         }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
+        Effect::GainActivatedAbilitiesOfTarget { .. } => {
+            gain_activated_abilities::resolve(state, ability, events)
+        }
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
         Effect::PutCounterAll { .. } => counters::resolve_add_all(state, ability, events),
@@ -2746,6 +2767,9 @@ pub fn resolve_effect(
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::ForEachCategoryExile { .. } => {
+            choose_from_zone::resolve_for_each_category(state, ability, events)
+        }
         Effect::ChooseObjectsIntoTrackedSet { .. } => {
             choose_objects_into_tracked_set::resolve(state, ability, events)
         }
@@ -2825,6 +2849,7 @@ pub fn resolve_effect(
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
         Effect::Endure { .. } => endure::resolve(state, ability, events),
         Effect::Forage => forage::resolve(state, ability, events),
+        Effect::Harness => harness::resolve(state, ability, events),
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
@@ -2844,9 +2869,13 @@ pub fn resolve_effect(
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
+        Effect::PutSticker { .. } | Effect::ApplySticker { .. } => {
+            stickers::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
+        Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
@@ -3477,6 +3506,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                 } | GameEvent::ControllerChanged { .. }
             )
         }),
+        // CR 708.7 + CR 608.2c: A resolving "turn this creature face up" (Etrata,
+        // Deadly Fugitive's granted ability) "did anything" iff a permanent
+        // actually became face up. `turn_face_up::resolve` emits `TurnedFaceUp`
+        // only on success — it is skipped when the object was already face up or
+        // when a `CantBeTurnedFaceUp` static (CR 116.2b + CR 708.7) blocks it.
+        // The event's presence is therefore the authoritative "the turn-up
+        // happened" signal, which drives Etrata's "If you can't, exile it …"
+        // rider: that rider gates on `Not { OptionalEffectPerformed }`, so it
+        // fires ONLY when no `TurnedFaceUp` occurred. Without this arm the effect
+        // would fall into the `_ => true` default and always claim success,
+        // suppressing the exile branch even when the turn-up was blocked.
+        Effect::TurnFaceUp { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })),
         _ => true,
     }
 }
@@ -5935,6 +5978,18 @@ fn resolve_chain_body(
             &ability.effect,
             Effect::CastFromZone { .. } | Effect::Counter { .. }
         ) && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+        {
+            return Ok(());
+        }
+
+        // CR 614.1c + CR 122.1: CastFromZone consumes the "creature cast this way
+        // enters with a [counter] counter on it" rider as permission metadata
+        // (recorded on the granted `ExileWithAltCost`). Resolving the structural
+        // `AddPendingETBCounters` rider here would read the (absent) SpellCast
+        // trigger event of the granting ability, not the future graveyard cast —
+        // so skip it (Osteomancer Adept, The Tomb of Aclazotz).
+        if matches!(&ability.effect, Effect::CastFromZone { .. })
+            && cast_from_zone::is_enters_with_counter_rider_subability(sub)
         {
             return Ok(());
         }
@@ -11493,6 +11548,7 @@ mod tests {
                         duration: None,
 
                         exile_instead_of_graveyard_on_resolve: false,
+                        enters_with_counter: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -11589,6 +11645,7 @@ mod tests {
                         duration: None,
 
                         exile_instead_of_graveyard_on_resolve: false,
+                        enters_with_counter: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -11659,6 +11716,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -13353,6 +13411,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -16080,6 +16140,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

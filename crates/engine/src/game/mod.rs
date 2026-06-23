@@ -1,6 +1,7 @@
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
+pub mod augment;
 pub mod bending;
 pub mod blitz;
 // Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
@@ -98,6 +99,9 @@ pub mod perf_counters;
 #[cfg(test)]
 #[path = "archenemy_tests.rs"]
 mod archenemy_tests;
+#[cfg(test)]
+#[path = "augment_tests.rs"]
+mod augment_tests;
 pub mod phasing;
 pub mod planechase;
 // Tests for `planechase` live in a sibling file (declared here, not in
@@ -126,6 +130,10 @@ mod splice_tests;
 pub mod stack;
 pub mod static_abilities;
 pub mod static_source_index;
+pub mod stickers;
+#[cfg(test)]
+#[path = "stickers_tests.rs"]
+mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
 pub mod transform;

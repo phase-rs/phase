@@ -1,4 +1,5 @@
 pub mod ai_support;
+pub mod analysis;
 pub mod database;
 pub mod game;
 pub mod parser;

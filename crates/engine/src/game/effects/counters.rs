@@ -2061,7 +2061,7 @@ mod tests {
             .replacement_definitions
             .push(
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
-                    .quantity_modification(QuantityModification::Double),
+                    .quantity_modification(QuantityModification::DOUBLE),
             );
 
         let plus_id = create_object(
@@ -3276,7 +3276,7 @@ mod tests {
             .insert(CounterType::Plus1Plus1, 1);
         let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
         repl.valid_card = Some(TargetFilter::SelfRef);
-        repl.quantity_modification = Some(QuantityModification::Double);
+        repl.quantity_modification = Some(QuantityModification::DOUBLE);
         state
             .objects
             .get_mut(&dest_id)
@@ -4030,7 +4030,7 @@ mod tests {
         );
         let mut doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
         doubler_repl.valid_card = Some(TargetFilter::Any);
-        doubler_repl.quantity_modification = Some(QuantityModification::Double);
+        doubler_repl.quantity_modification = Some(QuantityModification::DOUBLE);
         state
             .objects
             .get_mut(&doubler_id)

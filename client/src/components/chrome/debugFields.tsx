@@ -9,6 +9,7 @@ import { getSeatColor } from "../../hooks/useSeatColor";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId";
 import { useUiStore } from "../../stores/uiStore";
+import { MenuSelect } from "../ui/MenuSelect";
 
 // ── Layout ──────────────────────────────────────────────────────────────
 
@@ -25,6 +26,18 @@ export function FieldRow({ label, children }: { label: string; children: ReactNo
 
 const inputClass =
   "w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300 focus:border-blue-500 focus:outline-none";
+
+/** Shared MenuSelect wiring for debug-panel fields inside scrollable overflow containers. */
+const DEBUG_MENU_PROPS = {
+  menuLayout: "dropdown" as const,
+  fitContainer: true,
+  wrapperClassName: "w-full min-w-0",
+  className:
+    "rounded border border-gray-700 bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300 hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500/40",
+  chevronClassName: "h-3 w-3 text-gray-500",
+  menuClassName: "border-gray-700 bg-gray-800/98 py-0.5 font-mono text-[10px]",
+  menuZClassName: "z-[10000]",
+};
 
 export function NumberInput({
   value,
@@ -81,14 +94,19 @@ export function SelectInput<T extends string>({
   onChange: (v: T) => void;
   options: readonly T[];
 }) {
+  const items = useMemo(
+    () => options.map((opt) => ({ value: opt, label: opt })),
+    [options],
+  );
+
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value as T)} className={inputClass}>
-      {options.map((opt) => (
-        <option key={opt} value={opt}>
-          {opt}
-        </option>
-      ))}
-    </select>
+    <MenuSelect
+      {...DEBUG_MENU_PROPS}
+      label={value}
+      items={items}
+      selectedValue={value}
+      onSelect={(next) => onChange(next as T)}
+    />
   );
 }
 
@@ -398,34 +416,40 @@ export function PlayerSelect({
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const myId = usePerspectivePlayerId();
   const setDebugHighlightedPlayerId = useUiStore((s) => s.setDebugHighlightedPlayerId);
-  // Native <select> doesn't surface per-option hover, so the closest analogue
-  // to "preview the chosen player" is: highlight on focus, follow the selected
-  // value while open, clear on blur. Combined with the avatar HudPlate
-  // honoring `debugHighlightedPlayerId`, the user gets a visible cue without
-  // a full custom dropdown rewrite.
+
+  const items = useMemo(
+    () =>
+      (players ?? []).map((p) => ({
+        value: String(p.id),
+        label: getPlayerDisplayName(p.id, myId),
+      })),
+    [players, myId],
+  );
+
+  const selectedLabel =
+    items.find((item) => item.value === String(value))?.label ?? "Player";
+  const seatColor = getSeatColor(value, seatOrder);
+
   return (
-    <select
-      value={value}
-      onChange={(e) => {
-        const v = Number(e.target.value) as PlayerId;
-        onChange(v);
-        setDebugHighlightedPlayerId(v);
-      }}
-      onFocus={() => setDebugHighlightedPlayerId(value)}
-      onBlur={() => setDebugHighlightedPlayerId(null)}
-      className={inputClass}
-      style={{ color: getSeatColor(value, seatOrder) }}
-    >
-      {(players ?? []).map((p) => {
-        const color = getSeatColor(p.id, seatOrder);
-        const label = getPlayerDisplayName(p.id, myId);
-        return (
-          <option key={p.id} value={p.id} style={{ color }}>
-            {label}
-          </option>
-        );
+    <MenuSelect
+      {...DEBUG_MENU_PROPS}
+      label={selectedLabel}
+      items={items}
+      selectedValue={String(value)}
+      triggerStyle={{ color: seatColor }}
+      chevronClassName="h-3 w-3"
+      getOptionStyle={(item) => ({
+        color: getSeatColor(Number(item.value) as PlayerId, seatOrder),
       })}
-    </select>
+      onOptionHover={(next) =>
+        setDebugHighlightedPlayerId(next != null ? (Number(next) as PlayerId) : null)
+      }
+      onSelect={(next) => {
+        const playerId = Number(next) as PlayerId;
+        onChange(playerId);
+        setDebugHighlightedPlayerId(playerId);
+      }}
+    />
   );
 }
 

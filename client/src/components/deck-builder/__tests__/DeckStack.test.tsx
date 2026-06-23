@@ -91,6 +91,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 
@@ -143,6 +144,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 
@@ -154,7 +156,7 @@ describe("DeckStack", () => {
     const plainsTile = getTileByRemoveTitle("Plains");
 
     expect(screen.getByText("Creatures")).toBeInTheDocument();
-    expect(screen.getByText("Spells")).toBeInTheDocument();
+    expect(screen.getByText("Enchantments")).toBeInTheDocument();
     expect(screen.getByText("Lands")).toBeInTheDocument();
     expect(
       screen.getByTitle("Ajani's Pridemate is at the copy limit"),
@@ -190,6 +192,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={(name) => (name === "Relentless Rats" ? Infinity : 4)}
+        groupMode="type"
       />,
     );
 
@@ -211,6 +214,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+        groupMode="type"
       />,
     );
     expect(screen.getByTitle("Add one Seven Dwarves")).toBeEnabled();
@@ -227,6 +231,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+        groupMode="type"
       />,
     );
     expect(
@@ -251,6 +256,7 @@ describe("DeckStack", () => {
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={() => 1}
+        groupMode="type"
       />,
     );
 
@@ -279,6 +285,7 @@ describe("DeckStack", () => {
         onMoveCard={onMoveCard}
         onRemoveCommander={vi.fn()}
         getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 

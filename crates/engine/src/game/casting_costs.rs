@@ -884,7 +884,10 @@ fn finish_pending_cost_or_cast(
     }
 
     if pending.activation_ability_index.is_some()
-        && !matches!(pending.cost, ManaCost::NoCost | ManaCost::SelfManaCost)
+        && !matches!(
+            pending.cost,
+            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue
+        )
     {
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
@@ -2788,9 +2791,22 @@ fn combined_imposed_additional_cast_cost(
     player: PlayerId,
     object_id: ObjectId,
     ability: &ResolvedAbility,
+    casting_variant: CastingVariant,
 ) -> Option<AbilityCost> {
-    let imposed_costs =
+    let mut imposed_costs =
         super::casting::collect_imposed_additional_cast_costs(state, player, object_id, ability);
+    // CR 601.2f: A graveyard/exile cast-permission static may carry an
+    // ADDITIONAL non-mana cost paid on top of the spell's mana cost (Festival of
+    // Embers' "by paying 1 life in addition to their other costs"; Dawnhand
+    // Dissident's additional remove-counters). The `Alternative` shape
+    // (Valgavoth) is handled separately in the alt-cost block — it zeroes the
+    // mana cost — and must NOT be folded in here.
+    imposed_costs.extend(cast_permission_additional_extra_cost(
+        state,
+        player,
+        object_id,
+        casting_variant,
+    ));
     match imposed_costs.len() {
         0 => None,
         1 => imposed_costs.into_iter().next(),
@@ -2798,6 +2814,39 @@ fn combined_imposed_additional_cast_cost(
             costs: imposed_costs,
         }),
     }
+}
+
+/// CR 601.2f: Return the ADDITIONAL non-mana cost imposed by a graveyard/exile
+/// cast-permission static when `object_id` is castable from that zone via the
+/// permission (Festival of Embers graveyard pay-life; Dawnhand Dissident exile
+/// remove-counters). Returns `None` for the `Alternative` cost shape (Valgavoth)
+/// — that replaces the mana cost and is paid through the alt-cost block instead.
+fn cast_permission_additional_extra_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<AbilityCost> {
+    let extra = match state.objects.get(&object_id).map(|obj| obj.zone) {
+        Some(Zone::Graveyard) => {
+            super::casting::graveyard_static_permission_extra_cost(state, player, object_id)
+        }
+        // CR 601.2a: Bind to the source this cast commits to so the additional
+        // rider is read from the elected permission, never a second active
+        // permission for the same exiled spell. A non-`ExilePermission` exile
+        // cast (impulse `PlayFromExile`) yields no static source and so no rider.
+        Some(Zone::Exile) => super::casting::elected_exile_permission_source(
+            state,
+            player,
+            object_id,
+            Some(casting_variant),
+        )
+        .and_then(|source| {
+            super::casting::exile_static_permission_extra_cost(state, player, object_id, source)
+        }),
+        _ => None,
+    }?;
+    matches!(extra.mode, crate::types::statics::CastCostMode::Additional).then_some(extra.cost)
 }
 
 fn merge_required_additional_cost(
@@ -2922,7 +2971,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
     let imposed_required_cost =
-        combined_imposed_additional_cast_cost(state, player, object_id, &ability);
+        combined_imposed_additional_cast_cost(state, player, object_id, &ability, casting_variant);
 
     // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
     // independently functioning instances are announced through a queue. This
@@ -3258,14 +3307,40 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             // CR 611.2a: Match the grantee filter used by
             // `prepare_spell_cast_with_variant_override` so the alt-ability
             // cost is only consumed by the granted player.
-            obj.casting_permissions.iter().find_map(|p| match p {
-                crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                    cost,
-                    granted_to,
-                    ..
-                } if granted_to.is_none() || *granted_to == Some(player) => Some(cost.clone()),
-                _ => None,
-            })
+            obj.casting_permissions
+                .iter()
+                .find_map(|p| match p {
+                    crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+                        cost,
+                        granted_to,
+                        ..
+                    } if granted_to.is_none() || *granted_to == Some(player) => Some(cost.clone()),
+                    _ => None,
+                })
+                .or_else(|| {
+                    // CR 118.9: Valgavoth — an `ExileCastPermission` static's
+                    // ALTERNATIVE extra-cost. The mana cost was zeroed in
+                    // `cast_spell`; pay the alt cost here.
+                    //
+                    // CR 601.2a: Read the rider from the source this cast commits
+                    // to so the alt cost paid matches the elected permission, not a
+                    // second active permission for the same exiled spell.
+                    super::casting::elected_exile_permission_source(
+                        state,
+                        player,
+                        object_id,
+                        Some(casting_variant),
+                    )
+                    .and_then(|source| {
+                        super::casting::exile_static_permission_extra_cost(
+                            state, player, object_id, source,
+                        )
+                        .filter(|extra| {
+                            matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
+                        })
+                        .map(|extra| extra.cost)
+                    })
+                })
         } else if obj.zone == Zone::Library && obj.owner == player {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
@@ -5535,6 +5610,27 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         apply_exile_instead_of_graveyard_rider(state, object_id);
     }
 
+    // CR 614.1c + CR 122.1: A `CastFromZone` grant whose rider was "the creature
+    // cast this way enters with a [counter] counter on it" records the counter on
+    // the granted `ExileWithAltCost`. When that cast finalizes, register a pending
+    // ETB counter so the object enters the battlefield carrying it (CR 122.1h: a
+    // finality counter exiles the permanent instead of letting it die).
+    // Osteomancer Adept, The Tomb of Aclazotz.
+    //
+    // CR 608.2c: the binding uses the selected-permission authority — the rider is
+    // read from the permission that actually supports THIS cast, not any permission
+    // that happens to carry a counter, so a non-consumed sibling permission's rider
+    // cannot leak onto this cast.
+    let cast_this_way_etb_counter =
+        super::casting::selected_exile_alt_cost_permission_enters_with_counter(
+            state, object_id, player,
+        );
+    if let Some(counter_type) = cast_this_way_etb_counter {
+        state
+            .pending_etb_counters
+            .push((object_id, counter_type, 1));
+    }
+
     if casting_variant == CastingVariant::Foretell {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
@@ -6212,6 +6308,7 @@ pub(super) fn auto_tap_mana_sources_excluding(
         deprioritize_source,
         excluded_sources,
         None,
+        None,
     );
 }
 
@@ -6251,9 +6348,11 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
         deprioritize_source,
         excluded_sources,
         payment_context,
+        None,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn auto_tap_mana_sources_inner(
     state: &mut GameState,
     player: PlayerId,
@@ -6262,6 +6361,7 @@ fn auto_tap_mana_sources_inner(
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
+    sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
 ) {
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
@@ -6292,11 +6392,19 @@ fn auto_tap_mana_sources_inner(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| mana_payment::reduce_cost_by_pool(&p.mana_pool, cost, effective_ctx, any_color))
+        .map(|p| {
+            mana_payment::reduce_cost_by_pool(
+                &p.mana_pool,
+                cost,
+                effective_ctx,
+                any_color,
+                sub_cost_demand,
+            )
+        })
         .unwrap_or_else(|| cost.clone());
 
     let (shards, generic) = match &residual {
-        ManaCost::NoCost | ManaCost::SelfManaCost => return,
+        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => return,
         ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
         ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
     };
@@ -6583,9 +6691,51 @@ fn auto_tap_mana_sources_inner(
                 .and_then(|obj| obj.abilities.get(idx))
                 .cloned();
             if let Some(ability_def) = ability_def {
-                if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
-                    let mut excluded = excluded_sources.clone();
-                    excluded.insert(option.object_id);
+                // CR 605.3c: Extend the in-flight exclusion chain with this
+                // source before re-entering auto-tap (pre-tap below) and before
+                // resolving the ability (which re-enters auto-tap through its
+                // mana sub-cost payment). This source's activation is suspended
+                // on the call stack until `resolve_mana_ability_excluding`
+                // returns, so it — and every ancestor already in
+                // `excluded_sources` — must be excluded from any nested
+                // auto-tap, or two cross-paying costed mana abilities recurse
+                // infinitely. The exclusion set is read only by
+                // `pay_mana_sub_cost`, reached only through the `AbilityCost::Mana`
+                // arms — exactly the costs `mana_sub_cost_of` reports `Some` for.
+                // A tap-only / sacrifice / pay-life mana ability never consumes
+                // it, so clone-and-extend only when a mana sub-cost is present and
+                // otherwise forward the caller's set unchanged — skipping a heap
+                // allocation per selected source on this auto-tap hot path.
+                //
+                // CR 118.10: Each payment of a cost applies to only one spell or
+                // ability, so a source the OUTER plan reserved for the outer cost
+                // (every id in `used_sources`, a superset of `to_tap` that already
+                // contains `option.object_id`) must be excluded from the nested
+                // sub-cost auto-tap. Phase 3 does not re-verify a source is untapped
+                // before resolving, so without this the sub-cost could grab a source
+                // the outer cost still needs. Unioning `used_sources` supersedes the
+                // prior `excluded.insert(option.object_id)`.
+                let sub_cost = mana_sub_cost_of(&ability_def.cost);
+                let excluded_buf;
+                // CR 107.4b + CR 118.10: The outer cost's colored shards are
+                // reserved; computed once (only when a mana sub-cost is present, so
+                // the `None` / no-sub-cost path adds zero work) and threaded into
+                // both the nested sub-cost auto-tap and the ability's own resolution
+                // so the sub-cost's generic pips are funded from non-demanded mana,
+                // never a floated color the outer cost still needs (the Dimir/Gruul
+                // Signet over-consumption bug).
+                let demand: Option<mana_payment::ColorDemand> =
+                    sub_cost.map(|_| mana_payment::outer_cost_color_demand(cost));
+                let excluded: &HashSet<ObjectId> = if sub_cost.is_some() {
+                    excluded_buf = excluded_sources
+                        .union(&used_sources)
+                        .copied()
+                        .collect::<HashSet<ObjectId>>();
+                    &excluded_buf
+                } else {
+                    excluded_sources
+                };
+                if let Some(sub_cost) = sub_cost {
                     let (source_types, source_subtypes) =
                         super::casting::activation_source_types(state, option.object_id);
                     let activation_ctx = PaymentContext::Activation {
@@ -6599,8 +6749,9 @@ fn auto_tap_mana_sources_inner(
                         sub_cost,
                         events,
                         Some(option.object_id),
-                        &excluded,
+                        excluded,
                         Some(&activation_ctx),
+                        demand.as_ref(),
                     );
                 }
                 // color_override tells resolve_mana_ability how to resolve the
@@ -6612,13 +6763,20 @@ fn auto_tap_mana_sources_inner(
                 // source is somehow invalid (e.g., removed by a replacement effect), we
                 // skip it silently — the player can still manually tap other sources.
                 let override_value = production_override_for_option(&ability_def, &option);
-                let _ = mana_abilities::resolve_mana_ability(
+                // CR 605.3c: Resolve via the exclusion-aware entry so the
+                // in-flight chain (`excluded`, including this source when it has a
+                // mana sub-cost) threads into the ability's own mana sub-cost
+                // auto-tap. The public `resolve_mana_ability` would discard the
+                // chain and re-tap a suspended ancestor, recursing infinitely.
+                let _ = mana_abilities::resolve_mana_ability_excluding(
                     state,
                     option.object_id,
                     player,
                     &ability_def,
                     events,
                     override_value,
+                    excluded,
+                    demand.as_ref(),
                 );
             }
         } else {
@@ -7387,6 +7545,8 @@ pub fn finalize_mana_payment(
             super::casting::activation_ability_tag(state, pending.object_id, ability_index),
             events,
             &excluded_sources,
+            // Interactive activation resume: top-level, no outer cost on the stack.
+            None,
         )?;
         return push_activated_ability_to_stack(
             state,
@@ -7553,6 +7713,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             Some(phyrexian_choices),
             events,
             &excluded_sources,
+            // Interactive Phyrexian-choice resume: top-level activation, no outer cost.
+            None,
         )?;
         return push_activated_ability_to_stack(
             state,
@@ -11643,6 +11805,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -11744,6 +11907,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -11809,6 +11973,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -11852,6 +12017,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -11906,6 +12072,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             hit_obj
                 .casting_permissions
@@ -11918,6 +12085,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -11964,6 +12132,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -12029,6 +12198,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             hit_obj
                 .casting_permissions
@@ -12048,6 +12218,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -12102,6 +12273,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             hit_obj
                 .casting_permissions
@@ -12114,6 +12286,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -14609,7 +14782,7 @@ its replicate cost was paid.)\nDraw a card.";
 
         // CR 614.1a: counter-doubling replacement effect (Doubling Season-class).
         let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         runner
             .state_mut()
             .objects

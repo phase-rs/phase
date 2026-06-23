@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Powrót do talii",
     "listView": "Widok listy",
-    "stackView": "Widok stosu"
+    "stackView": "Widok stosu",
+    "groupType": "Typ",
+    "groupColor": "Kolor",
+    "groupByType": "Grupuj według typu",
+    "groupByColor": "Grupuj według koloru"
   },
   "tabs": {
     "ariaLabel": "Powierzchnia kreatora talii",
@@ -48,7 +52,11 @@
     "clone": "Klonuj",
     "cloneTitle": "Zapisz kopię pod nową nazwą",
     "loadDeck": "Wczytaj talię...",
-    "nameToSave": "Nazwij talię, aby ją zapisać"
+    "nameToSave": "Nazwij talię, aby ją zapisać",
+    "savedToastTitle": "Talia zapisana",
+    "savedToastDescription": "„{{name}}” została zapisana w twoich taliach.",
+    "clonedToastTitle": "Talia sklonowana",
+    "clonedToastDescription": "Kopia została zapisana jako „{{name}}”."
   },
   "unsaved": {
     "title": "Niezapisane zmiany",
@@ -95,13 +103,31 @@
     "sideboardEmptyHint": "Najedź na kartę z talii głównej i kliknij →, aby ją tu przenieść.",
     "group": {
       "Creatures": "Stwory",
-      "Spells": "Czary",
+      "Planeswalkers": "Planeswalkery",
+      "Instants": "Sztuczki",
+      "Sorceries": "Czary",
+      "Artifacts": "Artefakty",
+      "Enchantments": "Zaklęcia",
+      "Battles": "Bitwy",
+      "Lands": "Ziemie",
+      "Other": "Inne"
+    },
+    "colorGroup": {
+      "White": "Biały",
+      "Blue": "Niebieski",
+      "Black": "Czarny",
+      "Red": "Czerwony",
+      "Green": "Zielony",
+      "Multicolor": "Wielokolorowy",
+      "Colorless": "Bezbarwny",
       "Lands": "Ziemie"
     },
     "importModalTitle": "Importuj talię",
     "pastePlaceholder": "Wklej listę talii (format MTGA lub .dck)...",
     "fromFile": "Z pliku",
     "parse": "Przetwórz",
+    "parsing": "Przetwarzanie…",
+    "parseError": "Nie znaleziono kart. Wklej talię w formacie MTGA lub .dck.",
     "exportModalTitle": "Eksportuj talię",
     "saveToFile": "Zapisz do pliku",
     "copied": "Skopiowano!",
@@ -136,7 +162,23 @@
     "groupCards_other": "{{count}} kart",
     "group": {
       "Creatures": "Stwory",
-      "Spells": "Czary",
+      "Planeswalkers": "Planeswalkery",
+      "Instants": "Sztuczki",
+      "Sorceries": "Czary",
+      "Artifacts": "Artefakty",
+      "Enchantments": "Zaklęcia",
+      "Battles": "Bitwy",
+      "Lands": "Ziemie",
+      "Other": "Inne"
+    },
+    "colorGroup": {
+      "White": "Biały",
+      "Blue": "Niebieski",
+      "Black": "Czarny",
+      "Red": "Czerwony",
+      "Green": "Zielony",
+      "Multicolor": "Wielokolorowy",
+      "Colorless": "Bezbarwny",
       "Lands": "Ziemie"
     },
     "sideboardGroup": "Zaplecze",
@@ -231,5 +273,11 @@
     "minimumCount": "Talia ma {{count}} kart (minimum 60)",
     "maxCopies": "{{name}}: {{count}} kopii (maks. 4)",
     "companionInMain": "{{name}} jest twoim towarzyszem, ale znajduje się też w talii głównej — to narusza jego warunek budowy talii. Usuń go z talii głównej, aby użyć go jako towarzysza."
+  },
+  "switcher": {
+    "starred": "Ulubione",
+    "unfiled": "Bez folderu",
+    "searchPlaceholder": "Szukaj talii…",
+    "noMatches": "Brak talii"
   }
 }

@@ -468,9 +468,6 @@ fn atomic_with_types(
 /// does / if no one does" group-bargain cards must flip to fully supported
 /// (no `Effect::Unimplemented` parts) with the new `AnyPlayer` scope.
 ///
-/// Breaking Point intentionally remains PARTIAL: its "Creatures destroyed this
-/// way can't be regenerated" rider is a separate, pre-existing gap. The test
-/// asserts that status explicitly so a future fix re-classifies it deliberately.
 #[test]
 fn any_player_group_bargain_cards_flip_supported() {
     // (name, type_line, types, keywords, oracle) — aliased to satisfy
@@ -525,6 +522,14 @@ fn any_player_group_bargain_cards_flip_supported() {
             "When this creature enters, any player may sacrifice two creatures of \
              their choice. If a player does, sacrifice this creature.",
         ),
+        (
+            "Breaking Point",
+            "Sorcery",
+            &["Sorcery"],
+            &[],
+            "Any player may have Breaking Point deal 6 damage to them. If no one does, \
+             destroy all creatures. Creatures destroyed this way can't be regenerated.",
+        ),
     ];
 
     for (name, type_line, types, keywords, oracle) in clean_cards {
@@ -535,22 +540,6 @@ fn any_player_group_bargain_cards_flip_supported() {
             "{name} must flip to fully supported (no Unimplemented parts) under AnyPlayer"
         );
     }
-
-    // Breaking Point: the regen rider is a separate gap → stays PARTIAL.
-    let breaking_point = atomic_with_types(
-        "Breaking Point",
-        "Sorcery",
-        &["Sorcery"],
-        &[],
-        "Any player may have Breaking Point deal 6 damage to them. If no one does, \
-         destroy all creatures. Creatures destroyed this way can't be regenerated.",
-    );
-    let bp_face = crate::database::synthesis::build_oracle_face(&breaking_point, None);
-    assert!(
-        crate::game::coverage::card_face_has_unimplemented_parts(&bp_face),
-        "Breaking Point is expected to remain PARTIAL (regen rider is a separate gap); \
-         if this fails, the rider now parses — re-verify and update this assertion"
-    );
 }
 
 /// Assert the face carries exactly one synthesized graveyard-activated

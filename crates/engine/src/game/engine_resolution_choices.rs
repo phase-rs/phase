@@ -544,14 +544,19 @@ pub(super) fn handle_resolution_choice(
                     state,
                     player,
                     hit_card,
-                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
-                        comparator: crate::types::ability::Comparator::LE,
-                        value: QuantityExpr::Fixed {
-                            value: discover_value as i32,
-                        },
-                    }),
-                    false,
-                    cleanup,
+                    casting::ResolutionCastRequest {
+                        constraint: Some(
+                            crate::types::ability::CastPermissionConstraint::ManaValue {
+                                comparator: crate::types::ability::Comparator::LE,
+                                value: QuantityExpr::Fixed {
+                                    value: discover_value as i32,
+                                },
+                            },
+                        ),
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
@@ -774,14 +779,19 @@ pub(super) fn handle_resolution_choice(
                     state,
                     player,
                     hit_card,
-                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
-                        comparator: crate::types::ability::Comparator::LT,
-                        value: QuantityExpr::Fixed {
-                            value: source_mv as i32,
-                        },
-                    }),
-                    false,
-                    cleanup,
+                    casting::ResolutionCastRequest {
+                        constraint: Some(
+                            crate::types::ability::CastPermissionConstraint::ManaValue {
+                                comparator: crate::types::ability::Comparator::LT,
+                                value: QuantityExpr::Fixed {
+                                    value: source_mv as i32,
+                                },
+                            },
+                        ),
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
@@ -822,7 +832,16 @@ pub(super) fn handle_resolution_choice(
                         },
                 };
                 let result = casting::initiate_cast_during_resolution(
-                    state, player, hit_card, None, false, cleanup, events,
+                    state,
+                    player,
+                    hit_card,
+                    casting::ResolutionCastRequest {
+                        constraint: None,
+                        cast_transformed: false,
+                        cleanup,
+                        exile_instead_of_graveyard_on_resolve: false,
+                    },
+                    events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
@@ -906,7 +925,16 @@ pub(super) fn handle_resolution_choice(
                     },
             };
             let result = casting::initiate_cast_during_resolution(
-                state, player, chosen, None, false, cleanup, events,
+                state,
+                player,
+                chosen,
+                casting::ResolutionCastRequest {
+                    constraint: None,
+                    cast_transformed: false,
+                    cleanup,
+                    exile_instead_of_graveyard_on_resolve: false,
+                },
+                events,
             )?;
             ResolutionChoiceOutcome::WaitingFor(result)
         }
@@ -998,7 +1026,18 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(pending_mana_ability) = pending_mana_ability {
                 let mut pending = pending_mana_ability.as_ref().clone();
-                pending.chosen_counter_count = Some(amount);
+                // CR 107.1c / CR 107.3a: bind the announced amount to the
+                // correct mana-ability cost axis — a removed-counter count
+                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
+                match resource {
+                    PayableResource::Counters => pending.chosen_counter_count = Some(amount),
+                    PayableResource::Speed => pending.chosen_x = Some(amount),
+                    other => {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Unexpected pay-amount resource {other:?} for mana ability"
+                        )))
+                    }
+                }
                 let waiting_for =
                     mana_abilities::advance_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
@@ -1040,6 +1079,27 @@ pub(super) fn handle_resolution_choice(
                     return Err(EngineError::InvalidAction(
                         "Counter amount choices require a pending mana ability".to_string(),
                     ));
+                }
+                PayableResource::Speed => {
+                    // CR 702.179e: `Pay X speed` only ever arises as a mana-ability
+                    // activation cost, which carries a `pending_mana_ability` and
+                    // is handled above. Reaching the standalone branch is a bug.
+                    return Err(EngineError::InvalidAction(
+                        "Speed amount choices require a pending mana ability".to_string(),
+                    ));
+                }
+                PayableResource::Life => {
+                    // CR 119.4: pay N life via the life-loss-as-cost authority
+                    // (replacement pipeline + CantLoseLife) — NOT inline life
+                    // subtraction.
+                    match crate::game::life_costs::pay_life_as_cost(state, player, amount, events) {
+                        crate::game::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        _ => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Player {player:?} cannot pay {amount} life"
+                            )))
+                        }
+                    }
                 }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that
@@ -1572,7 +1632,11 @@ pub(super) fn handle_resolution_choice(
             // (shared with the search-split partition) has a single Zone.
             // When a continuation owns the unkept pile (Expressive Iteration
             // bottom/exile tail), do not pre-route here.
-            if state.pending_continuation.is_none() {
+            let defer_rest_routing = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
+            if !defer_rest_routing {
                 route_rest_partition(
                     state,
                     &unkept,
@@ -2114,6 +2178,20 @@ pub(super) fn handle_resolution_choice(
                 // Only after every player has been prompted (the drain leaves no
                 // pending iteration and is no longer waiting on a choice) does
                 // the parked continuation run.
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+            // CR 608.2c + CR 105.1 / CR 205.2a: A per-category-member
+            // `Effect::ForEachCategoryExile` iteration accumulates each pick into
+            // the chain's tracked set and prompts the next member, exactly like
+            // the per-player path (Sanar, Portent of Calamity). The continuation
+            // ("from among them" / "put the rest …") reads that tracked set.
+            if state.pending_per_category_zone_choice.is_some() {
+                effects::choose_from_zone::drain_pending_per_category_zone_choice(
+                    state, &chosen, events,
+                );
                 effects::drain_pending_continuation(state, events);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),

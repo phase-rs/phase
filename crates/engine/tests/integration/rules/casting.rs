@@ -1276,6 +1276,7 @@ fn play_land_from_graveyard_with_permission() {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1342,6 +1343,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1409,6 +1411,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1487,6 +1490,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),

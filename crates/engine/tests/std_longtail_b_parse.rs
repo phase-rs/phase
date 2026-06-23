@@ -3,9 +3,9 @@
 //! residual `Effect::Unimplemented` nodes; reverting the corresponding parser
 //! arm reintroduces an `Unimplemented` node and flips the assertion.
 //!
-//! Deferred cards (Heirloom Epic, Lightstall Inquisitor, Steamcore Scholar,
-//! Stolen Uniform, Combustion Man) intentionally retain an honest
-//! `Effect::Unimplemented` residual and are NOT asserted 0-unimpl here.
+//! Deferred cards (Heirloom Epic, Steamcore Scholar, Stolen Uniform,
+//! Combustion Man) intentionally retain an honest `Effect::Unimplemented`
+//! residual and are NOT asserted 0-unimpl here.
 
 use engine::parser::oracle::parse_oracle_text;
 
@@ -38,6 +38,24 @@ fn all_out_assault_zero_unimplemented() {
         &[],
         &["Enchantment"],
         &[],
+    );
+}
+
+#[test]
+fn lightstall_inquisitor_zero_unimplemented() {
+    // CR 611.2a + CR 601.2f + CR 614.1c: the compound "each opponent exiles a
+    // card from their hand and may play that card for as long as it remains
+    // exiled" splits into a player-scoped exile + an `ObjectOwner`
+    // `PlayFromExile` grant; the two rider sentences fold into the grant's
+    // `cast_cost_raise` / `land_enter_tapped`, leaving no `Unimplemented`.
+    assert_zero_unimplemented(
+        "Vigilance\nWhen this creature enters, each opponent exiles a card from their hand \
+         and may play that card for as long as it remains exiled. Each spell cast this way \
+         costs {1} more to cast. Each land played this way enters tapped.",
+        "Lightstall Inquisitor",
+        &["Vigilance"],
+        &["Creature"],
+        &["Bird", "Cleric"],
     );
 }
 

@@ -1021,15 +1021,26 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    // STEP A.0 — peel an optional leading "during your turn, " timing clause.
+    // STEP A.0 — peel an optional leading turn-restriction timing clause.
     // Mirror of `parse_compound_turn_counter_animation` (anthem.rs): the
     // alternate printing convention writes the turn restriction as a leading
-    // timing prefix ("During your turn, ~ is a 4/4 ...") rather than a trailing
-    // "as long as it's your turn" clause. The peel is Option-returning, so when
-    // absent it falls through to `*tp` unchanged and no condition is attached.
-    let (tp, turn_condition) = match nom_tag_tp(tp, "during your turn, ") {
-        Some(rest) => (rest, Some(StaticCondition::DuringYourTurn)),
-        None => (*tp, None),
+    // timing prefix ("During your turn, ~ is a 4/4 ..." — Gideon-class; "During
+    // turns other than yours, ~ is an artifact creature" — Midnight Mangler)
+    // rather than a trailing "as long as it's your turn" clause. CR 611.3a: the
+    // negated form lowers to `Not(DuringYourTurn)`. The peel is Option-returning,
+    // so when absent it falls through to `*tp` unchanged and no condition is
+    // attached.
+    let (tp, turn_condition) = if let Some(rest) = nom_tag_tp(tp, "during your turn, ") {
+        (rest, Some(StaticCondition::DuringYourTurn))
+    } else if let Some(rest) = nom_tag_tp(tp, "during turns other than yours, ") {
+        (
+            rest,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            }),
+        )
+    } else {
+        (*tp, None)
     };
 
     // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical

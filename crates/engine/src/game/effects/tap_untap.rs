@@ -940,4 +940,735 @@ mod tests {
             "a non-enchanted creature must untap normally"
         );
     }
+
+    /// CR 701.26b + CR 614.6 + CR 611.2b: Spider-Woman, Secret Agent end-to-end.
+    /// Parses the real Oracle text, drives the ETB trigger through
+    /// `resolve_ability_chain`, and asserts the full duration-bound can't-untap
+    /// class:
+    ///
+    /// 1. The ETB taps the chosen opponent's creature.
+    /// 2. While you control Spider-Woman, an *effect* untap ("untap target
+    ///    creature") of that creature is prevented (broad prohibition — drives
+    ///    `resolve_set_tap_state` Single/Untap, which the untap-step loop never
+    ///    runs).
+    /// 3. It also stays tapped through its controller's untap step
+    ///    (`execute_untap`).
+    /// 4. Once you no longer control Spider-Woman (it leaves play, CR 611.2b),
+    ///    the prohibition lapses and the creature untaps.
+    ///
+    /// Revert-probe: reverting `stamp_for_as_long_as_controlled_gate` makes the
+    /// installed replacement permanent (no `ControllerControlsSource` gate), so
+    /// step 4's final `!tapped` assertion FAILS (the creature stays locked even
+    /// after Spider-Woman is gone). Reverting the rider parser
+    /// (`try_parse_cant_become_untapped_target_rider`) leaves the sub-ability an
+    /// `Effect::Unimplemented`, so no replacement installs and step 2's "stays
+    /// tapped" assertion FAILS (the effect untap succeeds). A shape-only assert on
+    /// the parsed `AddTargetReplacement` would NOT discriminate either: it never
+    /// drives the untap pipeline.
+    #[test]
+    fn spider_woman_secret_agent_cant_untap_for_as_long_as_controlled() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::turns::execute_untap;
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Spider-Woman under our control (PlayerId 0).
+        let spider_woman = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider-Woman, Secret Agent".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&spider_woman)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // The opponent's creature (PlayerId 1), untapped to start.
+        let foe_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opposing Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Parse the real card and pull the ETB trigger's effect chain.
+        let parsed = crate::parser::parse_oracle_text(
+            "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. \
+             That creature can't become untapped for as long as you control Spider-Woman.",
+            "Spider-Woman, Secret Agent",
+            &[],
+            &["Creature".to_string()],
+            &["Spider".to_string()],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("Spider-Woman must parse an ETB trigger");
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("the ETB trigger must carry an effect chain");
+        // The sub-ability rider must be the broad untap prohibition, not an
+        // Unimplemented residue (parse-shape sanity — the discrimination is the
+        // runtime assertions below).
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("the tap clause must carry a can't-untap rider");
+        assert!(
+            matches!(*sub.effect, Effect::AddTargetReplacement { .. }),
+            "rider must install a replacement, got {:?}",
+            sub.effect
+        );
+
+        // Drive the ETB with the opponent's creature as the chosen target.
+        let resolved = build_resolved_from_def_with_targets(
+            execute,
+            spider_woman,
+            PlayerId(0),
+            vec![TargetRef::Object(foe_creature)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        // 1. ETB tapped the opponent's creature.
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "the ETB must tap the chosen opponent's creature"
+        );
+
+        // 2. An effect untap is prevented while we control Spider-Woman.
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "an effect-driven untap must be prevented while we control Spider-Woman"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == foe_creature)),
+            "no PermanentUntapped event should fire for the locked creature"
+        );
+
+        // 3. It also stays tapped through its controller's untap step.
+        state.active_player = PlayerId(1);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "the creature must stay tapped through its controller's untap step \
+             while we control Spider-Woman"
+        );
+
+        // 4. CR 611.2b: once we no longer control Spider-Woman (it leaves play),
+        // the prohibition lapses and an effect untap succeeds.
+        crate::game::zones::move_to_zone(
+            &mut state,
+            spider_woman,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the prohibition must lapse once we no longer control Spider-Woman (CR 611.2b)"
+        );
+    }
+
+    /// CR 611.2b control-swap sibling: the duration ends on a control CHANGE of
+    /// Spider-Woman, not only when it leaves play (the Master Thief reading).
+    /// Reverting the `ControllerControlsSource` controller comparison to read the
+    /// host's controller would keep the lock after the swap and fail the final
+    /// assertion.
+    #[test]
+    fn spider_woman_cant_untap_lapses_on_control_swap() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let spider_woman = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider-Woman, Secret Agent".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&spider_woman)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let foe_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opposing Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. \
+             That creature can't become untapped for as long as you control Spider-Woman.",
+            "Spider-Woman, Secret Agent",
+            &[],
+            &["Creature".to_string()],
+            &["Spider".to_string()],
+        );
+        let execute = parsed.triggers[0].execute.as_deref().unwrap();
+        let resolved = build_resolved_from_def_with_targets(
+            execute,
+            spider_woman,
+            PlayerId(0),
+            vec![TargetRef::Object(foe_creature)],
+        );
+        resolve_ability_chain(&mut state, &resolved, &mut Vec::new(), 0).unwrap();
+        assert!(state.objects[&foe_creature].tapped);
+
+        // An opponent gains control of Spider-Woman: we no longer control it.
+        state.objects.get_mut(&spider_woman).unwrap().controller = PlayerId(1);
+
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the prohibition must lapse once we lose control of Spider-Woman (CR 611.2b)"
+        );
+    }
+
+    /// Shared scaffolding for the durability/lapse tests: installs the real
+    /// Spider-Woman can't-untap lock on `foe`, returns `(spider_woman, foe)`.
+    /// Drives the actual parsed ETB chain so the `ControllerControlsSource`
+    /// replacement is installed exactly as production installs it (live + base).
+    fn install_spider_woman_lock(state: &mut GameState) -> (ObjectId, ObjectId) {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+
+        let spider_woman = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Spider-Woman, Secret Agent".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&spider_woman)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let foe_creature = create_object(
+            state,
+            CardId(2),
+            PlayerId(1),
+            "Opposing Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. \
+             That creature can't become untapped for as long as you control Spider-Woman.",
+            "Spider-Woman, Secret Agent",
+            &[],
+            &["Creature".to_string()],
+            &["Spider".to_string()],
+        );
+        let execute = parsed.triggers[0].execute.as_deref().unwrap();
+        let resolved = build_resolved_from_def_with_targets(
+            execute,
+            spider_woman,
+            PlayerId(0),
+            vec![TargetRef::Object(foe_creature)],
+        );
+        resolve_ability_chain(state, &resolved, &mut Vec::new(), 0).unwrap();
+        assert!(state.objects[&foe_creature].tapped, "ETB must tap the foe");
+        (spider_woman, foe_creature)
+    }
+
+    /// TEST D — CR 611.2b durability across a layer pass: the can't-untap lock
+    /// must survive `evaluate_layers` (which rebuilds live `replacement_definitions`
+    /// from `base_replacement_definitions`). Without the Step-2 base-push the live
+    /// def is wiped on the reset (layers.rs ~1363) and the foe untaps.
+    ///
+    /// Discriminating: reverting the base-push makes the final `tapped` assertion
+    /// fail (the effect-untap succeeds after the layer pass). Negative sibling:
+    /// an unrelated non-`ControllerControlsSource` rider on a second object is NOT
+    /// mirrored into that object's base store.
+    #[test]
+    fn spider_woman_cant_untap_survives_layer_pass() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+
+        let mut state = GameState::new_two_player(42);
+        let (spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        // Negative sibling — install a transient (non-gated) `Moved` rider on a
+        // second object through the SAME production resolver
+        // (`add_target_replacement::resolve`). Step 2's base-push is scoped to
+        // `ControllerControlsSource`, so this rider must land live-only with an
+        // EMPTY base store. Asserted immediately, before any `evaluate_layers`
+        // one-time base sync (`sync_missing_base_characteristics`) could latch a
+        // manually-seeded live def into base — this checks the production path,
+        // not the test scaffold.
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut eot_rider = crate::types::ability::ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::Moved,
+        )
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard);
+        eot_rider.expiry = Some(crate::types::ability::RestrictionExpiry::EndOfTurn);
+        let other_install = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(eot_rider),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(other)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+        crate::game::effects::add_target_replacement::resolve(
+            &mut state,
+            &other_install,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&other]
+                .replacement_definitions
+                .iter_all()
+                .count(),
+            1,
+            "non-gated rider installs live"
+        );
+        assert!(
+            state.objects[&other]
+                .base_replacement_definitions
+                .is_empty(),
+            "a non-ControllerControlsSource rider must NOT be pushed to base (gate-scoping)"
+        );
+
+        // Mark the host as base-initialized so it matches a real battlefield
+        // object. Otherwise `sync_missing_base_characteristics` (game_object.rs,
+        // fires only when base is empty AND init == false) would latch the
+        // manually-installed LIVE lock def into base before the live-from-base
+        // reset (layers.rs ~1476) — masking the production base-push and making
+        // this durability test non-discriminating (it would pass even with the
+        // base-push reverted). Real battlefield hosts are already initialized,
+        // so this makes the test depend on the production base-push alone.
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .base_characteristics_initialized = true;
+
+        // The layer pass rebuilds live defs from base.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Spider-Woman is still in play under our control — the lock holds.
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "the can't-untap lock must survive a layer pass (CR 611.2b base durability)"
+        );
+        assert!(
+            state.objects[&spider_woman].zone == Zone::Battlefield,
+            "Spider-Woman remained in play for this case"
+        );
+    }
+
+    /// TEST a — CR 611.2b control swap, then swap-back: a REAL Layer-2 control
+    /// change (the path GainControl uses) of the captured source ends the lock
+    /// permanently; regaining control must NOT revive it.
+    ///
+    /// Discriminating: reverting the Step-3 prune call inside `evaluate_layers`
+    /// makes the swap-back re-tap case fail (the foe stays locked because the
+    /// gated def is still present in base+live after the swap-back makes the gate
+    /// true again).
+    #[test]
+    fn spider_woman_cant_untap_lapses_on_real_gain_control_no_revive() {
+        use crate::types::ability::{ContinuousModification, Duration};
+
+        let mut state = GameState::new_two_player(42);
+        let (spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        // Durability sanity: still locked after a plain flush.
+        crate::game::layers::evaluate_layers(&mut state);
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "lock holds before any control change"
+        );
+
+        // P1 gains control of Spider-Woman (the source) via the real Layer-2
+        // ChangeController TCE path — routes through evaluate_layers, firing the
+        // Step-3 prune. We do NOT mutate obj.controller directly (that would
+        // bypass the prune and make the test vacuous).
+        state.add_transient_continuous_effect(
+            spider_woman,
+            PlayerId(1),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: spider_woman },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&spider_woman].controller,
+            PlayerId(1),
+            "Layer 2 must have flipped Spider-Woman's controller"
+        );
+
+        // Lock lapsed: the foe untaps.
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "losing control of the source must lapse the lock (CR 611.2b)"
+        );
+
+        // Control of Spider-Woman returns to the installer (P0) via a second,
+        // later-timestamp Layer-2 control TCE that overrides the first.
+        state.add_transient_continuous_effect(
+            spider_woman,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: spider_woman },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&spider_woman].controller,
+            PlayerId(0),
+            "control must return to the installer"
+        );
+
+        // Re-tap the foe and attempt an effect untap: the lock is DEAD (pruned on
+        // the swap), so it must NOT have revived — the foe untaps.
+        state.objects.get_mut(&foe_creature).unwrap().tapped = true;
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the lock must NOT revive when control of the source returns (CR 611.2b ends permanently)"
+        );
+    }
+
+    /// CR 702.26f + CR 611.2b: a "for as long as you control ~" duration that
+    /// tracks the source ends when that source phases out (the effect can no
+    /// longer see it), permanently — phasing the source back in must NOT revive
+    /// the lock. CR 702.26b/d: phasing never changes the source's zone or
+    /// controller, so only the phased-in requirement in the gate makes this lapse.
+    ///
+    /// Discriminating: reverting the gate's `&& o.is_phased_in()` conjunct leaves
+    /// the gate true while the source is phased out (zone/controller unchanged by
+    /// phasing, CR 702.26d), so the layer-pass prune never drops the gated def
+    /// from base+live. The lock then survives phase-out and revives on phase-in,
+    /// and the final `!tapped` assertion fails.
+    #[test]
+    fn spider_woman_cant_untap_dead_on_phase_out_no_revive() {
+        use crate::game::game_object::PhaseOutCause;
+        use crate::game::phasing::{phase_in_object, phase_out_object};
+
+        let mut state = GameState::new_two_player(42);
+        let (spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        // Negative baseline: with the source phased in, the lock HOLDS — proves the
+        // phase-out (not a pre-broken lock) is what lapses the duration.
+        crate::game::layers::evaluate_layers(&mut state);
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "lock holds while the source is phased in"
+        );
+
+        // Phase the SOURCE out via the production path (marks layers full). The
+        // HOST (foe) stays phased in and its controller is unchanged — this isolates
+        // the source-phase axis from the control-swap and zone-exit axes.
+        let mut events = Vec::new();
+        let phased = phase_out_object(
+            &mut state,
+            spider_woman,
+            PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert_eq!(phased, vec![spider_woman], "source phased out");
+        assert!(
+            state.objects[&spider_woman].is_phased_out(),
+            "source is phased out"
+        );
+        assert_eq!(
+            state.objects[&spider_woman].zone,
+            Zone::Battlefield,
+            "CR 702.26d: phasing must not change zone"
+        );
+        assert_eq!(
+            state.objects[&spider_woman].controller,
+            PlayerId(0),
+            "CR 702.26d: phasing must not change controller"
+        );
+
+        // Flush layers: the now-false gate makes prune_lapsed_controller_controls_source
+        // drop the gated def from base+live (CR 611.2b permanent lapse).
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // The lock lapsed: the foe untaps while the source is phased out.
+        state.objects.get_mut(&foe_creature).unwrap().tapped = true;
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "phasing out the source must lapse the lock (CR 702.26f + CR 611.2b)"
+        );
+
+        // Phase the source back in via the production path, then flush layers.
+        let mut events = Vec::new();
+        let back = phase_in_object(&mut state, spider_woman, &mut events);
+        assert_eq!(back, vec![spider_woman], "source phased back in");
+        assert!(
+            state.objects[&spider_woman].is_phased_in(),
+            "source is phased in again"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Re-tap the foe and attempt an effect untap: the lock is DEAD (pruned on
+        // phase-out), so it must NOT revive on phase-in — the foe untaps.
+        state.objects.get_mut(&foe_creature).unwrap().tapped = true;
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the lock must NOT revive when the source phases back in (CR 611.2b ends permanently)"
+        );
+    }
+
+    /// TEST b — CR 611.2b + CR 400.7 source re-entry: the captured source leaving
+    /// and re-entering as a new object (same storage ObjectId) ends the lock
+    /// permanently; it must not revive on a same-ObjectId re-entry.
+    ///
+    /// Discriminating: reverting the Step-4 source-axis (`source == departed_id`)
+    /// arm leaves the gated def in base+live, so after the round-trip the gate is
+    /// true again (Spider-Woman back in play, controlled by installer) and the
+    /// foe would stay locked — the final `!tapped` assertion fails.
+    #[test]
+    fn spider_woman_cant_untap_dead_on_source_reentry() {
+        let mut state = GameState::new_two_player(42);
+        let (spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        let inc_before = state.objects[&spider_woman].incarnation;
+
+        // Round-trip the source through the graveyard and back (same ObjectId).
+        crate::game::zones::move_to_zone(
+            &mut state,
+            spider_woman,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        crate::game::zones::move_to_zone(
+            &mut state,
+            spider_woman,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        // Re-establish controller and type for the re-entered incarnation.
+        {
+            let sw = state.objects.get_mut(&spider_woman).unwrap();
+            sw.controller = PlayerId(0);
+            if !sw.card_types.core_types.contains(&CoreType::Creature) {
+                sw.card_types.core_types.push(CoreType::Creature);
+            }
+        }
+        // Same storage ObjectId, strictly newer incarnation → a real re-entry.
+        assert_eq!(
+            state.objects[&spider_woman].zone,
+            Zone::Battlefield,
+            "source must be back on the battlefield"
+        );
+        assert!(
+            state.objects[&spider_woman].incarnation > inc_before,
+            "re-entry must bump the incarnation (CR 400.7 new object)"
+        );
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the lock must NOT revive on a same-ObjectId source re-entry (CR 611.2b + CR 400.7)"
+        );
+    }
+
+    /// TEST c — CR 611.2b + CR 400.7 host blink (the B1 fix): the LOCKED HOST
+    /// leaving and re-entering as a new object (same storage ObjectId) ends the
+    /// lock — the re-entered creature is a new object and must not inherit the
+    /// previous incarnation's can't-untap rider.
+    ///
+    /// Discriminating: reverting the Step-4 host-axis (`host_id == departed_id`)
+    /// arm leaves the gated def on the re-entered host in base+live, so with
+    /// Spider-Woman still in play the gate is true and the host would stay locked
+    /// — the final `!tapped` assertion fails.
+    #[test]
+    fn spider_woman_cant_untap_dead_on_host_blink() {
+        let mut state = GameState::new_two_player(42);
+        let (_spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        let inc_before = state.objects[&foe_creature].incarnation;
+
+        // Spider-Woman stays in play; the HOST (foe) is blinked.
+        crate::game::zones::move_to_zone(
+            &mut state,
+            foe_creature,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        crate::game::zones::move_to_zone(
+            &mut state,
+            foe_creature,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        {
+            let foe = state.objects.get_mut(&foe_creature).unwrap();
+            foe.controller = PlayerId(1);
+            if !foe.card_types.core_types.contains(&CoreType::Creature) {
+                foe.card_types.core_types.push(CoreType::Creature);
+            }
+            // Re-tap so a successful untap is observable.
+            foe.tapped = true;
+        }
+        assert_eq!(
+            state.objects[&foe_creature].zone,
+            Zone::Battlefield,
+            "host must be back on the battlefield"
+        );
+        assert!(
+            state.objects[&foe_creature].incarnation > inc_before,
+            "host re-entry must bump the incarnation (CR 400.7 new object)"
+        );
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(foe_creature), &mut events).unwrap();
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "a blinked host re-enters as a new object — the lock must NOT carry over \
+             (CR 611.2b + CR 400.7, B1 fix)"
+        );
+    }
+
+    /// CR 707.2 / CR 611.2b: The "can't untap for as long as you control ~" lock
+    /// is durably stored in the host's `base_replacement_definitions` ONLY so it
+    /// survives a layer reset. It is a runtime continuous effect installed by
+    /// another permanent, NOT a printed/defining characteristic — so it must NOT
+    /// be exposed as a copiable value. A copy of the locked host (becomes-a-copy
+    /// or a copy-token) must therefore NOT inherit the lock.
+    ///
+    /// Discriminating: with the `intrinsic_copiable_values` filter reverted to an
+    /// unconditional `Arc::clone(&obj.base_replacement_definitions)`, the gated
+    /// `ControllerControlsSource` def leaks into `CopiableValues` and the first
+    /// assertion (`!gated_in_copiable`) fails. The companion printed (non-gated)
+    /// `Moved` rider proves the filter is selective, not a blanket drop: it MUST
+    /// still appear in the copiable values.
+    #[test]
+    fn locked_host_copiable_values_exclude_control_gated_lock() {
+        use crate::game::printed_cards::intrinsic_copiable_values;
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        // Installs the real Spider-Woman lock: the host (foe) receives a
+        // `ControllerControlsSource`-gated def in BOTH live and base stores via
+        // the production resolver (add_target_replacement.rs).
+        let (_spider_woman, foe_creature) = install_spider_woman_lock(&mut state);
+
+        // Seed a PRINTED (non-gated) replacement directly into the same host's
+        // base store, as a printed "enters tapped"-style `Moved` redirect would
+        // appear. This is a copiable value and MUST survive the filter.
+        let printed_rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield);
+        {
+            let foe = state.objects.get_mut(&foe_creature).unwrap();
+            std::sync::Arc::make_mut(&mut foe.base_replacement_definitions)
+                .push(printed_rider.clone());
+        }
+
+        // Sanity: the host's base store carries BOTH the gated lock and the
+        // printed rider, so the filter has something selective to do.
+        let foe = state.objects.get(&foe_creature).unwrap();
+        assert!(
+            foe.base_replacement_definitions.iter().any(|d| matches!(
+                d.condition,
+                Some(ReplacementCondition::ControllerControlsSource { .. })
+            )),
+            "fixture precondition: host base must carry the gated lock"
+        );
+        assert!(
+            foe.base_replacement_definitions.contains(&printed_rider),
+            "fixture precondition: host base must carry the printed rider"
+        );
+
+        let values = intrinsic_copiable_values(foe);
+
+        let gated_in_copiable = values.replacement_definitions.iter().any(|d| {
+            matches!(
+                d.condition,
+                Some(ReplacementCondition::ControllerControlsSource { .. })
+            )
+        });
+        assert!(
+            !gated_in_copiable,
+            "CR 707.2: a ControllerControlsSource-gated runtime lock must NOT be a \
+             copiable value (a copy of the locked host must not inherit the lock)"
+        );
+        assert!(
+            values.replacement_definitions.contains(&printed_rider),
+            "CR 707.2: a printed (non-gated) replacement IS a copiable value — the \
+             filter must be selective, not a blanket drop"
+        );
+    }
 }

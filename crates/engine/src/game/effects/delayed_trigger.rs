@@ -502,6 +502,35 @@ fn snapshot_quantity_ref(
             crate::game::quantity::counter_count_from_map(&obj.counters, counter_type.as_ref())
         });
     }
+    // CR 603.7c + CR 603.12 + CR 202.3e: A reflexive/delayed trigger that
+    // references "that spell's mana value" (`ObjectManaValue` with the
+    // demonstrative/anaphoric referent — Breeches, the Blastmaker's
+    // "deals damage equal to that spell's mana value") carries no parent object
+    // target: the spell lives in the creation-time trigger event (a `SpellCast`
+    // whose source is the cast spell). Snapshot it from that event context now,
+    // before the `ability.targets[0]` extraction below (which would early-return
+    // `None` and leave the ref to evaluate to 0 at fire time, where
+    // `current_trigger_event` is the later `CoinFlipped`). Falls through to the
+    // target-based path when targets are present.
+    if matches!(
+        qty,
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Demonstrative | ObjectScope::Anaphoric,
+        }
+    ) && ability.targets.is_empty()
+    {
+        if let Some(spell_id) = state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+        {
+            // CR 202.3e: include cost_x_paid for the on-stack spell.
+            return state
+                .objects
+                .get(&spell_id)
+                .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32);
+        }
+    }
     let target_object_id = ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => Some(*id),
         _ => None,

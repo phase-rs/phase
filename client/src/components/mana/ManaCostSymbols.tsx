@@ -18,7 +18,7 @@ export function ManaCostSymbols({
   freeClassName = "text-slate-500",
 }: ManaCostSymbolsProps) {
   const { t } = useTranslation("game");
-  if (cost.type === "NoCost" || cost.type === "SelfManaCost") {
+  if (cost.type === "NoCost" || cost.type === "SelfManaCost" || cost.type === "SelfManaValue") {
     return <span className={freeClassName}>{t("mana.free")}</span>;
   }
 

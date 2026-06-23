@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Zurück zum Deck",
     "listView": "Listenansicht",
-    "stackView": "Stapelansicht"
+    "stackView": "Stapelansicht",
+    "groupType": "Typ",
+    "groupColor": "Farbe",
+    "groupByType": "Nach Typ gruppieren",
+    "groupByColor": "Nach Farbe gruppieren"
   },
   "tabs": {
     "ariaLabel": "Deckbuilder-Oberfläche",
@@ -48,7 +52,11 @@
     "clone": "Klonen",
     "cloneTitle": "Eine Kopie unter neuem Namen speichern",
     "loadDeck": "Deck laden...",
-    "nameToSave": "Benenne das Deck, um es zu speichern"
+    "nameToSave": "Benenne das Deck, um es zu speichern",
+    "savedToastTitle": "Deck gespeichert",
+    "savedToastDescription": "„{{name}}“ wurde in deinen Decks gespeichert.",
+    "clonedToastTitle": "Deck dupliziert",
+    "clonedToastDescription": "Eine Kopie wurde als „{{name}}“ gespeichert."
   },
   "unsaved": {
     "title": "Ungespeicherte Änderungen",
@@ -95,13 +103,31 @@
     "sideboardEmptyHint": "Fahre über eine Hauptdeck-Karte und klicke auf →, um sie hierher zu verschieben.",
     "group": {
       "Creatures": "Kreaturen",
-      "Spells": "Zaubersprüche",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Spontanzauber",
+      "Sorceries": "Hexereien",
+      "Artifacts": "Artefakte",
+      "Enchantments": "Verzauberungen",
+      "Battles": "Schlachten",
+      "Lands": "Länder",
+      "Other": "Sonstige"
+    },
+    "colorGroup": {
+      "White": "Weiß",
+      "Blue": "Blau",
+      "Black": "Schwarz",
+      "Red": "Rot",
+      "Green": "Grün",
+      "Multicolor": "Mehrfarbig",
+      "Colorless": "Farblos",
       "Lands": "Länder"
     },
     "importModalTitle": "Deck importieren",
     "pastePlaceholder": "Deckliste einfügen (MTGA- oder .dck-Format)...",
     "fromFile": "Aus Datei",
     "parse": "Einlesen",
+    "parsing": "Wird eingelesen…",
+    "parseError": "Keine Karten gefunden. Füge ein Deck im MTGA- oder .dck-Format ein.",
     "exportModalTitle": "Deck exportieren",
     "saveToFile": "In Datei speichern",
     "copied": "Kopiert!",
@@ -136,7 +162,23 @@
     "groupCards_other": "{{count}} Karten",
     "group": {
       "Creatures": "Kreaturen",
-      "Spells": "Zaubersprüche",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Spontanzauber",
+      "Sorceries": "Hexereien",
+      "Artifacts": "Artefakte",
+      "Enchantments": "Verzauberungen",
+      "Battles": "Schlachten",
+      "Lands": "Länder",
+      "Other": "Sonstige"
+    },
+    "colorGroup": {
+      "White": "Weiß",
+      "Blue": "Blau",
+      "Black": "Schwarz",
+      "Red": "Rot",
+      "Green": "Grün",
+      "Multicolor": "Mehrfarbig",
+      "Colorless": "Farblos",
       "Lands": "Länder"
     },
     "sideboardGroup": "Sideboard",
@@ -231,5 +273,11 @@
     "minimumCount": "Das Deck hat {{count}} Karten (Minimum 60)",
     "maxCopies": "{{name}}: {{count}} Kopien (max. 4)",
     "companionInMain": "{{name}} ist dein Gefährte, befindet sich aber auch im Hauptdeck — das verstößt gegen seine Deckbau-Bedingung. Entferne ihn aus dem Hauptdeck, um ihn als Gefährten zu nutzen."
+  },
+  "switcher": {
+    "starred": "Favoriten",
+    "unfiled": "Nicht zugeordnet",
+    "searchPlaceholder": "Decks suchen…",
+    "noMatches": "Keine Decks gefunden"
   }
 }

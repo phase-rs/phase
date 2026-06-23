@@ -8,6 +8,7 @@ import {
   repairParsedDeck,
   resolveCommander,
   expandParsedDeck,
+  parsedDeckHasCards,
 } from '../deckParser';
 
 vi.mock('../engineRuntime', () => ({
@@ -265,6 +266,17 @@ Sideboard
     expect(result.sideboard).toEqual([
       { count: 1, name: 'Dark Leo & Shredder' },
     ]);
+  });
+
+  it('preserves sticker sheets through repair and expansion', () => {
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      sticker_sheets: ['sheet-1', 'sheet-2', 'sheet-3'],
+    });
+
+    expect(repaired.sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
+    expect(expandParsedDeck(repaired).sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
   });
 });
 
@@ -667,5 +679,15 @@ describe('expandParsedDeck', () => {
       sideboard: [],
     });
     expect(result.commander).toEqual([]);
+  });
+});
+
+describe('parsedDeckHasCards', () => {
+  it('returns false when no deck lines were recognized', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('asdasd'))).toBe(false);
+  });
+
+  it('returns true when main-deck cards were parsed', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('4 Lightning Bolt'))).toBe(true);
   });
 });

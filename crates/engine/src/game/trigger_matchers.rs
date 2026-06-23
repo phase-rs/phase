@@ -736,6 +736,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTarget
@@ -827,9 +828,13 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::ControllerChanged { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
-        | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
+        | GameEvent::PermanentUntapped { object_id }
+        | GameEvent::StickerPlaced { object_id, .. } => count_one(*object_id),
         // CR 702.140c + CR 730.2c: the merged (surviving) permanent is the subject.
         GameEvent::Mutated { merged_id, .. } => count_one(*merged_id),
+        // Unstable Host/Augment combine also makes the surviving Host permanent
+        // the observable subject for generic object-scoped event helpers.
+        GameEvent::Augmented { merged_id, .. } => count_one(*merged_id),
         // Object target events yield the affected object as subject. Player
         // target events carry no object subject; player scoping lives on
         // `valid_target`.

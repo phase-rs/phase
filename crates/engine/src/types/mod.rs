@@ -19,6 +19,7 @@ pub mod player;
 pub mod proposed_event;
 pub mod replacements;
 pub mod statics;
+pub mod stickers;
 pub mod triggers;
 pub mod zones;
 
@@ -58,5 +59,6 @@ pub use player::{Player, PlayerId};
 pub use proposed_event::{ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use statics::StaticMode;
+pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};
 pub use zones::Zone;

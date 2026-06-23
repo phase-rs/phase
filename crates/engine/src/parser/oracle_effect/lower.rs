@@ -33,9 +33,10 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
+use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
 // These are private to oracle_effect but accessible here as a descendant module.
@@ -174,7 +175,9 @@ fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
     else {
         return false;
     };
-    if static_abilities.len() != 1 || static_abilities[0].mode != StaticMode::SpendManaAsAnyColor {
+    if static_abilities.len() != 1
+        || static_abilities[0].mode != (StaticMode::SpendManaAsAnyColor { spell_filter: None })
+    {
         return false;
     }
 
@@ -218,6 +221,101 @@ fn attach_any_color_mana_rider_to_previous_play_from_exile(defs: &mut [AbilityDe
     };
 
     *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
+    true
+}
+
+/// CR 601.2f: Detect the "each spell cast this way costs {N} more to cast"
+/// rider sentence (Lightstall Inquisitor) and return the cost increase. This is
+/// a cost-raise scoped to spells cast via the immediately-preceding
+/// `PlayFromExile` grant ("this way" = the just-granted exile play), not a
+/// global static cost increase — so it folds into the grant's `cast_cost_raise`
+/// rather than emitting a standalone `StaticMode::ModifyCost`. Generic over the
+/// printed increase (`{1}`, `{2}`, …); the mana symbols are case-insensitive
+/// digits in the common generic case.
+fn cast_cost_raise_rider(clause: &ClauseIr) -> Option<ManaCost> {
+    let lower = clause.source_text.to_ascii_lowercase();
+    nom_on_lower(clause.source_text.trim(), lower.trim(), |i| {
+        let (i, _) = tag("each spell cast this way costs ").parse(i)?;
+        let (i, cost) = nom_primitives::parse_mana_cost(i)?;
+        let (i, _) = tag(" more to cast").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        eof(i)?;
+        Ok((i, cost))
+    })
+    .map(|(cost, _)| cost)
+}
+
+fn parses_land_enters_tapped_rider(input: &str) -> bool {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "each land played this way enters tapped",
+    ))
+    .parse(input)
+    .is_ok()
+}
+
+/// CR 614.1c: Detect the "each land played this way enters tapped" rider
+/// sentence (Lightstall Inquisitor) — "enters tapped" is a CR 614.1c
+/// "[permanent] enters ..." replacement. Scoped to lands played via the
+/// preceding `PlayFromExile` grant ("this way"), so it folds into the grant's
+/// `land_enter_tapped` rather than emitting a board-wide ETB-tapped replacement.
+fn is_land_enters_tapped_rider(clause: &ClauseIr) -> bool {
+    let lower = clause.source_text.to_ascii_lowercase();
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    parses_land_enters_tapped_rider(trimmed)
+}
+
+/// Walk the previous def and its `sub_ability` chain for a `PlayFromExile`
+/// permission. The grant produced by the compound "exile … and may play that
+/// card" chain (Lightstall Inquisitor) lands as a sibling def during the lower
+/// loop, but a self-contained "exile …. You may play …" chain (Gonti) nests it
+/// as a sub-ability — handle both so the rider absorbs in either shape.
+fn find_prev_play_from_exile_permission_mut(
+    defs: &mut [AbilityDefinition],
+) -> Option<&mut CastingPermission> {
+    fn walk(def: &mut AbilityDefinition) -> Option<&mut CastingPermission> {
+        let is_pfe = matches!(
+            def.effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile { .. },
+                ..
+            }
+        );
+        if is_pfe {
+            if let Effect::GrantCastingPermission { permission, .. } = def.effect.as_mut() {
+                return Some(permission);
+            }
+        }
+        def.sub_ability.as_mut().and_then(|sub| walk(sub))
+    }
+    defs.last_mut().and_then(walk)
+}
+
+/// CR 601.2f: Fold an "each spell cast this way costs {N} more" rider into the
+/// preceding `PlayFromExile` grant's `cast_cost_raise`.
+fn attach_cast_cost_raise_to_previous_play_from_exile(
+    defs: &mut [AbilityDefinition],
+    cost: ManaCost,
+) -> bool {
+    let Some(CastingPermission::PlayFromExile {
+        cast_cost_raise, ..
+    }) = find_prev_play_from_exile_permission_mut(defs)
+    else {
+        return false;
+    };
+    *cast_cost_raise = Some(cost);
+    true
+}
+
+/// CR 614.1c: Fold an "each land played this way enters tapped" rider into the
+/// preceding `PlayFromExile` grant's `land_enter_tapped`.
+fn attach_land_enters_tapped_to_previous_play_from_exile(defs: &mut [AbilityDefinition]) -> bool {
+    let Some(CastingPermission::PlayFromExile {
+        land_enter_tapped, ..
+    }) = find_prev_play_from_exile_permission_mut(defs)
+    else {
+        return false;
+    };
+    *land_enter_tapped = EtbTapState::Tapped;
     true
 }
 
@@ -642,6 +740,26 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // emitting a broad standalone `SpendManaAsAnyColor` effect.
         if is_spend_mana_as_any_color_rider(clause_ir)
             && attach_any_color_mana_rider_to_previous_play_from_exile(&mut defs)
+        {
+            prev_boundary = clause_ir.boundary;
+            continue;
+        }
+
+        // CR 601.2f + CR 614.1c: Lightstall Inquisitor's "Each spell cast this
+        // way costs {1} more to cast." / "Each land played this way enters
+        // tapped." rider sentences scope to the preceding `PlayFromExile`
+        // grant. Fold each into the grant (`cast_cost_raise` /
+        // `land_enter_tapped`) instead of emitting a standalone cost-modify
+        // static or board-wide ETB-tapped replacement — "this way" binds them
+        // to the exile-play permission, not to all spells/lands.
+        if let Some(cost) = cast_cost_raise_rider(clause_ir) {
+            if attach_cast_cost_raise_to_previous_play_from_exile(&mut defs, cost) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+        }
+        if is_land_enters_tapped_rider(clause_ir)
+            && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
         {
             prev_boundary = clause_ir.boundary;
             continue;

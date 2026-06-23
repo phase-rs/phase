@@ -5170,6 +5170,88 @@ mod tests {
         assert_eq!(state.last_effect_count, Some(4));
     }
 
+    /// CR 400.7 + CR 701.23 + CR 108.3: Surgical Extraction-class search uses
+    /// `ParentTargetOwner` (owner axis) rather than controller axis.
+    #[test]
+    fn change_zone_all_multi_zone_same_name_parent_target_owner_exiles() {
+        use crate::types::ability::FilterProp;
+        let mut state = GameState::new_two_player(42);
+
+        let seed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Graveyard,
+        );
+
+        let bolt_gy = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Graveyard,
+        );
+        let bolt_hand = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        let bolt_lib = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        let other_gy = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Counterspell".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(ControllerRef::ParentTargetOwner)
+                        .properties(vec![
+                            FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                            },
+                            FilterProp::SameNameAsParentTarget,
+                        ]),
+                ),
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Object(seed)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for &id in &[seed, bolt_gy, bolt_hand, bolt_lib] {
+            assert_eq!(
+                state.objects[&id].zone,
+                Zone::Exile,
+                "matching Lightning Bolt {id:?} must be exiled"
+            );
+        }
+        assert_eq!(state.objects[&other_gy].zone, Zone::Graveyard);
+    }
+
     /// CR 701.59c + CR 601.2f: End-to-end cascade for Deadly Cover-Up with
     /// evidence paid. Chains DestroyAll → (conditional on AdditionalCostPaid)
     /// exile seed from opponent's graveyard → multi-zone same-name exile →

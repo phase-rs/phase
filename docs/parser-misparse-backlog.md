@@ -1,0 +1,5398 @@
+# Phase Engine Parser Misparse — Global Root-Cause Taxonomy
+
+Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
+
+- **Canonical root causes:** 38
+- **Distinct cards implicated:** 4890
+- **Total card appearances across root causes:** 4924 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+
+This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
+
+## Ranked root causes
+
+| # | Root cause | # cards | Fix hint (where it likely lives) |
+|---|------------|--------:|----------------------------------|
+| 1 | Relative-clause / filter restriction on target dropped | 754 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 605 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 333 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 6 | Disjunctive (or-list) collapsed to first branch | 248 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 7 | Wrong / dropped zone parameters on zone-change effect | 211 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
+| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
+| 10 | Trigger event/mode unrecognized → Unknown | 170 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 170 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 134 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 14 | Granted/quoted ability or continuous modification dropped | 96 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 91 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
+| 16 | Keyword payload / multiplicity / mis-tokenization | 84 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
+| 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
+| 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
+| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 71 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
+| 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
+| 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
+| 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
+| 23 | Effect modeled with structurally wrong variant / ability class | 51 | add-engine-effect: select the correct Effect/ability variant for the clause class |
+| 24 | Counter-type field contaminated by quantifier/grammar prefix | 40 | oracle_util.rs counter-type extraction — strip 'number of'/'or more' before canonicalizing |
+| 25 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
+| 26 | Wrong / dropped effect duration | 30 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 27 | Delayed / future-phase trigger flattened to immediate effect | 21 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
+| 28 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
+| 29 | Trigger/activation timing or ordinal restriction dropped | 20 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 30 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
+| 31 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
+| 32 | Strive surcharge double-emitted as spurious ModifyCost static | 11 | oracle_static.rs — suppress Strive lines from static cost-modifier dispatch |
+| 33 | 'another'/'other' self-exclusion FilterProp dropped | 10 | oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed |
+| 34 | Other / uncategorized misparse | 7 | manual triage |
+| 35 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
+| 36 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
+| 37 | Cost-reduction static spell_filter / condition dropped | 4 | oracle_static.rs ModifyCost — capture spell_filter and gating condition |
+| 38 | 'You may' optionality dropped (mandatory instead of optional) | 3 | oracle parser — set optional:true when 'you may' governs the effect |
+
+> The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
+
+## Full card lists per root cause
+
+### 1. Relative-clause / filter restriction on target dropped  (754 cards)
+
+**Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
+
+**Fix hint.** oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses
+
+<details><summary>Cards</summary>
+
+- "Rumors of My Death . . ."
+- A-Goma Fada Vanguard
+- A-High-Rise Sawjack
+- A-Phylath, World Sculptor
+- Aboleth Spawn
+- Abomination
+- Abstruse Archaic
+- Abu Ja'far
+- Abuna Acolyte
+- Abyssal Harvester
+- Acclaimed Contender
+- Ace, Fearless Rebel
+- Activated Sleeper
+- Adaptive Armorer
+- Addle
+- Admiral Beckett Brass
+- Aetherplasm
+- Agadeem's Awakening
+- Agent Phil Coulson
+- Airlift Chaplain
+- Akoum
+- Akroma, Vision of Ixidor
+- Alchemist's Retrieval
+- Aleatory
+- Amphibious Kavu
+- Angel of Unity
+- Animus of Night's Reach
+- Apocalypse Chime
+- Appetite for Brains
+- Arashin Sunshield
+- Arc Spitter
+- Arcade Gannon
+- Archon of the Wild Rose
+- Argivian Blacksmith
+- Armored Transport
+- Arrogant Bloodlord
+- Ashiok's Erasure
+- Ashiok, Nightmare Weaver
+- Assassin's Blade
+- Assembly Hall
+- Assembly-Worker
+- Aura Graft
+- Autumn Willow and Baron Sengir
+- Autumn-Tail, Kitsune Sage
+- Avatar Kuruk
+- Avengers Quinjet
+- Avengers Tower
+- Avenging Arrow
+- Ayesha Tanaka
+- Back for Seconds
+- Bant
+- Barbed-Back Wurm
+- Battering Wurm
+- Battlecast Mimic
+- Battlefront Krushok
+- Battlegate Mimic
+- Beetle-Headed Merchants
+- Begin Anew
+- Behold the Sinister Six!
+- Benalish Missionary
+- Bitter Work duplicate?
+- Blade of the Swarm
+- Bladegriff Prototype
+- Bladehold War-Whip
+- Blinding Fog
+- Blur of Heroism
+- Body Launderer
+- Boiling Rock Rioter
+- Bone Miser
+- Bonty
+- Bounce Chamber
+- Bounty Agent
+- Bower Passage
+- Bowie Base One
+- Boxing Ring
+- Brace for Impact
+- Brainspoil
+- Bramblearmor Brawler
+- Brassclaw Orcs
+- Break Out
+- Brine Seer
+- Bring Low
+- Bringer of the Last Gift
+- Brown Ouphe
+- Bucky Barnes, Eager Ally
+- Burrenton Forge-Tender
+- Caesar, Legion's Emperor
+- Calix, Destiny's Hand
+- Callous Giant
+- Campfire
+- Cantor of the Refrain
+- Captain America's Shield
+- Captain N'ghathrod
+- Cartographer's Hawk
+- Cathedral Membrane
+- Cemetery Prowler
+- Cephalid Shrine
+- Challenger Troll
+- Champion's Victory
+- Chandra Ablaze
+- Chandra, Heart of Fire
+- Change of Plans
+- Chaotic Strike
+- Checks and Balances
+- Cho-Arrim Legate
+- Chong and Lily, Nomads
+- Churning Reservoir
+- Cinder Seer
+- Cinnamon, Seasoned Steed
+- Circle of Confinement
+- City of the Daleks
+- Citystalker Connoisseur
+- Clamilton Estate
+- Clear, Fair Magic
+- Clever Conjurer
+- Closing Statement
+- Cloudstone Curio
+- Cockatrice
+- Coiling Stalker
+- Coils of the Medusa
+- Colfenor, the Last Yew
+- Commencement of Festivities
+- Compound Fracture
+- Consulate Surveillance
+- Coralhelm Chronicler
+- Corpse Dance
+- Corrosive Ooze
+- Cover of Winter
+- Crimson Roc
+- Cromat
+- Crowd of True Believers
+- Crown of Ascension
+- Crown of the Ages
+- Cryptic Gateway
+- Culling Scales
+- Curious Herd
+- Cycle of Life
+- Cyclone Summoner
+- Dance of the Manse
+- Daunting Defender
+- Day of the Moon
+- Death-Priest of Myrkul
+- Death-Rattle Oni
+- Deathbringer Liege
+- Deathless Behemoth
+- Declaration in Stone
+- Decompose
+- Decoy Ploy
+- Denied!
+- Dermoplasm
+- Desert
+- Destined Confrontation
+- Detention Sphere
+- Detritivore
+- Devoted Sultai
+- Devout Harpist
+- Dewdrop Cure
+- Diluvian Primordial
+- Dimension X Pizzasaur
+- Diplomatic Escort
+- Dire Fleet Warmonger
+- Disciple of Bolas
+- Diseased Vermin
+- Disharmony
+- Dissonant Wave
+- Donatello, Rad Scientist
+- Doran, Besieged by Time
+- Double Header
+- Draconic Fealty
+- Dragonlord Kolaghan
+- Draugr Necromancer
+- Dread Fugue
+- Dread Wight
+- Dromar, the Banisher
+- Drown in the Loch
+- Due Diligence
+- Duelist's Flame
+- Duh
+- Dutiful Replicator
+- Dwarven Sea Clan
+- Dyadrine, Synthesis Amalgam
+- Earthshape
+- Eater of Virtue
+- Echo, Perceptive Prodigy
+- Echoing Boon
+- Ecstatic Beauty
+- Edgewall Inn
+- Edgewall Innkeeper
+- Eiganjo Castle
+- Eiganjo Exemplar
+- Elder Arthur Maxson
+- Eldest Dragon Highlander
+- Elvish Soultiller
+- Emeritus of Ideation
+- Emrakul's Evangel
+- Enchantment Alteration
+- End Hostilities
+- Enduring Friendship
+- Engineered Plague
+- Enigma Sphinx Avatar
+- Enigmatic Incarnation
+- Epic Experiment
+- Erebos's Intervention
+- Essence Reliquary
+- Ethereal Champion
+- Ethereal Forager
+- Ethersworn Shieldmage
+- Euroakus
+- Evendo, Waking Haven
+- Everett K. Ross, Hapless Attaché
+- Executioner's Swing
+- Expel the Interlopers
+- Extirpate
+- Eye of Singularity
+- Faerie Artisans
+- Fall of the Thran
+- False Memories
+- Famished Worldsire
+- Feasting Hobbit
+- Felix Five-Boots
+- Feral Deathgorger
+- Fiendslayer Paladin
+- Fight to the Death
+- Finale of Promise
+- Finneas, Ace Archer
+- Fire and Brimstone
+- Firesong and Sunspeaker
+- Flame Channeler
+- Flamerush Rider
+- Flamewar, Brash Veteran
+- Flash Foliage
+- Flensing Raptor
+- Flower
+- Flowstone Flood
+- Flummoxed Cyclops
+- Flumph
+- Fraction Jackson
+- Frenetic Ogre
+- Frontier Seeker
+- Frostweb Spider
+- Furygale Flocking
+- Gaea's Revenge
+- Garnet, Princess of Alexandria
+- Garruk, Cursed Huntsman
+- General Traag, Heart of Stone
+- Getaway Car
+- Ghazbán Ogre
+- Ghost of Ramirez DePietro
+- Giant Beaver
+- Giant Shark
+- Giant Trap Door Spider
+- Gideon's Defeat
+- Gilt-Leaf Winnower
+- Giltspire Avenger
+- Glamer Spinners
+- Glass-Cast Heart
+- Gleam of Authority
+- Glen Elendra Pranksters
+- Glittering Wish
+- Glyph of Life
+- Glyph of Reincarnation
+- Goblin Javelineer
+- Goblin Mutant
+- Godo's Irregulars
+- Golden Argosy
+- Golden Demise
+- Golden Sidekick
+- Gollum, Obsessed Stalker
+- Gonti, Canny Acquisitor
+- Goreclaw, Terror of Qal Sisma
+- Gorgon Recluse
+- Gornog, the Red Reaper
+- Graphic Violence
+- Grasping Shadows
+- Grassland Crusader
+- Gratuitous Violence
+- Grave Sifter
+- Graven Abomination
+- Graveyard Dig
+- Greater Werewolf
+- Green Slime
+- Grishnákh, Brash Instigator
+- Grudge Keeper
+- Guardian Seraph
+- Gyruda, Doom of Depths
+- Gyrus, Waker of Corpses
+- Hammerfest Boomtacular
+- Harness the Storm
+- Harsh Mercy
+- Harvester Druid
+- Haunting Echoes
+- Haunting Voyage
+- Hazoret's Undying Fury
+- Heat Stroke
+- Hedron Blade
+- Hellish Rebuke
+- Helmut Zemo, Mastermind
+- Hemlock Vial
+- Herald of Vengeance
+- Hidden Retreat
+- Hidetsugu's Poison Rite
+- Hinterland Drake
+- Hipparion
+- Homing Lightning
+- Hour of Devastation
+- Hubris
+- Icatian Skirmishers
+- Ice Floe
+- Imagecrafter
+- Imbraham, Dean of Theory
+- Immerwolf
+- Impulsive Charge
+- In Search of Greatness
+- Incriminate
+- Incubation Triformer
+- Indentured Oaf
+- Infectious Curse
+- Infernal Tutor
+- Infinite Authority
+- Inflame
+- Inquisitor's Snare
+- Inscription of Abundance
+- Invasion of Karsus
+- Invasion of Ravnica
+- Invasion of Regatha
+- Involuntary Cooldown
+- Iridian Maelstrom
+- Isamaru and Yoshimaru
+- Isareth the Awakener
+- It That Heralds the End
+- Iterative Analysis
+- Ivorytusk Fortress
+- Jabari's Influence
+- Jacob Frye
+- Jasmine Seer
+- Jermane, Pride of the Circus
+- Joraga Auxiliary
+- Joven's Ferrets
+- Jungle Creeper
+- Junkyard Scrapper
+- Kaima, the Fractured Calm
+- Kamachal, Ship's Mascot
+- Kamahl's Summons
+- Karona, False God Avatar
+- Karplusan Strider
+- Kathril, Aspect Warper
+- Keeper of the Beasts
+- Keeper of the Dead
+- Keeper of the Flame
+- Keeper of the Light
+- Keeper of the Mind
+- Keldon Firebombers
+- Keldon Twilight
+- Khalni Gem
+- Kindly Cognician
+- Kitkin Brinefarer
+- Kitsune Healer
+- Kitsune Palliator
+- Kjeldoran Frostbeast
+- Klement, Knowledge Acolyte
+- Klement, Novice Acolyte
+- Knight of Dusk
+- Knight of Valor
+- Knight of the Mists
+- Knight of the New Coalition
+- Knollspine Invocation
+- Knowledge Pool
+- Korlash, Heir to Blackblade
+- Korvold, Fae-Cursed King
+- Kotis, the Fangkeeper
+- Kotose, the Silent Spider
+- Krang, the All-Powerful
+- Krasis Incubation
+- Krosan Drover
+- Krosan Reclamation
+- Krovikan Sorcerer
+- Ladies' Knight
+- Lae'zel, Primal Warrior
+- Lae'zel, Vlaakith's Champion
+- Laquatus's Disdain
+- Lara Croft, Tomb Raider
+- Lazav, Wearer of Faces
+- Legion of Clay
+- Leisure Bicycle
+- Leonardo's Technique
+- Lesser Werewolf
+- Lethal Scheme
+- Liara of the Flaming Fist
+- Light of Sanction
+- Likeness Looter
+- Lila, Hospitality Hostess
+- Lithomancer's Focus
+- Localized Destruction
+- Locket of Yesterdays
+- Long Rest
+- Lost in the Maze
+- Loyal Unicorn
+- Lumbering Lightshield
+- Luminesce
+- Lure
+- Magewright's Stone
+- Magic Designer
+- Main Event Horizon
+- Mana Clash
+- March of Burgeoning Life
+- Mari, the Killing Quill
+- Mark of Eviction
+- Martial Impetus
+- Martyr of Ashes
+- Martyr of Bones
+- Martyr of Frost
+- Martyr of Sands
+- Martyr of Spores
+- Master of Arms
+- Mechtitan Core
+- Memory Theft
+- Memory Vampire
+- Mesmeric Fiend
+- Metalworker
+- Michelangelo's Technique
+- Midnight Arsonist
+- Mimeoplasm, Revered One
+- Mindlink Mech
+- Mindreaver
+- Miracle Worker
+- Mirko, Obsessive Theorist
+- Mishra, Excavation Prodigy
+- Misinformation
+- Mistform Mutant
+- Mistmoon Griffin
+- Mizzium Mortars
+- Mizzix's Mastery
+- Monastery Siege
+- Mongrel Pack
+- Murasa Sproutling
+- Murkfiend Liege
+- Naban, Dean of Iteration
+- Narset, Enlightened Master
+- Necromantic Selection
+- Necrotic Plague
+- Needle Drop
+- Netcaster Spider
+- Nettling Imp
+- Neural Network
+- Niambi, Esteemed Speaker
+- Nick Fury, Agent of S.H.I.E.L.D.
+- Night Nurse, Healer of Heroes
+- Nightshade Seer
+- Nimble Obstructionist
+- Noctis, Heir Apparent
+- Norritt
+- Not of This World
+- Oath of Druids
+- Oath of Ghouls
+- Oath of Lieges
+- Oath of Mages
+- Oath of Scholars
+- Oath of the Grey Host
+- Obelisk of Undoing
+- Obsidian Charmaw
+- Oddly Uneven
+- Offspring's Revenge
+- Olog-hai Crusher
+- Omega, Heartless Evolution
+- On Wings of Gold
+- Onakke Oathkeeper
+- Only the Best
+- Oracle of Tragedy
+- Orcish Veteran
+- Ordinary Pony
+- Ordruun Mentor
+- Oriq Loremage
+- Out Cold
+- Outpace Oblivion
+- Overseer of Vault 76
+- Overwhelming Forces
+- Pack Leader
+- Pack's Betrayal
+- Pale Wayfarer
+- Paradise Plume
+- Paradox Surveyor
+- Parallax Inhibitor
+- Park Re-Entry
+- Penumbra Umbra
+- Pestilent Cauldron
+- Phyrexian Furnace
+- Phyrexian Furnace-DUP
+- Piety Charm
+- Pin Trading-DUP
+- Plague Nurse
+- Plague Wight
+- Planar Engineering
+- Planar Overlay
+- Plot Armor
+- Pollywog Symbiote
+- Pompous Gadabout
+- Popular Egotist
+- Portal of Sanctuary
+- Power Sink
+- Preacher
+- Precognition
+- Premature Burial
+- Press the Enemy
+- Primal Vigor
+- Prism Ring
+- Profaner of the Dead
+- Prophecy
+- Providence of Night
+- Psychomancer
+- Puca's Covenant
+- Pull from Eternity
+- Puresteel Angel
+- Pyromancer's Gauntlet
+- Quandrix Cultivator
+- Qutrub Forayer
+- Radiant Kavu
+- Radiant Strike
+- Ragefire Hellkite
+- Rakdos Augermage
+- Rally the Troops
+- Rambling Possum
+- Rangers of Ithilien
+- Raphael, Fiendish Savior
+- Rare-B-Gone
+- Ravager Wurm
+- Rebel Informer
+- Reciprocate
+- Reckless Abandon
+- Reclaim the Wastes
+- Red Guardian, Super-Soldier
+- Red Sun's Zenith
+- Reenact the Crime
+- Reidane, God of the Worthy
+- Repel the Abominable
+- Restore the Peace
+- Restrain
+- Retaliate
+- Retraced Image
+- Reunion of the House
+- Revered Elder
+- Riddle of Lightning
+- Riffsweeper-Riftsweeper
+- Rift Elemental
+- Riftsweeper
+- Rigo, Streetwise Mentor
+- Risen Riptide
+- Rix Maadi Guildmage
+- Roar of Jukai
+- Rocket Launcher
+- Rofellos's Gift
+- Root Greevil
+- Rooting Moloch
+- Rosheen, Roaring Prophet
+- Rotted Ones, Lay Siege
+- Rowan's Stalwarts
+- Runic Repetition
+- Runner's Bane
+- Rust
+- Sacellum Godspeaker
+- Sacred Guide
+- Sailors' Bane
+- Sanctum Spirit
+- Sandsower
+- Savaen Elves
+- Scalar Scholar
+- Scarab of the Unseen
+- Scarlet Witch, Chaotic Avenger
+- Scent of Brine
+- Scent of Cinder
+- Scent of Ivy
+- Scent of Jasmine
+- Scent of Nightshade
+- Scientist Supreme of A.I.M.
+- Scrap Trawler
+- Scrap Welder
+- Seal of the Guildpact
+- Seasinger
+- Second Guess
+- Secret Invasion
+- Seedling Charm
+- Selective Obliteration
+- Selective Snare
+- Sentinel of Lost Lore
+- Serene Remembrance
+- Serra Inquisitors
+- Shadow of the Grave
+- Shadowfax, Lord of Horses
+- Shaile, Dean of Radiance
+- Shaun, Father of Synths
+- Shelldock Isle
+- Sheoldred's Terror
+- Shorecrasher Mimic
+- Silverquill Silencer
+- Simic Guildmage
+- Simic Manipulator
+- Siren Stormtamer
+- Sisters of Stone Death
+- Skrelv's Hive
+- Skyfire Kirin
+- Slayer's Bounty
+- Slippery Bogbonder
+- Sly Spy
+- Smelting Vat
+- Smite
+- Sneaky Homunculus
+- Snow Fortress
+- Sorceress's Schemes
+- Soul Snare
+- Soul-Shackled Zombie
+- Spatula of the Ages
+- Spawnbinder Mage
+- Spawnsire of Ulamog
+- Spear of Heliod
+- Spellweaver Helix
+- Sphinx of the Chimes
+- Spitfire Handler
+- Spitting Slug
+- Spore Cloud
+- Sporogenic Infection
+- Spy Kit
+- Squirming Emergence
+- Staff of Eden, Vault's Key
+- Stalwart Speartail
+- Standardize
+- Standstill
+- Star of Extinction
+- Steadfast Armasaur
+- Steel Hellkite
+- Stenn, Paranoid Partisan
+- Stonehewer Giant Avatar
+- Stormchaser Drake
+- Stormscape Familiar
+- Street Sweeper
+- Strip Bare
+- Stroke of Luck
+- Strong Back
+- Strongarm Tactics
+- Surgical Extraction
+- Sweet-Gum Recluse
+- Tariel, Reckoner of Souls
+- Tato Farmer
+- Teferi's Response
+- Tenuous Truce
+- The Black Gate
+- The Fantastic Four
+- The Fifth Doctor
+- The Matrix of Time
+- The Scarlet Witch
+- The Tarrasque
+- The Wizardly Barge
+- The Wretched
+- Thornscape Familiar
+- Thornscape Familiar cost
+- Thrun, Breaker of Silence
+- Thunderscape Familiar
+- Tilonalli's Skinshifter
+- Time Reaper
+- Time to Reflect
+- Tinder Wall
+- Tombstone, Career Criminal
+- Toph, Greatest Earthbender
+- Toralf, God of Fury
+- Trailblazer's Torch
+- Transcantation
+- Triple Triad
+- Triumph of Gerrard
+- Trove Warden
+- Turn to Slag
+- Twisted Riddlekeeper
+- Tyrant's Familiar
+- Tzaangor Shaman
+- Ulalek, Fused Atrocity
+- Ultimecia, Time Sorceress
+- Uncage the Menagerie
+- Uncle Istvan
+- Undercity Scavenger
+- Undercover Butler
+- Unnatural Selection
+- Urborg Panther
+- Urborg Phantom
+- Ursine Fylgja
+- Urza's Filter
+- Urza's Hot Tub
+- Valley Questcaller
+- Vampire Socialite
+- Venerated Loxodon
+- Venerated Teacher
+- Vengeful Strangler
+- Venom, Deadly Devourer
+- Verdant Command
+- Veronica, Dissident Scribe
+- Veteran's Voice
+- Villainous Hideout
+- Villainous Syndication
+- Vinesoul Spider
+- Viper, Cruel Conspirator
+- Vizier of Deferment
+- Vodalian War Machine
+- Voidstone Gargoyle
+- Volcanic Offering
+- Volrath's Laboratory
+- Vrestin, Menoptra Leader
+- Wall of Corpses
+- Wall of Fire (n/a)
+- Wall of Mulch
+- Wall of Nets
+- Wall of Putrid Flesh
+- Wall of Vapor
+- Wallop
+- Wandermare
+- Warpath
+- Wash Away
+- Waste Not
+- Weathered Bodyguards
+- Weathered Runestone
+- Weaver of Harmony
+- West Coast Expansion
+- Whip Vine
+- Wicked Akuba
+- Wildgrowth Archaic
+- Winds of Rath
+- Wine of Blood and Iron
+- Wingbright Thief
+- Winter Blast
+- Witch of the Moors
+- Witch's Vengeance
+- Witch-king of Angmar
+- Witch-king, Bringer of Ruin
+- Wondrous Crucible
+- Wood Sage
+- Wooden Stake
+- Woodlurker Mimic
+- Woolly Spider
+- Wormfang Crab
+- Worms of the Earth
+- Wort, the Raidmother
+- Yavimaya Dryad
+- Yawning Fissure
+- Yenna, Redtooth Regent
+- You Cannot Pass!
+- You Find Some Prisoners
+- You Find a Cursed Idol
+- Your Mistake Is My Triumph
+- Zara, Renegade Recruiter
+- Zenith Chronicler
+- Zephyr Singer
+- Zero Point Ballad
+- Zethi, Arcane Blademaster
+- Zndrsplt's Judgment
+- Zombie Boa
+- Zombie Scavengers
+- Zoraline, Cosmos Caller
+- Zurzoth, Chaos Rider
+- Zzzyxas's Abyss
+
+</details>
+
+### 2. Dropped intervening-if / gating condition (condition: null)  (605 cards)
+
+**Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
+
+**Fix hint.** oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here
+
+<details><summary>Cards</summary>
+
+- A-Paragon of Modernity
+- A-Sigil of Myrkul
+- Abzan Beastmaster
+- Adaptive Training Post
+- Adrestia
+- Aether Revolt
+- Aether Rift
+- Agency Coroner
+- Aggressive Detective
+- Ajani, Nacatl Avenger
+- Akuta, Born of Ash
+- Alacrian Jaguar
+- Alex Wilder, Runaway
+- Amalia Benavides Aguirre
+- Anax, Hardened in the Forge
+- Anchor to Reality
+- Anje Falkenrath
+- Anoint with Affliction
+- Anti-Venom, Horrifying Healer
+- Antiquities on the Loose
+- Arcbound Tracker
+- Arcum's Sleigh
+- Ardenvale Paladin
+- Arid Archway
+- Ascendant Packleader
+- Ashen Ghoul
+- Ashnod the Uncaring
+- Atemsis, All-Seeing
+- Aurelia, the Law Above
+- Aurora Champion
+- Autarch Mammoth
+- Avacynian Missionaries
+- Avalanche of Sector 7
+- Avatar of Fury
+- Avatar of Hope
+- Avatar of Might
+- Avatar of Will
+- Avatar of Woe
+- Avengers Assemble!
+- Avengers: Under Siege
+- Avishkar Raceway
+- Baird, Argivian Recruiter
+- Banefire
+- Barracks of the Thousand
+- Barrin's Unmaking
+- Barrowin of Clan Undurr
+- Battle Angels of Tyr
+- Battle Cry Goblin
+- Battle of Wits
+- Battlefield Improvisation
+- Bazaar of Wonders
+- Berserk
+- Bilbo's Ring
+- Bison Whistle
+- Bitter Work
+- Blasphemous Edict
+- Blazing Bomb
+- Blitzwing, Cruel Tormentor
+- Bloodletter of Aclazotz
+- Bloodline Recollector
+- Boing!
+- Bonehoard Dracosaur
+- Boreal Outrider
+- Botanical Brawler
+- Bottle-Cap Blast
+- Brackish Blunder
+- Brain Pry
+- Breath of the Sleepless
+- Breathless Knight
+- Brimstone Vandal
+- Bronze Horse
+- Bull-Rush Bruiser
+- Bulwark Ox
+- Burning-Eye Zubera
+- Cache Grab
+- Calamity of the Titans
+- Call to Arms
+- Camel
+- Captivating Crossroads
+- Carnivorous Canopy
+- Carpet of Flowers
+- Chain Assassination
+- Chakram Retriever
+- Charging Hooligan
+- Chevill, Bane of Monsters
+- Chrome Courier
+- Cinder Cloud
+- Clockwork Servant
+- Clowning Around
+- Codespell Cleric
+- Colfenor's Urn
+- Collectigull
+- Combat Celebrant
+- Command Mine
+- Command Power Plant
+- Concord with the Kami
+- Confounding Conundrum
+- Congregation Gryff
+- Consuming Ashes
+- Contaminant Grafter
+- Counterbalance
+- Court of Vantress
+- Creakwood Safewright
+- Creepy Crawler
+- Crown of Gondor
+- Cryptolith Fragment
+- Curator's Ward
+- Curse of Shaken Faith
+- Cursed Scroll
+- Daredevil Dragster
+- Daredevil, Man Without Fear
+- Dawn Evangel
+- Dead Ringers
+- Death of a Thousand Stings
+- Death's Caress
+- Deathknell Berserker
+- Debt of Loyalty
+- Debt to the Deathless
+- Deccode-noop
+- Decorated Knight
+- Delivery Moogle
+- Delve too Deep
+- Demonfire
+- Demonic Covenant
+- Desperate Plea
+- Development
+- Diamond Knight
+- Dimir Strandcatcher
+- Dire Tactics
+- District Mascot
+- Diviner's Lockbox
+- Domri, Chaos Bringer
+- Doom Foretold
+- Dose of Dawnglow
+- Dovin's Dismissal
+- Draconic Roar
+- Dragon's Disciple
+- Dragonlord's Prerogative
+- Dreadlight Monstrosity
+- Dreampod Druid
+- Drop of Honey
+- Drowner of Truth
+- Drownyard Behemoth
+- Dust Animus
+- Dúnedain Rangers
+- Earwig Squad
+- Ego Drain
+- Elcohol
+- Emeritus of Woe
+- Endless Evil
+- Enshrouding Mist
+- Ephara, God of the Polis
+- Epochrasite
+- Equinox
+- Errand-Rider of Gondor
+- Ethrimik, Imagined Fiend
+- Etrata, the Silencer
+- Ever-Watching Threshold
+- Exert Influence
+- Exile into Darkness
+- Extraordinary Journey
+- Faerie Miscreant
+- Faller's Faithful
+- Faramir, Field Commander
+- Farideh, Devil's Chosen
+- Farrelite Priest
+- Fated Clash
+- Fear of Immobility
+- Feast of Blood
+- Feast of Worms
+- Feast on the Fallen
+- Feed the Infection
+- Festival
+- Feudkiller's Verdict
+- Fevered Visions
+- Fiery Encore
+- Fight for the Throne
+- Filigree Fracture
+- Finale of Devastation
+- Firkraag, Cunning Instigator
+- Firmament Sage
+- First Response
+- Flood of Tears
+- Flutterfox
+- Forceful Cultivator
+- Foriysian Totem
+- Foul-Tongue Invocation
+- Fractal Tender
+- Free-Range Chicken
+- Freestrider Commando
+- Frodo, Adventurous Hobbit
+- Frontier Mastodon
+- Full Bore
+- Furnace Oriflamme
+- Fyndhorn Druid
+- Galadriel of Lothlórien
+- Galvanoth
+- Game Preserve
+- Gandalf, Friend of the Shire
+- Gargantuan Gorilla
+- Garruk's Warsteed
+- Getaway Glamer
+- Geyser Drake
+- Ghastly Demise
+- Gideon's Resolve
+- Glacial Dragonhunt
+- Glissa Sunseeker
+- Gloomlance
+- Gloomwidow's Feast
+- Glorious Enforcer
+- Gnoll Hunter
+- Goblin Savant
+- Goldmane Griffin
+- Goliath Hatchery
+- Grab the Prize
+- Grasping Current
+- Greener Pastures
+- Grim Reaper's Sprint
+- Grip of Amnesia
+- Grizzled Angler
+- Growing Detective
+- Grunn, the Lonely King
+- Gríma Wormtongue
+- Guardian Naga
+- Guardian Project
+- Guardian Sunmare
+- Guiding Spirit
+- Hagra Mauling
+- Hall of the Bandit Lord
+- Hawkeye, Avenging Archer
+- Head to Head
+- Hedron-Field Purists
+- Heir of the Ancient Fang
+- Helicarrier Strike
+- Hellkite Hatchling
+- Henge Walker
+- Henry Wu, InGen Geneticist
+- Herald of Ilharg
+- Hero in Training
+- Heroic Defiance
+- Heroic Return
+- Heroic Teamwork
+- Hidetsugu's Second Rite
+- Hidetsugu, Devouring Chaos
+- Hisoka, Minamo Sensei
+- Hixus, Prison Warden
+- Hobgoblin Captain
+- Holistic Wisdom
+- Hotheaded Giant
+- Hour of Glory
+- Hour of Revelation
+- Howlpack Piper
+- Howltooth Hollow
+- Hulkling, Burgeoning Bruiser
+- Human Torch, Johnny Storm
+- Hurkyl's Final Meditation
+- Hydaelyn, the Mothercrystal
+- Ian the Reckless
+- Icequake
+- Idolized
+- Imaginary Pet
+- Imoen, Mystic Trickster
+- Impatience
+- Impending Disaster
+- Incisor Glider
+- Inferno Hellion
+- Infinite Guideline Station
+- Inga Rune-Eyes
+- Initiates of the Ebon Hand
+- Instrument of the Bards
+- Intermediate Chirography
+- Intrepid Outlander
+- Intruder's Inquisition
+- Invasion of Pyrulea
+- Inventive Wingsmith
+- Jason Bright, Glowing Prophet
+- Jenson Carthalion, Druid Exile
+- Jiang Yanggu
+- Jihad
+- Jin Sakai, Ghost of Tsushima
+- Kaervek's Purge
+- Kaervek's Torch
+- Kaito Shizuki
+- Kami of Transience
+- Kavu Runner
+- Kezzerdrix
+- Kjeldoran Guard
+- Kjeldoran Home Guard
+- Kotis, Sibsig Champion
+- Krazy Kow
+- Krond the Dawn-Clad
+- Kroxa, Titan of Death's Hunger
+- Kyren Legate
+- Kytheon, Hero of Akros
+- Laboratory Drudge
+- Lagomos, Hand of Hatred
+- Lairwatch Giant
+- Land's Edge
+- Lashwhip Predator
+- Latchkey Faerie
+- Lava Burst
+- Leader's Talent
+- Lethal Throwdown
+- Liberating Combustion
+- Liberator, Urza's Battlethopter
+- Lictor
+- Lifecraft Awakening
+- Lighthouse Chronologist
+- Lightning Dart
+- Liliana's Defeat
+- Locthwain Paladin
+- Lord Skitter's Blessing
+- Loxodon Surveyor
+- Ludevic, Necro-Alchemist
+- Lullmage's Domination
+- Lumengrid Augur
+- Lupine Prototype
+- Lure of Prey
+- Lurker
+- Lurking Jackals
+- M'Baku, Jabari Chieftain
+- Maarika, Brutal Gladiator
+- Mace of Disruption
+- Mad Dog
+- Maddening Hex
+- Magmatic Scorchwing
+- Magus of the Scroll
+- Malamet Battle Glyph
+- Malicious Invader
+- Manor Gargoyle
+- Marauding Raptor
+- Marchesa, Resolute Monarch
+- Market Gnome
+- Mask of Intolerance
+- Master's Manufactory
+- Matzalantli, the Great Door
+- Maze's Mantle
+- Mechanized Production
+- Medomai the Ageless
+- Merry, Esquire of Rohan
+- Might Makes Right
+- Mighty Servant of Leuk-o
+- Mindstorm Crown
+- Minion of the Mighty
+- Mise
+- Mogg Salvage
+- Monk Class
+- Moria Scavenger
+- Morsel Theft
+- Muraganda Raceway
+- Must Be Knights
+- Mzed, Mercenary Leader
+- Naiad of Hidden Coves
+- Naktamun Lorespinner
+- Nalathni Dragon
+- Necropotence Avatar
+- Nefarox, Overlord of Grixis
+- Negative Zone Portal
+- Nightshade Assassin
+- Nikara, Lair Scavenger
+- Nimbus Champion
+- Nine-Lives Familiar
+- No Quarter
+- Norn's Decree
+- Norn's Fetchling
+- Now I Know My ABC's
+- O-Kagachi, Vengeful Kami
+- Oakhame Adversary
+- Oblivion's Hunger
+- Oblivious Bookworm
+- Octavia, Living Thesis
+- Orator of Ojutai
+- Orbital Plunge
+- Ornery Tumblewagg
+- Otterball Antics
+- Overgrowth Elemental
+- Overpowering Attack
+- Padeem, Consul of Innovation
+- Paladin of Atonement
+- Paliano Vanguard
+- Paragon of Modernity
+- Park Heights Pegasus
+- Pathway Arrows
+- Patient Turtle
+- Peer Pressure
+- Pelt Collector
+- Pentarch Paladin
+- Perennial Gravewarden
+- Phelia, Exuberant Shepherd
+- Phyrexian Atlas
+- Pick Up the Pace
+- Pious Kitsune
+- Pitfall Trap
+- Planar Collapse
+- Platinum Angel Avatar
+- Play with Fire
+- Polis Crusher
+- Portcullis
+- Powerbalance
+- Predatory Advantage
+- Princess Snowfall
+- Proft's Eidetic Memory
+- Promising Stairs
+- Prompto Argentum
+- Prowling Geistcatcher
+- Pugnacious Hammerskull
+- Pulse of the Forge
+- Pulse of the Hunter Maze
+- Qasali Ambusher
+- Quest for the Nihil Stone
+- Quicksilver Servitor
+- Quilled Charger
+- Rage Extractor
+- Raging Battle Mouse
+- Rakdos, Lord of Riots
+- Rakish Scoundrel
+- Ramses, Assassin Lord
+- Ran and Shaw
+- Raphael, the Muscle
+- Rapid Fire
+- Rashka the Slayer
+- Raven Clan War-Axe
+- Rayne, Academy Chancellor
+- Reaper of Night
+- Reaper's Talisman
+- Reckless Ogre
+- Redcap Melee
+- Regna, the Redeemer
+- Reject Imperfection
+- Rekindled Flame
+- Relic Axe
+- Repentant Vampire
+- Reptilian Recruiter
+- Rhoda, Geist Avenger
+- Richlau, Headmaster
+- Rilsa Rael, Kingpin
+- Ringwraiths
+- Risona, Asari Commander
+- Rite of the Serpent
+- Rith, Liberated Primeval
+- Rivalry
+- Roost of Drakes
+- Routeway Moose
+- Rowdy Crew
+- Rubblebelt Braggart
+- Runaway Steam-Kin
+- Runo Stromkirk
+- Rushing-Tide Zubera
+- Rushwood Legate
+- Saffi Eriksdotter
+- Sahagin
+- Saiba Syphoner
+- Samut, Vizier of Naktamun
+- Sandstalker Moloch
+- Sanguine Spy
+- Saprazzan Legate
+- Sarcomancy
+- Sarevok, Deathbringer
+- Scaleguard Sentinels
+- Second Stage of Magic Design
+- Septic Rats
+- Seraphic Steed
+- Shadowborn Demon
+- Sharp-Eyed Rookie
+- Shatterskull Charger
+- Shirei, Shizo's Caretaker
+- Shuriken
+- Sickle Dancer
+- Sidequest: Hunt the Mark
+- Sigil Captain
+- Silhouette
+- Silver Bolt
+- Skulking Killer
+- Slingbow Trap
+- Smart Ass
+- Smuggler's Share
+- Sold Out
+- Solstice Revelations
+- Sonic Shrieker
+- Sorin, Ravenous Neonate
+- Soul Search
+- Soulflayer
+- Sphere of Duty
+- Sphere of Grace
+- Sphere of Law
+- Sphere of Purity
+- Sphere of Reason
+- Sphere of Truth
+- Spiders-Man, Heroic Horde
+- Spiny Starfish
+- Spirit Mirror
+- Spirit of Resistance
+- Spiritual Sanctuary
+- Splitting the Powerstone
+- Sprout watch Dryad
+- Sproutwatch Dryad
+- Stalwart Successor
+- Steel Exemplar
+- Stomping Slabs
+- Storm Elemental
+- Sword of Hours
+- T'Chaka, Venerable King
+- TL;DR
+- Team Avatar
+- Tears of Rage
+- Tecutlan, the Searing Rift
+- Tezzeret's Betrayal
+- The Bird Champion
+- The Book of Vile Darkness
+- The Cinematic Phoenix
+- The Countdown Is at One
+- The Emperor of Palamecia
+- The First Doctor
+- The Karfell Rocker
+- The Karst, Enchanted
+- The Last Ronin
+- The Prima Vista
+- The River Warlock
+- The Spot's Portal
+- The Tale of Tamiyo
+- The Wilds
+- Thermokarst
+- Thickest in the Thicket
+- Thijarian Witness
+- Thing Swing
+- Thirsting Axe
+- Titan Hunter
+- Titan's Presence
+- Tithe
+- Tomb of Urami
+- Torch the Witness
+- Town Greeter
+- Training Drone
+- Tribal Golem
+- Triumph of Cruelty
+- Triumph of Ferocity
+- Tsabo's Assassin
+- Tunnel Ignus
+- Twinning Glass
+- Typhoid Mary, Fractured
+- Ulamog's Despoiler
+- Ultra Magnus, Armored Carrier
+- Ultros, Obnoxious Octopus
+- Undercellar Sweep
+- Underdog Racer
+- Undersimplify
+- Unified Strike
+- Unified Will
+- Unnatural Summons
+- Unswerving Sloth
+- Unyaro
+- Urborg Stalker
+- Urza's Miter
+- Uthros Psionicist
+- Vadrik, Astral Archmage
+- Valakut Exploration
+- Vampire Scrivener
+- Vampire Socialite
+- Vantress Paladin
+- Venom's Hunger
+- Venom, Eddie Brock
+- Verity Circle
+- Vessel of the All-Consuming
+- Vesuvan Drifter
+- Veteran Bodyguard
+- Visage of Bolas
+- Vision, Synthezoid Avenger
+- Visions of Beyond
+- Visions of Villainy
+- Viv Vision, Teen Synthezoid
+- Vivisection Evangelist
+- Vogar, Necropolis Tyrant
+- Void Mirror
+- Volrath's Curse
+- Voracious Bibliophile
+- Voracious Tome-Skimmer
+- Vulpine Harvester
+- Wakka, Devoted Guardian
+- Wall of Caltrops
+- Wall of Reverence
+- Wall of Shadows
+- Warchanter Skald
+- Wardens of the Cycle
+- Wave of Rats
+- Well Done
+- Well-Laid Plans
+- Werewolf Pack Leader
+- Whiplash, Vengeful Engineer
+- White Glove Gourmand
+- White Plume Adventurer
+- Wild Dogs
+- Wild Pair
+- Wild Slash
+- Wilhelt, the Rotcleaver
+- Winnow
+- Wirecat
+- Wisecrack
+- Wonderscape Sage
+- Worldsoul's Rage
+- Wretched Banquet
+- Wumpus Aberration
+- Yavimaya Bloomsage
+- Yennett, Cryptic Sovereign
+- Zealots en-Dal
+- Zimone's Homework
+
+</details>
+
+### 3. Anaphor bound to wrong referent  (404 cards)
+
+**Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k).
+
+**Fix hint.** oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring
+
+<details><summary>Cards</summary>
+
+- A-Kargan Intimidator
+- A-Minsc & Boo, Timeless Heroes
+- A-Precipitous Drop
+- Accursed Witch
+- Acererak the Archlich
+- Acidic Dagger
+- Adarkar Valkyrie
+- Aegis of the Legion
+- Agonizing Remorse
+- Aisling Leprechaun
+- Akroan Conscriptor
+- Anvil of Bogardan
+- Aquatic Ingress
+- Archelos, Lagoon Mystic
+- Archery Training
+- Archfiend of Depravity
+- Ardbert, Warrior of Darkness
+- Arena
+- Arena of Glory
+- Ashling, the Extinguisher
+- Assassin Gauntlet
+- Assert Perfection
+- Astarion's Thirst
+- Bane of Bala Ged
+- Barbed Shocker
+- Battle Cry
+- Beastie Beatdown
+- Berserk
+- Biting-Palm Ninja
+- Black Bolt, Inhuman King
+- Blast of Genius
+- Blastfire Bolt
+- Blinding Beam
+- Blizzard Specter
+- Bloodcrazed Hoplite
+- Bloodscent
+- Blot Out
+- Boggart Harbinger
+- Bone Mask
+- Bothersome Quasit
+- Bounty Board
+- Braids's Frightful Return
+- Braids, Arisen Nightmare
+- Brain Maggot
+- Brainstealer Dragon
+- Breaking of the Fellowship
+- Bring the Ending
+- Bronze Bombshell
+- Brudiclad, Telchor Engineer
+- Burn Away
+- Call of the Death-Dweller
+- Captain Ripley Vance
+- Celeborn the Wise
+- Cemetery Gatekeeper
+- Cemetery Protector
+- Chandra's Firemaw
+- Chandra's Incinerator
+- Chaos Warp
+- Chaotic Backlash
+- Citadel Siege
+- Citadel of Pain
+- Clamavus
+- Cleaving Reaper
+- Colossal Collision
+- Cranial Extraction
+- Crown of Awe
+- Crown of Fury
+- Cruel Deceiver
+- Crusher Zendikon
+- Curse of Bloodletting
+- Curse of Exhaustion
+- Curse of Unbinding
+- Curse of the Pierced Heart
+- Cursed Rack
+- Cylian Sunsinger
+- Dalkovan Outrider
+- Dazzling Reflection
+- Dead Reckoning
+- Deadly Dancer
+- Debt to the Kami
+- Decree of Silence
+- Defang
+- Defensive Maneuvers
+- Dennick, Pious Apprentice
+- Dense Foliage
+- Desperate Gambit
+- Desperate Research
+- Detainment Spell
+- Diminished Returner
+- Discover the Formula
+- Disorienting Choice
+- Divine Deflection
+- Divine Light
+- Djeru, With Eyes Open
+- Doomfall
+- Dragon Turtle
+- Dragonback Assault
+- Driftgloom Coyote
+- Dual-Sun Technique
+- Eagle of Deliverance
+- Ebony Horse
+- Efflorescence
+- Eidolon of Astral Winds
+- Elder Cathar
+- Elspeth's Devotee
+- Elspeth, Undaunted Hero
+- Elvish Vatkeeper
+- Endless Horizons
+- Energy Arc
+- Eutropia the Twice-Favored
+- Evelyn, the Covetous
+- Evy, Fang Keeper
+- Eye for an Eye
+- Face of Divinity
+- Fanged Flames
+- Farsight Mask
+- Fearless Fledgling
+- Feint
+- Felling Blow
+- Felothar the Steadfast
+- Fighting Chance
+- Fires of Mount Doom
+- Flay Essence
+- Fleeting Flight
+- Formless Nurturing
+- Foxfire
+- Fragment Reality
+- Framed!
+- Freyalise, Skyshroud Partisan
+- Galvanic Discharge
+- Galvanize
+- Garland, Royal Kidnapper
+- Generator Servant
+- Ghazbán Ogress
+- Gix's Command
+- Global Ruin
+- Glyph of Destruction
+- Goblin Barrage
+- Goblin Welder
+- Godsend
+- Gomazoa
+- Grappling Kraken
+- Grasping Tentacles
+- Great Oak Guardian
+- Grenzo, Havoc Raiser
+- Grim Reaper, Lethal Legionnaire
+- Groom's Finery
+- Ground Seal
+- Grub, Notorious Auntie
+- Gryff's Boon
+- Guard Dogs
+- Guardian Beast
+- Haakon, Stromgald Scourge Avatar
+- Hall of Mirrors
+- Hallowed Moonlight
+- Harnessed Lightning
+- Heartless Hidetsugu
+- Heat Wave
+- Heavy Mattock
+- Heliod's Punishment
+- Hex, Kellan's Companion
+- Hit
+- Homesickness
+- Hook Horror
+- Howl of the Horde
+- Illuna, Apex of Wishes
+- Illusory Gains
+- Iridescent Drake
+- Iridian Maelstrom
+- Jaded Response
+- Jetsam
+- Join Forces
+- Joint Assault
+- Jovial Evil
+- Judge Unworthy
+- Justice
+- Kamahl's Sledge
+- Kappa Cannoneer
+- Karazikar, the Eye Tyrant
+- Karlach, Fury of Avernus
+- Karn, Scion of Urza
+- Karplusan Minotaur
+- Kefka, Court Mage
+- Keldon Overseer
+- Kibo, Uktabi Prince
+- Kirtar's Desire
+- Kitesail Skirmisher
+- Kitsune Bonesetter
+- Knight of Grace
+- Know Naught but Fire
+- Kor Scythemaster
+- Kresh the Bloodbraided
+- Krovikan Plague
+- Kroxa, Titan of Death's Hunger
+- Kusari-Gama
+- Laquatus's Champion
+- Latulla's Orders
+- Leaf-Leap Guide
+- Leap of Faith
+- Lich-Knights' Conquest
+- Lie in Wait
+- Light of Judgment
+- Light-Paws, Emperor's Voice
+- Lightning Surge
+- Littjara
+- Loafing Giant
+- Loki, God of Lies
+- Longstalk Brawl
+- Longtusk Stalker
+- Luminate Primordial
+- Magnanimous Magistrate
+- Mana Breach
+- Mana Web
+- Mark for Death
+- Maze of Ith
+- Maze of Shadows
+- Memory Worm
+- Mercy Killing
+- Mind Carver
+- Mind Spiral
+- Mindshrieker
+- Minn, Wily Illusionist
+- Mogg Bombers
+- Mogis, God of Slaughter
+- Moku, Meandering Drummer
+- Monkey Cage
+- Mothers Yamazaki
+- Murmurs from Beyond
+- Mutational Advantage
+- Mutiny
+- Naga Fleshcrafter
+- Nantuko Slicer
+- Neutralize the Guards
+- Nicol Bolas, Planeswalker
+- Nightmare Sower
+- Nihiloor
+- Nissa's Judgment
+- Niv-Mizzet, Supreme
+- No One Will Hear Your Cries
+- Norin the Wary
+- Numbing Dose
+- Ob Nixilis, Unshackled
+- Oblation
+- Oft-Nabbed Goat
+- Ondu Rising
+- Opal Gargoyle
+- Opal Titan
+- Orcish Captain
+- Order of the Alabaster Host
+- Ordruun Commando
+- Origin of Black Widow
+- Origin of Thor
+- Orthion, Hero of Lavabrink
+- Othelm, Sigardian Outcast
+- Overburden
+- Ovika, Enigma Goliath
+- Owlbear Cub
+- Pact Weapon
+- Pact of the Serpent
+- Panther Habit
+- Parapet Thrasher
+- Pay Tribute to Me
+- Petra Sphinx
+- Petty Larceny
+- Phila, Unsealed
+- Phyrexian Chimney Imp-DUP
+- Pinchy McStingbutt
+- Pollen Lullaby
+- Precipitous Drop
+- Price of Progress
+- Prison Sentence
+- Prison Term
+- Promise of Loyalty
+- Provoke the Trolls
+- Public Execution
+- Putrid Cyclops
+- Radiant Destiny
+- Raid Bombardment
+- Rally to Battle
+- Ratonhnhakéːton
+- Recurring Insight
+- Reincarnation
+- Restorative Technique
+- Retro-Mutation
+- Retromancer
+- Rhystic Shield
+- Rime Chill
+- Ripples of Potential
+- Rotating Fireplace
+- Rush the Room
+- Samite Censer-Bearer
+- Sanctifier en-Vec
+- Sanguine Savior
+- Savage Punch
+- Savage Summoning
+- Sawtooth Ogre
+- Scarlet Spider, Ben Reilly
+- Scorching Dragonfire
+- Scour the Desert
+- Scrabbling Skullcrab
+- Scroll of Isildur
+- Scrying Glass
+- Searing Blaze
+- Sewer Plague
+- Shadow Rider
+- Shaman en-Kor
+- Shaman of Forgotten Ways
+- Shrouded Serpent
+- Sidar Kondo of Jamuraa
+- Siege Dragon
+- Signature Spells
+- Silent Gravestone
+- Silent-Blade Oni
+- Silumgar, the Drifting Death
+- Sinner's Judgment
+- Siphon Insight
+- Sivvi's Ruse
+- Sky Swallower
+- Slab Hammer
+- Slimy Aquarium
+- Snaremaster Sprite
+- So Tiny
+- Solar Blaze
+- Soul Scourge
+- Soul Seizer
+- Spark of Creativity
+- Spawnbroker
+- Spectacular Showdown
+- Spectral Grasp
+- Spellbane Centaur
+- Spellbound Dragon
+- Spellshift
+- Spider-Bot
+- Spider-Man, Peter Parker
+- Spiked Pit Trap
+- Spirit Flare
+- Spirit of the Night
+- Stasis Cocoon
+- Sterling Grove
+- Storm Fleet Negotiator
+- Storm Herald
+- Storm, Force of Nature
+- Stormchaser Chimera
+- Strategic Betrayal
+- Strength of the Tajuru
+- Strider, Ranger of the North
+- Strixhaven Stadium
+- Stump Stomp
+- Stumpsquall Hydra
+- Sunspine Lynx
+- Super Intelligence
+- Teferi's Protection
+- Teleportal
+- Temur Battle Rage
+- Territorial Strike
+- The Ancient Dingus
+- The Crab Queen
+- The Dogronmaster
+- The Hive
+- Thelonite Druid
+- Thorin, Mountain-king
+- Thryx, the Sudden Storm
+- Toluz, Clever Conductor
+- Tomik, Wielder of Law
+- Tourach's Canticle
+- Tranquil Frillback
+- Treasure Map
+- Trial of Agony
+- Tribal Forcemage
+- Tribal Unity
+- Truth or Tale
+- Trygon Prime
+- Turn the Earth
+- Ultron, Artificial Malevolence
+- Undercover Skrull
+- Underworld Cerberus
+- Unfinished Business
+- Unforge
+- Unravel the Aether
+- Urza, Lord Protector
+- Vesuvan Mist
+- Vial Smasher the Fierce
+- Violent Urge
+- Visions of Dominance
+- Vivid Flying Fish
+- Vivien's Grizzly
+- Vivien's Invocation
+- Volatile Stormdrake
+- Voldaren Stinger
+- Wakandan Royal Guard
+- Wall of Vipers
+- Wandering Wolf
+- Warren Pilferers
+- Wei Assassins
+- Wheel and Deal
+- Wicked Slumber
+- Wildcall
+- Will of the Abzan
+- Willow Satyr
+- Winged Temple of Orazca
+- Wolf's Quarry
+- Zurgo Bellstriker
+- Zurgo, Thunder's Decree
+- Éowyn, Fearless Knight
+
+</details>
+
+### 4. Conjoined / chained second effect clause dropped  (387 cards)
+
+**Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
+
+**Fix hint.** oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain
+
+<details><summary>Cards</summary>
+
+- Absorb Energy
+- Advanced Floral Invocations
+- Agrus Kos, Wojek Veteran
+- Akawalli, the Seething Tower
+- Akroma, Angel of Wrath Avatar
+- Alien Symbiosis
+- All Shall Smolder in My Wake
+- Ambitious Augmenter
+- Amnesia
+- An-Havva Inn
+- Anavolver
+- Angel of Destiny
+- Armament of Nyx
+- Auxiliary Boosters
+- Azor's Gateway
+- Baba Lysaga, Night Witch
+- Bag Check
+- Barbed Servitor
+- Barreling Attack
+- Become the Pilot
+- Benalish Partisan
+- Bestial Menace
+- Bile Blight
+- Blood Sun
+- Brass Herald
+- Call Up Emrakul to Help
+- Captain America, Team Leader
+- Careful Consideration
+- Ceta Sanctuary
+- Chains of Mephistopheles
+- Chance for Glory
+- Chaos Mutation
+- Choco, Seeker of Paradise
+- Choose Your Demise
+- Circle of Power
+- Clandestine Meddler
+- Clockwork Fox
+- Code of Constraint
+- Codecracker Hound
+- Commence the Endgame
+- Conductive Current
+- Conundrum Sphinx
+- Convenient Target
+- Corpse Appraiser
+- Corruption of Towashi
+- Cosmic Horror
+- Covenant of Minds
+- Crabomination
+- Crosis, the Purger
+- Cry of the Carnarium
+- Cunning Nightbonder
+- Cuombajj Witches
+- Dakkon Blackblade Avatar
+- Dark Salvation
+- Dawnglow Infusion
+- Dazzling Sphinx
+- Deal Broker
+- Death to Our Enemies
+- Death-Mask Duplicant
+- Deathrender
+- Decimator Beetle
+- Dimir Keyrune
+- Disorder
+- Divine Purge
+- Dominating Licid
+- Doors of Durin
+- Double Stroke
+- Dragonbroods' Relic
+- Dread Tiller
+- Dreadhorde Invasion
+- Druidic Ritual
+- Dusk's Landing
+- Earthbind
+- Eaten by Spiders
+- Educated Detective
+- Eerie Interference
+- Efreet Flamepainter
+- Elderscale Wurm
+- Elenda, Saint of Dusk
+- Ellie, Vengeful Hunter
+- Enchanted Being
+- Encircling Fissure
+- Energy Field
+- Energy Storm
+- Errantry
+- Escaped Shapeshifter
+- Essence Vortex
+- Eternal Flame
+- Ethereal Grasp
+- Exocrine
+- Expedition Lookout
+- Experimental Frenzy
+- Explosion of Riches
+- Fae Offering
+- Faerie Squadron
+- Fear, Fire, Foes!
+- Fearless Swashbuckler
+- Feast of Dreams
+- Feast of the Victorious Dead
+- Field-Tested Frying Pan
+- Filigree Vector
+- Firemind's Foresight
+- First Family
+- Flame Wave
+- Foggy Swamp Spirit Keeper
+- Forge of Heroes
+- Fossil Find
+- Friendly Rivalry
+- Fungal Shambler
+- Gandalf of the Secret Fire
+- Garruk, Caller of Beasts
+- Gliding Licid
+- Glimpse of Tomorrow
+- Goblin Machinist
+- Goblin Ringleader
+- Goblin Swine-Rider
+- Goldmane Griffin
+- Grand Abolisher
+- Grave Defiler
+- Great Fang Chroniclers
+- Grim Captain's Call
+- Grim Contest
+- Grip of Phyresis
+- Gruesome Menagerie
+- Guardian Zendikon
+- Guildpact Greenwalker
+- Hail Storm
+- Haldir, Lórien Lieutenant
+- Hand to Hand
+- Harmonious Emergence
+- Heart of Bogardan
+- Heart-Shaped Herb
+- Helm of Obedience
+- Herald's Reveille
+- Hide in Plain Sight
+- Horizon Boughs
+- Hunter's Bow
+- Ignition Team
+- Ignorant Bliss
+- Illusionist's Gambit
+- Immard, the Stormcleaver
+- Immovable Rod
+- Impulsivity
+- Incriminating Impetus
+- Infernal Kirin
+- Inferno of the Star Mounts
+- Invasive Maneuvers
+- Invoke Despair
+- Invoke Justice
+- Izzet Staticaster
+- Jet's Brainwashing
+- Jetfire, Air Guardian
+- Jetmir's Fixer
+- Judgment Bolt
+- Kaervek's Hex
+- Katabatic Winds
+- Kavu Howler
+- Kavu Titan
+- Keeper of Tresserhorn
+- Kheru Spellsnatcher
+- Killer
+- Kor Blademaster
+- Kor Castigator
+- Krovikan Vampire
+- Land Equilibrium
+- Larval Scoutlander
+- Lavalanche
+- Lich Lord of Unx
+- Life and Limb
+- Lightning Runner
+- Lignify
+- Lim-Dûl's Paladin
+- Liquid Fire
+- Llanowar Greenwidow
+- Lona, Tracker of the Known
+- Lynde, Cheerful Tormentor
+- Magmaquake
+- Magmasaur
+- March from Velis Vel
+- Marcus, Mutant Mayor
+- Mardu Siegebreaker
+- Margle, Cousin of Yargle
+- Mascot Exhibition
+- Memory Jar
+- Mercadian Atlas
+- Midnight Crusader Shuttle
+- Midnight Oil
+- Mind Extraction
+- Mindculling
+- Minimus Containment
+- Minion of Leshrac
+- Mishra's War Machine
+- Molten Firebird
+- Monastery Raid
+- Mornsong Aria
+- My Followers Ascend
+- My Tendrils Run Deep
+- My Wealth Will Bury You
+- Myrel, Shield of Argive
+- Need for Speed (Not the Odyssey One)
+- Neurok Transmuter
+- Next of Kin
+- Nick Fury, Spymaster
+- Nightcreep
+- Nim Deathmantle
+- Nissa's Zendikon
+- Noggin Whack
+- Noggle the Mind
+- North Pole Research Base
+- Oasis of Renewal
+- Offender at Large
+- Old Way Phyrexian
+- Ominous Traveler
+- Onakke Catacomb
+- One Last Job
+- Opportunistic Dragon
+- Oreskos Explorer
+- Origin of Captain America
+- Orim's Thunder
+- Orzhov Euthanist
+- Orzhov Pontiff
+- Osseous Sticktwister
+- Outfitted Jouster
+- Painful Bond
+- Perennation
+- Perplex
+- Persecute
+- Persecute Artist
+- Phantasmal Form
+- Plague Spores
+- Predators' Hour
+- Quest Compleated Beast
+- Questing Cosplayer
+- Rag Man
+- Rakdos, Lord of Riots
+- Rampaging Geoderm
+- Rankle, Pitiless Trickster
+- Ravager of the Fells
+- Release
+- Relive the Past
+- Remorseless Punishment
+- Reno and Rude
+- Repulsive Mutation
+- Requiem Monolith-draw-loselife
+- Rescuer Sphinx
+- Restoration Specialist
+- Retrieve
+- Revealing Wind
+- Reveka, Wizard Savant
+- Reweave
+- Rhystic Cave
+- Rhystic Scrying
+- Rimewall Protector
+- Rip to Pieces
+- Riptide Chronologist
+- Riptide Replicator
+- Rise from the Wreck
+- Roalesk, Apex Hybrid
+- Rock Jockey
+- Rookie Mistake
+- Rootwater Shaman
+- Rothga, Bonded Engulfer
+- Rout
+- Rufus Shinra
+- Rune-Brand Juggler
+- Ryan Sinclair
+- Rysorian Badger
+- Safana, Calimport Cutthroat
+- Saheeli, Sublime Artificer
+- Sanguine Brushstroke
+- Saproling Symbiosis
+- Savvy Trader
+- Scourglass
+- Scriv, the Obligator
+- Seismic Wave
+- Sensational Spider-Man
+- Serendib Djinn
+- Serpent of the Pass
+- Serra Bestiary
+- Sewers of Estark
+- Shadowmoor Draw Spell
+- Shapeshifter's Marrow
+- Shard Convergence
+- Shatter Assumptions
+- Shay Cormac
+- Shreds of Sanity
+- Sidequest: Play Blitzball
+- Sightless Brawler
+- Signal the Clans
+- Signaling Roar
+- Silver-Inlaid Dagger
+- Singularity Rupture
+- Sinister Strength
+- Skeletal Swarming
+- Slash the Ranks
+- Slinn Voda, the Rising Deep
+- Soldevi Adnate
+- Somberwald Beastmaster
+- Song of Totentanz
+- Soul Ransom
+- Soul of Shandalar
+- Soul-Scar Mage
+- Souls of the Faultless
+- Spark Rupture
+- Sparksmith
+- Spell Suck
+- Spelunking
+- Sphinx of Foresight
+- Spirit Water Revival
+- Splinter, Aging Champion
+- Spry and Mighty
+- Spy Network
+- Spyglass Siren
+- Stalactite Dagger
+- Starting Town NPC
+- Static Orb
+- Steel Seraph
+- Steer Clear
+- Stern Mentor
+- Stone-Tongue Basilisk
+- Stonewright
+- Storage Matrix
+- Storm of Souls
+- Storm, Windrider
+- Street Savvy
+- Struggle for Sanity
+- Stubborn Burrowfiend
+- Stunning Reversal
+- Teachings of the Archaics
+- Tenza, Godo's Maul
+- Thassa's Intervention
+- That's Rough Buddy
+- The Destined Thief
+- The Parting of the Ways
+- The Windy City
+- Thorna and Twigtooth
+- Thought Gorger
+- Thoughtcutter Agent
+- Throw from the Saddle
+- Thunderfoot Baloth
+- Tidus, Yuna's Guardian
+- Tilonalli's Summoner
+- Timely Ward
+- Tinybones, the Pickpocket
+- Toddler's Rage
+- Tomb of Horrors Adventurer
+- Tragic Lesson
+- Traitor's Clutch
+- Transcendent Dragon
+- Trapfinder's Trick
+- Tricky Mage
+- Tropical Storm
+- Trostani's Summoner
+- Tsabo's Decree
+- Turncoat Kunoichi
+- Turtles in Time
+- Unclaimed Blessing
+- Unclaimed Cat
+- Undead Alchemist
+- Underbridge Warlock
+- Undercover Operative
+- Undergrowth
+- Unnatural Aggression
+- Unstable Experiment
+- Urdnan, Dromoka Warrior
+- Urza's Rage
+- Vayne's Treachery
+- Vazi, Keen Negotiator
+- Verdant Rebirth
+- Waylay
+- Whelming Wave
+- Which of You Burns Brightest?
+- Widespread Brutality
+- Wild Magic Surge
+- Woodcaller Automaton
+- Woolly Razorback
+- Wrath of Oko
+- Xantcha, Sleeper Agent
+- Xathrid Gorgon
+- Xu-Ifit, Osteoharmonist
+- Yarus, Roar of the Old Gods
+- Yasova Dragonclaw
+- Zariel, Archduke of Avernus
+- Zealot's Conviction
+- Zealous Persecution
+- Zuko, Conflicted
+- Éowyn, Lady of Rohan
+
+</details>
+
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (333 cards)
+
+**Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
+
+**Fix hint.** oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field
+
+<details><summary>Cards</summary>
+
+- A-Earthquake Dragon
+- A-Thornmantle Striker
+- Abandon Hope
+- Abuelo's Awakening
+- Aegis Sculptor
+- Agatha of the Vile Cauldron
+- Agrus Kos, Eternal Soldier
+- Aim for the Head
+- Ajani's Presence
+- Alabaster Potion
+- Algorithmic Ferocity
+- Alien Invasion
+- Alisaie Leveilleur
+- Altered Ego
+- Amber Gristle O'Maul
+- Ambitious Dragonborn
+- Animal Friend
+- Anowon, the Ruin Thief
+- Anya, Merciless Angel
+- Apothecary White
+- April O'Neil, Hacktivist
+- Arjun, the Shifting Flame
+- Ascendant Acolyte
+- Astonishing Spider-Man
+- Astral Confrontation
+- Auspicious Starrix
+- Autograph Book
+- Avatar Destiny
+- Awesome Presence
+- B-I-N-G-O
+- Behemoth of Vault 0
+- Biomantic Mastery
+- Birth of the Imperium
+- Black Hole
+- Blackmail
+- Blademane Baku
+- Blaster Hulk
+- Blitzball Stadium
+- Bloodsoaked Insight
+- Blue, Loyal Raptor
+- Bone Harvest
+- Boreas Charger
+- Bound
+- Bounding Felidar
+- Cabal Conditioning
+- Caller of the Claw
+- Captain Vargus Wrath
+- Case of the Gateway Express
+- Catacomb Dragon
+- Celestial Kirin
+- Cemetery Desecrator
+- Cerebral Download
+- Chandra, Legacy of Fire
+- Chaos Balor
+- Chatzuk, Mighty Guitarist
+- Cheap Ass
+- Choice of Damnations
+- City of Ass
+- Cloud, Ex-SOLDIER
+- Cloudsculpt Armorer
+- Coerced Confession
+- Cogwork Grinder
+- Colorless Ultimatum
+- Commander's Insight
+- Concert Kaboomist
+- Conflagrate
+- Consuming Tide
+- Contagion Dispenser
+- Covetous Elegy
+- Dead Man's Chest
+- Descendant of Masumaro
+- Devoted Mardu
+- Devouring Greed
+- Diligent Zookeeper
+- Discordant Dirge
+- Discordant Spirit
+- Disemvowel
+- Disrupting Shoal
+- Draco
+- Draconic Debut
+- Drafna's Restoration
+- Dragonhawk, Fate's Tempest
+- Dragonscale General
+- Drakuseth, Maw of Flames
+- Dramatist's Puppet
+- Duskana, the Rage Mother
+- Dust Elemental
+- Ellywick Tumblestrum
+- Embodiment of Agonies
+- Emergent Sequence
+- Enshrined Memories
+- Eris, Roar of the Storm
+- Errant Minion
+- Essence Sliver
+- Extortion
+- Extract Power
+- Fanatic of Rhonas (multiplier)
+- Fated Firepower
+- Festival of the Guildpact
+- Fireball
+- Fists of Flame
+- Flamewar, Streetwise Operative
+- Font of Magic
+- Footbottom Feast
+- Frankenstein's Monster
+- Fumiko the Lowblood
+- Furious Reprisal
+- Furious Spinesplitter
+- G'raha Tia, Scion Reborn
+- Gadrak, the Crown-Scourge
+- Garbage Elemental
+- Gargantuan Leech
+- Genju of the Fields
+- Glamdring
+- Glint Raker
+- Gnoll War Band
+- Go-Shintai of Hidden Cruelty
+- Goblin Negotiation
+- Goldbug, Scrappy Scout
+- Golden Urn
+- Green Goblin, Revenant
+- Gremlin Mine
+- Guardian of the Gateless
+- Gus
+- HELIOS One
+- Halo Fountain
+- Hawkeye, Young Avenger
+- Hazel of the Rootbloom
+- Head Games
+- Hearth Elemental
+- Heartlash Cinder
+- Hell to Pay
+- Herald of Amity
+- Hex Parasite
+- Hinata, Dawn-Crowned
+- Hurkyl, Master Wizard
+- Huskburster Swarm
+- Hydradoodle
+- Ill-Gotten Gains
+- Illuminated Folio
+- Immortal Coil
+- Impose Hierarchy
+- Infantry Shield
+- Investigator's Journal
+- Invoke the Ancients
+- Jester's Mask
+- Jinxed Choker
+- Jirina Kudro
+- Journey to the Lost City
+- Kemba's Legion
+- Kianne, Dean of Substance
+- Killing Wave
+- Killmonger, Ruthless Usurper
+- Klaw, Sonic Subjugator
+- Knickknack Ouphe
+- Kodama of the Center Tree
+- Krav, the Unredeemed
+- Krumar Initiate
+- Last Stand
+- Legate Lanius, Caesar's Ace
+- Legolas, Master Archer
+- Licia, Sanguine Tribune
+- Loamcrafter Faun
+- Lodestone Bauble
+- Lonis, Cryptozoologist
+- Lonis, Genetics Expert
+- Lumbering Megasloth
+- Lunar Insight
+- Lupine Harbingers
+- Luxurious Locomotive
+- Lydia Frye
+- Machinist's Arsenal
+- Machinist's Dismissal
+- Maga, Traitor to Mortals
+- Managorger Phoenix
+- Marrow Chomper
+- Master Biomancer
+- Match the Odds
+- Meet and Greet "Sisay"
+- Michelangelo, On the Scene
+- Mind Funeral
+- Mindmoil
+- Mirko Vosk, Mind Drinker
+- Mistakes Were Made
+- Misty Knight, Hero for Hire
+- Moira Brown, Guide Author
+- Moraug, Fury of Akoum
+- Mutagen Connoisseur
+- Mutinous Massacre
+- Myr Battlesphere
+- Mysterio, Master of Illusion
+- Namor the Sub-Mariner
+- Nantuko Mentor
+- Naya Soulbeast
+- Nefarious Lich
+- Nelly Borca, Impulsive Accuser
+- Neoform
+- Neriv, Crackling Vanguard
+- Neverwinter Hydra
+- New Magic Game Plus
+- Nightmare Incursion
+- Nita, Forum Conciliator
+- Noctis, Prince of Lucis
+- Now You See Me . . .
+- Nyxathid
+- Officious Interrogation
+- Oona, Queen of the Fae
+- Outlaw Stitcher
+- Overencumbered
+- Pearl Lake Ancient
+- Perfect Intimidation
+- Perforator Crocodile
+- Phosphorescent Feast
+- Phyresis Outbreak
+- Phyrexian Chimney Imp
+- Phyrexian Harvester
+- Phyrexian Incubator
+- Pin Trading
+- Piper Wright, Publick Reporter
+- Planetary Annihilation
+- Polluted Cistern
+- Possibility Storm
+- Power Surge
+- Power Without Equal
+- Pride of the Clouds
+- Professor Onyx
+- Pulse of the Dross
+- Pyrokinesis
+- Quandrix Command
+- Radiant Lotus
+- Radiant, Archangel
+- Rampaging Ursaguana
+- Razia's Purification
+- Reaper's Scythe
+- Refurbished Familiar
+- Reinforcements
+- Render Inert
+- Rent Is Due
+- Repel Intruders
+- Requiem Monolith
+- Research
+- Reverse Polarity
+- Rickety Gazebo
+- Riku of Many Paths
+- Rise of the Dread Marn
+- Rite of Flame
+- Rith, the Awakener
+- River Heralds' Boon
+- Rowan's Grim Search
+- Rushed Rebirth
+- Ryan Sinclair
+- Sage of Hours
+- Sage's Reverie
+- Sarevok's Tome
+- Sasaya's Essence
+- Say Its Name
+- Search for Glory
+- Settle the Wreckage
+- Shadow of Mortality
+- Sheriff of Safe Passage
+- Show of Confidence
+- Sidisi, Regent of the Mire
+- Skanos Dragonheart
+- Skullmulcher
+- Sophina, Spearsage Deserter
+- Spectral Deluge
+- Spell Contortion
+- Spoils of the Vault
+- Springjack Shepherd
+- Squee's Revenge
+- Squirrel Squatters
+- Stabwhisker the Odious
+- Starlight Spectacular
+- Storm Entity
+- Storm of Forms
+- Strata Scythe
+- Strefan, Maurer Progenitor
+- Takeno, Samurai General
+- Taster of Wares
+- Teferi's Puzzle Box
+- Temper
+- Teysa, Opulent Oligarch
+- The Bear Force Pilot
+- The Crowd Goes Wild
+- The Final Days
+- The Horizon Seeker
+- The Judge of Height
+- The Key to the Vault
+- The Knight of Weeks
+- Thornmantle Striker
+- Thought Sponge
+- Thousand-Year Storm
+- Thrive
+- Time Stretch
+- Timecrafting
+- Tormented Thoughts
+- Treva, the Renewer
+- Ulasht, the Hate Seed
+- Umbris, Fear Manifest
+- Undead Sprinter
+- Unlucky Cabbage Merchant
+- Ursine Monstrosity
+- Urza's Mine
+- Urza's Power Plant
+- Urza's Tower
+- Uyo, Silent Prophet
+- Valakut Awakening
+- Valiant Changeling
+- Vengeful Archon
+- Vengeful Dreams
+- Vile Redeemer
+- Villainous Wealth
+- Vision Quest
+- Vitalizing Cascade
+- Vivien's Stampede
+- Voda Sea Scavenger
+- Voice of Many
+- Waking the Trolls
+- Warden of the Grove
+- Wasp, Shrinking Savior
+- Watcher in the Web
+- Wheel of Potential
+- Whispering Specter
+- Willowdusk, Essence Seer
+- Windfall
+- Wing Storm
+- Winter Soldier, Icy Assassin
+- Winter Soldier, Reborn Avenger
+- Winter, Misanthropic Guide
+- Wojek Investigator
+- Woodvine Elemental
+- Wreck Hunter
+- You've Been Caught Stealing
+
+</details>
+
+### 6. Disjunctive (or-list) collapsed to first branch  (248 cards)
+
+**Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
+
+**Fix hint.** oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches
+
+<details><summary>Cards</summary>
+
+- A-Brinebound Gift
+- A-Death-Priest of Myrkul
+- A-Nahiri, Heir of the Ancients
+- A-Radha, Coalition Warlord
+- A-Rockslide Sorcerer
+- A-Shipwreck Sifters
+- A-Umara Mystic
+- A-Zar Ojanen, Scion of Efrava
+- Aang and Katara
+- All Will Be One
+- Alpha Deathclaw
+- Ana Battlemage
+- Angel of Serenity
+- Angelic Intervention
+- Anje, Maid of Dishonor
+- Archangel of Wrath
+- Ashes of the Abhorrent
+- Ashling, Rimebound
+- Assembled Alphas
+- Aurelia's Vindicator
+- Axgard Armory
+- Balthor the Defiled
+- Banishing Slash
+- Battle of Frost and Fire
+- Bebop & Rocksteady
+- Benefaction of Rhonas
+- Bill Potts
+- Blood Reckoning
+- Break the Ice
+- Brinebound Gift
+- Brood of Cockroaches
+- Cabal Therapist
+- Cabal Therapy
+- Cairn Wanderer
+- Camato Scout
+- Campsite Cuisine
+- Case of the Pilfered Proof
+- Case of the Stashed Skeleton
+- Champions of the Shoal
+- Circle of Flame
+- Cloak and Dagger, Entwined
+- Coalborn Entity
+- Coalition Construct
+- Comeuppance
+- Cone of Flame
+- Convert to Slime
+- Corpse Explosion
+- Crashing Wave
+- Crop Sigil
+- Cryoshatter
+- Cryptic Pursuit
+- Culvert Ambusher
+- Cut Short
+- Dakkon, Shadow Slayer
+- Daretti, Ingenious Iconoclast
+- Dark Fortress
+- Dead-Iron Sledge
+- Deathgazer
+- Deathmark
+- Deeproot Wayfinder
+- Definitely Not a Turtle
+- Degavolver
+- Dire-Strain Anarchist
+- Donna Noble
+- Doom Reigns Supreme
+- Doomsday Excruciator
+- Doorman
+- Double Negative
+- Dragon-Kami's Egg
+- Dream Cache
+- Dreamspoiler Witches
+- Dromosaur
+- Dwarven Soldier
+- Eclipsed Steppe
+- Eivor, Wolf-Kissed
+- Elenda, Saint of Dusk
+- Elite Headhunter
+- Elsewhere Flask
+- Eluge, the Shoreless Sea
+- Embrace Oblivion
+- Essence Filter
+- Etched Slith
+- Exorcise
+- Firespout
+- Flailing Drake
+- Flameblade Angel
+- Fleetfoot Panther
+- Furnace Reins
+- Fury Charm
+- Gathering Place
+- Geralf, the Fleshwright
+- Ghostly Dancers
+- Giant Oyster
+- Gift of the Gargantuan
+- Gift of the Woods
+- Gitaxian Mindstinger
+- Glarb, Calamity's Augur
+- Gleaming Bastion
+- Glitch Ghost Surveyor
+- Glittering Massif
+- Godhunter Octopus
+- Golem Artisan
+- Greater Gargadon
+- Guru Pathik
+- Gut, True Soul Zealot
+- HYDRA Assault Robot
+- Hand of Vecna
+- Harsh Mentor
+- Hero of Bretagard
+- Hidetsugu and Kairi
+- Ironsoul Enforcer
+- Isperia, Supreme Judge
+- Jeska and Kamahl
+- Jhoira's Timebug
+- Jin-Gitaxias, Progress Tyrant
+- Jodah's Avenger
+- Jukai Trainee
+- Kaalia, Zenith Seeker
+- Kamahl's Druidic Vow
+- Kami of Mourning
+- Kastral, the Windcrested
+- Katara's Reversal
+- Kaya, Ghost Assassin
+- Kessig Forgemaster
+- Khod, Etlan Shiis Envoy
+- Kiora, Sovereign of the Deep
+- Lair Delve
+- Largepox
+- Leovold, Emissary of Trest
+- Leyline of Combustion
+- Lo and Li, Royal Advisors
+- Long Feng, Grand Secretariat
+- Lost in the Woods
+- Love on the Battlefield
+- Lucky Clover
+- Lucky the Pizza Dog
+- Lunar Rejection
+- Make Your Move
+- Malevolent Noble
+- Mary Read and Anne Bonny
+- Mechanized Warfare
+- Merieke Ri Berit
+- Michelangelo, Improviser
+- Mindsparker
+- Mister Immortal
+- Mold Folk
+- Mythos of Nethroi
+- Nahiri, the Harbinger
+- Nashi, Searcher in the Dark
+- Naturalize 2
+- Neerdiv, Devious Diver
+- Neyith of the Dire Hunt
+- Nicol Bolas, God-Pharaoh
+- Oglor, Devoted Assistant
+- Omen of Fire
+- One with the Multiverse
+- Ornery Goblin
+- Overgrown Pest
+- Overlord of the Balemurk
+- Paladin Danse, Steel Maverick
+- Palazzo Archers
+- Parnesse, the Subtle Brush
+- Pestilent Spirit
+- Planeswalker's Mischief
+- Price of Betrayal
+- Purphoros, Bronze-Blooded
+- Pursued by Something
+- Regent's Authority
+- Reign of Terror
+- Relic Amulet
+- Renowned Weaponsmith
+- Reptilian-...placeholder
+- Resilient Wanderer
+- Return the Favor
+- Rick Jones, Destined Sidekick
+- Riveteers Confluence
+- Rob the Hoard
+- Rock Basilisk
+- Sarah's Wings
+- Sarkhan the Masterless
+- Sauron, the Dark Lord
+- Savai Triome
+- Sawback Manticore
+- Scarlet Witch, Chaotic Avenger
+- Scarred Puma
+- Sea Troll
+- Search the Premises
+- Seifer, Balamb Rival
+- Shivan Sand-Mage
+- Shoreline Scout
+- Sidequest: Catch a Fish
+- Sivriss, Nightmare Speaker
+- Skophos Warleader
+- Skullport Merchant
+- Slaughter-Priest of Mogis
+- Sludge Titan
+- Sonar Strike
+- Songstitcher
+- Spider-Ham, Peter Porker
+- Spider-Sense
+- Spider-Suit
+- Sram, Senior Edificer
+- Tezzeret's Gatebreaker
+- The Archimandrite
+- The Biblioplex
+- The Ringhart Crest
+- The Ultimate Nightmare of Wizards of the Coast Customer Service
+- The Wanderer
+- The Western Cloud
+- Thornscape Battlemage
+- Thought Prison
+- Thraben Exorcism
+- Thrull Wizard
+- Thunderherd Migration
+- Thunderscape Battlemage
+- Thurid, Mare of Destiny
+- Tidal Control
+- Tiefling Outcasts
+- Timebender
+- Timecrafting
+- Tinfoil Helm
+- Track Down
+- Training Compound
+- Traveling Chocobo
+- Ultimate Spider-Man
+- Umara Mystic
+- Umara Wizard
+- Underground Sea
+- Urgent Necropsy
+- Valley Floodcaller
+- Vampire Gourmand
+- Vengeful Pharaoh
+- Venom
+- Venomous Dragonfly
+- Venser's Diffusion
+- Vodalian Mindsinger
+- Volatile Arsonist
+- War Falcon
+- Wash Out
+- Watery Grave
+- West Wind Avatar
+- Windrider Wizard
+- Wingnut, Bat on the Belfry
+- World War Hulk
+- Yawgmoth's Agenda
+- Yuna's Decision
+- Zask, Skittering Swarmlord
+- Ziatora's Envoy
+
+</details>
+
+### 7. Wrong / dropped zone parameters on zone-change effect  (211 cards)
+
+**Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
+
+**Fix hint.** game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle
+
+<details><summary>Cards</summary>
+
+- Aang's Journey
+- Acquisitions Expert
+- Agonizing Memories
+- Airbending Lesson
+- Alms
+- Altar of the Wretched
+- Amok
+- Amphibian Accident
+- Archmage's Newt
+- Archnemesis
+- Argivian Welcome
+- Armored Skyhunter
+- Arthur, Marigold Knight
+- Ashiok's Forerunner
+- Biotransference
+- Bloodbond March
+- Bone Dancer
+- Bringer of the Black Dawn
+- Burning-Rune Demon
+- Calibrated Blast
+- Canyon Drake
+- Captain Kirk, Boldly Going
+- Cathartic Operation
+- Celestus Sanctifier
+- Cherished Hatchling
+- Clay Revenant
+- Collected Conjuring
+- Cosmic Cube
+- Curse of Oblivion
+- Cybership
+- Darigaaz Reincarnated
+- Death Spark
+- Death in Heaven
+- Deepwood Denizen
+- Denying Wind
+- Descent into Madness
+- Desecrator Hag
+- Discover the Impossible
+- Domri's Nodorog
+- Dr. Julius Jumblemorph
+- Durable Coilbug
+- Dwarven Armory
+- Dwarven Strike Force
+- Echo of Eons
+- Elemental Teachings
+- Encroaching Mycosynth
+- Endless Detour
+- Enlistment Officer
+- Eon Frolicker
+- Erratic Explosion
+- Erratic Mutation
+- Estrid, the Masked
+- Every Hope Shall Vanish
+- Explore the Vastlands
+- Faerie Dragon
+- Faerie Snoop
+- Fell Shepherd
+- Flourishing Bloom-Kin
+- Follow the Lumarets
+- Fool's Demise
+- Foresight
+- Fortune Teller's Talent
+- Fortune's Favor
+- Frenetic Sliver
+- From Father to Son
+- Frontier Explorer
+- Gadget Technician
+- Gale, Waterdeep Prodigy
+- Galvanic Blast
+- Garna, the Bloodflame
+- Geist of Regret
+- Glimmer Seeker
+- Glimpse the Impossible
+- Goatnap
+- Goliath Daydreamer
+- Groffskithur
+- Gwenom, Remorseless
+- Harper Recruiter
+- Haunted Angel
+- Hazardroot Herbalist
+- Hedron Alignment
+- Hellkite Courser
+- Hildibrand Manderville
+- Hinder
+- Holy Avenger
+- Hurkyl's Recall
+- Hypnox
+- Ichor Aberration
+- Ink-Eyes, Servant of Oni
+- Invasion of Alara
+- Izzet Chemister
+- Jace's Mindseeker
+- Jace's Ruse
+- Jester's Cap
+- Jester's Mask
+- Jhoira of the Ghitu Avatar
+- Journey for the Elixir
+- Jungle Wayfinder
+- Kaho, Minamo Historian
+- Ketramose, the New Dawn
+- Ketria
+- Klement, Knowledge Acolyte
+- Krovikan Horror
+- Leonin Squire
+- Loxodon Peacekeeper
+- Magmatic Hellkite
+- March of the Returned
+- Memnarchitect
+- Merchant of Many Hats
+- Merfolk Wayfinder
+- Mikey & Don, Party Planners
+- Mission Briefing
+- Moment of Truth
+- Moonlight Bargain
+- Moonring Mirror
+- Mosswood Dreadknight
+- Munda, Ambush Leader
+- Muse Vortex
+- Nael, Avizoa Aeronaut
+- Nahiri, the Lithomancer
+- Nascent Metamorph
+- Nature's Kiss
+- Necratog
+- Nether Shadow
+- Nether Spirit
+- New Argive
+- Nine-Fingers Keene [n/a]
+- Nissa's Pilgrimage
+- Oglor, Devoted Assistant
+- Opal Palace
+- Peregrination
+- Perish the Thought
+- Plague Rats
+- Planar Genesis
+- Plow Under
+- Praetorhoof Behemoth
+- Preferred Selection
+- Prismatic Undercurrents
+- Purging Scythe
+- Radagast the Brown
+- Ransack
+- Realms Uncharted
+- Reins of the Vinesteed
+- Reset
+- Resurgence
+- Rise and Shine
+- River Song's Diary
+- Rohirrim Chargers
+- Rory Williams
+- Saheeli's Directive
+- Scaled Destruction
+- Scheming Symmetry
+- Scholar of New Horizons
+- Season of the Witch
+- Seek Thrills
+- Selective Memory
+- Shigeki, Jukai Visionary
+- Shove Aside
+- Silver Scrutiny
+- Skywarp Skaab
+- Slithering Cryptid
+- Sol'Kanar the Tainted
+- Sound the Call
+- Spider Climb
+- Spirited Simulacrum
+- Squee, the Immortal
+- Starfall
+- Stormkeld Curator
+- Stormscape Battlemage
+- Street Urchin
+- Stronghold Arena
+- Taskmaster, Mercenary Mimic
+- Teacher's Pet
+- Telling Time
+- Terraformer
+- The Blue Spirit
+- The Five Doctors
+- The Moonbase
+- The Spot, Living Portal
+- Thought Dissector
+- Threats Undetected
+- Tidal Courier
+- Titania's Song
+- Trash Bin
+- Trepanation Blade
+- Triplicate Titan
+- Truga Jungle
+- Turntimber Symbiosis
+- Turtle Tracks
+- Ultron the Annihilator
+- Ultron's Auxiliary
+- Vampire Charmseeker
+- Varragoth, Bloodsky Sire
+- Vault 101: Birthday Party
+- Vaultborn Tyrant
+- Verdant Crescendo
+- Verdant Mastery
+- Verdant Rejuvenation
+- Viewpoint Synchronization
+- Vigor Mortis
+- Vivify
+- Void
+- Volcanic Vision
+- Vona's Hunger
+- Wake to Slaughter
+- Wall of Fortune
+- War of the Spark
+- Weird Harvest
+- Wish
+- Witness the End
+- Witness the Future
+
+</details>
+
+### 8. Additional / alternative casting cost dropped  (210 cards)
+
+**Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
+
+**Fix hint.** oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost
+
+<details><summary>Cards</summary>
+
+- A-Cobbled Lancer
+- A-Splitting the Powerstone
+- Abhorrent Oculus
+- Abjure
+- Abolish
+- Acceptable Losses
+- Allosaurus Rider
+- Allure of Power
+- Altar of Bone
+- Archive Trap
+- Arctic Merfolk
+- Artillerize
+- Auntie Ool, Cursewretch
+- Balduvian Horde
+- Baleful Mastery
+- Bankrupt in Blood
+- Barbarian Bully
+- Baron Helmut Zemo
+- Big Score
+- Bitter Triumph
+- Blazing Shoal
+- Blood Divination
+- Bog Down
+- Bullseye, Death Dealer
+- Calciform Pools
+- Carrion
+- Cathartic Reunion
+- Caustic Exhale
+- Champion of the Clachan
+- Chill Haunting
+- Chocobo Kick
+- Chthonian Nightmare
+- Cobbled Lancer
+- Collateral Damage
+- Crash
+- Crop Rotation
+- Cruel Feeding
+- Culling the Weak
+- Dark Triumph
+- Daze
+- Demand Answers
+- Deprive
+- Devour in Flames
+- Diabolic Intent
+- Disappearing Act
+- Disruption Protocol
+- Draconian Cylix
+- Eliminate the Competition
+- Emberwilde Djinn
+- Ensnare
+- Erase (Not the Urza's Legacy One)
+- Erosion
+- Eumidian Lifeseed
+- Eviscerator's Insight
+- Falco Spara, Pactweaver
+- Familiar's Ruse
+- Fieldmist Borderpost
+- Fiery Conclusion
+- Final Flare
+- Final Payment
+- Final Strike
+- Final Vengeance
+- Fireblast
+- Firestorm
+- Flawless Maneuver
+- Fling
+- Fodder Launch
+- Force of Vigor
+- Gaze of Justice
+- Ghitu Fire
+- Gush
+- Hama, the Bloodbender
+- Harrow
+- Hatred
+- Headless Skaab
+- Heartfire
+- Hollow Warrior
+- Honor the God-Pharaoh
+- Horobi's Whisper
+- Hundred-Talon Strike
+- Immoral Bargain
+- Improvised Club
+- Incendiary Sabotage
+- Induce Despair
+- Infernal Harvest
+- Infernal Plunge
+- Into the Pit
+- Jadzi, Oracle of Arcavios
+- Jandor's Ring
+- Jar of Eyeballs
+- Kaervek's Spite
+- Kazuul's Fury
+- Kentaro, the Smiling Cat
+- Kinsbaile Aspirant
+- Kuldotha Rebirth
+- Kylox's Voltstrider
+- Labro Bot
+- Lash of the Balrog
+- Lashknife
+- Laughing Mad
+- Launch Party
+- Lavaball Trap
+- Living Destiny
+- Louisoix's Sacrifice
+- Lunar Hatchling
+- Lys Alana Dignitary
+- Maestros Ascendancy
+- Magma Burst
+- Magma Rift
+- Magmatic Insight
+- Mask of the Mimic
+- Massacre
+- Me, the Immortal
+- Merciless Resolve
+- Meteor Storm
+- Mindbreak Trap
+- Mine Collapse
+- Minion Missile
+- Misdirection
+- Mistvein Borderpost
+- Molten Exhale
+- Mudbutton Cursetosser
+- Mundungu
+- Mutual Destruction
+- Mystical Tether
+- Nahiri's Sacrifice
+- Natural Order
+- Necrologia
+- Necrotic Fumes
+- Night Soil
+- Nourishing Shoal
+- Obscuring Haze
+- Orim's Cure
+- Outbreak
+- Patrician's Scorn
+- Phyrexian Purge
+- Plumb the Forbidden
+- Plunderer's Prize
+- Powerstone Fracture
+- Processor Assault
+- Pulverize
+- Pumpkin Bombardment
+- Quarrel's End
+- Ramosian Rally
+- Ravenous Trap
+- Raze
+- Reiterating Bolt
+- Relentless Skaabs
+- Renewal
+- Reshape
+- Restless Dreams
+- Reverent Mantra
+- Ricochet Trap
+- Ritual of the Machine
+- Rouse
+- Rune Snag
+- Ruthless Disposal
+- Sacrifice
+- Salvage Titan
+- Savage Order
+- Scapegoat
+- Scarscale Ritual
+- Scorched Earth
+- Seize the Spoils
+- Sephara, Sky's Blade
+- Shared Discovery
+- Shining Shoal placeholder
+- Sivvi's Valor
+- Skaab Ruinator
+- Skeletal Scrying
+- Slumbering Dragon
+- Snuff Out
+- Sonic Burst
+- Sonic Seizure
+- Spaghetti Junction
+- Spare Changeling
+- Sphinx of the Revelation
+- Tectonic Split
+- Tendrils of Despair
+- Territorial Aetherkite
+- Thrill of Possibility
+- Thunderclap
+- Thwart
+- Tidal Bore
+- Tinker
+- Titania, Rugged Rumbler
+- Torrent of Stone
+- Toxic Deluge
+- Trash for Treasure
+- Treacherous Greed
+- Unclaimed Battle Axe
+- Urza's Tome
+- Veil of Secrecy
+- Veinfire Borderpost
+- Velomachus Lorehold
+- Voltage Surge
+- Waste Away
+- Wastescape Battlemage
+- Waterbending Lesson
+- Weigh Down
+- Well of Lost Dreams
+- Whipgrass Entangler
+- Whiplash Trap
+- Wicked Reward
+- Wickerfolk Indomitable
+- Wild Unraveling
+- Winter, Cursed Rider
+- Withering Boon
+- Wolf of Devil's Breach
+- Zombie Assassin
+
+</details>
+
+### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (182 cards)
+
+**Signature.** Effect recipient / filter controller / chooser uses You/Controller where Opponent/TargetPlayer/ScopedPlayer/DefendingPlayer is required, or per-player fan-out is dropped.
+
+**Fix hint.** oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You
+
+<details><summary>Cards</summary>
+
+- A-Case the Joint
+- A-Fall of the Impostor
+- A-Nael, Avizoa Aeronaut
+- Abzan Kin-Guard
+- Abzan Runemark
+- Acidic Soil
+- Acorn Catapult
+- Aether Syphon
+- Aggravate
+- Aku Djinn
+- Alora, Cheerful Thief
+- Alpha Brawl
+- Ashiok, Sculptor of Fears
+- Ayesha Tanaka, Armorer
+- Azure Fleet Admiral
+- Barrensteppe Siege
+- Barroom Brawl
+- Behold the Power of Destruction
+- Black Cat, Cunning Thief
+- Brigid's Command
+- Butcher of Malakir
+- Cait, Cage Brawler
+- Can't Quite Recall
+- Case the Joint
+- Cloudsteel Kirin
+- Consume
+- Consumed by Greed
+- Corrosion
+- Crashing Boars
+- Craterous Stomp
+- Creeping Dread
+- Crow Scarer
+- Cruel Fate
+- Curator of Destinies
+- Dark Intimations
+- Deluxe Dragster
+- Demolition Field
+- Depressurize
+- Deputy of Detention
+- Deus of Calamity
+- Devastating Mastery
+- Diaochan, Artful Beauty
+- Dictate of Erebos
+- Din of the Fireherd
+- Domestication
+- Dong Zhou, the Tyrant
+- Drach'Nyen
+- Dragon's Eye Savants
+- Dread Rider
+- Dream Harvest
+- Dusk Mangler
+- Dwarven Lightsmith
+- Early Harvest
+- Early Winter
+- Earth-Cult Elemental
+- Echo Chamber
+- Elminster's Simulacrum
+- Ember Gale
+- Ensnared by the Mara
+- Epiphany at the Drownyard
+- Eradicator Valkyrie
+- Erithizon
+- Eumidian Wastewaker
+- Eunuchs' Intrigues
+- Evangelize
+- Even the Odds
+- Faerie Tauntings
+- Fateful Absence
+- Feed the Machine
+- Flames of the Raze-Boar
+- Flare of Malice
+- Gonti, Lord of Luxury
+- Happy Hogan, Bodyguard
+- Heartwood Storyteller
+- High Ground
+- Hired Giant
+- Hollow One
+- Howlpack Wolf
+- Htbr, Racetrack Referee
+- Hum of the Radix
+- Hungering Yeti
+- Hunted Nightmare
+- Hunter of Eyeblights
+- Imperial Edict
+- Impulsive Destruction
+- Incite Rebellion
+- Infernal Offering
+- Inferno of the Star Mounts
+- Intrude on the Mind
+- Inzerva, Master of Insights
+- Kitt Kanto, Mayhem Diva
+- Kogla, the Titan Ape
+- Kraven the Hunter
+- Leadership Vacuum
+- Legion's End
+- Lembas
+- Liliana's Indignation
+- Liliana's Triumph
+- Loaming Shaman
+- Lobelia, Defender of Bag End
+- Lord of Tresserhorn
+- Lozhan, Dragons' Legacy
+- Lyla, Holographic Assistant
+- May Civilization Collapse
+- Measure of Wickedness
+- Mercenaries
+- Mikey & Mona, Mutant Sitters
+- Mire in Misery
+- Misfortune
+- Momentum Breaker
+- Mortal Flesh Is Weak
+- Nicol Bolas, the Arisen
+- Parasitic Bond
+- Radiant Grace
+- Radiating Lightning
+- Rain of Daggers
+- Rakdos, Patron of Chaos
+- Rakdos, the Showstopper
+- Rakshasa Debaser
+- Rampaging Raptor
+- Ravenous Amulet
+- Regna's Sanction
+- Reservoir Kraken
+- Resistance Reunited
+- Riptide Gearhulk
+- Rishadan Footpad
+- Riveteers Charm
+- Rootweaver Druid
+- Rot-Tide Gargantua
+- Saheeli's Silverwing
+- Sakashima's Will
+- Savra, Queen of the Golgari
+- Saw
+- Scalelord Reckoner
+- Sculpted Sunburst
+- Sealed Fate
+- Seasons Past
+- Second Sight
+- Secret Rendezvous
+- Sentinel of the Eternal Watch
+- Song of Point Prime
+- Sothera, the Supervoid
+- Soul Shatter
+- Tataru Taru
+- Team Spirit
+- Tectonic Instability
+- Teferi, Temporal Pilgrim
+- Tempest Caller
+- Temporal Distortion
+- Tezzeret, Master of Metal
+- The Celestial Toymaker
+- The Fall of Kroog
+- The Fate of the Flammable
+- The Motherlode, Excavator
+- The Spear of Bashenga
+- Thieving Amalgam
+- Thieving Sprite
+- Thoughtpicker Witch
+- Thran Tome
+- Tolarian Contempt
+- Tomb Blade
+- Total War
+- Treacherous Terrain
+- Tribute to the Wild
+- Tsabo's Web
+- Typhoon
+- Unnatural Hunger
+- Urza's Armor
+- Valkmira, Protector's Shield
+- Varchild, Betrayer of Kjeldor
+- Veil of Birds
+- Vein Ripper
+- Veteran Warleader
+- Vhati il-Dal
+- Vicious Rumors
+- Villainous Wrath
+- Visions of Dread
+- Vohar, Vodalian Desecrator
+- Voracious Fell Beast
+- Walking Sponge
+- Wrong Turn
+- Yosei, the Morning Star
+
+</details>
+
+### 10. Trigger event/mode unrecognized → Unknown  (170 cards)
+
+**Signature.** TriggerMode parses as Unknown(text); the event/subject combinator (state-trigger, taps-for-mana, becomes-blocked, keyword-action, loyalty-activated, die-roll) doesn't recognize the phrasing so the trigger never fires.
+
+**Fix hint.** oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes
+
+<details><summary>Cards</summary>
+
+- A-Akki Ronin
+- A-Mishra, Excavation Prodigy
+- A-Urza, Powerstone Prodigy
+- A-Vampire Scrivener
+- Abomination, Irradiated Brute
+- Agent Maria Hill
+- Akki Ember-Keeper
+- Alaundo the Seer
+- Ambiguity
+- Athreos, Shroud-Veiled
+- Balthier and Fran
+- Baneclaw Marauder
+- Bess, Soul Nourisher
+- Black Panther, Vanguard
+- Bomb Squad
+- Bronze Horse (n/a)
+- C.A.M.P.
+- Cadric, Soul Kindler
+- Caged Sun
+- Captain America, Living Legend
+- Chandra's Regulator
+- Chatzuk, Mighty Guitarist (dup)
+- Chicken à la King
+- Circle of Affliction
+- Criminal Enterprise
+- Crimson Cowl, Master of Evil
+- Crown of Doom
+- Curse of Vengeance
+- Curse of Wizardry
+- Curse of the Restless Dead
+- Darigaaz's Whelp
+- Death Tyrant
+- Decorated Champion
+- Endangered Armodon
+- Endrek Sahr, Master Breeder
+- Engulfing Slagwurm
+- Erdwal Illuminator
+- Eriette, the Beguiler
+- Ertha Jo, Frontier Mentor
+- Evolved Spinoderm
+- Exalted Dragon
+- Fable of the Mirror-Breaker
+- Falko, Showoff Pilot
+- Favorable Destiny
+- Ferocity
+- Fire Giant's Fury
+- Firebender Ascension
+- Floodgate
+- Foul Emissary
+- Frie, Displaced in Time
+- Fumulus, the Infestation
+- Gahiji, Honored One
+- Garruk Relentless
+- Ghyrson Starn, Kelermorph
+- Glorious Purpose
+- Goblin Cadets
+- Gorilla War Cry
+- Grievous Wound
+- Hidden Predators
+- Hoarding Broodlord
+- Homarid
+- Honored Hierarch
+- Hooded Horror
+- Hundred-Battle Veteran
+- Immolation Shaman
+- Imprison
+- Ineffable Blessing
+- Inniaz, the Gale Force
+- Iron Monger, Sadistic Tycoon
+- Isleback Spawn
+- Kalamax, the Stormsire
+- Karmic Justice
+- Karn, Silver Golem
+- Kassandra, Eagle Bearer
+- Kishla Skimmer
+- Klaw, Master of Sound
+- Kothophed, Soul Hoarder
+- Kresh the Bloodbraided Avatar
+- Kutzil, Malamet Exemplar
+- Lady Octopus, Inspired Inventor
+- Last Laugh
+- Loki, God of Mischief
+- Loki, the Deceiver
+- Lurebound Scarecrow
+- Mana Max, Afterburner
+- Mangara's Equity
+- Marchesa's Decree
+- Marvel Boy, Noh-Varr
+- Mistmoon Griffin
+- Mob Mentality
+- Molten Lavamancer
+- Monoxa, Midway Manager
+- Ms. Marvel, Elastic Ally
+- Mul Daya Channelers
+- Multani's Presence
+- Narci, Fable Singer
+- Netherese Puzzle-Ward
+- Olivia, Crimson Bride
+- Oni-Cult Anvil
+- Orcish Mine
+- Oura, the Imitator
+- Pain Magnification
+- Paladin of Prahv
+- Party Dude
+- Pirated Copy
+- Powerleech
+- Psychic Possession
+- Psychogenic Probe
+- Pure Intentions
+- Reparations
+- Repeated Reverberation
+- Resolute Veggiesaur
+- Revenge of Ravens
+- Riddlekeeper
+- Righteous Indignation
+- Roots of Life
+- Rowan's Talent
+- Runescale Stormbrood
+- Samite Ministration
+- Scythe of the Wretched
+- Selfless Squire
+- Seraph
+- Shah of Naar Isle
+- Sharae of Numbing Depths
+- Siona, Captain of the Pyleas
+- Skewer Slinger
+- Skophos Maze-Warden
+- Spiritual Focus
+- Sproutback Trudge
+- Squall, SeeD Mercenary
+- Stika, Playtestress
+- Stilt-Man, Towering Terror
+- Strict Proctor
+- Tax Taker
+- Tenuous Truce
+- Thantis, the Warweaver
+- Thayan Evokers
+- The Collector
+- The Matrix of Time
+- The Red Terror
+- The Thing, Ben Grimm
+- The Watcher in the Water
+- Thoughtbound Primoc
+- Thoughtweft Imbuer
+- Touch of Moonglove
+- Trained Arynx
+- Treefolk Mystic
+- Trophy Hunter
+- Ultron, Unlimited
+- Unscythe, Killer of Kings
+- Unsettled Mariner
+- Uvilda, Dean of Perfection
+- Valor's Reach
+- Vampiric Embrace
+- Veiled Crocodile
+- Veiling Oddity
+- Vengeful Ancestor
+- Vexyr, Ich-Tekik's Heir
+- Virtual Assistant
+- Vizier of the Anointed
+- Volo, Guide to Monsters
+- Voltaic Visionary
+- War Historian
+- Warden of the Beyond
+- White Scarab
+- Widespread Panic
+- Windwright Mage
+- Wiretapping
+- Zidane, Tantalus Thief
+- Zone of Flame
+
+</details>
+
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (170 cards)
+
+**Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
+
+**Fix hint.** add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters
+
+<details><summary>Cards</summary>
+
+- Abandoned Sarcophagus
+- Aberrant Return
+- Advancing the Spirit
+- All Hallow's Eve
+- Anafenza, the Foremost
+- Animus of Predation
+- Anthem of Rakdos
+- Archon of Coronation
+- Arlinn, the Pack's Hope
+- Arm the Cathars
+- Armor of Thorns
+- Arwen, Mortal Queen
+- Assault Suit
+- Autumn's Veil
+- Avacyn's Judgment
+- Avacyn, Guardian Angel
+- Awe Strike
+- Azorius Ploy
+- Beamtown Beatstick
+- Benevolent Unicorn
+- Betrayal at the Vault
+- Bloatfly Swarm
+- Chains of Mephistopheles
+- Chameleon Blur
+- Channel Harm
+- Charm Peddler
+- Circle of Protection: Art
+- Circle of Protection: Artifacts
+- Circle of Protection: Black
+- Circle of Protection: Blue
+- Circle of Protection: Green
+- Circle of Protection: Red
+- Circle of Protection: Shadow
+- Circle of Protection: White
+- Coalition Victory
+- Consign to Dream
+- Containment Priest
+- Cosmic Intervention
+- Cult of the Waxing Moon
+- Cut the Tethers
+- Dearly Departed
+- Disciples of the Inferno
+- Divine Presence
+- Don't Blink
+- Flaying Tendrils
+- Forbidden Crypt
+- Forethought Amulet
+- Forfend
+- Forgotten Cellar
+- Frenzied Baloth
+- Frontline Strategist
+- Fylgja
+- Genesis Wave
+- Ghosts of the Innocent
+- Gift of Growth
+- Gisela, Blade of Goldnight
+- Gleemax
+- Glimpse the Cosmos
+- Gluttonous Hellkite
+- Goblin Bowling Team
+- Goblin Snowman
+- Greater Realm of Preservation
+- Harm's Way
+- Harsh Judgment
+- Healing Grace
+- Heart of Light
+- Heroic Sacrifice
+- Hyperion, Supreme Hero
+- Inspire Awe
+- Judgment of Alexander
+- Kor Haven
+- Kry Shield
+- Leeching Licid
+- Lidless Gaze
+- Liesa, Forgotten Archangel
+- Lightning, Army of One
+- Liliana's Other Contract
+- Lyzolda, the Blood Witch Avatar
+- Magma Pummeler
+- Malicious Eclipse
+- Malicious Malfunction
+- March Toward Perfection
+- Masterful Ninja
+- Mastermind's Acquisition
+- Mauhúr, Uruk-hai Captain
+- Meathook Massacre II
+- Mimeofacture
+- Mindclaw Shaman
+- Mire's Toll
+- Mirri
+- Mirror Strike
+- Mirrormind Crown
+- Mistcaller
+- Moonmist
+- Mount Keralia
+- Mourner's Shield
+- Mtenda Lion
+- Naked Singularity
+- Necromantic Summons
+- Nephalia Academy
+- Norn's Fetchling [n/a]
+- Norn's Inquisitor
+- Nova Pentacle
+- Overblaze
+- Ozai, the Phoenix King
+- Palisade Giant
+- Patchplate Resolute
+- Penance
+- Pentagram of the Ages
+- Personal Decoy
+- Pharika's Spawn
+- Phyrexian Vindicator
+- Pilgrim of Justice
+- Pilgrim of Virtue
+- Plated Pegasus
+- Power Leak
+- Power Level Analyzer
+- Prairie Dog
+- Primeval Spawn
+- Printlifter Ooze
+- Prismatic Circle
+- Protean Raider
+- Protection of the Hekma
+- Protective Sphere
+- Pulmonic Sliver
+- Reality Acid
+- Reality Twist
+- Recommission
+- Reed Richards, Smartest Man
+- Reflect Damage
+- Reflective Gate
+- Rune of Protection: Artifacts
+- Rune of Protection: Black
+- Rune of Protection: Blue
+- Rune of Protection: Green
+- Rune of Protection: Lands
+- Rune of Protection: Red
+- Rune of Protection: White
+- Samite Blessing
+- Sanctum Guardian
+- Sandman's Quicksand
+- Secrets of the Key
+- See the Truth
+- Sekki, Seasons' Guide
+- Shadow the Hedgehog
+- Shelter
+- Shield of the Avatar
+- Shield of the Realm
+- Shieldmage Advocate
+- Shimatsu the Bloodcloaked
+- Shining Shoal
+- Spider-Punk
+- Stone of Erech
+- Stonewise Fortifier
+- Telekinesis
+- Temple Altisaur
+- Terrifying Presence
+- That's No Moonmist
+- The Value Knight
+- Thick-Skinned Goblin
+- Thief of Blood
+- Tishana's Tidebinder
+- Tok-Tok, Volcano Born
+- Treacherous Link
+- Turn the Tables
+- Wear Down
+- Whirlpool Whelm
+- With Great Power . . .
+- Words of War
+- Worldheart Phoenix
+
+</details>
+
+### 12. Modal 'choose one/N' parsed as independent abilities  (138 cards)
+
+**Signature.** Modal header (Choose one/two/one-or-both) not detected; bullet modes emitted as flat independent Spell abilities with no ChooseOneOf/Modal wrapper, so all modes resolve.
+
+**Fix hint.** oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf
+
+<details><summary>Cards</summary>
+
+- A-Urza's Command
+- Accumulate Wisdom
+- Aether Shockwave
+- Aid the Fallen
+- Akroma's Will
+- Allure of the Unknown
+- Apostle's Blessing
+- Applied Biomancy
+- Argivian Avenger
+- Arrow Storm
+- Assassin Initiate
+- Atraxa's Skitterfang
+- Austere Command
+- Avengers Disassembled
+- Azula Always Lies
+- Blood on the Snow
+- Branching Bolt
+- Brightling
+- Buccaneer's Bravado
+- Butcher of the Horde
+- Casualties of War
+- Catastrophe
+- Choose Your Weapon
+- Cleansing Nova
+- Cloud's Limit Break
+- Crash and Burn
+- Crisis of Conscience
+- Crucias, Titan of the Waves
+- Crux of Mirrodin
+- Cult of Skaro
+- Curse of Inertia
+- Dawn to Dusk
+- Deafening Clarion
+- Deathmist Raptor
+- Dimir Charm
+- Dina's Guidance
+- Dismantle
+- Dominaria's Judgment
+- Doomsday Confluence
+- Dromoka's Command
+- Drown in Dreams
+- Energy Bolt
+- Ezrim, Agency Chief
+- Fever Charm
+- Fiery Confluence
+- Fight as One
+- Fire Magic
+- Flame of Anor
+- Flash Flood
+- Flowstone Sculpture
+- Fortify
+- Fortuitous Find
+- Gabriel Angelfire
+- Gerrard and Hanna
+- Gideon Blackblade
+- Gilgamesh, Master-at-Arms
+- Giver of Runes
+- Glorfindel, Dauntless Rescuer
+- Grim Discovery
+- Hive Mind
+- Ice Magic
+- Idyllic Beachfront
+- Insidious Will
+- Invoke the Firemind
+- Isu the Abominable
+- It's Clobberin' Time!
+- Izzet Polarizer
+- Jeweled Spirit
+- Jinxed Choker
+- Klauth's Will
+- Let's Play a Game
+- Library of Lat-Nam
+- Lich's Mastery
+- Liliana of the Dark Realms
+- Lonely End
+- Lunar Avenger
+- Mercurial Transformation
+- Molten Collapse
+- Multiform Wonder
+- Nasty End
+- Nature's Blessing
+- Ojutai's Command
+- Ooze Flux
+- Pawpatch Formation
+- Pemmin's Aura
+- Pharika's Libation
+- Plow Through
+- Profane Command
+- Pyrrhic Strike
+- Rain of Thorns
+- Rally the Monastery
+- Rankle's Prank
+- Razor Barrier
+- Reef Worm
+- Remember the Fallen
+- Return to Nature
+- Righteous Confluence
+- Rise to Glory
+- Road of Return
+- Run Ashore
+- Rustler Rampage
+- Saheeli's Artistry
+- Sarkhan, the Dragonspeaker
+- Scour for Scrap
+- Season of Gathering
+- See Double
+- Settle Beyond Reality
+- Shaper Parasite
+- Shifting Ceratops
+- Shorecrasher Elemental
+- Sigil Blessing
+- Sigurd, Jarl of Ravensthorpe
+- Skullscorch
+- Smogbelcher Chariot
+- Soul Transfer
+- Special Move
+- Start from Scratch
+- Temmet, Vizier of Naktamun
+- Tezzeret, Cruel Machinist
+- The Ash Lizard
+- The Ruinous Wrecking Crew
+- Tomb of Horrors Adventurer
+- Trial and Error
+- Trystan's Command
+- Tundra Kavu
+- Typhoid Mary, Fractured
+- Umbral Juke
+- Umezawa's Charm
+- Unbury
+- Unite the Coalition
+- Urza's Avenger
+- Urza's Command
+- Urza's Rebuff
+- Vandalize
+- Wail of War
+- Wail of the Forgotten
+- Will of the Sultai
+- Wishmonger
+
+</details>
+
+### 13. State/game-state condition → StaticCondition::Unrecognized  (134 cards)
+
+**Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
+
+**Fix hint.** oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class
+
+<details><summary>Cards</summary>
+
+- Agent Frank Horrigan
+- Arcades Sabboth
+- Artifact Possession
+- Atomwheel Acrobats
+- Balan, Wandering Knight
+- Baneslayer Aspirant
+- Baxter Building
+- Beast, Erudite Aerialist
+- Beasts of Bogardan
+- Blue Scarab
+- Bonds of Faith
+- Bonecache Overseer
+- Brass Knuckles
+- Bride's Gown
+- Captain America, Super-Soldier
+- Chained Throatseeker
+- Chittering Illuminator
+- Cobra Trap
+- Cocoon
+- Command of Unsummoning
+- Confront the Assault
+- Consuming Ferocity
+- Corrupted Resolve
+- Crew Captain
+- Crown-Hunter Hireling
+- Curse of Misfortunes
+- Curse of Silence
+- Curse of the Restless Dead-dup
+- Damping Engine
+- Dangerous
+- Deadhead
+- Decode Transmissions
+- Descendant of Kiyomaro
+- Diabolic Servitude
+- Doctor Doom
+- Dormant Gomazoa
+- Dormant Grove
+- Duplicant
+- Flaring Flame-Kin
+- Fledgling Osprey
+- Flooded Woodlands
+- Floodtide Serpent
+- Flowering Lumberknot
+- Freewind Equenaut
+- Frodo Baggins
+- Gate Hound
+- Giant's Amulet
+- Glacial Crasher
+- Goblin Glory Chaser
+- Goblin Goon
+- Goblin Rock Sled
+- Gorilla Tactics
+- Gorilla Titan
+- Grasping Scoundrel
+- Graveyard Shift
+- Green Scarab
+- Ground Pounder
+- Guardian of the Ages
+- Guul Draz Specter
+- Hadana's Climb
+- Hakim, Loreweaver
+- Harbor Serpent
+- Haunting Wind
+- Havengul Mystery
+- Havi, the All-Father
+- Intercessor's Arrest
+- Intrepid Ace
+- Invader Parasite
+- Karametra's Blessing
+- Kitesail Corsair
+- Knight of Malice
+- Kosei, Penitent Warlord
+- Masked Bandits
+- Mazemind Tome
+- Metathran Elite
+- Minas Morgul, Dark Fortress
+- Nature's Chosen
+- Nemesis Phoenix
+- Neriv, Heart of the Storm
+- New Master of Arms
+- Night Revelers
+- Nightsky Mimic
+- Nine-Fingers Keene
+- Nocturno of Myra's Marvels
+- Novice Knight
+- Pillar of War
+- Praetor's Grasp
+- Predator's Gambit
+- Pristine Skywise
+- Proper Laboratory Attire
+- Prosper, Tome-Bound
+- Psychic Theft
+- Purraj of Urborg
+- Rampaging Cyclops
+- Rassilon, the War President
+- Ratatwotwo
+- Rayami, First of the Fallen
+- Red Scarab
+- Regenerations Restored
+- Rod of Spanking
+- Rushing-Tide Zubera placeholder
+- Sab-Sunen, Luxa Embodied
+- Sanwell, Avenger Ace
+- Secretkeeper
+- Security Bypass
+- Siege Behemoth
+- Skill Borrower
+- Skittish Kavu
+- Skyward Spider
+- Snow Devil
+- Soltari Lancer
+- Soul Sculptor
+- Spara's Adjudicators
+- Spectral Cloak
+- Spelljack
+- Stature, Size Shifter
+- Steam Augury
+- Sting, the Glinting Dagger
+- Temp of the Damned
+- Temple of Cyclical Time
+- Temple of Power
+- Temple of the Dead
+- Temur Elevator
+- Territorial Hellkite
+- Tezzeret's Reckoning
+- The Lunar Whale
+- The Warring Triad
+- Thorned Moloch
+- Tidal Influence
+- Tide Shaper
+- Vexing Beetle
+- Viridian Betrayers
+- Volition Reins
+- Walking Skyscraper
+
+</details>
+
+### 14. Granted/quoted ability or continuous modification dropped  (96 cards)
+
+**Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
+
+**Fix hint.** oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword
+
+<details><summary>Cards</summary>
+
+- A-Ancestral Katana
+- Aurelia, Exemplar of Justice
+- Aurification
+- Awaken the Ancient
+- Benalish Lancer
+- Blind Fury
+- Bloodcurdler
+- Bombardment
+- Boseiju, Who Shelters All
+- Breathkeeper Seraph
+- Cloud, Midgar Mercenary
+- Concerted Effort
+- Conspicuous Snoop
+- Convergence of Dominion
+- Dan Lewis
+- Deadeye Navigator
+- Disciple of Kangee
+- Display of Dominance
+- Dog Umbra
+- Dollhouse of Horrors
+- Doom Weaver
+- Eater of Virtue
+- Favored Hoplite
+- Fistful of Force
+- Flare of Fortitude
+- Fog on the Barrow-Downs
+- Fractalize
+- Frodo, Sauron's Bane
+- Frozen in Ice
+- Galvanic Alchemist
+- Gibbering Hyenas
+- Gift of the Deity
+- Goddric, Cloaked Reveler
+- Grave Servitude
+- Henrika, Infernal Seer
+- Hold for Ransom
+- Hunting Wilds
+- Hurkyl's Prodigy
+- I Call for Slaughter
+- Idris, Soul of the TARDIS
+- Kindle the Inner Flame
+- Kinzu of the Bleak Coven
+- Lizard, Connors's Curse
+- Mercenary Informer
+- Mirage Phalanx
+- Mirran Safehouse
+- Mister Cheddar, Cheese Sliver
+- Mythos of Illuna
+- Nettling Nuisance
+- Nurturing Licid
+- Pharika's Spawn
+- Pouncing Kavu
+- Pouncing Wurm
+- Prison Barricade
+- Proven Combatant
+- Rakdos Riteknife
+- Rakish Revelers
+- Repentant-...placeholder
+- Rescue Skiff
+- Retriever Phoenix
+- Return the Past
+- Revenge of the Hunted
+- Spider-Man No More
+- Super-Soldier Serum
+- Swift Reconfiguration
+- Tandem Lookout
+- The Sprinkler of Stardust
+- The Triumph of Anax
+- The Unknown Wizard
+- Thrull Wizard placeholder
+- Thundering Mightmare
+- Torrent of Lava
+- Trazyn the Infinite
+- True-Faith Censer
+- U.S.Agent, John Walker
+- Ultima, Origin of Oblivion
+- Unable to Scream
+- Uncontrolled Infestation
+- Unexpected Potential
+- Vectis Gloves
+- Veiled Apparition
+- Viconia, Disciple of Blood
+- Viconia, Disciple of Strength
+- Viconia, Disciple of Violence
+- Voidpouncer
+- Wake the Dragon
+- Walking Bulwark
+- Wand of Orcus
+- Wardscale Dragon
+- Wayward Angel
+- Weathered Sentinels
+- Welcome the Darkness
+- Wind Zendikon
+- Wings of Velis Vel
+- Winter Orb
+- Woodcaller Automaton
+
+</details>
+
+### 15. Multi-target / 'up to N' optionality or count dropped  (91 cards)
+
+**Signature.** MultiTargetSpec / 'up to one/two target' optionality dropped to a mandatory single Typed target (or collapsed into DamageAll), losing the multi_target / up_to slot and per-target distinctness.
+
+**Fix hint.** oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting
+
+<details><summary>Cards</summary>
+
+- A-Incriminate
+- Azorius Justiciar
+- Batroc the Leaper
+- Blue Dragon
+- Bon... placeholder
+- Bonfire of the Damned
+- Boom Box
+- Boros Battleshaper
+- Boseiju Reaches Skyward
+- Bounty of Skemfar
+- Bow of Nylea
+- Bridgeworks Battle
+- Brightflame
+- Caparocti Sunborn
+- Capricious Efreet
+- Cetavolver
+- Chandra, Flame's Catalyst
+- Chandra, Hope's Beacon
+- Chandra, Roaring Flame
+- Chaotic Transformation
+- Clattering Augur
+- Cleansing Meditation
+- Comet Storm
+- Conduct Electricity
+- Conjurer's Bauble
+- Fire Juggler
+- Flame Sweep
+- Gold Rush
+- Gravegouger
+- Griffnaut Tracker
+- Grime Gorger
+- Here Comes a New Hero!
+- Hundred-Handed One
+- Hunter's Bow
+- Impractical Joke
+- Increasing Vengeance
+- Invent
+- Ioreth of the Healing House
+- Jace, Ingenious Mind-Mage
+- Jagged Lightning
+- Jaya's Immolating Inferno
+- Journey of Discovery
+- Lyev Decree
+- Magus of the Candelabra
+- March of Reckless Joy
+- Mass Manipulation
+- Meeting of the Five
+- Mega Flare
+- Memory's Journey
+- Moorland Rescuer
+- Mossbridge Troll
+- Nethroi, Apex of Death
+- Nimbleclaw Adept
+- Nomad Decoy
+- Perpetual Timepiece
+- Pinnacle of Rage
+- Primal Might
+- Pull from the Deep
+- Put Away
+- Raff, Weatherlight Stalwart
+- Raiding Party
+- Rakdos Firewheeler
+- Razorgrass Invoker
+- Rebuking Ceremony
+- Reconstruct History
+- Redeem
+- Redirect
+- Relentless Pursuit
+- Rimehorn Aurochs
+- Risky Move
+- Sex Appeal
+- Shower of Coals
+- Simoon
+- Soratami Mirror-Mage
+- Soratami Seer
+- Sorin, Lord of Innistrad
+- Soul Parry
+- Stream of Consciousness
+- Stunning Shot
+- Teferi, Who Slows the Sunset
+- Temporal Firestorm
+- The Fallen
+- The Great Aerie
+- The Great Work
+- The Karst, Enchanted (split-zone)
+- The Triumph of Anax
+- Thousand Moons Smithy
+- Tidal Terror
+- Time Spiral
+- Venom Blast
+- Wand of Vertebrae
+
+</details>
+
+### 16. Keyword payload / multiplicity / mis-tokenization  (84 cards)
+
+**Signature.** A keyword cost or discriminant is wrong (ward life cost as {0}, devour type hardcoded, multi-kicker merged, protection color stored on CardType axis), a keyword is deduped, or a flavor ability-word label is read as a keyword.
+
+**Fix hint.** game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels
+
+<details><summary>Cards</summary>
+
+- Alseid of Life's Bounty
+- Angelic Skirmisher
+- Archetype of Aggression
+- Archetype of Courage
+- Archetype of Endurance
+- Archetype of Finality
+- Archetype of Imagination
+- Asha's Favor
+- Auditore Ambush
+- Autumn Willow
+- Back from the Brink
+- Baffling Defenses
+- Bala Ged Thief
+- Balshan Beguiler
+- Bamboozle
+- Benalish Knight-Counselor
+- Benevolent Bodyguard
+- Bold Biochemist
+- Brineborn Cutthroat
+- Burden of Proof
+- Cactus Preserve
+- Caprichrome
+- Cartel Aristocrat
+- Cat Collector
+- Celestial Gatekeeper
+- Center Soul
+- Chariot of the Sun
+- Commander's Plate
+- Controlled Instincts
+- Crypsis
+- Cultist of the Absolute
+- Diamond Mare
+- Domineer
+- Earnest Fellowship
+- Empty-Shrine Kannushi
+- Emrakul, the World Anew
+- Encase in Ice
+- Evil's Thrall
+- Expel the Interlopers (forward)
+- Extinction
+- Extinction Event
+- Fascist Art Director
+- Flesh Duplicate
+- Fungal Behemoth
+- Gardens of Tranquil Repose
+- Gathan Raiders
+- Gemcutter Buccaneer
+- Gods Willing
+- Hades, Sorcerer of Eld
+- Illuminate
+- Indigo Faerie
+- Infernal Denizen
+- Iron Golem
+- Ironclaw Buzzardiers
+- Ironclaw Curse
+- J. Jonah Jameson
+- Knight of Dawn
+- Lava, Axe
+- Lukamina, Moon Druid
+- Mage il-Vec
+- Moradin's Disciples
+- Nahiri, Storm of Stone
+- Necravolver
+- Nightscape Battlemage
+- Quilled Greatwurm
+- Rakavolver
+- Raubahn, Bull of Ala Mhigo
+- Really Epic Punch
+- Rebbec, Architect of Ascension
+- Samite Elder
+- Stave Off
+- Stormscape Master
+- Story Circle
+- Tetsuo Umezawa
+- The Aetherspark
+- The Serpent Society
+- Thor Odinson
+- Urborg Scavengers
+- Uthros Scanship
+- Veilstone Amulet
+- Wraith, Vicious Vigilante
+- Wrath of the Skies
+- Wurmweaver Coil
+- Zur, Eternal Schemer
+
+</details>
+
+### 17. Copy 'except' / additional-modification clause dropped  (81 cards)
+
+**Signature.** Copy-spell/animate/token-copy drops the 'except it's X' / 'with <ability>' override (P/T, keyword, type, supertype, non-legendary, retarget) from the copy.
+
+**Fix hint.** oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2)
+
+<details><summary>Cards</summary>
+
+- Absorbing Man
+- Auton Soldier
+- Brittle Blast
+- Broken Visage
+- Brokers' Safeguard
+- Captain's Maneuver
+- Carom
+- Cephalid Facetaker
+- Donal, Herald of Wings
+- Double Header (copy)
+- Double Major
+- Duplication Device
+- Echoing Equation
+- Electroduplicate
+- Espers to Magicite
+- Garruk the Slayer
+- Genasi Rabble-Rouser
+- Gifts Given
+- Gonti, Night Minister
+- Gut, Bestial Fanatic
+- Gut, Brutal Fanatic
+- Gut, Devious Fanatic
+- Gut, Zealous Fanatic
+- Heat Shimmer
+- Higher Level Zone Monster
+- Honored Hydra
+- Hulking Metamorph
+- Hulkling, Young Avenger
+- Idol of False Gods
+- Imposter Mech
+- Imprisoned in the Moon
+- Ink-Treader Nephilim
+- Iron Man, Bleeding Edge
+- Jackal, Genius Geneticist
+- Loki, Lord of Misrule
+- Masterful Replication
+- Minion Reflector
+- Mirror Match
+- Mirror Room
+- Mirrorform
+- Mirrorweave
+- Mirrorwing Dragon
+- Moritte of the Frost
+- Nacatl War-Pride
+- Oko, the Ringleader
+- Old Man of the Sea
+- Quicksilver Gargantuan
+- Ral and the Implicit Maze
+- Ranger Squadron
+- Rebuild the City
+- Saheeli, the Sun's Brilliance
+- Sakashima's Student
+- Sauron's Ransom
+- Scrambleverse
+- Sea Gate Stormcaller
+- Snickering Squirrel
+- Soldevi Digger
+- Soldiers of the Watch
+- Soul Partition
+- Soulfire Eruption
+- Tawnos, the Toymaker
+- Teferi's Contingency
+- Teferi's Time Twist
+- Tempt with Mayhem
+- The Argent Etchings
+- The Bean
+- The Cobra King
+- The Eleventh Hour
+- The Grand Evolution
+- The Incredible Hulk
+- The Many Deeds of Belzenlok
+- The Sixth Doctor
+- Tibalt the Chaotic
+- Valkyrie's Call
+- Vesuva
+- Veyran, Voice of Duality
+- Vizier of Many Faces
+- Welcome to Mini-apolis
+- Welcome to Valley
+- Will of the Temur
+- Zada, Hedron Grinder
+
+</details>
+
+### 18. Subtype / type-change modification malformed or dropped  (79 cards)
+
+**Signature.** A subtype is missing from SUBTYPES (silently discarded), singularized wrongly, a state/type word is mis-encoded as a Subtype, or a 'becomes/is a [color][type]' modification drops the color/subtype/P-T piece.
+
+**Fix hint.** oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set
+
+<details><summary>Cards</summary>
+
+- Ambitious Farmhand
+- Avengers Assemble!
+- Beluna Grandsquall
+- Black Lotus Lounge
+- Blex, Vexing Pest
+- Brood Birthing
+- Builder's Blessing
+- Cast Through Time
+- Caught in the Crossfire
+- Champion of Wits
+- Citizen V, Helmut Zemo
+- Crackling Emergence
+- Crystal Skull, Isu Spyglass
+- Demigod of Revenge
+- Depala, Pilot Exemplar
+- Desert Warfare
+- Dino DNA
+- Director Nick Fury
+- Doctor Spectrum
+- Eight-and-a-Half-Tails Avatar
+- Elsewhere Flask
+- Elvish Healer
+- Eye of Malcator
+- Eye of Nidhogg
+- Fanatic of Rhonas
+- Frost Augur
+- Giant Caterpillar
+- Gideon, the Oathsworn
+- Halsin, Emerald Archdruid
+- Hazezon Tamar
+- Hazezon, Shaper of Sand
+- Heartflame Duelist
+- Hulk, Strongest There Is
+- Ichthyomorphosis
+- Invisible Woman, Sue Storm
+- Iron Monger, Sadistic Tycoon
+- Jarvis, Earth's Mightiest Butler
+- Kargan Dragonlord
+- Kaya, Intangible Slayer
+- Lavabrink Venturer
+- Leonardo da Vinci
+- Lord of the Nazgûl
+- Lush Growth
+- Myojin of Roaring Blades
+- Nyx Herald
+- Ooze Spill
+- Origin of the Avengers
+- Paired Tactician
+- Radiant Scrollwielder
+- Sagrada Familiar
+- Sand Scout
+- Sceptre of Eternal Glory
+- See Red
+- Shadow Puppeteers
+- Shanna, Sisay's Legacy
+- She-Hulk, Wallbreaker
+- Steadfast Sentinel
+- Storm, Force of Nature
+- Synth Infiltrator
+- The Wasp, Winsome Avenger
+- Then, Dreadmaws Ate Everyone
+- There and Back Again
+- Tideshaper Mystic
+- Timeless Dragon
+- Timeless Witness
+- Transgress the Mind
+- Tsabo Tavoc
+- Turtles Forever
+- Unwavering Initiate
+- Wall of Kelp
+- Wall of Stolen Identity
+- Wandering Mage
+- Warning
+- Wary Zone Guard
+- Wellgabber Apothecary
+- Wild Mammoth
+- Witness Protection
+- Wondrous Revival
+- Zarda, the Power Princess
+
+</details>
+
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (71 cards)
+
+**Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
+
+**Fix hint.** oracle_nom/duration.rs — add Perpetual duration combinator branch
+
+<details><summary>Cards</summary>
+
+- Bloodsprout Talisman
+- By Elspeth's Command
+- Chronicler of Worship
+- Cottontail Caretaker
+- Courtly Provocateur
+- Creeping Tar Pit
+- Custodi Soulcaller
+- Davriel's Withering
+- Drop Tower
+- Edifice of Authority
+- Effluence Devourer
+- Emperor Apatzec Intli IV
+- Ethereal Escort
+- Garruk, Wrath of the Wilds
+- Geistchanneler
+- Gitrog, Horror of Zhava
+- Goblin Trapfinder
+- Grow Old Together
+- Hardened Bonds
+- Homarid Warrior
+- Hypnotic Pattern
+- Incessant Provocation
+- Indris, the Hydrostatic Surge
+- Inspiring Easel
+- Karlach, Tiefling Berserker
+- Karlach, Tiefling Guardian
+- Karlach, Tiefling Punisher
+- Karlach, Tiefling Spellrager
+- Karlach, Tiefling Zealot
+- Kemba's Outfitter
+- Kobold Warcaller
+- Legion of Clay (duration)
+- Leonin Sanctifier
+- Lizardfolk Librarians
+- Lobelia Sackville-Baggins
+- Loose in the Park
+- Lurking Spinecrawler
+- Mapping the Maze
+- Melt Through
+- Mentor of Evos Isle
+- Mischievous Lookout
+- Niambi, Beloved Protector
+- Nightclub Bouncer
+- Paths of Tuinvale
+- Plaguecrafter's Familiar
+- Prairie Survivalist
+- Pull of the Mist Moon
+- Puppet Raiser
+- Ravenous Pursuit
+- Reckless Ringleader
+- Sap Vitality
+- Scion of Shiv
+- Scrutiny of the Guildpact
+- Shadow of the Enemy
+- Shattered Seraph
+- Skyline Savior
+- Spelldrain Assassin
+- Tempting Licid
+- Teyo, Aegis Adept
+- The Five Stages of Grief
+- Thought Rattle
+- Thoughtweft's Call
+- Thrill-Kill Disciple
+- Timeline Culler
+- Traumatic Prank
+- Unbreakable Remnant
+- Undersimplify
+- Unsavory Kitchen
+- Valiant Farewell
+- Wizened Githzerai
+- Wyll of the Fey Pact
+
+</details>
+
+### 20. Damage subject/recipient set incomplete  (70 cards)
+
+**Signature.** A DealDamage/DamageDone clause drops a second source/recipient, the 'and each creature/planeswalker they control' sweep, a Battle target, or a 'shares a color' radiance expansion.
+
+**Fix hint.** Effect::DealDamage handling — capture all damage subjects/recipients per CR 120
+
+<details><summary>Cards</summary>
+
+- A-Phylath, World Sculptor
+- Archpriest of Shadows
+- Attentive Skywarden
+- Ayara's Oathsworn
+- Aziza, Mage Tower Captain
+- Balduvian Fallen
+- Battlefield Thaumaturge
+- Bishop of the Bloodstained
+- Bitterheart Witch
+- Bloodfeather Phoenix
+- Bloodroot Apothecary
+- Boros Fury-Shield
+- Borrowed Knowledge
+- Brotherhood's End
+- Burn Down the House
+- Calamitous Cave-In
+- Cerebral Eruption
+- Chandra Nalaar
+- Chandra's Flame Wave
+- Chandra's Fury
+- Chandra, Bold Pyromancer
+- Chandra, Fire of Kaladesh
+- Chandra, Flame's Fury
+- Chandra, Pyrogenius
+- Cleansing Beam
+- Collective Voyage
+- Dispense Justice
+- Durkwood Tracker
+- Duty Beyond Death
+- Dwarven Catapult
+- Dwarven Driller
+- Eaten Alive
+- Furnace Reins (battle)
+- Gandalf the White
+- Hunt Down
+- Incite Hysteria
+- Knollspine Dragon
+- Korvold and the Noble Thief
+- Malignus
+- Mana Vapors
+- Martyr's Cause
+- Martyrdom
+- Molten Influence
+- Overwhelming Victory
+- Rankle and Torbran
+- Rooftop Saboteurs
+- Rupture
+- Safe Passage
+- Scorching Winds
+- Self-Destruct
+- Semester's End
+- Sephiroth, Fabled SOLDIER
+- Serene Sunset
+- Seton's Desire
+- Shao Jun
+- Skoa, Embermage
+- Slitherwisp
+- Snarespinner
+- Snort
+- Spellpyre Phoenix
+- Stangg
+- Storm's Wrath
+- Strax, Sontaran Nurse
+- Taii Wakeen, Perfect Shot
+- The Beast, Deathless Prince
+- Thought-Knot Seer
+- Wojek Apothecary
+- Wojek Embermage
+- Wojek Siren
+- Zurgo and Ojutai
+
+</details>
+
+### 21. Token entry flags / keyword / attachment clause dropped  (52 cards)
+
+**Signature.** Token creation drops tapped/enters_attacking flags, a 'with <keyword>' grant, color/name, or an attach-to-target clause (terminator misses a trailing relative phrase).
+
+**Fix hint.** oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target
+
+<details><summary>Cards</summary>
+
+- A Killer Among Us
+- A-Krydle of Baldur's Gate
+- A-Winota, Joiner of Forces
+- Aang, Master of Elements
+- Adeline, Resplendent Cathar
+- Brimaz, King of Oreskos
+- Cabaretti Courtyard
+- Cloudform
+- Crow Storm
+- Eclipsed Realms
+- Eidolon of Countless Battles
+- Elder Pine of Jukai
+- Elemental Mastery
+- Fires of Victory
+- Flash
+- From the Ashes
+- Godsire
+- Goldmeadow Lookout
+- Ignacio of Myra's Marvels
+- Immortal Obligation
+- Imperious Mindbreaker
+- Impetuous Lootmonger
+- In Too Deep
+- Indrik Umbra
+- Infuse with Vitality
+- Ingenious Mastery
+- Irenicus's Vile Duplication
+- Koma, World-Eater
+- Mabel, Heir to Cragflame
+- Mage's Attendant
+- Magitek Scythe
+- Math is for Blockers (Plane)
+- Meandered Towershell
+- Meandering Towershell
+- Moonsilver Key
+- Nacatl War-Pride
+- Shadow of the Goblin
+- Shifting Shadow
+- Solitary Sanctuary
+- Soul Bleed
+- Stampede Surfer
+- Stormforged Armor
+- Temple Thief
+- The Coming of Galactus
+- The Invincible Iron Man
+- The Neutrinos
+- The Sentry, Golden Guardian
+- Underworld Fires
+- Vortex Elemental
+- Wasitora, Nekoru Queen
+- Watchful Blisterzoa
+- Wirefly Hive
+
+</details>
+
+### 22. Attacks-alone / while-saddled combat constraint dropped  (51 cards)
+
+**Signature.** Attacks/while-saddled trigger emits constraint/condition null; the 'alone' sole-attacker or 'while saddled' qualifier is silently discarded.
+
+**Fix hint.** oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled
+
+<details><summary>Cards</summary>
+
+- Agent 13, Sharon Carter
+- Agents of S.H.I.E.L.D.
+- Akki Ronin
+- Alluring Suitor
+- Altar of the Goyf
+- Angelic Exaltation
+- Asari Captain
+- Black Panther, Claws of Bast
+- Black Widow, Double Agent
+- Bob, Reluctant HYDRA Agent
+- Bridled Bighorn
+- Brightfield Glider
+- Brightfield Mustang
+- Dracosaur Auxiliary
+- Drover Grizzly
+- Gila Courser
+- Gilded Ghoda
+- Gloryheath Lynx
+- HYDRA Infiltration
+- Heiko Yamazaki, the General
+- Imperial Blademaster
+- Imperial Subduer
+- Inferno Elemental
+- Intrepid Trufflesnout
+- Luke Cage, Power Man
+- Lunk Errant
+- Ma Chao, Western Warrior
+- Norika Yamazaki, the Poet
+- Peerless Samurai
+- Peggy Carter, Secret Agent
+- Raiyuu, Storm's Edge
+- Seifer Almasy
+- Selfless Samurai
+- Sentinel Dispatch
+- Spider-Man Noir
+- Strategic Intervention
+- Tattermunge Witch
+- Tawnos, Urza's Apprentice
+- Tempered in Solitude
+- The Animus
+- The Bears of Littjara
+- The Brewing Chef
+- The Capitoline Triad
+- The Gitrog, Ravenous Ride
+- The Golden-Gear Colossus
+- The Knight of Land Drops
+- Voltaic Whip
+- Widow's Walk
+- Witchstalker
+- Yuan Shao's Infantry
+- Zuko, Firebending Master
+
+</details>
+
+### 23. Effect modeled with structurally wrong variant / ability class  (51 cards)
+
+**Signature.** A clause is lowered to the wrong AST shape: continuous static as one-shot Spell, replacement as static, single-target vs PumpAll, RevealHand vs library look, Bounce vs ChangeZone, or other categorical mismatch.
+
+**Fix hint.** add-engine-effect: select the correct Effect/ability variant for the clause class
+
+<details><summary>Cards</summary>
+
+- Assassin's Ink
+- Avenge
+- Baron Strucker, HYDRA Overlord
+- Blended Twistling
+- Blinding Flare
+- Cavern-Hoard Dragon
+- Chicken Egg
+- Circadian Struggle
+- Commune with Spirits
+- Conflux
+- Coral Helm
+- Creature Guy
+- Dreamshaper Shaman
+- Geistlight Snare
+- Gifts Ungiven
+- Goblin Archaeologist
+- Into the Fray
+- Jhoira's Familiar
+- Kraken of the Straits
+- Leonardo, Sewer Samurai
+- Leyline of Punishment
+- Mental Modulation
+- Nighthowler
+- Nissa, Who Shakes the World
+- Noble Quarry
+- Ogre Shaman
+- Optimus Prime, Hero
+- Oriss, Samite Guardian
+- Page, Loose Leaf
+- Panoptic Projektor
+- Pardic Lancer
+- Pardic Swordsmith
+- Phyrexian Unlife
+- Playtest Wish
+- Ponyback Brigade
+- Possessed Aven
+- Possessed Barbarian
+- Prop Room
+- Prophet of Kruphix
+- Protector of the Wastes
+- Psychic Network
+- Pyromancy
+- Pyromania
+- Quest for Renewal
+- Quistis Trepe
+- Shipwreck Singer
+- Tithe Taker
+- Vanish into Memory
+- Vengeful Rebirth
+- Venser, Corpse Puppet
+- Wall of Shards
+
+</details>
+
+### 24. Counter-type field contaminated by quantifier/grammar prefix  (40 cards)
+
+**Signature.** counter_type holds 'number of X' / 'one or more +1/+1' instead of the bare canonical counter name; the quantity/comparator prefix is not stripped before extracting the type word.
+
+**Fix hint.** oracle_util.rs counter-type extraction — strip 'number of'/'or more' before canonicalizing
+
+<details><summary>Cards</summary>
+
+- Arachnus Spinner
+- Arcee, Sharpshooter
+- Aria of Flame
+- Ashuza's Breath
+- Champion's Drake
+- Charging Cinderhorn
+- Clearwater Goblet
+- Dragonspark Reactor
+- Dralnu's Pet
+- Falkenrath Exterminator
+- Felisa, Fang of Silverquill
+- Fell Beast of Mordor
+- Grimdancer
+- Hankyu
+- Hanweir Battlements
+- Heirloom Mirror
+- Heliophial
+- Indominus Rex, Alpha
+- Intrepid Paleontologist
+- Kilnmouth Dragon
+- Klement, Life Acolyte
+- Life Burst
+- Lightning Reaver
+- Llanowar Mentor
+- Loot, Exuberant Explorer
+- Magma Mine
+- Mishra, Tamer of Mak Fawa
+- Murmuration
+- Muzzio's Preparations
+- Myr Servitor
+- Mysterious Pathlighter
+- Naar Isle
+- Perrie, the Pulverizer
+- Pumpkin Bombs
+- Rotisserie Elemental
+- Runadi, Behemoth Caller
+- Shrine of Burning Rage
+- Simic Slaw
+- The Ten Rings
+- The War Doctor
+
+</details>
+
+### 25. Variable X / where-X count unbound (sentinel or unresolved Variable)  (37 cards)
+
+**Signature.** X-derived cost/count emitted as a u32::MAX sentinel, Fixed, or raw-string Variable with no 'where X is' binding; the X linkage is severed.
+
+**Fix hint.** oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses
+
+<details><summary>Cards</summary>
+
+- Another Round
+- Arcbound Javelineer
+- Arcbound Wanderer
+- Baru, Fist of Krosa
+- Belisarius Cawl
+- Brain in a Jar
+- Cabal Shrine
+- Calciform Pools (cost X)
+- Firecat Blitz
+- Flash of Insight
+- Florian, Voldaren Scion
+- Frantic Firebolt
+- Imoen, Trickster Friend
+- Infernal Genesis
+- Invade the City
+- Isildur's Fateful Strike
+- Mephit's Enthusiasm
+- Merchant's Dockhand
+- Mind Burst
+- Mind Warp
+- Minthara, Merciless Soul
+- Mutated Cultist
+- Necron Overlord
+- Night Dealings
+- Panacea
+- Pantlaza, Sun-Favored
+- Petalmane Baku
+- Quillmane Baku
+- Saltcrusted Steppe
+- Sand Silos
+- Save Life
+- Scourge of Fleets
+- Secluded Starforge
+- Spontaneous Combustion
+- Springjack Pasture
+- Stormbind
+- Stormscale Anarch
+
+</details>
+
+### 26. Wrong / dropped effect duration  (30 cards)
+
+**Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
+
+**Fix hint.** oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants
+
+<details><summary>Cards</summary>
+
+- Dragon Egg
+- Elvish Bard
+- Enkira, Hostile Scavenger
+- Etched Oracle Avatar
+- Excruciator
+- Faerie Conclave
+- Faith's Reward
+- Ferris Wheel
+- Firja's Retribution
+- Fraying Sanity
+- Glorious End
+- Golden Guardian
+- Jinx
+- Mistform Shrieker
+- Mistform Skyreaver
+- Mistform Stalker
+- Mistform Wakecaster
+- Mistform Wall
+- Mistform Warchief
+- Monoist Gravliner
+- Mythos of Vadrok
+- Nezumi Ronin
+- Notorious Throng
+- Orcish Farmer
+- Palace Jailer
+- Peace Talks
+- Plant a Sapling
+- Superior Foes of Spider-Man
+- Trickery Charm
+- War of the Last Alliance
+
+</details>
+
+### 27. Delayed / future-phase trigger flattened to immediate effect  (21 cards)
+
+**Signature.** An effect that should be a delayed triggered ability (next combat/end/draw step) is emitted as an immediate effect with no CreateDelayedTrigger wrapper (CR 603.7).
+
+**Fix hint.** add-trigger: wrap future-phase effects in CreateDelayedTrigger
+
+<details><summary>Cards</summary>
+
+- Aphelia, Viper Whisperer
+- Arcane Archery
+- Arcanis, the Omnipotent Avatar
+- Archaic's Agony
+- Archon of the Triumvirate
+- Arming Gala
+- Armory Automaton
+- At Least It's a Dry Heat
+- Electric Seaweed
+- Faerie Aerie
+- Feral Encounter
+- Flamehold Grappler
+- Flamethrower Sonata
+- Flaming Fist Duskguard
+- Gaze of Pain
+- Giant Slug
+- Glass Asp
+- Nafs Asp
+- Okoye, Mighty and Adored
+- Perilous Iteration
+- Phytotitan
+
+</details>
+
+### 28. Cross-target group / shared-quality constraint dropped  (20 cards)
+
+**Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
+
+**Fix hint.** oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints
+
+<details><summary>Cards</summary>
+
+- Cannibalize
+- Carrion Beetles
+- Cease
+- Desecrate Reality
+- Ebony Charm
+- Echoing Courage
+- Echoing Decay
+- Echoing Echo
+- Echoing Return
+- Eerie Ultimatum
+- Puca's Mischief
+- Rain of Riches
+- Rashmi, Eternities Crafter
+- Soundwave, Superior Captain
+- Thanos, the Mad Titan
+- Unlicensed Hearse
+- V.A.T.S.
+- Valor's Reach Tag Team
+- Void Winnower
+- Zimone's Hypothesis
+
+</details>
+
+### 29. Trigger/activation timing or ordinal restriction dropped  (20 cards)
+
+**Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
+
+**Fix hint.** oracle_casting.rs scan_timing_restrictions + trigger constraint parsing
+
+<details><summary>Cards</summary>
+
+- Fixer, Techno Terror
+- Garenbrig Squire
+- Goremand
+- Grizzled Wolverine
+- Hermit of the Natterknolls
+- Hidden Lair
+- Highspire Bell-Ringer
+- Hurkyl's Final Meditation
+- Ichneumon Druid
+- Lavinia, Foil to Conspiracy
+- MACH-1, Swooping Scoundrel
+- Shadowheart, Sharran Cleric
+- Shichifukujin Dragon
+- Skarrgan Hellkite
+- Skyblade's Boon
+- Tomb Tyrant
+- Trade Caravan
+- Uthros Research Craft
+- Uthros, Titanic Godcore
+- Witch Engine
+
+</details>
+
+### 30. Disjunctive mana ability split into two Fixed abilities  (18 cards)
+
+**Signature.** '{T}: Add {X} or {Y}' emits two separate Fixed single-color mana abilities instead of one ManaProduction::AnyOneColor disjunctive-choice ability (CR 106.1).
+
+**Fix hint.** oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B'
+
+<details><summary>Cards</summary>
+
+- Cabal Stronghold
+- Cinder Glade
+- Coastal Peak
+- Haunted Mire
+- Hedge Maze
+- Lush Portico
+- Molten Tributary
+- On Thin Ice
+- Open the Omenpaths
+- Prairie Stream
+- Radiant Grove
+- Radiant Summit
+- Rainbow Vale
+- Savannah
+- Scattered Groves
+- The Great Mound
+- Wooded Ridgeline
+- Zagoth Triome
+
+</details>
+
+### 31. Token/named-card name corrupted by normalization or overrun  (18 cards)
+
+**Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
+
+**Fix hint.** oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans
+
+<details><summary>Cards</summary>
+
+- Deathpact Angel
+- Dragonstorm Forecaster
+- Emerald Collector
+- Hecatomb
+- High Marshal Arguel
+- Jet Collector
+- Kookus
+- Liu Bei, Lord of Shu
+- Pearl Collector
+- Ruby Collector
+- Sapphire Collector
+- Sift Through Sands
+- Thran Golem
+- Thrasta, Tempest's Roar
+- Wrathful Raptors
+- Wrathful Red Dragon
+- Zenos yae Galvus
+- capital offense
+
+</details>
+
+### 32. Strive surcharge double-emitted as spurious ModifyCost static  (11 cards)
+
+**Signature.** Strive line captured in strive_cost but also classified by the static cost-modifier parser, producing a duplicate ModifyCost{empty ObjectCount}.
+
+**Fix hint.** oracle_static.rs — suppress Strive lines from static cost-modifier dispatch
+
+<details><summary>Cards</summary>
+
+- Aerial Formation
+- Consign to Dust
+- Eternal Dominion
+- Fertilid
+- Harness by Force
+- Kiora's Dismissal
+- Launch the Fleet
+- Phalanx Formation
+- Setessan Tactics
+- Silence the Believers
+- Twinflame
+
+</details>
+
+### 33. 'another'/'other' self-exclusion FilterProp dropped  (10 cards)
+
+**Signature.** Target/sacrifice filter omits FilterProp::Another; the 'another'/'other' qualifier excluding the source object is not propagated.
+
+**Fix hint.** oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed
+
+<details><summary>Cards</summary>
+
+- Furious Rise
+- Haze Frog
+- High-Society Hunter
+- Hotel of Fears
+- Incremental Blight
+- Incremental Growth
+- Morkrut Necropod
+- Mukotai Soulripper
+- Redcap Gutter-Dweller
+- Unstable Amulet
+
+</details>
+
+### 34. Other / uncategorized misparse  (7 cards)
+
+**Signature.** Cluster did not match a canonical signature class.
+
+**Fix hint.** manual triage
+
+<details><summary>Cards</summary>
+
+- Bound by Moonsilver
+- Bound in Gold
+- Flaccify
+- Merfolk Falconer
+- Rush of Dread
+- Sorcerous Sight
+- The Goose Mother
+
+</details>
+
+### 35. Duplicate / spurious effect or modification emitted  (7 cards)
+
+**Signature.** A single Oracle instruction is lowered to two effects (double ChangeZone after search, duplicate modification) or a phantom node with no Oracle basis is injected.
+
+**Fix hint.** oracle parser — dedupe search-result continuations and guard against phantom effect nodes
+
+<details><summary>Cards</summary>
+
+- Exhumer Thrull
+- Explosive Revelation
+- Graven Dominator
+- Lumen-Class Frigate
+- Magus of the Jar
+- Mana Severance
+- Valiant Emberkin
+
+</details>
+
+### 36. 'Unless'-payment / escape-cost clause dropped  (6 cards)
+
+**Signature.** An 'unless its controller pays/sacrifices/discards' alternative is modeled unconditionally; the unless_pay cost or sacrifice-alternative branch is absent.
+
+**Fix hint.** oracle parser — attach unless_pay cost / alternative-action branch to the gated effect
+
+<details><summary>Cards</summary>
+
+- Lava Blister
+- Lethargy Trap
+- Lim-Dûl's Hex
+- Lost in Thought
+- Read the Runes
+- Trapped in the Tower
+
+</details>
+
+### 37. Cost-reduction static spell_filter / condition dropped  (4 cards)
+
+**Signature.** ModifyCost emitted with spell_filter and/or condition null; the reduction applies to all spells or unconditionally, dropping the type/subtype/state gate.
+
+**Fix hint.** oracle_static.rs ModifyCost — capture spell_filter and gating condition
+
+<details><summary>Cards</summary>
+
+- Drag to the Underworld
+- Dragonfire Blade
+- Progenitor's Icon
+- Visions of Ruin
+
+</details>
+
+### 38. 'You may' optionality dropped (mandatory instead of optional)  (3 cards)
+
+**Signature.** An effect's optional flag is false where Oracle 'you may' makes resolution optional.
+
+**Fix hint.** oracle parser — set optional:true when 'you may' governs the effect
+
+<details><summary>Cards</summary>
+
+- Decoy Gambit
+- Deflecting Swat
+- Speedball, New Warrior
+
+</details>

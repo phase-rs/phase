@@ -1171,7 +1171,17 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         // instead of leaving it as an unparsed trailing sentence.
         let (effect_text, constraints) =
             crate::parser::oracle::strip_activated_constraints(effect_text);
-        let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+        // CR 116.2b + CR 708.7: flag the granted activated-ability body so a head
+        // clause of "turn this/~ creature face up" lowers to the printed
+        // `Effect::TurnFaceUp { SelfRef }` resolving effect (Etrata, Deadly
+        // Fugitive's "{2}{U}{B}: Turn this creature face up. ..."), rather than
+        // being rejected as the rule-based morph/disguise special action.
+        let mut ctx = ParseContext {
+            in_granted_activated_ability: true,
+            ..ParseContext::default()
+        };
+        let mut def =
+            parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
         def.description = Some(text.to_string());

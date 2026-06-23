@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Torna al mazzo",
     "listView": "Vista elenco",
-    "stackView": "Vista pila"
+    "stackView": "Vista pila",
+    "groupType": "Tipo",
+    "groupColor": "Colore",
+    "groupByType": "Raggruppa per tipo",
+    "groupByColor": "Raggruppa per colore"
   },
   "tabs": {
     "ariaLabel": "Superficie del costruttore di mazzi",
@@ -48,7 +52,11 @@
     "clone": "Clona",
     "cloneTitle": "Salva una copia con un nuovo nome",
     "loadDeck": "Carica mazzo...",
-    "nameToSave": "Dai un nome al mazzo per salvarlo"
+    "nameToSave": "Dai un nome al mazzo per salvarlo",
+    "savedToastTitle": "Mazzo salvato",
+    "savedToastDescription": "\"{{name}}\" è stato salvato nei tuoi mazzi.",
+    "clonedToastTitle": "Mazzo clonato",
+    "clonedToastDescription": "Una copia è stata salvata come \"{{name}}\"."
   },
   "unsaved": {
     "title": "Modifiche non salvate",
@@ -95,13 +103,31 @@
     "sideboardEmptyHint": "Passa il mouse su una carta del mazzo principale e clicca → per spostarla qui.",
     "group": {
       "Creatures": "Creature",
-      "Spells": "Magie",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Istantanei",
+      "Sorceries": "Stregonerie",
+      "Artifacts": "Artefatti",
+      "Enchantments": "Incantesimi",
+      "Battles": "Battaglie",
+      "Lands": "Terre",
+      "Other": "Altri"
+    },
+    "colorGroup": {
+      "White": "Bianco",
+      "Blue": "Blu",
+      "Black": "Nero",
+      "Red": "Rosso",
+      "Green": "Verde",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terre"
     },
     "importModalTitle": "Importa mazzo",
     "pastePlaceholder": "Incolla la lista del mazzo (formato MTGA o .dck)...",
     "fromFile": "Da file",
     "parse": "Analizza",
+    "parsing": "Analisi…",
+    "parseError": "Nessuna carta trovata. Incolla un mazzo in formato MTGA o .dck.",
     "exportModalTitle": "Esporta mazzo",
     "saveToFile": "Salva su file",
     "copied": "Copiato!",
@@ -136,7 +162,23 @@
     "groupCards_other": "{{count}} carte",
     "group": {
       "Creatures": "Creature",
-      "Spells": "Magie",
+      "Planeswalkers": "Planeswalker",
+      "Instants": "Istantanei",
+      "Sorceries": "Stregonerie",
+      "Artifacts": "Artefatti",
+      "Enchantments": "Incantesimi",
+      "Battles": "Battaglie",
+      "Lands": "Terre",
+      "Other": "Altri"
+    },
+    "colorGroup": {
+      "White": "Bianco",
+      "Blue": "Blu",
+      "Black": "Nero",
+      "Red": "Rosso",
+      "Green": "Verde",
+      "Multicolor": "Multicolore",
+      "Colorless": "Incolore",
       "Lands": "Terre"
     },
     "sideboardGroup": "Sideboard",
@@ -231,5 +273,11 @@
     "minimumCount": "Il mazzo ha {{count}} carte (minimo 60)",
     "maxCopies": "{{name}}: {{count}} copie (max 4)",
     "companionInMain": "{{name}} è il tuo compagno ma è anche nel mazzo principale — questo viola la sua condizione di costruzione del mazzo. Rimuovilo dal mazzo principale per usarlo come compagno."
+  },
+  "switcher": {
+    "starred": "Preferiti",
+    "unfiled": "Senza cartella",
+    "searchPlaceholder": "Cerca mazzi…",
+    "noMatches": "Nessun mazzo trovato"
   }
 }

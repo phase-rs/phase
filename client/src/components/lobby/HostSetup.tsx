@@ -1,14 +1,15 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../../adapter/types";
+import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
 import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
 
 export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
@@ -45,7 +46,6 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
   Multiplayer: 3,
 };
 
-const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
 /** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
@@ -163,7 +163,7 @@ export function HostSetup({
   hostDisabled = false,
   hostDisabledReason,
 }: HostSetupProps) {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "menu"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
   // MultiplayerPage). We read it here only to submit it and to seed the
   // room-name placeholder — this form itself intentionally has no
@@ -349,11 +349,15 @@ export function HostSetup({
   // so any format whose minimum is reachable from that ceiling is listable.
   // Formats requiring more seats than the ceiling are hidden here to avoid
   // advertising a configuration we can't actually host.
-  const availableFormats = isP2P
-    ? FORMAT_OPTIONS.filter(
-        (f) => FORMAT_DEFAULTS[f.format].min_players <= P2P_MAX_PEERS,
-      )
-    : FORMAT_OPTIONS;
+  const availableFormats = useMemo(
+    () =>
+      isP2P
+        ? FORMAT_OPTIONS.filter(
+            (f) => FORMAT_DEFAULTS[f.format].min_players <= P2P_MAX_PEERS,
+          )
+        : FORMAT_OPTIONS,
+    [isP2P],
+  );
 
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
@@ -364,6 +368,31 @@ export function HostSetup({
       on ? "bg-white/10 text-white" : "text-fg-meta hover:text-slate-200"
     } ${extra}`;
   const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
+  const formatMenuGroups = useMemo((): MenuSelectGroup[] => {
+    const groups: MenuSelectGroup[] = [];
+    for (const group of (Object.keys(GROUP_ORDER) as FormatGroup[]).sort(
+      (a, b) => GROUP_ORDER[a] - GROUP_ORDER[b],
+    )) {
+      const groupFormats = availableFormats.filter((f) => f.group === group);
+      if (groupFormats.length === 0) continue;
+      groups.push({
+        label: group,
+        items: groupFormats.map((opt) => ({
+          value: opt.format,
+          label: opt.label,
+        })),
+      });
+    }
+    return groups;
+  }, [availableFormats]);
+  const difficultyMenuItems = useMemo(
+    () =>
+      AI_DIFFICULTIES.map(({ id }) => ({
+        value: id,
+        label: t(`menu:aiDifficulty.levels.${id}`),
+      })),
+    [t],
+  );
   const submitDisabled =
     hostDisabled || isSubmitting || hostingStatus !== "idle" || (aiSeats.length > 0 && !defaultAiDeck);
 
@@ -407,33 +436,21 @@ export function HostSetup({
           </Field>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {/* Format — grouped native <select>. Native is the mobile/tablet UX
-                win: iOS/Android render touch-optimized pickers from <select>.
-                <optgroup>s mirror the engine's FormatGroup taxonomy. */}
-            <Field label={t("hostSetup.format")} htmlFor="host-setup-format" hint={formatMeta?.description}>
-              <SelectField
-                wrapperClassName="w-full"
-                id="host-setup-format"
-                value={selectedFormat}
-                onChange={(e) => handleFormatSelect(e.target.value as GameFormat)}
+            {/* Format — grouped MenuSelect mirrors the engine's FormatGroup
+                taxonomy. fitContainer keeps the trigger inside the grid column;
+                menuLayout="dropdown" anchors below the trigger on all widths. */}
+            <Field label={t("hostSetup.format")} hint={formatMeta?.description}>
+              <MenuSelect
+                ariaLabel={t("hostSetup.format")}
+                label={formatMeta?.label ?? selectedFormat}
+                selectedValue={selectedFormat}
+                groups={formatMenuGroups}
+                onSelect={(value) => handleFormatSelect(value as GameFormat)}
+                menuLayout="dropdown"
+                fitContainer
+                wrapperClassName="w-full min-w-0"
                 className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
-              >
-                {(Object.keys(GROUP_ORDER) as FormatGroup[])
-                  .sort((a, b) => GROUP_ORDER[a] - GROUP_ORDER[b])
-                  .map((group) => {
-                    const items = availableFormats.filter((f) => f.group === group);
-                    if (items.length === 0) return null;
-                    return (
-                      <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
-                        {items.map((opt) => (
-                          <option key={opt.format} value={opt.format} title={opt.description} className="bg-[#0a0f1b] text-slate-100">
-                            {opt.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    );
-                  })}
-              </SelectField>
+              />
             </Field>
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
@@ -601,19 +618,19 @@ export function HostSetup({
                         {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
                       </button>
                       {aiSeat ? (
-                        <SelectField
-                          chevronSize="sm"
-                          wrapperClassName="ml-auto"
-                          value={aiSeat.difficulty}
-                          onChange={(e) => setAiDifficulty(seatIndex, e.target.value)}
-                          className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
-                        >
-                          {DIFFICULTY_OPTIONS.map((d) => (
-                            <option key={d} value={d} className="bg-[#0a0f1b] text-slate-100">
-                              {d}
-                            </option>
-                          ))}
-                        </SelectField>
+                        <MenuSelect
+                          ariaLabel={t("menu:aiDifficulty.label")}
+                          label={
+                            difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
+                            t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                          }
+                          selectedValue={aiSeat.difficulty}
+                          items={difficultyMenuItems}
+                          onSelect={(value) => setAiDifficulty(seatIndex, value)}
+                          menuLayout="dropdown"
+                          wrapperClassName="ml-auto min-w-0"
+                          className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] font-medium text-white"
+                        />
                       ) : (
                         <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
                       )}

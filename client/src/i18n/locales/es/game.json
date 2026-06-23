@@ -422,7 +422,8 @@
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energía",
     "resourceMana": "maná",
-    "resourceCounters": "contadores"
+    "resourceCounters": "contadores",
+    "resourceSpeed": "velocidad"
   },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
@@ -1377,6 +1378,10 @@
     "spectacleNormalLabel": "Lanzar normalmente",
     "spectacleAltLabel": "Lanzar con Espectáculo",
     "spectacleSubtitle": "Lanza {{name}} normalmente, o paga su coste de Espectáculo (disponible porque un oponente perdió vida este turno).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Lanzar normalmente",
+    "prowlAltLabel": "Lanzar con Prowl",
+    "prowlSubtitle": "Lanza {{name}} normalmente, o paga su coste de Prowl (disponible porque una criatura correspondiente hizo daño de combate a un jugador este turno).",
     "overloadEyebrow": "Sobrecargar",
     "overloadNormalLabel": "Lanzar normalmente",
     "overloadAltLabel": "Lanzar con Sobrecargar",

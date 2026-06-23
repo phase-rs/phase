@@ -1442,6 +1442,7 @@ fn mana_cost_string(cost: &ManaCost) -> String {
     match cost {
         ManaCost::NoCost => String::new(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
+        ManaCost::SelfManaValue => "its mana value".to_string(),
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {
@@ -1704,6 +1705,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,

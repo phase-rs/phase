@@ -71,6 +71,11 @@ pub enum ReplacementEvent {
     Transform,
     /// CR 614.1a: Replaces an explore event.
     Explore,
+    /// CR 701.50a + CR 614.1a: Replaces a connive keyword action. Lets a
+    /// replacement effect intercept "a creature would connive" and substitute a
+    /// modified action (Leader, Super-Genius — "instead you draw a card, then
+    /// that creature connives").
+    Connive,
 
     // --- Stub-only Forge types (recognized but no-op) ---
     AssembleContraption,
@@ -132,6 +137,7 @@ impl fmt::Display for ReplacementEvent {
             ReplacementEvent::CoinFlip => write!(f, "CoinFlip"),
             ReplacementEvent::Transform => write!(f, "Transform"),
             ReplacementEvent::Explore => write!(f, "Explore"),
+            ReplacementEvent::Connive => write!(f, "Connive"),
             ReplacementEvent::AssembleContraption => write!(f, "AssembleContraption"),
             ReplacementEvent::BeginPhase => write!(f, "BeginPhase"),
             ReplacementEvent::BeginTurn => write!(f, "BeginTurn"),
@@ -181,6 +187,7 @@ impl FromStr for ReplacementEvent {
             "CoinFlip" => ReplacementEvent::CoinFlip,
             "Transform" => ReplacementEvent::Transform,
             "Explore" => ReplacementEvent::Explore,
+            "Connive" => ReplacementEvent::Connive,
             "AssembleContraption" => ReplacementEvent::AssembleContraption,
             "BeginPhase" => ReplacementEvent::BeginPhase,
             "BeginTurn" => ReplacementEvent::BeginTurn,

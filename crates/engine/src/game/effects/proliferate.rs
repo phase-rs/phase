@@ -718,7 +718,7 @@ mod tests {
     fn apply_proliferate_replacement_choice_stashes_remaining_counter_additions() {
         let mut state = GameState::new_two_player(42);
         for (id, modification) in [
-            (ObjectId(90), QuantityModification::Double),
+            (ObjectId(90), QuantityModification::DOUBLE),
             (ObjectId(91), QuantityModification::Plus { value: 1 }),
         ] {
             let source = create_object(

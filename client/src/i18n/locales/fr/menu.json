@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Saisissez une URL de deck Moxfield ou Archidekt valide.",
     "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
     "errorGeneric": "Échec de l'import du deck.",
+    "errorNoCards": "Aucune carte trouvée. Collez un deck au format MTGA ou .dck.",
     "fileSupports": "Prend en charge les formats .dck, .dec, .txt et MTGA",
     "chooseFile": "Choisir un fichier",
     "importedSuccessTitle": "Deck importé",
@@ -199,7 +200,13 @@
     "unknown": "Inconnues {{count}}",
     "unknownCardsTitle": "Cartes inconnues :\n{{cards}}",
     "unsupportedTitle": "Non prises en charge ({{unique}} uniques, {{copies}} copies) :\n{{cards}}",
-    "setIconAlt": "Icône d'extension {{code}}"
+    "setIconAlt": "Icône d'extension {{code}}",
+    "actionsMenu": "Options du deck",
+    "star": "Mettre en favori",
+    "unstar": "Retirer des favoris",
+    "moveToFolder": "Déplacer vers un dossier",
+    "unfiled": "Non classé",
+    "newFolder": "Nouveau dossier…"
   },
   "myDecks": {
     "headingManage": "Mes decks",
@@ -254,7 +261,11 @@
     "loadMore": "Charger plus",
     "selectedDeck": "Deck sélectionné",
     "chooseDeckToContinue": "Choisissez un deck pour continuer",
-    "filterAll": "Tous"
+    "filterAll": "Tous",
+    "sectionStarred": "Favoris",
+    "sectionUnfiled": "Non classé",
+    "collapseAll": "Tout réduire",
+    "expandAll": "Tout développer"
   },
   "subscriptions": {
     "emptyTitle": "Aucun abonnement à un flux",
@@ -281,5 +292,16 @@
     "alpha": "Alpha",
     "profile": "Profil",
     "settings": "Réglages"
+  },
+  "folder": {
+    "actionsMenu": "Options du dossier",
+    "rename": "Renommer",
+    "delete": "Supprimer",
+    "newFolder": "Nouveau dossier",
+    "newFolderPrompt": "Nom du dossier :",
+    "renamePrompt": "Renommer le dossier :",
+    "deleteConfirm": "Supprimer le dossier « {{name}} » ? Les decks passeront dans Non classé.",
+    "emptyHint": "Ce dossier est vide.",
+    "unfiledEmptyHint": "Aucun deck non classé."
   }
 }

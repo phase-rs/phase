@@ -302,6 +302,7 @@ fn redundancy_delta(
             /* delta= */ -3.0,
         ),
         Effect::ApplyPostReplacementDamage { .. } => None,
+        Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => None,
         Effect::Draw { count, .. } => zero_quantity_redundancy(
             state,
             source_id,
@@ -437,6 +438,7 @@ fn redundancy_delta(
         | Effect::ExileResolvingSpellInsteadOfGraveyard
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
@@ -489,6 +491,7 @@ fn redundancy_delta(
         | Effect::Planeswalk
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::Exploit { .. }
@@ -526,6 +529,7 @@ fn redundancy_delta(
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
         | Effect::BlightEffect { .. }
@@ -536,6 +540,7 @@ fn redundancy_delta(
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
         | Effect::Intensify { .. }
+        | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Tribute { .. }
         | Effect::Unimplemented { .. }
@@ -608,6 +613,8 @@ fn redundancy_delta(
         // no static redundancy signal; the AI scores Heist via the generic
         // effect-rating path, not the redundancy-avoidance table.
         | Effect::Heist { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
         | Effect::HeistExile => None,
     }
 }

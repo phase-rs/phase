@@ -14,6 +14,7 @@
  */
 import {
   ACTIVE_DECK_KEY,
+  DECK_FOLDERS_KEY,
   DECK_METADATA_KEY,
   FEED_DECK_ORIGINS_KEY,
   FEED_SUBSCRIPTIONS_KEY,
@@ -32,6 +33,12 @@ export interface PhaseBackupV1 {
   decks: Record<string, string>;
   /** Raw JSON of the deck metadata store, or null. */
   deckMetadata: string | null;
+  /**
+   * Raw JSON of the deck-folder registry, or null. Optional on read so
+   * backups exported before folders existed still validate (treated as
+   * "no folders"); always present on write.
+   */
+  deckFolders?: string | null;
   /** Currently-active deck name, or null. */
   activeDeck: string | null;
   /** Raw JSON of the feed subscriptions array, or null. */
@@ -59,6 +66,7 @@ export function buildBackup(): PhaseBackupV1 {
     preferences: localStorage.getItem(PREFERENCES_KEY),
     decks,
     deckMetadata: localStorage.getItem(DECK_METADATA_KEY),
+    deckFolders: localStorage.getItem(DECK_FOLDERS_KEY),
     activeDeck: localStorage.getItem(ACTIVE_DECK_KEY),
     feedSubscriptions: localStorage.getItem(FEED_SUBSCRIPTIONS_KEY),
     feedDeckOrigins: localStorage.getItem(FEED_DECK_ORIGINS_KEY),
@@ -95,9 +103,13 @@ function isBackupV1(value: unknown): value is PhaseBackupV1 {
   }
   const stringOrNull = (field: unknown): boolean =>
     field === null || typeof field === "string";
+  // `deckFolders` is optional on read: pre-folders backups omit it entirely.
+  const optionalStringOrNull = (field: unknown): boolean =>
+    field === undefined || stringOrNull(field);
   return (
     stringOrNull(v.preferences) &&
     stringOrNull(v.deckMetadata) &&
+    optionalStringOrNull(v.deckFolders) &&
     stringOrNull(v.activeDeck) &&
     stringOrNull(v.feedSubscriptions) &&
     stringOrNull(v.feedDeckOrigins)
@@ -191,6 +203,7 @@ export function applyBackup(
     true,
   );
   writeValidated(DECK_METADATA_KEY, backup.deckMetadata, true);
+  writeValidated(DECK_FOLDERS_KEY, backup.deckFolders ?? null, true);
   writeValidated(ACTIVE_DECK_KEY, backup.activeDeck, false);
   writeValidated(FEED_SUBSCRIPTIONS_KEY, backup.feedSubscriptions, true);
   writeValidated(FEED_DECK_ORIGINS_KEY, backup.feedDeckOrigins, true);

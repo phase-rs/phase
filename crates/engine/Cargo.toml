@@ -65,6 +65,12 @@ name = "tokens-gen"
 path = "src/bin/tokens_gen.rs"
 test = false
 
+[[bin]]
+name = "coverage-parse-diff"
+path = "src/bin/coverage_parse_diff.rs"
+# `test = true` (default): this bin carries non-trivial diff logic with inline
+# unit tests, unlike the logic-free tool bins above that set `test = false`.
+
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

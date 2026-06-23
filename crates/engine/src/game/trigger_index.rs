@@ -73,8 +73,11 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
         TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
         TypeFilter::Battle => Some(CoreType::Battle),
         // Non-narrow filter shapes — broad emission carries the trigger.
+        // CR 308.1: Kindred is a non-permanent supplemental type, never a
+        // narrowing battlefield-trigger card type.
         TypeFilter::Instant
         | TypeFilter::Sorcery
+        | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -455,6 +458,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
+        GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
         GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
@@ -633,6 +637,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // unclassified bucket (see `keys_from_trigger_def`), so the `Mutated`
         // event needs no dedicated index key — `match_mutates` is always consulted.
         GameEvent::Mutated { .. } => {}
+        // Unstable Host/Augment combine is a distinct mechanic and has no
+        // dedicated trigger mode today.
+        GameEvent::Augmented { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -687,6 +694,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
         EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
+        EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
@@ -752,6 +760,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
+        | EffectKind::GainActivatedAbilitiesOfTarget
         | EffectKind::ChooseCard
         | EffectKind::PutCounter
         | EffectKind::PutCounterAll
@@ -852,6 +861,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
+        | EffectKind::Harness
         | EffectKind::CollectEvidence
         | EffectKind::Endure
         | EffectKind::BlightEffect
@@ -862,6 +872,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
         | EffectKind::Intensify
+        | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize
@@ -885,7 +896,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExchangeLifeTotals
         // Heist/HeistExile have no production EffectResolved-dispatching matcher.
         | EffectKind::Heist
-        | EffectKind::HeistExile => {}
+        | EffectKind::HeistExile
+        | EffectKind::CombineHost
+        | EffectKind::ChooseAugmentAndCombineWithHost => {}
     }
 }
 

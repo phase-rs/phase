@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
+use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
@@ -694,6 +695,15 @@ fn main() {
     atomic_keys.sort_unstable();
     for mtgjson_key in atomic_keys {
         let faces = &atomic.data[mtgjson_key];
+        // Drop officially-removed offensive cards before any other handling,
+        // so they never enter the card database (and not even an explicit
+        // --filter can resurrect them).
+        if faces
+            .first()
+            .is_some_and(|f| is_removed_offensive_card(&f.name))
+        {
+            continue;
+        }
         // --filter: skip cards not matching any filter name
         if !filter_names.is_empty() {
             let card_name = faces
@@ -1416,7 +1426,13 @@ fn run_decks(remaining_args: &[String]) {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let raw = parsed.data;
+        let mut raw = parsed.data;
+        // Strip officially-removed cards from every section at ingestion, so
+        // they never reach decks.json, coverage, or the deck-size threshold.
+        // Single authority shared with the card-export path above.
+        for section in [&mut raw.main_board, &mut raw.side_board, &mut raw.commander] {
+            section.retain(|c| !is_removed_offensive_card(&c.name));
+        }
         if deck_card_total(&raw) < MIN_DECK_CARDS {
             too_small += 1;
             continue;

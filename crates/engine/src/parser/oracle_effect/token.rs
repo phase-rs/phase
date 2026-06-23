@@ -2380,6 +2380,105 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod kazar_token_landfall_tests {
+    use super::*;
+    use crate::types::ability::ContinuousModification;
+
+    /// Ka-Zar of the Savage Land's Zabu token: the granted ability text carries
+    /// an italicized "Landfall —" ability-word prefix (CR 207.2c) before the
+    /// trigger keyword. The token-ability classifier must strip the ability word
+    /// and recognize the inner trigger (CR 603.1 / CR 603.6a) as a `GrantTrigger`
+    /// static modification — not the `GrantAbility(Unimplemented[landfall])`
+    /// catch-all produced before the fix.
+    #[test]
+    fn zabu_token_landfall_trigger_parses_as_grant_trigger() {
+        let txt = "Create Zabu, a legendary 2/2 green Cat creature token with \"Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("Zabu token line must parse");
+        let Effect::Token {
+            name,
+            supertypes,
+            static_abilities,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Zabu");
+        assert!(
+            supertypes.contains(&Supertype::Legendary),
+            "Zabu must be legendary, got {supertypes:?}"
+        );
+        let grant_trigger = static_abilities
+            .iter()
+            .flat_map(|def| def.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            });
+        let trigger = grant_trigger.unwrap_or_else(|| {
+            panic!("landfall trigger must classify as GrantTrigger, got {static_abilities:#?}")
+        });
+        // CR 603.6a: the inner trigger is a zone-change (ETB) trigger.
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
+        // No residual Unimplemented landfall effect anywhere in the parsed token.
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !format!("{static_abilities:?}").contains("Unimplemented"),
+            "token ability must have no residual Unimplemented effect"
+        );
+    }
+
+    /// The catalog-token path (`inject_catalog_token_abilities`) re-parses the
+    /// preset `rules_text` through `classify_quoted_inner`. The Zabu preset's
+    /// rules_text begins with the "Landfall —" ability word; the same strip must
+    /// apply so the runtime injection yields a `GrantTrigger`, not a
+    /// `GrantAbility(Unimplemented)`.
+    #[test]
+    fn catalog_landfall_rules_text_classifies_as_grant_trigger() {
+        let rules_text =
+            "Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.";
+        let mods = crate::parser::oracle_static::classify_quoted_inner(rules_text);
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+            "catalog rules_text must classify as GrantTrigger, got {mods:?}"
+        );
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !format!("{mods:?}").contains("Unimplemented"),
+            "catalog classification must have no residual Unimplemented effect"
+        );
+    }
+
+    /// Full-card parse: Ka-Zar's three lines (look at top, play lands from top,
+    /// ETB token with landfall) must produce zero residual `Unimplemented`
+    /// effects after the ability-word strip fix.
+    #[test]
+    fn kazar_full_card_no_residual_unimplemented() {
+        let oracle = "You may look at the top card of your library any time.\n\
+            You may play lands from the top of your library.\n\
+            When Ka-Zar of the Savage Land enters, create Zabu, a legendary 2/2 green Cat creature token with \"Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.\"";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            "Ka-Zar of the Savage Land",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Warrior".to_string()],
+        );
+        let debug = format!("{parsed:?}");
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !debug.contains("Unimplemented"),
+            "Ka-Zar must parse to zero residual Unimplemented, got: {debug}"
+        );
+    }
+}
+
 #[test]
 fn copy_token_non_saga_token_you_control_issue_3294() {
     use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};

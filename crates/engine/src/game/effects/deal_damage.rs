@@ -589,6 +589,9 @@ pub(crate) fn apply_damage_after_replacement(
             target_controller,
             amount: actual_amount,
             is_combat,
+            // CR 120.10: Record excess so "was dealt excess damage this turn"
+            // intervening-if conditions can query without re-computing lethal.
+            excess,
             // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
             // overwrites these when the source still exists; the empty/default
             // tail (Default::default()) covers the source-already-gone case.

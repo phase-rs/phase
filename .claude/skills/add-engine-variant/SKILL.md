@@ -22,6 +22,8 @@ If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `cra
 
 The variant might already exist under a different engine-native name. The mtgish AST and the engine vocabulary are not 1:1; the engine often has the concept under a different name.
 
+> The canonical engine surface is `data/engine-inventory.json` (gitignored). Run `cargo engine-inventory` to (re)generate it locally before grepping for existing variants.
+
 Run **all five searches** before considering extension:
 
 ```bash
@@ -113,6 +115,8 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 4. **Pair with converter arm in one commit.** Engine extensions ship with the converter arm that uses them, in a single coherent commit. Don't batch unrelated engine extensions.
 
 5. **Concurrency contract.** Engine extensions ship in a separate PR before the converter PR depending on them, OR in one paired commit if the work is done by a single agent. No half-extensions.
+
+6. **Serialized-surface audit.** Before implementation is complete, determine whether the enum appears in game state, `GameAction`, `WaitingFor`, card-data export, AI/community scenario fixtures, saved test fixtures, client adapter types, or any wire-visible protocol. If yes, add the required serde defaults, migration / compatibility path, regenerated fixture, or protocol version bump. Include a test or CI evidence that existing repo-owned serialized data still loads. If protocol-visible, bump the wire contract or prove no serialized shape changed.
 
 ## Anti-patterns this skill prevents
 

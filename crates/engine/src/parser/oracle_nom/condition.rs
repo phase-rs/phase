@@ -190,12 +190,90 @@ fn parse_was_cast_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 
 fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 120.10: excess-damage check must precede the plain damage check so
+        // "was dealt excess damage this turn" wins over the shorter "was dealt
+        // damage this turn" prefix in `parse_source_was_dealt_damage_this_turn`.
+        parse_subject_was_dealt_excess_damage_this_turn,
         parse_player_was_dealt_damage_threshold_this_turn,
         parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_to_opponent_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// Wrapper around `parse_type_phrase` that fails (nom error) when the result is
+/// `TargetFilter::Any`, used as a nom-compatible parser combinator.
+fn parse_type_phrase_nonempty(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, rest) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((rest, filter))
+}
+
+/// CR 120.10 + CR 603.4: "a [subject] was dealt excess damage this turn" —
+/// intervening-if predicate used by Maarika-class triggers.
+///
+/// Parses a broad class of subjects:
+///   - "that creature" / "that permanent" — CR 603.2 + CR 120.1 demonstrative
+///     references bound to the *specific* object that received the triggering
+///     event's damage (`TargetFilter::EventTarget`). This must NOT be a generic
+///     type filter: otherwise the intervening-`if` would scan every excess-damage
+///     record this turn and fire off an unrelated creature's earlier overkill
+///     (Maarika false-positive). Binding to the event target restricts the query
+///     to the one creature/permanent this trigger's damage went to.
+///   - "a creature", "a permanent", etc. — bare indefinite references that stay
+///     a generic type-phrase filter (the demonstrative binding does not apply).
+///   - Any `parse_type_phrase` result (e.g. "a creature or planeswalker an
+///     opponent controlled" from Rith, Liberated Primeval).
+///
+/// All forms map to `DamageDealtThisTurn { source: Any, target: <filter>,
+/// excess_only: true }` compared ≥ 1, which is true when at least one
+/// `DamageRecord` this turn targeted a matching object with `excess > 0`.
+fn parse_subject_was_dealt_excess_damage_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // Subject: a pronominal "that creature/permanent" or a type-phrase noun.
+    let (rest, target) = alt((
+        // CR 603.2 + CR 120.1 + CR 603.4: "that creature" / "that permanent" is
+        // the *specific* object that received this trigger's damage, not any
+        // creature/permanent of that type. Bind to `TargetFilter::EventTarget`
+        // so the intervening-`if` only checks the damaged object — Maarika's
+        // "if that creature was dealt excess damage this turn" must not fire off
+        // an unrelated creature's earlier excess hit. The event target is itself
+        // the damaged creature/permanent, so no separate type guard is needed.
+        value(
+            TargetFilter::EventTarget,
+            tag::<_, _, OracleError<'_>>("that creature"),
+        ),
+        value(TargetFilter::EventTarget, tag("that permanent")),
+        // Bare article form: "a creature or planeswalker an opponent controlled"
+        // (Rith), "a creature", "a permanent", etc. Delegate to parse_type_phrase
+        // which handles "a/an <type>", "a/an <type> <controller-suffix>",
+        // and compound "a <type> or <type>" forms.
+        parse_type_phrase_nonempty,
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" was dealt excess damage this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(target),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                // CR 120.10: Only match records where the damage was overkill.
+                excess_only: true,
+            },
+            1,
+        ),
+    ))
 }
 
 /// CR 603.4 + CR 120.3: "you were/an opponent was dealt N or more damage this
@@ -234,6 +312,8 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             amount,
         ),
@@ -287,6 +367,8 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::CombatOnly,
+
+                excess_only: false,
             },
             1,
         ),
@@ -316,6 +398,8 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             1,
         ),
@@ -350,6 +434,8 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             1,
         ),
@@ -1221,9 +1307,41 @@ fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondit
     .parse(rest)
 }
 
+/// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+/// contraction subject ("he's"/"she's" = "_ is", "they're" = "they are") is
+/// source-anaphoric — binds the ability source. Whiplash ("if he's equipped");
+/// The Incredible Hulk ("if he's attacking"). Composes the copula + BARE-predicate
+/// shape of `parse_recipient_is_filter_condition` (the contraction already supplies
+/// the verb, so a BARE predicate tag is matched, NOT "is equipped"). The copula is
+/// paired to its pronoun so the ungrammatical cross-products ("they's"/"he're")
+/// cannot parse. Bare "it's" is deliberately excluded (target-anaphoric in spell
+/// bodies — Awaken the Sleeper); source "it's" is handled by the context-gated
+/// SelfRef rewrite. Straight ASCII apostrophe (0x27) only.
+fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        preceded(alt((tag("he"), tag("she"))), tag("'s ")),
+        preceded(tag("they"), tag("'re ")),
+    ))
+    .parse(input)?;
+    alt((
+        value(StaticCondition::SourceIsEquipped, tag("equipped")),
+        value(StaticCondition::SourceIsEnchanted, tag("enchanted")),
+        value(StaticCondition::SourceIsTapped, tag("tapped")),
+        value(StaticCondition::SourceIsMonstrous, tag("monstrous")),
+        value(StaticCondition::SourceIsAttacking, tag("attacking")),
+        value(StaticCondition::SourceIsBlocking, tag("blocking")),
+        value(StaticCondition::SourceIsBlocked, tag("blocked")),
+    ))
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 301.5a/303.4/508.1k/509.1g/509.1h: gendered/plural contraction subject
+        // ("he's equipped", "she's enchanted", "they're attacking"). Source-only
+        // (never target-anaphoric for a gendered/plural pronoun in MTG templates).
+        parse_contraction_source_state_condition,
         // CR 611.2b: Tapped/untapped — composed as subject × predicate.
         // Parse subject ("~ is", "this creature is", etc.) then branch on "tapped"/"untapped".
         parse_tapped_untapped,
@@ -2946,6 +3064,20 @@ pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> Ta
             }
             TargetFilter::Typed(tf)
         }
+        // CR 109.5: Words like 'you' or 'your' on an object refer to the object's controller.
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, ctrl.clone()))
+                .collect(),
+        },
+        // CR 109.5: Words like 'you' or 'your' on an object refer to the object's controller.
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, ctrl.clone()))
+                .collect(),
+        },
         other => other,
     }
 }
@@ -3867,6 +3999,8 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             amount,
         ),
@@ -4109,18 +4243,32 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
-/// "[N] or more mana from <source-filter> was spent to cast <self>".
+/// "[N] or more mana from <source-filter> was spent to cast <self>" and
+/// "at least [N] mana from <source-filter> was spent to cast <self>".
 ///
 /// CR 400.7d: the subject anaphora selects the scope (see
 /// `parse_source_qualified_mana_spent_condition`).
 fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, n) = parse_number(input)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
@@ -4239,30 +4387,48 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 /// CR 601.2h + CR 603.4: Intervening-if comparing the total amount of mana
 /// spent to cast the triggering spell against a fixed threshold.
 ///
-/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~" and
-/// the inverse "[N] or less mana was spent to cast …". Produces a
+/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~",
+/// "at least [N] mana was spent to cast …", and the inverse
+/// "[N] or less mana was spent to cast …". Produces a
 /// `StaticCondition::QuantityComparison` with LHS
 /// triggering-spell spent-mana ref that bridges to `TriggerCondition::QuantityComparison`
 /// via the existing `static_condition_to_trigger_condition` path.
 ///
 /// Used by Expressive Firedancer's conditional rider ("If five or more mana
-/// was spent to cast that spell, ..."), Opus/Increment family cards with
-/// mana-threshold riders, and any future card that gates on triggering-spell
-/// cost magnitude. Complementary to `parse_mana_spent_vs_source_pt` (which
-/// handles Increment-style `greater than this creature's P/T`).
+/// was spent to cast that spell, ..."), The Emperor of Palamecia's
+/// intervening-if ("if at least four mana was spent to cast it, ..."),
+/// Opus/Increment family cards with mana-threshold riders, and any future
+/// card that gates on triggering-spell cost magnitude. Complementary to
+/// `parse_mana_spent_vs_source_pt` (which handles Increment-style
+/// `greater than this creature's P/T`).
 ///
 /// CR 400.7d: the subject anaphora selects the scope — "that spell" stays
 /// `TriggeringSpell`; "this spell"/"it" on a resolving spell is `SelfObject`.
 fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Number first — combinator verifies word boundary via existing helper.
-    let (rest, n) = parse_number(input)?;
-    // "or more" / "or fewer" / "or less" threshold word — map to comparator.
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    // Two surface forms — both are `>= N` thresholds:
+    //   "N or more mana was spent to cast …"
+    //   "at least N mana was spent to cast …"
+    // Plus the inverse: "N or less/fewer mana was spent to cast …"
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
     let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
@@ -8174,6 +8340,77 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceIsEquipped);
     }
 
+    // CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+    // contraction subject ("he's"/"she's"/"they're <state>") binds the ability
+    // source. Fail-before: `parse_source_subject` rejects "he's" → no Source
+    // condition (Whiplash "if he's equipped" trigger condition dropped).
+    #[test]
+    fn test_contraction_source_state_pronouns() {
+        for subj in ["he's equipped", "she's equipped", "they're equipped"] {
+            let (rest, c) = parse_inner_condition(subj)
+                .unwrap_or_else(|e| panic!("expected Ok for {subj:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {subj:?}");
+            assert_eq!(c, StaticCondition::SourceIsEquipped, "for {subj:?}");
+        }
+    }
+
+    // CR 508.1k / CR 303.4: the contraction combinator covers the whole source-state
+    // class, not just "equipped" (The Incredible Hulk shape "if he's attacking").
+    #[test]
+    fn test_contraction_source_state_siblings() {
+        let (rest, c) = parse_inner_condition("he's attacking").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsAttacking);
+
+        let (rest, c) = parse_inner_condition("he's enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsEnchanted);
+    }
+
+    // BLOCKER-2 guard (discriminating, REACHABLE): bare "it's" is target-anaphoric
+    // in spell bodies (Awaken the Sleeper reaches this same combinator at
+    // oracle_effect/conditions.rs). It MUST NOT yield a Source condition — fails if
+    // anyone later adds a blanket "it's" source arm.
+    #[test]
+    fn test_bare_its_not_source_equipped() {
+        match parse_inner_condition("it's equipped") {
+            Err(_) => {}
+            Ok((rest, c)) => {
+                assert_ne!(
+                    c,
+                    StaticCondition::SourceIsEquipped,
+                    "bare \"it's equipped\" must not bind the source (rest={rest:?})"
+                );
+            }
+        }
+    }
+
+    // Over-acceptance guard: the copula is paired to its pronoun, so the
+    // ungrammatical cross-products "they's"/"he're" cannot parse a Source condition.
+    #[test]
+    fn test_contraction_cross_products_rejected() {
+        for subj in ["they's equipped", "he're equipped"] {
+            match parse_inner_condition(subj) {
+                Err(_) => {}
+                Ok((rest, c)) => {
+                    assert!(
+                        !matches!(
+                            c,
+                            StaticCondition::SourceIsEquipped
+                                | StaticCondition::SourceIsEnchanted
+                                | StaticCondition::SourceIsTapped
+                                | StaticCondition::SourceIsMonstrous
+                                | StaticCondition::SourceIsAttacking
+                                | StaticCondition::SourceIsBlocking
+                                | StaticCondition::SourceIsBlocked
+                        ),
+                        "ungrammatical {subj:?} must not yield a Source condition (rest={rest:?}, c={c:?})"
+                    );
+                }
+            }
+        }
+    }
+
     // CR 303.4: bare SourceIsEnchanted predicate across subjects.
     // Discriminating (fail-on-revert): if the `parse_source_is_enchanted` arm
     // is removed these fall through to `Unrecognized` (evaluates always-true),
@@ -11284,6 +11521,8 @@ mod tests {
                                 aggregate: AggregateFunction::Max,
                                 group_by: Some(DamageGroupKey::SourceId),
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11314,6 +11553,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11345,6 +11586,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11376,6 +11619,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11405,6 +11650,8 @@ mod tests {
                         aggregate: AggregateFunction::Sum,
                         group_by: None,
                         damage_kind: DamageKindFilter::Any,
+
+                        excess_only: false,
                     },
                 },
                 comparator: Comparator::GE,
@@ -11434,6 +11681,8 @@ mod tests {
                             aggregate: AggregateFunction::Sum,
                             group_by: None,
                             damage_kind: DamageKindFilter::CombatOnly,
+
+                            excess_only: false,
                         },
                 },
             comparator: Comparator::GE,
@@ -11472,6 +11721,8 @@ mod tests {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::DamageDealtThisTurn {
                         damage_kind: DamageKindFilter::CombatOnly,
+
+                        excess_only: false,
                         ..
                     },
                 },
@@ -11655,6 +11906,54 @@ mod tests {
             scope_of("five or more mana was spent to cast that spell"),
             CastManaObjectScope::TriggeringSpell,
         );
+
+        // Site D — "at least N" bare total threshold (Emperor of Palamecia).
+        // "it" maps to SelfObject at the condition level; the trigger bridge
+        // handles context-specific scope adjustment.
+        assert_eq!(
+            scope_of("at least four mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least seven mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
+    }
+
+    /// CR 601.2h: "at least N mana was spent to cast it" must parse identically
+    /// to "N or more mana was spent to cast it" — both are `>= N` thresholds.
+    #[test]
+    fn test_at_least_mana_spent_threshold_parses() {
+        let (rest, c) = parse_condition("if at least four mana was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: crate::types::ability::CastManaSpentMetric::Total,
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => {
+                // "it" → SelfObject at condition level; trigger bridge adjusts.
+                assert_eq!(scope, CastManaObjectScope::SelfObject);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(value, 4);
+            }
+            other => panic!("expected ManaSpentToCast QuantityComparison, got {other:?}"),
+        }
     }
 
     #[test]
@@ -13253,5 +13552,97 @@ mod tests {
             .expect("bound-it combat-state gate should parse");
         assert_eq!(rest, "");
         assert_eq!(cond, expected);
+    }
+
+    /// CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "that creature was dealt
+    /// excess damage this turn" is the Maarika-class intervening-if. It must map
+    /// to a `DamageDealtThisTurn` check with `excess_only: true` whose target is
+    /// bound to `TargetFilter::EventTarget` — the *specific* damaged object of
+    /// the trigger — not a generic creature filter. A generic filter would let
+    /// the condition fire off an unrelated creature's earlier excess hit.
+    #[test]
+    fn parse_inner_condition_that_creature_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) = parse_inner_condition("that creature was dealt excess damage this turn")
+            .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert!(excess_only, "excess_only must be true");
+        assert_eq!(
+            target.as_ref(),
+            &TargetFilter::EventTarget,
+            "\"that creature\" must bind to the triggering event's damaged object"
+        );
+    }
+
+    /// CR 603.2 + CR 120.1: "that permanent" binds to the event target too.
+    #[test]
+    fn parse_inner_condition_that_permanent_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) =
+            parse_inner_condition("that permanent was dealt excess damage this turn")
+                .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { ref target, .. },
+                },
+            ..
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert_eq!(target.as_ref(), &TargetFilter::EventTarget);
+    }
+
+    /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's "a creature or
+    /// planeswalker an opponent controlled was dealt excess damage this turn"
+    /// must parse as an opponent-filtered DamageDealtThisTurn with excess_only.
+    /// `parse_type_phrase` produces `TargetFilter::Or` for compound types, so
+    /// this test checks that excess_only is set and the target is non-Any.
+    #[test]
+    fn parse_inner_condition_typed_subject_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) = parse_inner_condition(
+            "a creature or planeswalker an opponent controlled was dealt excess damage this turn",
+        )
+        .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert!(excess_only, "excess_only must be true");
+        // parse_type_phrase emits Or{Typed(Creature+Opp), Typed(Planeswalker+Opp)}
+        // for compound types — verify the filter is non-trivial (not Any).
+        assert!(
+            !matches!(target.as_ref(), TargetFilter::Any),
+            "target filter must be non-Any, got: {target:?}"
+        );
     }
 }

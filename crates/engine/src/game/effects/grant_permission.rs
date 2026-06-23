@@ -251,6 +251,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -302,6 +304,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: true,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::TrackedSet { id: tracked_set },
                 grantee: PermissionGrantee::AbilityController,
@@ -437,6 +441,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -491,6 +497,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ParentTargetController,
@@ -558,6 +566,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -637,6 +647,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         };
 
         state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
@@ -712,6 +724,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         };
         state
             .objects
@@ -773,6 +787,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         }];
 
         // Simulate the ordering in `turns.rs`:
@@ -807,6 +823,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -874,6 +892,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             }];
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -914,6 +934,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             }];
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -969,6 +991,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

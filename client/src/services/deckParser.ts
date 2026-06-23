@@ -12,6 +12,7 @@ export interface ParsedDeck {
   main: DeckEntry[];
   sideboard: DeckEntry[];
   commander?: string[];
+  sticker_sheets?: string[];
   /** Oathbreaker RC: the signature spell card name (0 or 1 entries). */
   signature_spell?: string[];
   companion?: string;
@@ -30,6 +31,7 @@ export interface ExpandedDeck {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  sticker_sheets: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
 }
@@ -56,6 +58,7 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
     main_deck: expandEntries(deck.main),
     sideboard: expandEntries(deck.sideboard),
     commander: deck.commander ?? [],
+    sticker_sheets: deck.sticker_sheets ?? [],
     signature_spell: deck.signature_spell ?? [],
   };
 }
@@ -164,6 +167,16 @@ function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
+/** True when a parsed deck contains at least one importable card slot. */
+export function parsedDeckHasCards(deck: ParsedDeck): boolean {
+  return (
+    totalCards(deck.main) > 0
+    || totalCards(deck.sideboard) > 0
+    || (deck.commander?.length ?? 0) > 0
+    || deck.companion !== undefined
+  );
+}
+
 function cleanDeckName(value: string): string {
   return value
     .trim()
@@ -238,6 +251,7 @@ function normalizeParsedDeck(
   const normalized: ParsedDeck = {
     main: deduplicateEntries(normalizeEntries(deck.main)),
     sideboard: deduplicateEntries(normalizeEntries(deck.sideboard)),
+    sticker_sheets: deck.sticker_sheets ? [...deck.sticker_sheets] : undefined,
   };
 
   if (deck.commander?.length) {

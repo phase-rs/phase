@@ -259,6 +259,17 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.50a + CR 614.1a: A creature is about to connive (draw N, discard N,
+    /// +1/+1 per nonland discarded). Carried through the replacement pipeline so
+    /// effects that intercept the connive keyword action (Leader, Super-Genius —
+    /// "instead you draw a card, then that creature connives") see the event
+    /// before the draw/discard/counter steps run. `count` is the connive N value,
+    /// already resolved from `QuantityExpr` at propose time.
+    Connive {
+        object_id: ObjectId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
     /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
     /// effects can modify how many times the proliferate action is performed
     /// (Tekuthal, Inquiry Dominus — "proliferate twice instead").
@@ -531,6 +542,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
@@ -560,6 +572,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
@@ -611,7 +624,10 @@ impl ProposedEvent {
             | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. } => state
+            | ProposedEvent::Explore { object_id, .. }
+            // CR 701.50a: The conniving permanent's controller is the affected
+            // player — they draw/discard and choose the connive replacement order.
+            | ProposedEvent::Connive { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
@@ -677,7 +693,10 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. } => Some(*object_id),
+            | ProposedEvent::Explore { object_id, .. }
+            // CR 614.1a: the conniving permanent is the affected object the
+            // `valid_card` filter ("a creature you control") is matched against.
+            | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,

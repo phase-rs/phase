@@ -71,7 +71,6 @@ const NEW_MECHANIC_KEYWORDS: &[&str] = &[
     "draft",
     "drafted",
     "ante",
-    "augment",
     "sticker",
     "attraction",
     "unfinity",

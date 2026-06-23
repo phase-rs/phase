@@ -507,6 +507,119 @@ pub fn prune_affected_object_left_effects(state: &mut GameState, departed_id: Ob
     }
 }
 
+/// CR 611.2b + CR 613.1b: a control swap of the captured source ends the
+/// can't-untap continuous effect permanently; remove the gated def from
+/// base+live so a later swap-back cannot revive it. Runs inside
+/// `evaluate_layers` after the Layer-2 control board is finalized.
+///
+/// Read/mutate split: the read pass borrows `&state` to consult the shared gate
+/// (`controller_controls_source_gate`) for every `ControllerControlsSource` def
+/// it finds (live OR base); the mutate pass uses only the owned host-id list and
+/// lapsed `(source, controller)` set, so no `&state` borrow is alive while
+/// mutating `state.objects`.
+pub(crate) fn prune_lapsed_controller_controls_source(state: &mut GameState) {
+    use crate::types::ability::ReplacementCondition;
+
+    let mut lapsed: HashSet<(ObjectId, PlayerId)> = HashSet::new();
+    let mut hosts: Vec<ObjectId> = Vec::new();
+
+    // READ pass.
+    for (host_id, obj) in state.objects.iter() {
+        let mut host_has_lapsed = false;
+        let mut scan = |def: &crate::types::ability::ReplacementDefinition| {
+            if let Some(ReplacementCondition::ControllerControlsSource { source, controller }) =
+                def.condition
+            {
+                if !crate::game::replacement::controller_controls_source_gate(
+                    state, source, controller,
+                ) {
+                    lapsed.insert((source, controller));
+                    host_has_lapsed = true;
+                }
+            }
+        };
+        obj.replacement_definitions.iter_all().for_each(&mut scan);
+        obj.base_replacement_definitions.iter().for_each(&mut scan);
+        if host_has_lapsed {
+            hosts.push(*host_id);
+        }
+    }
+
+    if hosts.is_empty() {
+        return;
+    }
+
+    // MUTATE pass — owned data only.
+    let is_lapsed = |def: &crate::types::ability::ReplacementDefinition| {
+        matches!(
+            def.condition,
+            Some(ReplacementCondition::ControllerControlsSource { source, controller })
+                if lapsed.contains(&(source, controller))
+        )
+    };
+    for host_id in hosts {
+        if let Some(obj) = state.objects.get_mut(&host_id) {
+            obj.replacement_definitions.retain(|d| !is_lapsed(d));
+            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+                .retain(|d| !is_lapsed(d));
+        }
+    }
+}
+
+/// CR 611.2b + CR 400.7: the captured source leaving play, OR the host leaving
+/// and re-entering as a new object (same storage ObjectId), ends the can't-untap
+/// continuous effect permanently — drop the gated def from base+live so it
+/// cannot revive on a same-ObjectId re-entry. Called from `zones.rs` on a
+/// battlefield exit, OUTSIDE `evaluate_layers`, so it marks layers full on change
+/// (mirroring `prune_host_left_effects`).
+///
+/// The predicate is purely id-based (`departed_id`), so no `&state` gate read is
+/// needed — each object is mutated in a single pass: case (b) the captured
+/// `source == departed_id`, OR case (c) the holding object's own id ==
+/// `departed_id` (host left and may re-enter as a new CR 400.7 object reusing the
+/// same storage key).
+pub(crate) fn prune_controller_controls_source_on_leave(
+    state: &mut GameState,
+    departed_id: ObjectId,
+) {
+    use crate::types::ability::ReplacementCondition;
+
+    let mut changed = false;
+    for (host_id, obj) in state.objects.iter_mut() {
+        let host_left = *host_id == departed_id;
+        let is_lapsed = |def: &crate::types::ability::ReplacementDefinition| {
+            host_left
+                || matches!(
+                    def.condition,
+                    Some(ReplacementCondition::ControllerControlsSource { source, .. })
+                        if source == departed_id
+                )
+        };
+        // Only `ControllerControlsSource` defs are eligible to be dropped — the
+        // `host_left` arm must not wipe unrelated riders, so gate on the variant.
+        let drop = |def: &crate::types::ability::ReplacementDefinition| {
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::ControllerControlsSource { .. })
+            ) && is_lapsed(def)
+        };
+        let before_live = obj.replacement_definitions.len();
+        obj.replacement_definitions.retain(|d| !drop(d));
+        let before_base = obj.base_replacement_definitions.len();
+        if obj.base_replacement_definitions.iter().any(drop) {
+            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions).retain(|d| !drop(d));
+        }
+        if obj.replacement_definitions.len() != before_live
+            || obj.base_replacement_definitions.len() != before_base
+        {
+            changed = true;
+        }
+    }
+    if changed {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// Evaluate a `StaticCondition` for the given controller.
 /// Returns `true` if the condition is met (effect should apply), `false` otherwise.
 ///
@@ -670,6 +783,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
@@ -795,6 +909,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
@@ -1072,6 +1187,12 @@ fn evaluate_condition_with_context(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.monstrous),
+        // CR 701.64b + CR 702.186b: True when the source permanent is harnessed.
+        // The ∞ (Infinity) ability gate reads `GameObject::harnessed`.
+        StaticCondition::SourceIsHarnessed => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.harnessed),
         // CR 301.5 + CR 303.4: True when source Aura/Equipment is attached to a
         // creature. A Player host (CR 303.4 + CR 702.5d) is never a creature, so
         // we filter to Object hosts via `as_object`.
@@ -1442,9 +1563,18 @@ pub fn evaluate_layers(state: &mut GameState) {
     for effect in &ordered_copy {
         apply_continuous_effect(state, effect, &mut abilities_suppressed);
     }
+    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
+        // Sticker ability text is appended after the top-of-pass reset/copy
+        // application, so a sticker can turn a non-generator into a continuous
+        // static source mid-pass. Refresh the generator index before the main
+        // gather so those sticker-granted statics participate in this pass
+        // without broadening the non-sticker top-of-pass rebuild contract.
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
-    let effects_by_layer = gather_active_continuous_effects(state);
+    let mut effects_by_layer = gather_active_continuous_effects(state);
+    crate::game::stickers::append_battlefield_pt_sticker_effects(state, &mut effects_by_layer);
 
     // Step 4: Process each remaining layer in order
     for (layer, layer_bucket) in &effects_by_layer {
@@ -1654,6 +1784,15 @@ pub fn evaluate_layers(state: &mut GameState) {
         evaluate_layers(state);
         return;
     }
+
+    // CR 611.2b + CR 613.1b: a control swap of the captured source ends the
+    // can't-untap continuous effect permanently; remove the gated def from
+    // base+live so a later swap-back cannot revive it. Runs AFTER the
+    // ring-normalization recursion guard (not at the prev_controllers diff loop)
+    // so it observes the fully-derived Layer-2 board. No `mark_full` here:
+    // `layers_dirty = Clean` is set unconditionally below, so a mark would be
+    // dead code — consistency relies on the in-pass live+base mutation.
+    prune_lapsed_controller_controls_source(state);
 
     // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
     // cache from this fully-derived board. Placed AFTER the ring-normalization
@@ -2106,6 +2245,15 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
         apply_continuous_effect_to(state, effect, &recipient_ids, &mut abilities_suppressed);
     }
 
+    let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
+    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec) {
+        // Incremental resets clear the entered/attached recipients back to base,
+        // so retained stickers must be re-applied before the restricted main
+        // gather. If a sticker grants a continuous static ability, refresh the
+        // generator index so the recipient can source that effect in this pass.
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
     let effects_by_layer = gather_active_continuous_effects(state);
     for (layer, layer_bucket) in &effects_by_layer {
@@ -2142,7 +2290,6 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
         }
         if *layer == Layer::Type {
             apply_prototype_characteristics(state, recipient_ids.iter().copied());
-            let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &recipient_vec);
         }
     }
@@ -2805,6 +2952,24 @@ pub(crate) fn gather_transient_continuous_effects(
 
         for (mod_index, modification) in tce.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
+                continue;
+            }
+            // CR 708.5: A `MayLookAtFaceDown` look permission (Lumbering Laundry's
+            // duration-bound grant) is a player-scoped visibility permission read
+            // directly off the TCE by `visibility::viewer_may_look_at_face_down`
+            // — never applied to an object's `static_definitions` through the
+            // layer system. Its `affected` filter (face-down creatures you don't
+            // control) matches OPPONENT permanents, so feeding it into the object
+            // layer gather would erroneously stamp the permission onto each
+            // opponent's face-down creature. Skip it here, mirroring the printed
+            // `MayLookAtFaceDown` static (built with empty `modifications`, read
+            // by mode in `battlefield_active_statics`).
+            if matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            ) {
                 continue;
             }
             effects.push(ActiveContinuousEffect {
@@ -4210,8 +4375,13 @@ fn apply_continuous_effect_filtered(
             // subtypes (e.g., creature subtypes on Land Creatures) are preserved.
             // Abilities granted by other effects are re-added in Layer 6.
             // Intrinsic mana abilities are derived from subtypes in mana_sources.rs.
+            // CR 613.1f: mirror RemoveAllAbilities — suppress the recipient's
+            // own printed continuous statics for the rest of this pass so layer
+            // 6 cannot re-install rules-text abilities the subtype change removed
+            // (Song of the Dryads class — issue #3279).
             ContinuousModification::SetBasicLandType { land_type } => {
                 set_land_subtype_replacing(obj, land_type.as_subtype_str().to_string());
+                abilities_suppressed.insert(id);
             }
             // CR 305.7 + CR 305.6: Set the land's subtype to the basic land type
             // chosen by the granting source (Phantasmal Terrain, Convincing
@@ -4225,6 +4395,7 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::SetChosenBasicLandType => {
                 if let Some(ref subtype) = chosen_subtype {
                     set_land_subtype_replacing(obj, subtype.clone());
+                    abilities_suppressed.insert(id);
                 }
             }
             // CR 707.9a: Retain the source's printed trigger on the copy.
@@ -10291,6 +10462,49 @@ mod tests {
     }
 
     #[test]
+    fn song_of_dryads_from_oracle_strips_host_triggers_and_statics() {
+        use crate::game::effects::attach::attach_to;
+
+        let mut scenario = GameScenario::new();
+        let host = {
+            let mut card = scenario.add_creature(PlayerId(0), "Obuun, Mul Daya Ancestor", 3, 3);
+            card.from_oracle_text(
+                "At the beginning of combat on your turn, up to one target land you control becomes an X/X Elemental creature with trample and haste until end of turn, where X is Obuun's power. It's still a land.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on target creature.",
+            );
+            card.with_trigger(TriggerMode::Attacks);
+            card.id()
+        };
+        let song = scenario
+            .add_creature(PlayerId(0), "Song of the Dryads", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("Enchant permanent\nEnchanted permanent is a colorless Forest land.")
+            .id();
+
+        let mut state = scenario.build().state().clone();
+        state
+            .objects
+            .get_mut(&song)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+
+        attach_to(&mut state, song, host);
+
+        let host_obj = state.objects.get(&host).unwrap();
+        assert_eq!(host_obj.card_types.core_types, vec![CoreType::Land]);
+        assert!(host_obj.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(
+            host_obj.trigger_definitions.is_empty(),
+            "CR 305.7: printed triggers must be removed"
+        );
+        assert!(
+            host_obj.static_definitions.is_empty(),
+            "CR 305.7: printed statics must be removed"
+        );
+    }
+
+    #[test]
     fn set_chosen_basic_land_type_reads_source_choice() {
         // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura
         // (source) recorded a chosen basic land type as it entered; its
@@ -10881,6 +11095,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -10908,6 +11124,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
@@ -10919,6 +11137,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -10958,6 +11178,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
@@ -11046,6 +11268,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
         state
             .objects
@@ -11064,6 +11288,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -11099,6 +11325,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -13551,6 +13779,65 @@ mod tests {
              pass — top-of-pass rebuild)"
         );
         assert_eq!(after_b.toughness, Some(4));
+    }
+
+    /// Sticker-granted continuous statics must participate in the same source
+    /// index as printed generators, even when another generator already makes
+    /// the index non-empty and therefore disarms the direct-scan fallback.
+    #[test]
+    fn sticker_static_source_is_indexed_with_preexisting_generator() {
+        let mut state = setup();
+
+        // Pre-existing generator disarms the empty-index fallback.
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        crate::game::stickers::set_player_sticker_sheets(
+            &mut state,
+            PlayerId(0),
+            &["Vampire Champion Fury".to_string()],
+        );
+        let hellbent = crate::game::stickers::available_sticker_candidates(
+            &state,
+            PlayerId(0),
+            Some(crate::types::stickers::StickerKind::Ability),
+            None,
+            true,
+        )
+        .into_iter()
+        .find(|candidate| {
+            matches!(
+                &candidate.sticker,
+                crate::types::stickers::AppliedSticker::Ability { text, .. }
+                    if text
+                        == "Hellbent — This creature gets +3/+3 as long as you have no cards in hand."
+            )
+        })
+        .expect("hellbent sticker available");
+        let mut events = Vec::new();
+        crate::game::stickers::apply_selected_sticker(
+            &mut state,
+            PlayerId(0),
+            creature,
+            hellbent.sticker,
+            hellbent.pay_ticket,
+            &mut events,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .static_source_index
+                .battlefield_sources
+                .iter()
+                .any(|&id| id == creature),
+            "sticker-granted continuous static source must be indexed in the \
+             same pass, even when another generator keeps the fallback disabled"
+        );
+        let creature_obj = state.objects.get(&creature).unwrap();
+        assert_eq!(creature_obj.power, Some(6));
+        assert_eq!(creature_obj.toughness, Some(6));
     }
 
     /// FIX-B counterpart: the SAME scenario under the buggy end-of-pass rebuild

@@ -373,6 +373,9 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
+        // CR 113.1a + CR 611.2: the donor whose activated abilities are gained
+        // (Quicksilver Elemental) is a real declared target.
+        | Effect::GainActivatedAbilitiesOfTarget { target, .. }
         | Effect::PutCounter { target, .. } => !matches!(target, TargetFilter::None),
         Effect::RevealHand { target, .. } => !matches!(target, TargetFilter::None),
         // CR 701.26a/b: only single-permanent tap/untap declares a target. The

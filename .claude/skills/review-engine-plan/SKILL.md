@@ -55,8 +55,13 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Parser shape tests do not satisfy runtime semantics or coverage-support claims. Parser-only shape tests are acceptable only when unsupported semantics remain honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged red coverage.
    - Reject parser plans that accept full Oracle text while dropping semantics unless the plan explicitly preserves an `Unimplemented`/coverage gap.
 
-10. **Scope matrix**
+10. **Identity / provenance contract**
+   - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.
+   - Reject plans that rely on rescanning matching permissions, sources, costs, replacements, tracked sets, controllers, owners, or choices at consumption time unless they prove the rescan is equivalent for a multi-authority fixture.
+
+11. **Scope matrix**
    - For target, player, combat, controller, owner, protector, or defender changes, require the plan to enumerate the variants/scopes reachable at the touched production boundary.
+   - Include permissions, costs, choice provenance, tracked sets, duration snapshots, source/controller/owner shifts, and serialization/protocol/card-data boundaries when those are touched.
    - Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
 
 ## Review Loop

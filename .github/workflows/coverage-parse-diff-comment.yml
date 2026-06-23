@@ -1,0 +1,124 @@
+name: Coverage parse-diff comment
+
+# Posts the parse-detail diff (built by ci.yml's "Parse-detail diff" step) as a
+# single sticky PR comment, for the reviewing LLM.
+#
+# Why workflow_run and not a step in ci.yml: the diff is computed in the
+# untrusted `pull_request` context (fork code, read-only token). Commenting
+# needs `pull-requests: write`, which fork PRs don't get. workflow_run runs in
+# the BASE repo's trusted context AFTER ci.yml finishes, and — critically — does
+# NOT check out PR code; it only consumes the uploaded artifact as data. This is
+# the safe half of the fork-comment pattern (the dangerous variant is
+# pull_request_target-with-checkout, which we deliberately avoid).
+#
+# The artifact (card names + Oracle fragments) is fork-controlled, so it is
+# treated as untrusted: its contents are read into a JS string and passed as the
+# octokit `body` param (JSON-encoded) — never concatenated into a shell/exec.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# A new push to the same branch cancels an in-flight comment job so a slower
+# older run can't land its (stale) comment after a newer one.
+concurrency:
+  group: parse-diff-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read # download the artifact from the triggering run
+  pull-requests: write # upsert the sticky comment
+
+jobs:
+  comment:
+    name: Sticky parse-diff comment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only PR-triggered CI runs produce the artifact. Skipping non-PR runs keeps
+    # this job off main/merge_group entirely.
+    if: github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Download parse-diff artifact
+        id: dl
+        uses: actions/download-artifact@v4
+        # Absent artifact = the PR didn't change engine source (compute step
+        # skipped its upload). Nothing to comment; degrade silently.
+        continue-on-error: true
+        with:
+          name: parse-diff
+          path: parse-diff-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upsert sticky comment
+        if: steps.dl.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- coverage-parse-diff -->';
+            const dir = 'parse-diff-artifact';
+
+            // pr-number.txt is authoritative (workflow_run.pull_requests is
+            // unreliable for forks). Absent => nothing to do.
+            let prNumber;
+            try {
+              prNumber = parseInt(fs.readFileSync(`${dir}/pr-number.txt`, 'utf8').trim(), 10);
+            } catch {
+              core.info('No pr-number.txt in artifact; nothing to comment.');
+              return;
+            }
+            if (!Number.isInteger(prNumber)) {
+              core.info('pr-number.txt malformed; skipping.');
+              return;
+            }
+
+            let body;
+            try {
+              body = fs.readFileSync(`${dir}/parse-diff.md`, 'utf8');
+            } catch {
+              core.info('No parse-diff.md in artifact; nothing to comment.');
+              return;
+            }
+            if (!body.includes(MARKER)) {
+              core.info('parse-diff.md missing marker; refusing to post.');
+              return;
+            }
+
+            // Bound to GitHub's 65536-char comment limit (untrusted content can
+            // be large in pathological diffs).
+            const LIMIT = 60000;
+            if (body.length > LIMIT) {
+              body = body.slice(0, LIMIT) + '\n\n_…truncated — see the `parse-diff.json` run artifact for the full diff._\n';
+            }
+
+            // Classify: a "real changes" body carries the "signature(s)" headline;
+            // the no-change and baseline-pending bodies do not. Anti-thrash rule:
+            // only REAL changes may CREATE a comment. No-change / pending may only
+            // UPDATE an existing sticky (so a resolved diff collapses to "✓"),
+            // never spawn a fresh notification.
+            const isReal = body.includes('signature(s)');
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              // EDIT in place — GitHub does not notify on edits, so re-pushes
+              // are silent. Never delete-and-recreate (that would notify).
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+              core.info(`Updated sticky comment ${existing.id} on PR #${prNumber}.`);
+            } else if (isReal) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body,
+              });
+              core.info(`Created sticky comment on PR #${prNumber}.`);
+            } else {
+              core.info('No existing sticky and nothing substantive to report; not creating one.');
+            }
