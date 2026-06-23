@@ -2874,6 +2874,14 @@ pub fn resolve_effect(
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
+        Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. } => {
+            crate::game::contraptions::resolve(state, ability, events)
+        }
         Effect::PutSticker { .. } | Effect::ApplySticker { .. } => {
             stickers::resolve(state, ability, events)
         }

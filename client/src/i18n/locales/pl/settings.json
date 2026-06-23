@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
     "clearArtOverridesConfirm_one": "Wyczyścić {{count}} nadpisanie grafiki?",
     "clearArtOverridesConfirm_other": "Wyczyścić wszystkie nadpisania grafiki ({{count}})?",
+    "clearArtOverridesAction": "Wyczyść",
     "vfxQualityOptions": {
       "full": "Pełna",
       "reduced": "Zredukowana",
@@ -160,6 +161,10 @@
     "description": "Eksport pakuje twoje preferencje, zaimportowane talie i subskrypcje kanałów do jednego pliku JSON. Import przywraca je na innym komputerze. Pamięci podręczne IndexedDB (pamięć kanałów, pamięć dźwięku, zapisane gry) nie są dołączane — odbudowują się automatycznie.",
     "exportBackup": "Eksportuj kopię zapasową…",
     "importBackup": "Importuj kopię zapasową…",
+    "importModeTitle": "Importuj kopię zapasową",
+    "importModeMessage": "Zastąp wszystko kopią zapasową (destrukcyjnie) lub scal — zachowaj istniejące talie i dodaj nowe z kopii.",
+    "importOverwrite": "Zastąp wszystko",
+    "importMerge": "Scal",
     "importConfirm": "Nadpisać istniejące preferencje i talie?\n\nOK: zastąp wszystko kopią zapasową (destrukcyjne).\nAnuluj: scal — zachowaj istniejące talie, dodaj nowe z kopii zapasowej.",
     "backupDownloaded": "Kopia zapasowa pobrana.",
     "imported_one": "Zaimportowano {{count}} talię.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "Zresetować wszystkie preferencje do wartości domyślnych? Spowoduje to wyczyszczenie każdego ustawienia w tym oknie.",
-    "button": "Zresetuj wszystkie preferencje"
+    "button": "Zresetuj wszystkie preferencje",
+    "confirmAction": "Zresetuj"
   },
   "pacing": {
     "title": "Tempo",

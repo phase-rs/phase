@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverridesConfirm_one": "Limpar todas as {{count}} substituição de arte?",
     "clearArtOverridesConfirm_other": "Limpar todas as {{count}} substituições de arte?",
+    "clearArtOverridesAction": "Limpar",
     "vfxQualityOptions": {
       "full": "Completa",
       "reduced": "Reduzida",
@@ -160,6 +161,10 @@
     "description": "A exportação agrupa suas preferências, decks importados e inscrições em feeds em um único arquivo JSON. A importação os restaura em outra máquina. Os caches do IndexedDB (cache de feeds, cache de áudio, jogos salvos) não são incluídos — eles se reconstroem automaticamente.",
     "exportBackup": "Exportar backup…",
     "importBackup": "Importar backup…",
+    "importModeTitle": "Importar backup",
+    "importModeMessage": "Substituir tudo pelo backup (destrutivo) ou mesclar — manter os decks existentes e adicionar os novos do backup.",
+    "importOverwrite": "Substituir tudo",
+    "importMerge": "Mesclar",
     "importConfirm": "Sobrescrever preferências e decks existentes?\n\nOK: substituir tudo pelo backup (destrutivo).\nCancelar: mesclar — manter os decks existentes e adicionar os novos do backup.",
     "backupDownloaded": "Backup baixado.",
     "imported_one": "Importado {{count}} deck.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "Redefinir todas as preferências para os padrões? Isso limpa todas as configurações deste diálogo.",
-    "button": "Redefinir todas as preferências"
+    "button": "Redefinir todas as preferências",
+    "confirmAction": "Redefinir"
   },
   "pacing": {
     "title": "Ritmo",

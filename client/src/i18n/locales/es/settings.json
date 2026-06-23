@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverridesConfirm_one": "¿Borrar la anulación de ilustración? ({{count}})",
     "clearArtOverridesConfirm_other": "¿Borrar las {{count}} anulaciones de ilustración?",
+    "clearArtOverridesAction": "Borrar",
     "vfxQualityOptions": {
       "full": "Completa",
       "reduced": "Reducida",
@@ -160,6 +161,10 @@
     "description": "Exportar agrupa tus preferencias, mazos importados y suscripciones a feeds en un único archivo JSON. Importar los restaura en otra máquina. Las cachés de IndexedDB (caché de feeds, caché de audio, partidas guardadas) no se incluyen — esas se reconstruyen automáticamente.",
     "exportBackup": "Exportar copia de seguridad…",
     "importBackup": "Importar copia de seguridad…",
+    "importModeTitle": "Importar copia de seguridad",
+    "importModeMessage": "Reemplazar todo con la copia de seguridad (destructivo), o fusionar — conservar los mazos existentes y añadir los nuevos de la copia.",
+    "importOverwrite": "Reemplazar todo",
+    "importMerge": "Fusionar",
     "importConfirm": "¿Sobrescribir las preferencias y mazos existentes?\n\nAceptar: reemplazar todo con la copia de seguridad (destructivo).\nCancelar: fusionar — conservar los mazos existentes y añadir los nuevos de la copia de seguridad.",
     "backupDownloaded": "Copia de seguridad descargada.",
     "imported_one": "Se importó {{count}} mazo.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",
-    "button": "Restablecer todas las preferencias"
+    "button": "Restablecer todas las preferencias",
+    "confirmAction": "Restablecer"
   },
   "pacing": {
     "title": "Ritmo",

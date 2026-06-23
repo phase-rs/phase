@@ -217,9 +217,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
         | GameEvent::StickerPlaced { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
         | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
@@ -1095,6 +1097,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttractionOpened { object_id, .. } => {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
         }
+        GameEvent::ContraptionAssembled {
+            object_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Assembled Contraption "),
+            card_seg(state, *object_id),
+            text(" onto sprocket "),
+            text(&sprocket.to_string()),
+        ],
         GameEvent::StickerPlaced {
             object_id, kind, ..
         } => vec![
@@ -1123,6 +1135,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 text(")"),
             ]
         }
+        GameEvent::ContraptionCranked {
+            contraption_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Cranked Contraption "),
+            card_seg(state, *contraption_id),
+            text(" on sprocket "),
+            text(&sprocket.to_string()),
+        ],
         GameEvent::Clash { .. } => vec![text("Clash")],
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]

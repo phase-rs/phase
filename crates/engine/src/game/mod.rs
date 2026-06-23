@@ -24,6 +24,10 @@ pub mod combat_damage;
 pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
+pub mod contraptions;
+#[cfg(test)]
+#[path = "contraptions_tests.rs"]
+mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;

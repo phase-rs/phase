@@ -527,6 +527,20 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 701.52: "roll to visit your Attractions"
     RollToVisitAttractions,
+    /// Unstable Contraptions: assemble one or more Contraptions from the top of
+    /// your Contraption deck.
+    AssembleContraptions {
+        count: crate::types::ability::QuantityExpr,
+    },
+    /// Unstable Contraptions: assemble a number of Contraptions equal to the
+    /// difference between the two most recent die-roll results.
+    AssembleContraptionsFromRollDifference,
+    /// Unstable Contraptions: move a Contraption onto a sprocket, optionally
+    /// gaining control of it first.
+    ReassembleContraption {
+        target: crate::types::ability::TargetFilter,
+        control_mode: crate::types::ability::ReassembleControlMode,
+    },
     Proliferate,
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,

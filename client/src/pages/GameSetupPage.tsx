@@ -548,14 +548,16 @@ export function GameSetupPage() {
         subtitle={t("gameSetup.formatPicker.subtitle")}
         onClose={() => setFormatPickerOpen(false)}
         maxWidthClassName="max-w-3xl"
-        bodyClassName="overflow-y-auto px-4 py-4 lg:px-6 lg:py-6"
+        bodyClassName="overflow-y-auto px-4 pt-4 lg:px-6 lg:pt-6"
       >
-        <FormatPicker
-          onFormatSelect={(format) => {
-            applyFormat(format);
-            setFormatPickerOpen(false);
-          }}
-        />
+        <div className="pb-4 lg:pb-6">
+          <FormatPicker
+            onFormatSelect={(format) => {
+              applyFormat(format);
+              setFormatPickerOpen(false);
+            }}
+          />
+        </div>
       </ModalPanelShell>
     </div>
   );

@@ -3668,6 +3668,13 @@ pub enum EffectScope {
     All,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReassembleControlMode {
+    #[default]
+    KeepController,
+    GainControl,
+}
+
 /// CR 701.26a (tap) / CR 701.26b (untap): Direction of an `Effect::SetTapState`.
 /// Parameterizes the tap/untap axis so a single effect variant covers both
 /// keyword actions.
@@ -9457,6 +9464,42 @@ pub enum Effect {
     },
     /// CR 701.52: Roll to visit your Attractions.
     RollToVisitAttractions,
+    /// Unstable Contraptions: assemble one or more Contraptions from the top
+    /// of the controller's Contraption deck.
+    AssembleContraptions {
+        count: QuantityExpr,
+    },
+    /// Unstable Contraptions: assemble Contraptions equal to the unsigned
+    /// difference between the two most recent die-roll results of the current
+    /// resolution.
+    AssembleContraptionsFromRollDifference,
+    /// Unstable Contraptions: crank the targeted Contraptions.
+    CrankContraptions {
+        target: TargetFilter,
+    },
+    /// Unstable Contraptions: move a Contraption onto a different sprocket,
+    /// optionally gaining control of it first.
+    ReassembleContraption {
+        target: TargetFilter,
+        #[serde(default)]
+        control_mode: ReassembleControlMode,
+    },
+    /// Internal Contraption helper: resolve one assemble onto the chosen
+    /// sprocket, then continue with any remaining assembles.
+    AssembleContraptionOnSprocket {
+        target: TargetFilter,
+        sprocket: u8,
+        #[serde(default)]
+        remaining: u32,
+    },
+    /// Internal Contraption helper: move the target Contraption onto the
+    /// chosen sprocket, optionally gaining control of it first.
+    ReassembleContraptionOnSprocket {
+        target: TargetFilter,
+        sprocket: u8,
+        #[serde(default)]
+        control_mode: ReassembleControlMode,
+    },
     /// CR 123.3: Put one or more stickers you have access to on a target object.
     PutSticker {
         #[serde(default = "default_target_filter_any")]
@@ -11110,6 +11153,9 @@ impl Effect {
 
             Effect::CombineHost { host, .. }
             | Effect::ChooseAugmentAndCombineWithHost { host, .. } => Some(host.as_ref()),
+            Effect::CrankContraptions { target }
+            | Effect::ReassembleContraption { target, .. }
+            | Effect::ReassembleContraptionOnSprocket { target, .. } => Some(target),
 
             // CR 702.75a: Hideaway conceal acts on the just-exiled card inherited
             // from the parent `Dig` continuation (`ParentTarget`); it is never
@@ -11356,6 +11402,9 @@ impl Effect {
             | Effect::Planeswalk
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -11465,6 +11514,7 @@ impl Effect {
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
             | Effect::Adapt { count, .. }
+            | Effect::AssembleContraptions { count }
             // CR 701.20a: how many matching cards to reveal before the
             // until-loop terminates ("reveal until you reveal X [filter] cards").
             | Effect::RevealUntil { count, .. }
@@ -11620,10 +11670,15 @@ impl Effect {
             | Effect::TurnFaceUp { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::CrankContraptions { .. }
             | Effect::PayCost { .. }
             | Effect::PutSticker { .. }
             | Effect::ApplySticker { .. }
             | Effect::ProcessRadCounters
+            | Effect::ReassembleContraption { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
             | Effect::ReduceNextSpellCost { .. }
             | Effect::RevealFromHand { .. }
             | Effect::RingTemptsYou
@@ -11686,6 +11741,7 @@ impl Effect {
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
             | Effect::Adapt { count, .. }
+            | Effect::AssembleContraptions { count }
             // CR 701.20a: how many matching cards to reveal before the
             // until-loop terminates ("reveal until you reveal X [filter] cards").
             | Effect::RevealUntil { count, .. }
@@ -11841,10 +11897,15 @@ impl Effect {
             | Effect::TurnFaceUp { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::CrankContraptions { .. }
             | Effect::PayCost { .. }
             | Effect::PutSticker { .. }
             | Effect::ApplySticker { .. }
             | Effect::ProcessRadCounters
+            | Effect::ReassembleContraption { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
             | Effect::ReduceNextSpellCost { .. }
             | Effect::RevealFromHand { .. }
             | Effect::RingTemptsYou
@@ -12012,6 +12073,12 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Planeswalk => "Planeswalk",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
+        Effect::AssembleContraptions { .. } => "AssembleContraptions",
+        Effect::AssembleContraptionsFromRollDifference => "AssembleContraptionsFromRollDifference",
+        Effect::CrankContraptions { .. } => "CrankContraptions",
+        Effect::ReassembleContraption { .. } => "ReassembleContraption",
+        Effect::AssembleContraptionOnSprocket { .. } => "AssembleContraptionOnSprocket",
+        Effect::ReassembleContraptionOnSprocket { .. } => "ReassembleContraptionOnSprocket",
         Effect::PutSticker { .. } => "PutSticker",
         Effect::ApplySticker { .. } => "ApplySticker",
         Effect::ProcessRadCounters => "ProcessRadCounters",
@@ -12232,6 +12299,12 @@ pub enum EffectKind {
     Planeswalk,
     OpenAttractions,
     RollToVisitAttractions,
+    AssembleContraptions,
+    AssembleContraptionsFromRollDifference,
+    CrankContraptions,
+    ReassembleContraption,
+    AssembleContraptionOnSprocket,
+    ReassembleContraptionOnSprocket,
     PutSticker,
     ApplySticker,
     ProcessRadCounters,
@@ -12465,6 +12538,18 @@ impl From<&Effect> for EffectKind {
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
+            Effect::AssembleContraptions { .. } => EffectKind::AssembleContraptions,
+            Effect::AssembleContraptionsFromRollDifference => {
+                EffectKind::AssembleContraptionsFromRollDifference
+            }
+            Effect::CrankContraptions { .. } => EffectKind::CrankContraptions,
+            Effect::ReassembleContraption { .. } => EffectKind::ReassembleContraption,
+            Effect::AssembleContraptionOnSprocket { .. } => {
+                EffectKind::AssembleContraptionOnSprocket
+            }
+            Effect::ReassembleContraptionOnSprocket { .. } => {
+                EffectKind::ReassembleContraptionOnSprocket
+            }
             Effect::PutSticker { .. } => EffectKind::PutSticker,
             Effect::ApplySticker { .. } => EffectKind::ApplySticker,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,

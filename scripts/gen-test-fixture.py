@@ -9,6 +9,10 @@ extracts just those (plus any faces sharing their `scryfall_oracle_id`, so
 multi-face cards keep their back faces) into a small committed fixture that
 `tests::integration::support::shared_card_db` loads instead.
 
+Scans both the integration tests under `crates/engine/tests` and the four
+inline-`#[cfg(test)]` `src/` files listed in `SRC_TEST_FILES`, which load the
+same fixture through `crate::test_support::shared_card_db`.
+
 Re-run after adding a test that references a new card:
 
     python3 scripts/gen-test-fixture.py
@@ -28,6 +32,15 @@ EXPORT_PATH = REPO_ROOT / "client/public/card-data.json"
 TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
 
+# Inline `#[cfg(test)]` unit tests in `src/` also load the fixture (via
+# `crate::test_support::shared_card_db`), so scan their card-name literals too.
+SRC_TEST_FILES = [
+    REPO_ROOT / "crates/engine/src/analysis/corpus_tests.rs",
+    REPO_ROOT / "crates/engine/src/database/synthesis.rs",
+    REPO_ROOT / "crates/engine/src/game/engine.rs",
+    REPO_ROOT / "crates/engine/src/game/meld_tests.rs",
+]
+
 # Double-quoted Rust string literal contents (handles \" escapes).
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -40,7 +53,7 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
     file. Card-name literals are single-line, so this loses nothing.
     """
     keys: set[str] = set()
-    for rs in TESTS_DIR.rglob("*.rs"):
+    for rs in [*TESTS_DIR.rglob("*.rs"), *SRC_TEST_FILES]:
         text = rs.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             for raw in STRING_LITERAL.findall(line):
