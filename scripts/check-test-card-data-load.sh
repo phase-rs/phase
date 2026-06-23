@@ -65,28 +65,18 @@ strip_comment_lines() {
     grep -Ev '^[[:space:]]*(//|\*|/\*)' || true
 }
 
-filter_allow_annotation() {
+# Emit "<new-file-lineno>\t<content>" for each ADDED line in the diff for $file.
+# The line number is parsed from the hunk header (@@ -a,b +c,d @@): with
+# --unified=0 only '+' lines advance the new-file counter, so the running line
+# number is exact. This replaces the old text-match-back-into-file approach,
+# which mis-attributed duplicate lines (always matched the first occurrence).
+added_lines_with_numbers() {
     local file="$1"
-    local candidates="$2"
-    local kept=""
-    while IFS= read -r text; do
-        [ -z "$text" ] && continue
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-full-card-db'; then
-                continue
-            fi
-        fi
-        if echo "$text" | grep -q 'allow-full-card-db'; then
-            continue
-        fi
-        kept="${kept}${text}
-"
-    done <<< "$candidates"
-    printf '%s' "${kept%$'\n'}"
+    git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | awk '
+        /^@@/        { match($0, /\+[0-9]+/); ln = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
+        /^\+\+\+/    { next }                       # skip the +++ b/file header
+        /^\+/        { print ln "\t" substr($0, 2); ln++; next }
+    '
 }
 
 files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
@@ -100,21 +90,21 @@ while IFS= read -r file; do
         continue
     fi
 
-    diff_added=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
-    [ -z "$diff_added" ] && continue
-
-    # Strip the leading '+', drop comment lines, then match the export path.
-    hits=$(echo "$diff_added" | sed 's/^+//' | strip_comment_lines | grep -E "$FORBIDDEN" || true)
-    hits=$(filter_allow_annotation "$file" "$hits")
-    if [ -n "$hits" ]; then
+    while IFS=$'\t' read -r ln content; do
+        [ -n "$ln" ] || continue
+        # Provenance notes in comments are fine — only code lines load the path.
+        printf '%s\n' "$content" | strip_comment_lines | grep -qE "$FORBIDDEN" || continue
+        # Exempt: annotation on the same line, or on the line immediately above.
+        # `case` globs (not grep args) so a content line starting with '-' is safe.
+        case "$content" in *allow-full-card-db*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(sed -n "$((ln - 1))p" "$file")
+            case "$prev" in *allow-full-card-db*) continue ;; esac
+        fi
         report="${report}
-  ${file}:"
-        while IFS= read -r line; do
-            report="${report}
-    ${line}"
-        done <<< "$hits"
+  ${file}:${ln}:${content}"
         FAIL=1
-    fi
+    done <<< "$(added_lines_with_numbers "$file")"
 done <<< "$files"
 
 if [ "$FAIL" -eq 1 ]; then
