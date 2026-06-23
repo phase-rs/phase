@@ -73,4 +73,15 @@ describe("rangeAdd", () => {
   it("handles reversed indices", () => {
     expect(rangeAdd(all, 3, 1, new Set(), 10)).toEqual(new Set([2, 3, 4]));
   });
+  it("clamps out-of-bounds endpoints and never adds undefined", () => {
+    // A stale shift anchor past the end (10) plus an unmapped index (-1) must
+    // clamp into [0, len-1] rather than indexing past the dense list and
+    // polluting the set with `undefined` (which fails engine set-membership).
+    const result = rangeAdd(all, 10, -1, new Set(), 10);
+    expect(result).toEqual(new Set([1, 2, 3, 4]));
+    expect([...result]).not.toContain(undefined);
+  });
+  it("returns the existing value unchanged for an empty list", () => {
+    expect(rangeAdd([], 0, 5, new Set([1]), 10)).toEqual(new Set([1]));
+  });
 });

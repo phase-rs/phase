@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -115,7 +115,7 @@ describe("Discard bulk-select grid", () => {
     fireEvent.click(screen.getByRole("button", { name: /Bravo/i })); // keep 2 -> keepCap reached
     fireEvent.click(screen.getByRole("button", { name: /Discard \(/ })); // confirm (avoids "Discard instead" toggle)
     const call = dispatchMock.mock.calls.find((c) => c[0].type === "SelectCards");
-    expect(call?.[0].data.cards.slice().sort((a, b) => a - b)).toEqual([3, 4]); // complement of {1,2}
+    expect(call?.[0].data.cards.slice().sort((a: number, b: number) => a - b)).toEqual([3, 4]); // complement of {1,2}
     expect(call?.[0].data.cards).toHaveLength(2);
   });
 
@@ -134,5 +134,43 @@ describe("Discard bulk-select grid", () => {
     expect(screen.queryByRole("button", { name: "Keep instead" })).toBeNull(); // up-to: no keep framing
     fireEvent.click(screen.getByRole("button", { name: /Discard \(/ }));
     expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [] } });
+  });
+
+  it("resets selection + keep-mode when a new prompt with a different card set arrives", () => {
+    // Prompt 1: enable keep-mode and select a card.
+    setWaitingFor({ type: "DiscardToHandSize", data: { player: 0, count: 2, cards: handIds } } as WaitingFor, hand);
+    render(<CardChoiceModal />);
+    fireEvent.click(screen.getByRole("button", { name: "Keep instead" }));
+    fireEvent.click(screen.getByRole("button", { name: /Alpha/i }));
+    expect(screen.getByRole("button", { name: "Discard instead" })).toBeInTheDocument(); // keep-mode on
+    expect(screen.getByRole("status")).toHaveTextContent("Keep 1 of 2");
+
+    // A fresh prompt whose eligible set differs (the hand shrank after discarding)
+    // changes the content key, so React remounts the modal with clean state.
+    act(() => {
+      setWaitingFor({ type: "DiscardToHandSize", data: { player: 0, count: 2, cards: [2, 3, 4] } } as WaitingFor, hand);
+    });
+
+    // Keep-mode off (toggle back to "Keep instead") and nothing selected.
+    expect(screen.getByRole("button", { name: "Keep instead" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Discard 0 of 2");
+  });
+
+  it("preserves an in-progress selection across an unrelated re-render (no per-render wipe)", () => {
+    // WardDiscardChoice passes a freshly-spread `data` literal, so the modal must
+    // NOT reset on every parent re-render — e.g. an engine push that replaces
+    // gameState without changing the eligible set (multiplayer/opponent action).
+    setWaitingFor({ type: "WardDiscardChoice", data: { player: 0, cards: handIds, pending_effect: {}, remaining: 1 } } as unknown as WaitingFor, hand);
+    render(<CardChoiceModal />);
+    fireEvent.click(screen.getByRole("button", { name: /Cosmo/i })); // select 1 of 1
+    expect(screen.getByRole("status")).toHaveTextContent("Discard 1 of 1");
+
+    // Same eligible cards, new gameState reference -> parent re-renders and the
+    // spread `data` literal is rebuilt, but the content key is unchanged so the
+    // instance is reused and the selection survives.
+    act(() => {
+      setWaitingFor({ type: "WardDiscardChoice", data: { player: 0, cards: handIds, pending_effect: {}, remaining: 1 } } as unknown as WaitingFor, hand);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Discard 1 of 1");
   });
 });

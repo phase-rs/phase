@@ -64,11 +64,16 @@ export default function SelectableCardGrid({
     [ordered],
   );
 
-  // Reset the shift-range anchor when the display order changes, so a stale
-  // ordered-index can't anchor a range against a reordered list.
+  // Reset the shift-range anchor whenever the displayed order changes, so a stale
+  // ordered-index can't anchor a range against a reordered or mutated list.
+  // `ordered` folds in the sort key + the underlying cards/objects (stable store
+  // slices during a prompt), so it is the single source of truth for index
+  // validity — covering sort changes and any card-list mutation. Grouping only
+  // re-buckets the same ids without changing ordered-indices, so a regroup keeps
+  // a valid anchor; `group` is intentionally not a dependency.
   useEffect(() => {
     lastIndexRef.current = null;
-  }, [sort, group]);
+  }, [ordered]);
 
   const bulk = useCallback(
     (action: "all" | "invert" | "clear") => onChange(applyBulk(action, ordered, value, cap)),
@@ -99,7 +104,13 @@ export default function SelectableCardGrid({
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
         switch (e.key) {
           case "Enter":
-            if (canConfirm && onConfirm) { e.preventDefault(); onConfirm(); }
+            // Only confirm when the grid container itself is focused; otherwise
+            // Enter must reach the focused child (toolbar/card button) so its
+            // native activation isn't shadowed by a modal-closing confirm.
+            if (e.target === e.currentTarget && canConfirm && onConfirm) {
+              e.preventDefault();
+              onConfirm();
+            }
             break;
           case "a": e.preventDefault(); bulk("all"); break;
           case "i": e.preventDefault(); bulk("invert"); break;

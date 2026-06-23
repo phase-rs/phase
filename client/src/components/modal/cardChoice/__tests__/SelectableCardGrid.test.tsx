@@ -19,7 +19,12 @@ const objects: Record<ObjectId, GameObject> = { 1: obj(1, "Alpha"), 2: obj(2, "B
 const cards: ObjectId[] = [1, 2, 3];
 const tone = { ring: "ring-red-400/80", overlay: "bg-red-500/20", badge: "bg-red-500/90" };
 
-function setup(value: Set<ObjectId>, cap: number, onChange = vi.fn()) {
+function setup(
+  value: Set<ObjectId>,
+  cap: number,
+  onChange = vi.fn(),
+  opts: { onConfirm?: () => void; canConfirm?: boolean } = {},
+) {
   render(
     <SelectableCardGrid
       cards={cards}
@@ -31,6 +36,8 @@ function setup(value: Set<ObjectId>, cap: number, onChange = vi.fn()) {
       badgeLabel="Discard"
       counterText={`Discard ${value.size} of ${cap}`}
       hoverProps={() => ({})}
+      onConfirm={opts.onConfirm}
+      canConfirm={opts.canConfirm}
     />,
   );
   return onChange;
@@ -97,5 +104,63 @@ describe("SelectableCardGrid core", () => {
     const onChange = setup(new Set([1, 2]), 2);
     fireEvent.click(screen.getByRole("button", { name: /Alpha/i }));
     expect(onChange).toHaveBeenCalledWith(new Set([2]));
+  });
+});
+
+describe("SelectableCardGrid Enter-to-confirm", () => {
+  it("confirms on Enter only when the grid container itself is focused", () => {
+    const onConfirm = vi.fn();
+    setup(new Set([1, 2]), 2, vi.fn(), { onConfirm, canConfirm: true });
+    const grid = screen.getByRole("status").parentElement as HTMLElement;
+    fireEvent.keyDown(grid, { key: "Enter" });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not confirm on Enter while a child button is focused", () => {
+    // Native button activation (e.target) must win; the container's confirm
+    // must not shadow Enter when a toolbar/card button holds focus.
+    const onConfirm = vi.fn();
+    setup(new Set([1, 2]), 2, vi.fn(), { onConfirm, canConfirm: true });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Select all" }), { key: "Enter" });
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("SelectableCardGrid shift-anchor reset", () => {
+  it("clears the shift anchor when the card list changes, so no range spans a reordered list", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <SelectableCardGrid
+        cards={[1, 2, 3]}
+        objects={objects}
+        value={new Set()}
+        onChange={onChange}
+        cap={3}
+        tone={tone}
+        badgeLabel="Discard"
+        counterText="Discard 0 of 3"
+        hoverProps={() => ({})}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Alpha/i })); // anchor at idx 0 (id 1)
+    // The hand mutates (Alpha leaves); the effect must drop the stale anchor.
+    rerender(
+      <SelectableCardGrid
+        cards={[2, 3]}
+        objects={objects}
+        value={new Set()}
+        onChange={onChange}
+        cap={3}
+        tone={tone}
+        badgeLabel="Discard"
+        counterText="Discard 0 of 2"
+        hoverProps={() => ({})}
+      />,
+    );
+    onChange.mockClear();
+    // With the anchor reset, this shift-click is a plain toggle ({3}); without
+    // the reset it would anchor on the stale idx 0 and add the range {2,3}.
+    fireEvent.click(screen.getByRole("button", { name: /Cosmo/i }), { shiftKey: true });
+    expect(onChange).toHaveBeenLastCalledWith(new Set([3]));
   });
 });

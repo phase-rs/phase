@@ -84,8 +84,16 @@ export function rangeAdd(
   value: Set<ObjectId>,
   cap: number,
 ): Set<ObjectId> {
-  const lo = Math.min(fromIdx, toIdx);
-  const hi = Math.max(fromIdx, toIdx);
+  // Clamp both endpoints into [0, maxIdx] before iterating. A stale shift anchor
+  // or an unmapped (-1) ordered-index must never index out of bounds — `ordered`
+  // is a dense ObjectId[], so clamped access can't yield `undefined` and pollute
+  // the set, which would fail the engine's set-membership check on dispatch.
+  const maxIdx = ordered.length - 1;
+  if (maxIdx < 0) return new Set(value);
+  const clampedFrom = Math.max(0, Math.min(maxIdx, fromIdx));
+  const clampedTo = Math.max(0, Math.min(maxIdx, toIdx));
+  const lo = Math.min(clampedFrom, clampedTo);
+  const hi = Math.max(clampedFrom, clampedTo);
   const next = new Set(value);
   for (let i = lo; i <= hi && next.size < cap; i++) {
     next.add(ordered[i]);

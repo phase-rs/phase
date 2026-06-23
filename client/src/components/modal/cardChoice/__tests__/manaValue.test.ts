@@ -18,8 +18,9 @@ describe("manaValueOfObject", () => {
     expect(manaValueOfObject({ mana_cost: cost(["X"], 0) })).toBe(0);
   });
 
-  it("returns 0 for NoCost / SelfManaCost", () => {
+  it("returns 0 for NoCost / SelfManaCost / SelfManaValue", () => {
     expect(manaValueOfObject({ mana_cost: { type: "NoCost" } as ManaCost })).toBe(0);
     expect(manaValueOfObject({ mana_cost: { type: "SelfManaCost" } as ManaCost })).toBe(0);
+    expect(manaValueOfObject({ mana_cost: { type: "SelfManaValue" } as ManaCost })).toBe(0);
   });
 });

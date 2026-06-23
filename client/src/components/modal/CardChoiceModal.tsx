@@ -176,7 +176,7 @@ export function CardChoiceModal() {
       return <SeparatePilesChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} />;
+      return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       if (!canActForWaitingState) return null;
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
@@ -228,6 +228,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
@@ -238,6 +239,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={
             waitingFor.data.up_to
@@ -254,6 +256,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
         />
@@ -2141,6 +2144,7 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
     case "Discard":
       return (
         <DiscardModal
+          key={choicesKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
