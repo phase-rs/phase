@@ -2,19 +2,40 @@ export interface HandSlotRect {
   objectId: number;
   left: number;
   width: number;
-  /** Viewport top of the card's rect — used to vertically place the drop caret on the fan arc. */
+  /** Viewport top of the card's rect — used to vertically place the drop arrow on the fan arc. */
   top?: number;
   /** Viewport height of the card's rect. */
   height?: number;
 }
 
 /**
- * Total width of the gap that opens between the two cards flanking the drop
+ * Fraction of a card's width that the *visible* slot between the two flanking
+ * cards should open to once they slide apart. The drop target reads as a real
+ * gap you could drop a card into, not a hairline.
+ */
+export const VISIBLE_GAP_FRACTION = 2 / 3;
+
+/**
+ * Total displacement (px) that opens between the two cards flanking the drop
  * position. Each flank shifts by half this amount (rigid two-block model: the
  * whole left block shifts left by gapPx/2, the whole right block shifts right),
  * so the inter-card overlap is preserved and exactly one gap appears.
+ *
+ * Hand cards overlap at rest (negative margin), so the two-block model separates
+ * the flanking pair by exactly `gapPx`, leaving a visible gap of
+ * `gapPx - edgeOverlapPx`. To land that visible gap on `VISIBLE_GAP_FRACTION` of
+ * the card width regardless of how tightly the hand is packed, the displacement
+ * must also cover the resting overlap:
+ *
+ *   gapPx = VISIBLE_GAP_FRACTION * cardWidthPx + edgeOverlapPx
+ *
+ * `cardWidthPx` is the rendered (transform-free) card width and `edgeOverlapPx`
+ * is the resting overlap between adjacent cards (the absolute negative margin),
+ * both measured once at drag start.
  */
-export const INSERTION_GAP_PX = 32;
+export function computeGapPx(cardWidthPx: number, edgeOverlapPx: number): number {
+  return VISIBLE_GAP_FRACTION * cardWidthPx + edgeOverlapPx;
+}
 
 export function computeHandInsertionSlot(
   cards: HandSlotRect[],
@@ -34,11 +55,12 @@ export function computeHandInsertionSlot(
 }
 
 /**
- * Screen position of the drop-position caret for a given insertion `slot`.
+ * Screen position of the drop-position marker (the bouncing arrow) for a given
+ * insertion `slot`.
  *
  * Operates in the SAME drag-excluded ("remaining") space as
  * `computeHandInsertionSlot`: the dragged card is filtered out first. For an
- * interior slot the caret sits at the MIDPOINT between the trailing edge of the
+ * interior slot the marker sits at the MIDPOINT between the trailing edge of the
  * card now before `slot` and the leading edge of the card now at `slot` — i.e.
  * the center of the gap the flanking cards open (symmetric displacement keeps
  * that center fixed at the resting midpoint). For slot 0 it sits at the leading
@@ -80,7 +102,7 @@ export function computeFlankDisplacement(
   index: number,
   slot: number,
   draggingIndex: number,
-  gapPx: number = INSERTION_GAP_PX,
+  gapPx: number,
 ): number {
   if (slot < 0 || draggingIndex < 0) return 0;
   if (index === draggingIndex) return 0;
@@ -91,8 +113,9 @@ export function computeFlankDisplacement(
 /**
  * The `handObjects`-space indices of the two cards flanking the gap at insertion
  * `slot` (drag-excluded space), or null on the side that has no card (slot 0 has
- * no left card; the append slot has no right card). Used to tilt the caret to
- * the average of the flanking cards' fan rotations.
+ * no left card; the append slot has no right card). Used to tilt the arrow to
+ * the average of the flanking cards' fan rotations and to light the inner edge
+ * of each flanking card.
  */
 export function flankingHandIndices(
   slot: number,

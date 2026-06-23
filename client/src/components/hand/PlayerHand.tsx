@@ -21,8 +21,8 @@ import {
   computeHandInsertionSlot,
   computeHandInsertionMarker,
   computeFlankDisplacement,
+  computeGapPx,
   flankingHandIndices,
-  INSERTION_GAP_PX,
 } from "./handInsertionSlot.ts";
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
@@ -57,6 +57,10 @@ function getArcCoefficient(handSize: number): number {
   const maxDist = (handSize - 1) / 2;
   return 54 / (maxDist * maxDist);
 }
+
+// Rendered size (px) of the bouncing drop-arrow's square box. Fixed (not
+// card-relative) so the imperative center / above-slot offsets stay exact in px.
+const DROP_ARROW_PX = 28;
 
 export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
@@ -119,34 +123,41 @@ export function PlayerHand() {
   const hoveredSlotRef = useRef<number | null>(null);
   const shouldReduceMotion = useReducedMotion();
 
-  // Drop-position caret (drag-to-rearrange). Driven by MotionValues set
-  // imperatively in handleDrag — NOT React state — so the memoized fan never
-  // re-renders on pointer move. A short spring glides the caret between slots;
-  // when prefers-reduced-motion is set we bind the raw values so it snaps.
-  const caretXRaw = useMotionValue(0);
-  const caretYRaw = useMotionValue(0);
-  const caretRotateRaw = useMotionValue(0);
-  const caretXSpring = useSpring(caretXRaw, { stiffness: 900, damping: 48, mass: 0.4 });
-  const caretYSpring = useSpring(caretYRaw, { stiffness: 900, damping: 48, mass: 0.4 });
-  const caretRotateSpring = useSpring(caretRotateRaw, { stiffness: 900, damping: 48, mass: 0.4 });
-  const caretX = shouldReduceMotion ? caretXRaw : caretXSpring;
-  const caretY = shouldReduceMotion ? caretYRaw : caretYSpring;
-  const caretRotate = shouldReduceMotion ? caretRotateRaw : caretRotateSpring;
-  const caretOpacity = useMotionValue(0);
+  // Drop-position arrow (drag-to-rearrange). A single bouncing arrow marks the
+  // gap the flanking cards open. Driven by MotionValues set imperatively in
+  // handleDrag — NOT React state — so the memoized fan never re-renders on
+  // pointer move. A short spring glides the arrow between slots; when
+  // prefers-reduced-motion is set we bind the raw values so it snaps. The arrow
+  // is tilted to the average fan rotation of the two flanking cards so it sits
+  // square in the angled gap.
+  const arrowXRaw = useMotionValue(0);
+  const arrowYRaw = useMotionValue(0);
+  const arrowRotateRaw = useMotionValue(0);
+  const arrowXSpring = useSpring(arrowXRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const arrowYSpring = useSpring(arrowYRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const arrowRotateSpring = useSpring(arrowRotateRaw, { stiffness: 900, damping: 48, mass: 0.4 });
+  const arrowX = shouldReduceMotion ? arrowXRaw : arrowXSpring;
+  const arrowY = shouldReduceMotion ? arrowYRaw : arrowYSpring;
+  const arrowRotate = shouldReduceMotion ? arrowRotateRaw : arrowRotateSpring;
+  const arrowOpacity = useMotionValue(0);
 
   // Shared slide-apart signal: the active insertion slot (drag-excluded space)
   // and the dragged card's handObjects index, both -1 when no reorder drag is in
-  // flight. Each HandCard derives its own displacement from these via
-  // useTransform (Task 3) — set imperatively here so the fan never re-renders.
+  // flight. Each HandCard derives its own edge highlight + displacement from
+  // these via useTransform — set imperatively here so the fan never re-renders.
   const insertionSlotMV = useMotionValue(-1);
   const draggingIndexMV = useMotionValue(-1);
+  // Measured-once-per-drag displacement that opens a visible slot of
+  // VISIBLE_GAP_FRACTION of the card width between the flanking cards (set in
+  // handleDragStart from the rendered card geometry). Each HandCard halves it.
+  const gapPxMV = useMotionValue(0);
 
   const handleDrag = useCallback(
     (objectId: number, info: PanInfo) => {
       const container = handContainerRef.current;
       if (!container) return;
 
-      // One DOM sweep, reused for both the slot and the caret position.
+      // One DOM sweep, reused for both the slot and the arrow position.
       const rects = Array.from(
         container.querySelectorAll<HTMLElement>("[data-card-hover]"),
       ).map((el) => {
@@ -163,19 +174,20 @@ export function PlayerHand() {
       const slot = computeHandInsertionSlot(rects, info.point.x, objectId);
       hoveredSlotRef.current = slot;
 
-      // Position the caret whenever a target slot exists (so the spring tracks it
-      // even while hidden), then gate visibility separately.
+      // Position the arrow whenever a target slot exists (so the spring tracks it
+      // even while hidden), then gate visibility separately. Center it on the gap
+      // and lift it one arrow-height above the top edge of the cards so it points
+      // down into the slot.
       const bounds = container.getBoundingClientRect();
       const marker = slot == null ? null : computeHandInsertionMarker(rects, slot, objectId);
       if (marker) {
-        // -1.5 centers the 3px line on the insertion boundary.
-        caretXRaw.set(marker.x - bounds.left - 1.5);
-        caretYRaw.set(marker.top - bounds.top);
+        arrowXRaw.set(marker.x - bounds.left - DROP_ARROW_PX / 2);
+        arrowYRaw.set(marker.top - bounds.top - DROP_ARROW_PX);
       }
 
       // CR n/a — pure UI gating. Reorder is a sideways/inside gesture; an upward
       // drag past the play threshold (or leaving the hand band) is a play, so hide
-      // the caret then. Suppress during a pending cast and on mobile, and on the
+      // the arrow then. Suppress during a pending cast and on mobile, and on the
       // no-op slot (releasing in place — mirrors the fromIdx === targetSlot guard).
       const fromIdx = rects.findIndex((r) => r.objectId === objectId);
       const insideHand =
@@ -190,9 +202,9 @@ export function PlayerHand() {
         insideHand &&
         info.offset.y >= DRAG_PLAY_THRESHOLD &&
         slot !== fromIdx;
-      caretOpacity.set(show ? 1 : 0);
+      arrowOpacity.set(show ? 1 : 0);
 
-      // Tilt the caret to the average fan rotation of the two cards flanking the
+      // Tilt the arrow to the average fan rotation of the two cards flanking the
       // gap (single neighbor at an edge), and open the slide-apart gap by
       // publishing the active slot + dragged index. -1 == inactive (no gap).
       if (show && slot != null) {
@@ -203,16 +215,16 @@ export function PlayerHand() {
         const angle = rotations.length
           ? rotations.reduce((a, b) => a + b, 0) / rotations.length
           : 0;
-        caretRotateRaw.set(angle);
+        arrowRotateRaw.set(angle);
         draggingIndexMV.set(fromIdx);
         insertionSlotMV.set(slot);
       } else {
-        caretRotateRaw.set(0);
+        arrowRotateRaw.set(0);
         insertionSlotMV.set(-1);
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, caretXRaw, caretYRaw, caretRotateRaw, caretOpacity, insertionSlotMV, draggingIndexMV],
+    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -223,8 +235,8 @@ export function PlayerHand() {
   // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      caretOpacity.set(0);
-      caretRotateRaw.set(0);
+      arrowOpacity.set(0);
+      arrowRotateRaw.set(0);
       insertionSlotMV.set(-1);
       draggingIndexMV.set(-1);
       const bounds = handContainerRef.current?.getBoundingClientRect();
@@ -260,7 +272,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, caretOpacity, caretRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, player, pendingObjectId, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
@@ -314,14 +326,33 @@ export function PlayerHand() {
     [isMobile, setMobileHandOpen],
   );
 
-  const handleDragStart = useCallback((id: number) => setDraggingCardId(id), []);
+  const handleDragStart = useCallback(
+    (id: number) => {
+      setDraggingCardId(id);
+      // Measure the rendered card geometry once per drag (stable while dragging)
+      // so the slide-apart gap opens to a visible 2/3 card width. getComputedStyle
+      // returns transform-free layout values, so the fan's rotation/scale don't
+      // pollute the width or the resting overlap (the negative margin-left).
+      const container = handContainerRef.current;
+      const cards = container?.querySelectorAll<HTMLElement>("[data-card-hover]");
+      if (cards && cards.length >= 2) {
+        const cardWidthPx = parseFloat(getComputedStyle(cards[0]).width);
+        // cards[0] has margin-left 0; any later card carries the overlap margin.
+        const edgeOverlapPx = Math.abs(parseFloat(getComputedStyle(cards[1]).marginLeft));
+        if (Number.isFinite(cardWidthPx) && Number.isFinite(edgeOverlapPx)) {
+          gapPxMV.set(computeGapPx(cardWidthPx, edgeOverlapPx));
+        }
+      }
+    },
+    [gapPxMV],
+  );
   const handleDragStop = useCallback(() => {
     setDraggingCardId(null);
-    caretOpacity.set(0);
-    caretRotateRaw.set(0);
+    arrowOpacity.set(0);
+    arrowRotateRaw.set(0);
     insertionSlotMV.set(-1);
     draggingIndexMV.set(-1);
-  }, [caretOpacity, caretRotateRaw, insertionSlotMV, draggingIndexMV]);
+  }, [arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV]);
   const handleMouseEnter = useCallback((id: number) => { setExpanded(true); inspectObject(id); }, [inspectObject]);
   const handleMouseLeave = useCallback(() => inspectObject(null), [inspectObject]);
 
@@ -350,7 +381,7 @@ export function PlayerHand() {
           hand expands/collapses. The lift lives on an inner wrapper so the outer
           container (which owns onMouseLeave) stays put and its collapse hit-area
           doesn't move under the cursor.
-          The drag drop-caret below is likewise driven by MotionValues (not state)
+          The drag drop-arrow below is likewise driven by MotionValues (not state)
           so pointer-move updates never re-render these memoized cards — do not
           lift the hovered slot into React state. */}
       <motion.div
@@ -374,7 +405,7 @@ export function PlayerHand() {
               handSize={handObjects.length}
               insertionSlotMV={insertionSlotMV}
               draggingIndexMV={draggingIndexMV}
-              gapPx={INSERTION_GAP_PX}
+              gapPxMV={gapPxMV}
               rotation={rotation}
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
@@ -394,15 +425,42 @@ export function PlayerHand() {
         })}
         </AnimatePresence>
       </motion.div>
-      {/* Drop-position caret: a glowing insertion line marking where a dragged
-          card will land. x/y/opacity are MotionValues set in handleDrag, so the
-          memoized fan never re-renders. Hidden on mobile (drawer is the surface). */}
+      {/* Drop-position arrow: a single glowing arrow that bounces over the slot
+          the flanking cards open (their inner edges light up via per-card edge
+          highlights). x/y/rotate/opacity are MotionValues set in handleDrag, so
+          the memoized fan never re-renders. The inner element bounces toward the
+          slot (suppressed under prefers-reduced-motion). Hidden on mobile (the
+          drawer is the surface). */}
       {!isMobile && (
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute left-0 top-0 z-50 w-[3px] rounded-full bg-cyan-400/90 shadow-[0_0_12px_3px_rgba(34,211,238,0.7)] h-[calc(var(--card-h)*1.14)] sm:h-[calc(var(--card-h)*1.34)] md:h-[calc(var(--card-h)*1.4)]"
-          style={{ x: caretX, y: caretY, rotate: caretRotate, opacity: caretOpacity }}
-        />
+          className="pointer-events-none absolute left-0 top-0 z-50"
+          style={{ x: arrowX, y: arrowY, rotate: arrowRotate, opacity: arrowOpacity }}
+        >
+          <motion.div
+            animate={shouldReduceMotion ? undefined : { y: [0, 9, 0] }}
+            transition={
+              shouldReduceMotion
+                ? undefined
+                : { duration: 0.85, repeat: Infinity, ease: "easeInOut" }
+            }
+          >
+            <svg
+              width={DROP_ARROW_PX}
+              height={DROP_ARROW_PX}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="rgb(34 211 238)"
+              strokeWidth={3}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="drop-shadow-[0_0_8px_rgba(34,211,238,0.85)]"
+            >
+              {/* Downward arrow: stem + chevron head pointing into the slot. */}
+              <path d="M12 3 V19 M5 12 l7 8 7-8" />
+            </svg>
+          </motion.div>
+        </motion.div>
       )}
     </div>
   );
@@ -417,7 +475,7 @@ interface HandCardProps {
   handSize: number;
   insertionSlotMV: MotionValue<number>;
   draggingIndexMV: MotionValue<number>;
-  gapPx: number;
+  gapPxMV: MotionValue<number>;
   rotation: number;
   isPlayable: boolean;
   isSelected: boolean;
@@ -443,7 +501,7 @@ const HandCard = memo(function HandCard({
   handSize,
   insertionSlotMV,
   draggingIndexMV,
-  gapPx,
+  gapPxMV,
   rotation,
   isPlayable,
   isSelected,
@@ -470,12 +528,33 @@ const HandCard = memo(function HandCard({
   // prefers-reduced-motion binds the raw target so the gap snaps open/closed.
   const shouldReduceMotion = useReducedMotion();
   const displaceTarget = useTransform(
-    [insertionSlotMV, draggingIndexMV],
-    ([slot, draggingIndex]: number[]) =>
+    [insertionSlotMV, draggingIndexMV, gapPxMV],
+    ([slot, draggingIndex, gapPx]: number[]) =>
       computeFlankDisplacement(index, slot, draggingIndex, gapPx),
   );
   const displaceSpring = useSpring(displaceTarget, { stiffness: 550, damping: 70 });
   const displaceX = shouldReduceMotion ? displaceTarget : displaceSpring;
+
+  // Inner-edge highlights: when this card flanks the active slot, light up the
+  // edge facing the gap. The card to the LEFT of the gap lights its RIGHT edge;
+  // the card to the RIGHT lights its LEFT edge. Driven by the same shared signal
+  // via useTransform, so toggling the glow never re-renders this memoized card.
+  const rightEdgeOpacity = useTransform(
+    [insertionSlotMV, draggingIndexMV],
+    ([slot, draggingIndex]: number[]) =>
+      slot >= 0 && draggingIndex >= 0
+        && flankingHandIndices(slot, draggingIndex, handSize).left === index
+        ? 1
+        : 0,
+  );
+  const leftEdgeOpacity = useTransform(
+    [insertionSlotMV, draggingIndexMV],
+    ([slot, draggingIndex]: number[]) =>
+      slot >= 0 && draggingIndex >= 0
+        && flankingHandIndices(slot, draggingIndex, handSize).right === index
+        ? 1
+        : 0,
+  );
 
   // Use effective spell cost from engine if available (reflects reductions),
   // otherwise fall back to printed mana cost.
@@ -570,6 +649,20 @@ const HandCard = memo(function HandCard({
           size="normal"
           unimplementedMechanics={unimplementedMechanics}
           className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
+        />
+        {/* Inner-edge drop highlights. Always rendered, normally invisible; their
+            opacity is driven by MotionValues so the glow toggles without a
+            re-render. They sit inside the displaced + rotated card, so they track
+            the slid-apart edge and the fan tilt. */}
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-full bg-cyan-300 shadow-[0_0_10px_3px_rgba(34,211,238,0.85)]"
+          style={{ opacity: leftEdgeOpacity }}
+        />
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 right-0 w-[3px] rounded-full bg-cyan-300 shadow-[0_0_10px_3px_rgba(34,211,238,0.85)]"
+          style={{ opacity: rightEdgeOpacity }}
         />
         <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
       </motion.div>

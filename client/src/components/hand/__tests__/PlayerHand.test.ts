@@ -4,7 +4,9 @@ import {
   computeHandInsertionSlot,
   computeHandInsertionMarker,
   computeFlankDisplacement,
+  computeGapPx,
   flankingHandIndices,
+  VISIBLE_GAP_FRACTION,
 } from "../handInsertionSlot.ts";
 
 const cardRects = [
@@ -20,17 +22,17 @@ const markerRects = [
 ];
 
 describe("computeHandInsertionMarker", () => {
-  it("centers the caret in the gap between the two flanking cards (drag-excluded space)", () => {
+  it("centers the marker in the gap between the two flanking cards (drag-excluded space)", () => {
     // dragging id 2 -> remaining [card1(left0,w100,right100), card3(left160)];
     // slot 1 -> gap between card1 and card3 -> midpoint of 100 and 160 = 130.
     expect(computeHandInsertionMarker(markerRects, 1, 2)).toEqual({ x: 130, top: 10, height: 140 });
   });
 
-  it("places the caret at the leading edge of the first remaining card for slot 0", () => {
+  it("places the marker at the leading edge of the first remaining card for slot 0", () => {
     expect(computeHandInsertionMarker(markerRects, 0, 2)).toEqual({ x: 0, top: 10, height: 140 });
   });
 
-  it("places the caret after the last remaining card for the append slot", () => {
+  it("places the marker after the last remaining card for the append slot", () => {
     // dragging id 2 -> remaining [card1, card3] (len 2); slot 2 -> append = card3.left + card3.width = 260.
     expect(computeHandInsertionMarker(markerRects, 2, 2)).toEqual({ x: 260, top: 10, height: 140 });
   });
@@ -54,23 +56,47 @@ describe("computeHandInsertionMarker", () => {
   });
 });
 
+describe("computeGapPx", () => {
+  it("opens a visible gap of exactly 2/3 the card width on top of the resting edge overlap", () => {
+    // cardWidth 150, the two flanking cards overlap by 60px at rest. The total
+    // displacement must cover the overlap AND open 2/3*150 = 100px of clear space.
+    expect(computeGapPx(150, 60)).toBe(160);
+  });
+
+  it("equals just the visible gap when the cards do not overlap at rest", () => {
+    expect(computeGapPx(150, 0)).toBe(100);
+  });
+
+  it("guarantees the post-displacement visible gap is 2/3 card width for any overlap", () => {
+    // Rigid two-block model separates the flanking pair by exactly gapPx, so the
+    // visible gap after sliding = gapPx - edgeOverlap. This must always be 2/3*w.
+    for (const [w, overlap] of [[120, 30], [200, 170], [96, 81.6]] as const) {
+      expect(computeGapPx(w, overlap) - overlap).toBeCloseTo(VISIBLE_GAP_FRACTION * w);
+    }
+  });
+
+  it("exposes 2/3 as the visible-gap fraction", () => {
+    expect(VISIBLE_GAP_FRACTION).toBeCloseTo(2 / 3);
+  });
+});
+
 describe("computeFlankDisplacement", () => {
   it("returns 0 for every card when no insertion slot is active", () => {
-    expect(computeFlankDisplacement(0, -1, 2)).toBe(0);
-    expect(computeFlankDisplacement(3, -1, 2)).toBe(0);
+    expect(computeFlankDisplacement(0, -1, 2, 32)).toBe(0);
+    expect(computeFlankDisplacement(3, -1, 2, 32)).toBe(0);
   });
 
   it("returns 0 for the dragged card itself", () => {
-    expect(computeFlankDisplacement(2, 1, 2)).toBe(0);
+    expect(computeFlankDisplacement(2, 1, 2, 32)).toBe(0);
   });
 
   it("shifts cards left of the boundary by -gap/2 and right by +gap/2 (rigid blocks)", () => {
     // handSize 5, dragging index 2, slot 2 -> remaining indices [0,1,(3->2),(4->3)],
     // boundary at remaining slot 2: handObjects 0,1 are left; 3,4 are right.
-    expect(computeFlankDisplacement(0, 2, 2)).toBe(-16);
-    expect(computeFlankDisplacement(1, 2, 2)).toBe(-16);
-    expect(computeFlankDisplacement(3, 2, 2)).toBe(16);
-    expect(computeFlankDisplacement(4, 2, 2)).toBe(16);
+    expect(computeFlankDisplacement(0, 2, 2, 32)).toBe(-16);
+    expect(computeFlankDisplacement(1, 2, 2, 32)).toBe(-16);
+    expect(computeFlankDisplacement(3, 2, 2, 32)).toBe(16);
+    expect(computeFlankDisplacement(4, 2, 2, 32)).toBe(16);
   });
 
   it("honors a custom gap width", () => {
