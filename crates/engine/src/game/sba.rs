@@ -1457,37 +1457,35 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     }
 }
 
-/// CR 301.5 / CR 301.6: The permanent core type a non-Aura attacher's
-/// subtype structurally requires its host to have, if any. An Equipment
-/// "can't legally be attached to anything that isn't a creature" (CR
-/// 301.5c); a Fortification "can't legally be attached to an object that
-/// isn't a land" (CR 301.6, applying CR 301.5c by analogy). Unlike an Aura's
-/// per-card `Keyword::Enchant` filter, this requirement is fixed by the
-/// subtype itself — every Equipment requires a creature host and every
-/// Fortification requires a land host, with no Oracle-text exception to
-/// either. A card with neither subtype (or only the Aura subtype, whose
-/// requirement is carried by `Keyword::Enchant` instead) has no requirement
-/// here.
-fn required_attachment_host_core_type(
+/// CR 301.5 / CR 301.6: The permanent core type(s) a non-Aura attacher's
+/// subtypes structurally require its host to have. An Equipment "can't
+/// legally be attached to anything that isn't a creature" (CR 301.5c); a
+/// Fortification "can't legally be attached to an object that isn't a land"
+/// (CR 301.6, applying CR 301.5c by analogy). Unlike an Aura's per-card
+/// `Keyword::Enchant` filter, this requirement is fixed by the subtype
+/// itself — every Equipment requires a creature host and every Fortification
+/// requires a land host, with no Oracle-text exception to either.
+///
+/// Each matching subtype contributes its own requirement independently —
+/// not a single either/or choice — so a (no current Oracle precedent, but
+/// rule-text-legal) card with both subtypes requires a host that is BOTH a
+/// creature AND a land (e.g. an animated land-creature), per CR 301.5c +
+/// CR 301.6 applying simultaneously. A card with neither subtype (or only
+/// the Aura subtype, whose requirement is carried by `Keyword::Enchant`
+/// instead) returns no requirements, and the caller's `all()` check is
+/// vacuously satisfied.
+fn required_attachment_host_core_types(
     attacher: &crate::game::game_object::GameObject,
-) -> Option<CoreType> {
-    if attacher
+) -> impl Iterator<Item = CoreType> + '_ {
+    attacher
         .card_types
         .subtypes
         .iter()
-        .any(|s| s == "Equipment")
-    {
-        Some(CoreType::Creature)
-    } else if attacher
-        .card_types
-        .subtypes
-        .iter()
-        .any(|s| s == "Fortification")
-    {
-        Some(CoreType::Land)
-    } else {
-        None
-    }
+        .filter_map(|s| match s.as_str() {
+            "Equipment" => Some(CoreType::Creature),
+            "Fortification" => Some(CoreType::Land),
+            _ => None,
+        })
 }
 
 /// CR 303.4c: An Aura is enchanting an illegal object or player when its
@@ -1508,7 +1506,7 @@ fn required_attachment_host_core_type(
 /// CR 301.5 / CR 301.6: Equipment and Fortification carry no
 /// `Keyword::Enchant`, so legality reduces to the printed "on the
 /// battlefield" requirement plus the host-type check from
-/// `required_attachment_host_core_type`.
+/// `required_attachment_host_core_types`.
 pub(crate) fn is_valid_attachment_target(
     state: &GameState,
     attacher_id: crate::types::identifiers::ObjectId,
@@ -1547,8 +1545,8 @@ pub(crate) fn is_valid_attachment_target(
         // produced (the host changed type after attaching, a buggy effect,
         // etc.), not just at initial Equip/Fortify activation.
         return target.zone == Zone::Battlefield
-            && required_attachment_host_core_type(attacher)
-                .is_none_or(|core_type| target.card_types.core_types.contains(&core_type));
+            && required_attachment_host_core_types(attacher)
+                .all(|core_type| target.card_types.core_types.contains(&core_type));
     };
 
     // CR 702.5a battlefield default: if the filter does not opt into a
@@ -2830,6 +2828,94 @@ mod tests {
             state.objects.get(&equip).unwrap().attached_to,
             None,
             "Equipment attached to a non-creature permanent must unattach (CR 301.5c)"
+        );
+    }
+
+    /// Build a permanent carrying BOTH the "Equipment" and "Fortification"
+    /// subtypes (no current Oracle precedent, but rule-text-legal) for the
+    /// dual-subtype host-type-conjunction tests below.
+    fn create_equipment_and_fortification(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+    ) -> crate::types::identifiers::ObjectId {
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.card_types.subtypes.push("Fortification".to_string());
+        id
+    }
+
+    #[test]
+    fn sba_dual_subtype_attachment_unattaches_from_creature_missing_land_type() {
+        // CR 301.5c + CR 301.6 apply simultaneously to a card with both the
+        // "Equipment" and "Fortification" subtypes: its host must be BOTH a
+        // creature AND a land. A plain creature host (no land type) satisfies
+        // only the Equipment half of the requirement, so the SBA must still
+        // unattach it — the conjunction, not just one of the two checks,
+        // must hold. (Regression for the dual-subtype gap where an if/else
+        // priority order would have checked only the Equipment requirement
+        // and ignored Fortification's.)
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let dual = create_equipment_and_fortification(&mut state, CardId(2), PlayerId(0), "Dual");
+        state.objects.get_mut(&dual).unwrap().attached_to = Some(creature.into());
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(dual);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&dual),
+            "stays on the battlefield (CR 704.5n)"
+        );
+        assert_eq!(
+            state.objects.get(&dual).unwrap().attached_to,
+            None,
+            "a creature-only host satisfies Equipment's requirement but not \
+             Fortification's, so the dual-subtype attachment must unattach"
+        );
+    }
+
+    #[test]
+    fn sba_dual_subtype_attachment_stays_attached_to_a_land_creature() {
+        // Positive control: a host that is BOTH a creature and a land (an
+        // animated land-creature) satisfies the full conjunction, so the
+        // dual-subtype attachment legally stays attached.
+        let mut state = setup();
+        let land_creature = create_land(&mut state, CardId(1), PlayerId(0), "Animated Forest");
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let dual = create_equipment_and_fortification(&mut state, CardId(2), PlayerId(0), "Dual");
+        state.objects.get_mut(&dual).unwrap().attached_to = Some(land_creature.into());
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .attachments
+            .push(dual);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&dual));
+        assert_eq!(
+            state.objects.get(&dual).unwrap().attached_to,
+            Some(land_creature.into()),
+            "a host that is both a creature and a land satisfies the full \
+             Equipment + Fortification conjunction"
         );
     }
 
