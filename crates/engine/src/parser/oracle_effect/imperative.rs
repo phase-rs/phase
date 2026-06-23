@@ -4718,6 +4718,56 @@ fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
     })
 }
 
+/// CR 113.1a + CR 611.2: Parse "gain[s] all activated abilities of <donor>
+/// [until end of turn]" (Quicksilver Elemental, Grell Philosopher) into
+/// `Effect::GainActivatedAbilitiesOfTarget`. The fixed lead-in phrase is
+/// stripped via `TextPair::strip_prefix`, then the remaining donor noun phrase
+/// is delegated entirely to the shared `parse_target` combinator (which already
+/// handles "target creature", "target artifact an opponent controls", etc.).
+///
+/// `recipient` is left at its `SelfRef` default here (Quicksilver's implicit
+/// self-recipient); the group-recipient form ("each Horror you control gains
+/// …") is wired by the subject-application layer, which rebinds `recipient`
+/// before this effect is emitted.
+///
+/// Returns `None` (so the line falls through to the loud `Unimplemented`
+/// fallback) when the lead-in phrase is absent, when no donor target parses, or
+/// when unrecognized text remains after the target strip — never swallowing
+/// unrecognized text into a half-built effect.
+fn try_parse_gain_all_activated_abilities_of_target(text: &str) -> Option<Effect> {
+    let (text_without_duration, duration) = super::strip_trailing_duration(text);
+    let lower = text_without_duration.to_lowercase();
+    let tp = TextPair::new(text_without_duration, &lower);
+
+    // CR 113.1a: fixed lead-in. Compose the two verb forms as a single axis.
+    let after_phrase = tp
+        // allow-noncombinator: TextPair dual-string fixed lead-in strip (oracle_util convention)
+        .strip_prefix("gains all activated abilities of ")
+        // allow-noncombinator: TextPair dual-string fixed lead-in strip (oracle_util convention)
+        .or_else(|| tp.strip_prefix("gain all activated abilities of "))?;
+
+    // CR 611.2: the donor noun phrase is a normal target — delegate to the
+    // shared target combinator. No new target grammar here.
+    let donor = after_phrase.original.trim();
+    if donor.is_empty() {
+        return None;
+    }
+    let (target, rest) = parse_target(donor);
+    // `parse_target` returns the full input as `rest` (and a fallback filter)
+    // when it cannot classify the phrase. Any unconsumed trailing text means
+    // the donor phrase was not fully recognized — fall through to
+    // Unimplemented rather than mis-parse a half-built effect.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::GainActivatedAbilitiesOfTarget {
+        target,
+        recipient: TargetFilter::SelfRef,
+        duration: duration.or(Some(Duration::UntilEndOfTurn)),
+    })
+}
+
 pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     match ast {
         ImperativeAst::Numeric(ast) => lower_numeric_imperative_ast(ast),
@@ -8020,6 +8070,12 @@ pub(super) fn parse_imperative_family_ast(
             if nom_primitives::scan_contains(lower, "control of") {
                 parse_targeted_action_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            } else if let Some(effect) = try_parse_gain_all_activated_abilities_of_target(text) {
+                // CR 113.1a + CR 611.2: "gains all activated abilities of
+                // target <donor> [until end of turn]" (Quicksilver Elemental,
+                // Grell Philosopher). Tried BEFORE the bare-keyword/quoted-ability
+                // arms so the longer, more specific phrase is not shadowed.
+                Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if let Some(effect) =
                 try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
             {
@@ -14486,6 +14542,235 @@ mod tests {
             try_parse_gain_quoted_ability("gain flying until end of turn").is_none(),
             "no quote marks → not a quoted-ability candidate"
         );
+    }
+
+    // ── CR 113.1a + CR 611.2: "gain[s] all activated abilities of target X" ──
+
+    /// Parser test 1: "gains all activated abilities of target creature until
+    /// end of turn" → `GainActivatedAbilitiesOfTarget` with a creature target,
+    /// `SelfRef` recipient, and `UntilEndOfTurn` duration (Quicksilver Elemental).
+    #[test]
+    fn gain_all_activated_abilities_of_target_creature() {
+        let effect = try_parse_gain_all_activated_abilities_of_target(
+            "gains all activated abilities of target creature until end of turn",
+        )
+        .expect("expected GainActivatedAbilitiesOfTarget");
+        let Effect::GainActivatedAbilitiesOfTarget {
+            target,
+            recipient,
+            duration,
+        } = effect
+        else {
+            panic!("expected GainActivatedAbilitiesOfTarget, got something else");
+        };
+        assert_eq!(recipient, TargetFilter::SelfRef, "implicit self-recipient");
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected a typed creature target, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)),
+            "donor target must be a creature; got {tf:?}"
+        );
+    }
+
+    /// Parser test 2: "gains all activated abilities of target artifact an
+    /// opponent controls until end of turn" → artifact + opponent-controls
+    /// donor filter (Grell Philosopher's donor phrase).
+    #[test]
+    fn gain_all_activated_abilities_of_opponent_artifact() {
+        let effect = try_parse_gain_all_activated_abilities_of_target(
+            "gains all activated abilities of target artifact an opponent controls until end of turn",
+        )
+        .expect("expected GainActivatedAbilitiesOfTarget");
+        let Effect::GainActivatedAbilitiesOfTarget { target, .. } = effect else {
+            panic!("expected GainActivatedAbilitiesOfTarget");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected a typed artifact target, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, crate::types::ability::TypeFilter::Artifact)),
+            "donor target must be an artifact; got {tf:?}"
+        );
+        assert_eq!(
+            tf.controller,
+            Some(crate::types::ability::ControllerRef::Opponent),
+            "donor must be controlled by an opponent; got {tf:?}"
+        );
+    }
+
+    /// Parser test 3: malformed "gains all activated abilities" (no "of X") must
+    /// return `None` rather than produce a half-built effect.
+    #[test]
+    fn gain_all_activated_abilities_without_donor_returns_none() {
+        assert!(
+            try_parse_gain_all_activated_abilities_of_target("gains all activated abilities")
+                .is_none(),
+            "no donor phrase → must not produce a half-built effect"
+        );
+    }
+
+    /// Parser test 4 (dispatch-ordering guard): "gains flying until end of
+    /// turn" must route to the bare-keyword grant path, NOT the new combinator.
+    #[test]
+    fn gain_flying_is_not_captured_by_all_activated_abilities_combinator() {
+        assert!(
+            try_parse_gain_all_activated_abilities_of_target("gains flying until end of turn")
+                .is_none(),
+            "bare keyword grant must not be captured by the new combinator"
+        );
+        // And the keyword path still produces a keyword grant.
+        assert!(
+            try_parse_gain_keyword("gains flying until end of turn").is_some(),
+            "the keyword grant path must still handle bare 'gains flying'"
+        );
+    }
+
+    /// Parser test 5: full real-Oracle-text parse-through of Quicksilver
+    /// Elemental. The `{U}:` activated ability's effect must lower to
+    /// `GainActivatedAbilitiesOfTarget` (no longer `Unimplemented`), and the
+    /// untouched "spend blue mana as any color" sentence must still produce its
+    /// own ability — proving the new effect slots in without disturbing the
+    /// rest of the card.
+    #[test]
+    fn quicksilver_elemental_full_oracle_parses_gain_effect() {
+        const TEXT: &str = "{U}: This creature gains all activated abilities of target creature until end of turn. (If any of the abilities use that creature's name, use this creature's name instead.)\nYou may spend blue mana as though it were mana of any color to pay the activation costs of this creature's abilities.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            TEXT,
+            "Quicksilver Elemental",
+            &[],
+            &["Creature".to_string()],
+            &["Elemental".to_string()],
+        );
+
+        let gain = parsed
+            .abilities
+            .iter()
+            .find(|a| {
+                matches!(
+                    a.effect.as_ref(),
+                    Effect::GainActivatedAbilitiesOfTarget { .. }
+                )
+            })
+            .expect("the {U} ability must lower to GainActivatedAbilitiesOfTarget");
+        let Effect::GainActivatedAbilitiesOfTarget {
+            recipient,
+            duration,
+            ..
+        } = gain.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*recipient, TargetFilter::SelfRef, "implicit self-recipient");
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+
+        assert!(
+            !parsed.abilities.iter().any(|a| matches!(
+                a.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "gain"
+            )),
+            "the 'gain' clause must no longer be Unimplemented"
+        );
+    }
+
+    /// Parser test 6: full real-Oracle-text parse-through of Grell Philosopher,
+    /// proving the GROUP-recipient rebind in `lower_subject_predicate_ast`'s
+    /// `ImperativeFallback` arm (oracle_effect/mod.rs) is reachable from the real
+    /// production parsing path. Grell's clause lives inside the "Aberrant
+    /// Tinkering — When this creature enters and at the beginning of your upkeep,
+    /// each Horror you control gains all activated abilities of target artifact
+    /// an opponent controls until end of turn." trigger sentence (the
+    /// byte-for-byte `oracle_text` from `data/card-data.json`). Test 5 uses the
+    /// full card text via `parse_oracle_text`, so this follows the same unit.
+    ///
+    /// The resolver-level `group_recipient_grants_to_each_matching_object_only`
+    /// test hand-constructs the effect and so never exercises this rebind; this
+    /// is the missing proof that production parsing threads "each Horror you
+    /// control" into `recipient` (NOT defaulting to `SelfRef`) while keeping the
+    /// opponent-controlled-artifact donor as `target`.
+    #[test]
+    fn grell_philosopher_full_oracle_rebinds_group_recipient() {
+        const TEXT: &str = "Aberrant Tinkering — When this creature enters and at the beginning of your upkeep, each Horror you control gains all activated abilities of target artifact an opponent controls until end of turn. You may spend blue mana as though it were mana of any color to activate those abilities.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            TEXT,
+            "Grell Philosopher",
+            &[],
+            &["Creature".to_string()],
+            &["Horror".to_string()],
+        );
+
+        // Grell's grant is the body of the "Aberrant Tinkering" triggered
+        // ability, so it lands in `parsed.triggers[*].execute` (NOT
+        // `parsed.abilities`). Walk each trigger's `execute` effect plus its
+        // `sub_ability` chain so we find it whether it is the top-level effect or
+        // a chained clause.
+        fn find_gain(def: &AbilityDefinition) -> Option<&Effect> {
+            let mut cur = Some(def);
+            while let Some(d) = cur {
+                if matches!(
+                    d.effect.as_ref(),
+                    Effect::GainActivatedAbilitiesOfTarget { .. }
+                ) {
+                    return Some(d.effect.as_ref());
+                }
+                cur = d.sub_ability.as_deref();
+            }
+            None
+        }
+        let gain = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_gain)
+            .expect("Grell's trigger must lower to GainActivatedAbilitiesOfTarget");
+        let Effect::GainActivatedAbilitiesOfTarget {
+            target,
+            recipient,
+            duration,
+        } = gain
+        else {
+            unreachable!()
+        };
+
+        // Recipient must be the typed "Horror you control" group filter, NOT the
+        // default `SelfRef` — this is the rebind under test.
+        let TargetFilter::Typed(rf) = recipient else {
+            panic!("recipient must be a typed group filter, got {recipient:?}");
+        };
+        assert!(
+            rf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Horror")),
+            "recipient must be the Horror subtype filter; got {rf:?}"
+        );
+        assert_eq!(
+            rf.controller,
+            Some(ControllerRef::You),
+            "recipient must be controlled by you; got {rf:?}"
+        );
+
+        // Donor target must remain the opponent-controlled artifact filter.
+        let TargetFilter::Typed(tf) = target else {
+            panic!("donor target must be a typed artifact filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Artifact)),
+            "donor target must be an artifact; got {tf:?}"
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::Opponent),
+            "donor target must be controlled by an opponent; got {tf:?}"
+        );
+
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
     }
 
     /// CR 122.1b: "put that many <keyword> counter(s) on <target>" must

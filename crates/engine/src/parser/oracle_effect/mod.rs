@@ -8392,18 +8392,39 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
-    let (duration, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
-        let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
-        let (input, _) = alt((tag("play "), tag("cast "))).parse(input)?;
-        let (input, _) = tag("the exiled card").parse(input)?;
-        let (input, duration) = alt((
-            value(Duration::UntilEndOfTurn, tag(" this turn")),
-            value(Duration::UntilEndOfTurn, tag(" until end of turn")),
-            value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
-        ))
-        .parse(input)?;
-        Ok((input, duration))
-    })?;
+    let ((duration, mana_spend_permission), rest_orig) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
+            let (input, _) = alt((tag("play "), tag("cast "))).parse(input)?;
+            // "the exiled nonland card" generalizes the bare "the exiled card"
+            // referent — the optional "nonland " qualifier (Black Widow, Super
+            // Spy) selects the same tracked exile set, so the grant is identical.
+            let (input, _) = tag("the exiled ").parse(input)?;
+            let (input, _) = opt(tag("nonland ")).parse(input)?;
+            let (input, _) = tag("card").parse(input)?;
+            // CR 514.2 + CR 611.2a: inline "until end of turn" sets the grant
+            // duration directly (it is not patched by `with_clause_duration` for
+            // this mid-clause position); the permission ends at cleanup.
+            let (input, duration) = alt((
+                value(Duration::UntilEndOfTurn, tag(" this turn")),
+                value(Duration::UntilEndOfTurn, tag(" until end of turn")),
+                value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
+            ))
+            .parse(input)?;
+            // CR 609.4b + CR 601.2: optional trailing "and mana of any type can
+            // be spent to cast that spell" scopes the any-type/any-color mana
+            // permission to the granted cast (Black Widow, Super Spy).
+            let (input, mana_spend_permission) = opt(value(
+                ManaSpendPermission::AnyTypeOrColor,
+                (
+                    tag(" and mana of any "),
+                    alt((tag("type"), tag("color"))),
+                    tag(" can be spent to cast that spell"),
+                ),
+            ))
+            .parse(input)?;
+            Ok((input, (duration, mana_spend_permission)))
+        })?;
     if !rest_orig.trim().is_empty() {
         return None;
     }
@@ -8415,7 +8436,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             frequency: CastFrequency::Unlimited,
             source_id: None,
             exiled_by_ability_controller: None,
-            mana_spend_permission: None,
+            mana_spend_permission,
             card_filter: None,
             single_use_group: None,
             single_use: false,
@@ -13368,6 +13389,17 @@ fn lower_subject_predicate_ast(
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
+            // CR 113.1a + CR 611.2: "each <type> you control gains all activated
+            // abilities of target <donor>" (Grell Philosopher). The imperative
+            // path lowered the verb to `GainActivatedAbilitiesOfTarget` with the
+            // default `SelfRef` recipient; rebind the recipient to the subject's
+            // resolved group filter so the grant lands on each matching object
+            // rather than the spell source. The donor `target` and `duration`
+            // were already parsed by the imperative combinator.
+            if let Effect::GainActivatedAbilitiesOfTarget { recipient, .. } = &mut clause.effect {
+                *recipient = subject.affected.clone();
+                return clause;
+            }
             if matches!(
                 &clause.effect,
                 Effect::ChooseFromZone {
@@ -52778,6 +52810,123 @@ mod tests {
         assert_eq!(
             grantee,
             crate::types::ability::PermissionGrantee::AbilityController
+        );
+    }
+
+    /// CR 514.2 + CR 609.4b + CR 611.2a: "cast the exiled nonland card until end
+    /// of turn and mana of any type can be spent to cast that spell" (Black
+    /// Widow, Super Spy) extends `try_parse_play_the_exiled_card_grant` with the
+    /// optional `nonland` referent qualifier and the optional trailing any-type
+    /// mana conjunct, yielding a typed `PlayFromExile` grant with both the EOT
+    /// duration and the any-type/any-color mana permission.
+    #[test]
+    fn play_exiled_nonland_card_until_eot_with_any_type_mana_grant() {
+        let e = parse_effect(
+            "cast the exiled nonland card until end of turn and mana of any type \
+             can be spent to cast that spell",
+        );
+        let Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } = e
+        else {
+            panic!("expected GrantCastingPermission, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            mana_spend_permission,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission");
+        };
+        assert_eq!(duration, Duration::UntilEndOfTurn);
+        assert_eq!(
+            mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor)
+        );
+        assert_eq!(
+            target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(
+            grantee,
+            crate::types::ability::PermissionGrantee::AbilityController
+        );
+    }
+
+    /// The any-type mana conjunct is optional: the bare "cast the exiled nonland
+    /// card until end of turn" form must still yield `mana_spend_permission:
+    /// None` (the `opt(value(..))` returns `None` when the conjunct is absent).
+    #[test]
+    fn play_exiled_nonland_card_until_eot_no_mana_conjunct() {
+        let e = parse_effect("cast the exiled nonland card until end of turn");
+        let Effect::GrantCastingPermission { permission, .. } = e else {
+            panic!("expected GrantCastingPermission, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            mana_spend_permission,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission");
+        };
+        assert_eq!(duration, Duration::UntilEndOfTurn);
+        assert_eq!(mana_spend_permission, None);
+    }
+
+    /// Regression: the pre-existing bare "the exiled card" referent (Expressive
+    /// Iteration class) must be unaffected by the `nonland` and mana-conjunct
+    /// extensions — still `PlayFromExile { UntilEndOfTurn, None }`.
+    #[test]
+    fn play_exiled_card_this_turn_regression_unchanged() {
+        let e = parse_effect("you may play the exiled card this turn");
+        let Effect::GrantCastingPermission { permission, .. } = e else {
+            panic!("expected GrantCastingPermission, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            mana_spend_permission,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission");
+        };
+        assert_eq!(duration, Duration::UntilEndOfTurn);
+        assert_eq!(mana_spend_permission, None);
+    }
+
+    /// Discriminating: the "for as long as it remains exiled, and mana of any
+    /// type..." form (Blightwing Bandit class) must keep dispatching to
+    /// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be
+    /// captured by the extended `try_parse_play_the_exiled_card_grant`. The
+    /// extended combinator's `tag("the exiled ")` referent never matches the
+    /// "that card"/"it" anaphor here, so no shadowing occurs.
+    #[test]
+    fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
+        let e = parse_effect(
+            "you may cast that card for as long as it remains exiled, \
+             and mana of any type can be spent to cast that spell",
+        );
+        let Effect::GrantCastingPermission { permission, .. } = e else {
+            panic!("expected GrantCastingPermission, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            mana_spend_permission,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission");
+        };
+        assert_ne!(duration, Duration::UntilEndOfTurn);
+        assert_eq!(
+            mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor)
         );
     }
 

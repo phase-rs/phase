@@ -2008,6 +2008,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
+        // CR 113.1a + CR 611.2: report the donor whose activated abilities are gained.
+        | Effect::GainActivatedAbilitiesOfTarget { target, .. }
         | Effect::Suspect { target, .. }
         | Effect::Unsuspect { target, .. }
         | Effect::Connive { target, .. }

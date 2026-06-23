@@ -4950,4 +4950,93 @@ mod tests {
             "the seventh-counter reflexive rider must lower to Effect::ControlNextTurn"
         );
     }
+
+    /// CR 514.2 + CR 609.4b + CR 611.2a: Black Widow's "if you don't" branch
+    /// grants a typed `PlayFromExile` impulse cast scoped to end of turn with
+    /// any-type/any-color mana spend permission. Before the
+    /// `try_parse_play_the_exiled_card_grant` extension this branch degraded to
+    /// `GenericEffect { SpendManaAsAnyColor, duration: null }` (dropping the
+    /// cast permission and the EOT window → `Swallow:Duration_UntilEndOfTurn`).
+    /// Discrimination: reverting either leaf addition flips the gated node back
+    /// to `GenericEffect` (proven via revert-probe), so the asserts below fail.
+    #[test]
+    fn black_widow_if_you_dont_grants_typed_play_from_exile_until_eot() {
+        use crate::types::ability::{AbilityCondition, CastingPermission, ManaSpendPermission};
+        use crate::types::statics::StaticMode;
+        use crate::types::Duration;
+
+        let parsed = parse_named(
+            "Menace\n\
+             Whenever Black Widow deals combat damage to a player, that player exiles \
+             cards from the top of their library until they exile a nonland card. You may \
+             put a +1/+1 counter on Black Widow. If you don't, you may cast the exiled \
+             nonland card until end of turn and mana of any type can be spent to cast that spell.",
+            "Black Widow, Super Spy",
+            &["Legendary", "Creature"],
+        );
+
+        // Walk the trigger sub_ability chain to the `Not(OptionalEffectPerformed)`
+        // gated node (the "if you don't" branch).
+        fn find_if_you_dont(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if def
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+            {
+                return Some(def);
+            }
+            def.sub_ability.as_deref().and_then(find_if_you_dont)
+        }
+
+        let gated = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_if_you_dont)
+            .expect("Black Widow trigger must carry a Not(OptionalEffectPerformed) gated node");
+
+        match &*gated.effect {
+            Effect::GrantCastingPermission { permission, .. } => match permission {
+                CastingPermission::PlayFromExile {
+                    duration,
+                    mana_spend_permission,
+                    ..
+                } => {
+                    assert_eq!(*duration, Duration::UntilEndOfTurn);
+                    assert_eq!(
+                        *mana_spend_permission,
+                        Some(ManaSpendPermission::AnyTypeOrColor)
+                    );
+                }
+                other => panic!("expected PlayFromExile permission, got {other:?}"),
+            },
+            other => panic!("expected GrantCastingPermission, got {other:?}"),
+        }
+
+        // The pre-fix degradation lowered to a GenericEffect carrying a
+        // `SpendManaAsAnyColor` static mode; assert no node in the chain does so,
+        // proving the cast permission was not dropped to that fallback.
+        fn chain_has_spend_mana_generic(def: &AbilityDefinition) -> bool {
+            let here = matches!(
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor { .. }))
+            );
+            here || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_spend_mana_generic)
+        }
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(chain_has_spend_mana_generic),
+            "the cast permission must not degrade to GenericEffect{{SpendManaAsAnyColor}}"
+        );
+
+        // No swallowed-clause diagnostic for the dropped EOT duration.
+        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
 }
