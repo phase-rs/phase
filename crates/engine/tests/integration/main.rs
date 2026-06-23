@@ -264,6 +264,7 @@ mod issue_3245_abhorrent_oculus_manifest_dread;
 mod issue_3250_paladin_class;
 mod issue_3251_force_of_negation;
 mod issue_3252_rhythm_of_the_wild;
+mod issue_3258_show_and_tell;
 mod issue_3260_phantasmal_image_persist;
 mod issue_3263_gitaxian_probe;
 mod issue_3264_jace_mind_sculptor_minus_twelve;

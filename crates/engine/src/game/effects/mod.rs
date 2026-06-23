@@ -3941,7 +3941,17 @@ fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
 /// ability's controller.
 fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::ScopedPlayer)
+                || tf.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer
+                        }
+                    )
+                })
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_uses_relative_controller_scoped)
         }

@@ -394,10 +394,10 @@ pub fn resolve(
         };
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player
-        // (not the caster), we pass `filter_controller` explicitly. Use
-        // `from_source_with_controller` to honor this remapping.
-        let ctx = crate::game::filter::FilterContext::from_source_with_controller(
-            ability.source_id,
+        // (not the caster), we pass `filter_controller` explicitly. Include the
+        // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
+        let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
+            ability,
             filter_controller,
         );
         let eligible: Vec<ObjectId> = state

@@ -30562,6 +30562,21 @@ mod tests {
     }
 
     #[test]
+    fn show_and_tell_each_player_may_put_is_optional_per_player() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield.",
+            "Show and Tell",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let ability = parsed.abilities.first().expect("spell ability");
+        assert!(ability.optional, "Show and Tell must be optional");
+        assert_eq!(ability.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*ability.effect, Effect::ChangeZone { .. }));
+    }
+
+    #[test]
     fn agitator_ant_end_step_counters_and_goad_parsed() {
         // Issue #2903: optional per-player counter placement on each player's
         // creature, then goad only creatures that received counters this way.
