@@ -1,6 +1,6 @@
 import { memo, useState, useCallback, useMemo, useRef } from "react";
-import { AnimatePresence, motion, useMotionValue, useSpring, useReducedMotion } from "framer-motion";
-import type { PanInfo } from "framer-motion";
+import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
+import type { MotionValue, PanInfo } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -20,7 +20,9 @@ import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 import {
   computeHandInsertionSlot,
   computeHandInsertionMarker,
+  computeFlankDisplacement,
   flankingHandIndices,
+  INSERTION_GAP_PX,
 } from "./handInsertionSlot.ts";
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
@@ -369,6 +371,9 @@ export function PlayerHand() {
               unimplementedMechanics={obj.unimplemented_mechanics}
               index={i}
               handSize={handObjects.length}
+              insertionSlotMV={insertionSlotMV}
+              draggingIndexMV={draggingIndexMV}
+              gapPx={INSERTION_GAP_PX}
               rotation={rotation}
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
@@ -409,6 +414,9 @@ interface HandCardProps {
   unimplementedMechanics?: string[];
   index: number;
   handSize: number;
+  insertionSlotMV: MotionValue<number>;
+  draggingIndexMV: MotionValue<number>;
+  gapPx: number;
   rotation: number;
   isPlayable: boolean;
   isSelected: boolean;
@@ -432,6 +440,9 @@ const HandCard = memo(function HandCard({
   unimplementedMechanics,
   index,
   handSize,
+  insertionSlotMV,
+  draggingIndexMV,
+  gapPx,
   rotation,
   isPlayable,
   isSelected,
@@ -449,6 +460,21 @@ const HandCard = memo(function HandCard({
 }: HandCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setDragging = useUiStore((s) => s.setDragging);
+
+  // Slide-apart displacement: derive this card's signed x offset from the shared
+  // insertion signal. useTransform updates imperatively when the MotionValues
+  // change (pointer move) and never re-renders this memoized component; the
+  // transformer closure is refreshed on every real re-render, so index/handSize
+  // stay current after a reorder. A gentle spring keeps cards from oscillating;
+  // prefers-reduced-motion binds the raw target so the gap snaps open/closed.
+  const shouldReduceMotion = useReducedMotion();
+  const displaceTarget = useTransform(
+    [insertionSlotMV, draggingIndexMV],
+    ([slot, draggingIndex]: number[]) =>
+      computeFlankDisplacement(index, slot, draggingIndex, gapPx),
+  );
+  const displaceSpring = useSpring(displaceTarget, { stiffness: 550, damping: 70 });
+  const displaceX = shouldReduceMotion ? displaceTarget : displaceSpring;
 
   // Use effective spell cost from engine if available (reflects reductions),
   // otherwise fall back to printed mana cost.
@@ -525,22 +551,27 @@ const HandCard = memo(function HandCard({
       }}
       onMouseEnter={() => onMouseEnter(objectId)}
       onMouseLeave={onMouseLeave}
-      className={`relative cursor-pointer rounded-lg leading-[0] select-none ${glowClass} ${
-        isSelected ? "ring-2 ring-cyan-400" : ""
-      } ${isMobile ? "pointer-events-none" : ""}`}
+      className={`relative cursor-pointer leading-[0] select-none ${
+        isMobile ? "pointer-events-none" : ""
+      }`}
       style={{
         marginLeft: index === 0 ? 0 : getHandOverlap(handSize),
         zIndex: isDragging ? 9999 : isSelected ? 20 : index,
       }}
       {...longPressHandlers}
     >
-      <CardImage
-        cardName={cardName}
-        size="normal"
-        unimplementedMechanics={unimplementedMechanics}
-        className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
-      />
-      <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
+      <motion.div
+        className={`relative rounded-lg ${glowClass} ${isSelected ? "ring-2 ring-cyan-400" : ""}`}
+        style={{ x: displaceX }}
+      >
+        <CardImage
+          cardName={cardName}
+          size="normal"
+          unimplementedMechanics={unimplementedMechanics}
+          className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
+        />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
+      </motion.div>
     </motion.div>
   );
 });
