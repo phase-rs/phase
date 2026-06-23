@@ -4,9 +4,7 @@
 //! CR 115.4 + CR 601.2c: separate instances of "target", but "other" requires
 //! a different choice from prior targets announced for this spell.
 
-use std::path::PathBuf;
-
-use engine::database::card_db::CardDatabase;
+use crate::support::shared_card_db;
 use engine::game::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -18,15 +16,6 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-
-fn export_db() -> Option<CardDatabase> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        eprintln!("skipping: client/public/card-data.json not generated");
-        return None;
-    }
-    Some(CardDatabase::from_export(&path).expect("export should load"))
-}
 
 fn add_mana_for_arc_trail(runner: &mut engine::game::scenario::GameRunner) {
     let dummy = ObjectId(0);
@@ -43,7 +32,7 @@ fn add_mana_for_arc_trail(runner: &mut engine::game::scenario::GameRunner) {
 
 #[test]
 fn arc_trail_rejects_same_target_for_both_damage_steps() {
-    let Some(db) = export_db() else {
+    let Some(db) = shared_card_db() else {
         return;
     };
 
@@ -51,10 +40,10 @@ fn arc_trail_rejects_same_target_for_both_damage_steps() {
     scenario.at_phase(Phase::PreCombatMain);
     let bear = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
 
-    let arc_trail = scenario.add_real_card(P0, "Arc Trail", Zone::Hand, &db);
+    let arc_trail = scenario.add_real_card(P0, "Arc Trail", Zone::Hand, db);
 
     let mut runner = scenario.build();
-    rehydrate_game_from_card_db(runner.state_mut(), &db);
+    rehydrate_game_from_card_db(runner.state_mut(), db);
     add_mana_for_arc_trail(&mut runner);
 
     let card_id = runner.state().objects[&arc_trail].card_id;

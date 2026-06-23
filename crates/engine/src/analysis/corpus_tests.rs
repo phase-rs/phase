@@ -59,8 +59,6 @@ use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
 use crate::types::phase::Phase;
-use std::path::PathBuf;
-use std::sync::OnceLock;
 
 /// One row of the acceptance corpus: a combo, its documented unbounded resource
 /// family, the expected [`WinKind`], and (for the 4 card-gated combos) the card
@@ -600,12 +598,7 @@ fn face_has_unimplemented(face: &crate::types::card::CardFace) -> bool {
 /// non-gated combos plus confirms the 4 gated ones are correctly classified.
 #[test]
 fn corpus_cards_present_and_implementation_status_matches_gating() {
-    let Some(db) = card_db() else {
-        eprintln!(
-            "skipping corpus_cards_present_*: card-data export not present (run gen-card-data.sh)"
-        );
-        return;
-    };
+    let db = card_db();
 
     let mut missing: Vec<String> = Vec::new();
     // Non-gated rows whose cards unexpectedly carry Unimplemented (a regression
@@ -707,22 +700,10 @@ fn drive_one_ping(probe: &mut LoopProbe, pinger: ObjectId) {
 // caller can skip gracefully rather than fail spuriously.
 // ---------------------------------------------------------------------------
 
-/// Load (once) the real card-data export. `None` if the export has not been
-/// generated (`./scripts/gen-card-data.sh`) — callers skip in that case.
-fn card_db() -> Option<&'static CardDatabase> {
-    static DB: OnceLock<Option<CardDatabase>> = OnceLock::new();
-    DB.get_or_init(|| {
-        // CARGO_MANIFEST_DIR is crates/engine; the export lives at the repo root.
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("client/public/card-data.json");
-        if !path.exists() {
-            return None;
-        }
-        CardDatabase::from_export(&path).ok()
-    })
-    .as_ref()
+/// The shared card database, loaded from the committed integration fixture
+/// (or the full export via `FORGE_TEST_FULL_DB=1`).
+fn card_db() -> &'static CardDatabase {
+    crate::test_support::shared_card_db()
 }
 
 /// Instantiate a real card by name directly onto `player`'s battlefield, with its
@@ -782,8 +763,8 @@ struct ComboBoard {
 /// axis is still measurable — not `debug_infinite_mana`), and layers settled.
 /// `None` if the export is absent or any name is missing. Auras are installed but
 /// NOT auto-attached (each driver attaches them to the correct host).
-fn build_board(cards: &[&str]) -> Option<ComboBoard> {
-    let db = card_db()?;
+fn build_board(cards: &[&str]) -> ComboBoard {
+    let db = card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 40);
@@ -798,12 +779,15 @@ fn build_board(cards: &[&str]) -> Option<ComboBoard> {
     {
         let state = runner.state_mut();
         for &name in cards {
-            ids.push(install_on_battlefield(state, db, name, P0)?);
+            ids.push(
+                install_on_battlefield(state, db, name, P0)
+                    .expect("corpus card must be present in the committed fixture"),
+            );
         }
         float_mana(state, 500);
         settle_layers(state);
     }
-    Some(ComboBoard { runner, ids })
+    ComboBoard { runner, ids }
 }
 
 /// Like [`build_board`], but floats GREEN-ONLY into P0's pool (no WUBRG+C pool).
@@ -814,8 +798,8 @@ fn build_board(cards: &[&str]) -> Option<ComboBoard> {
 /// reading as a spurious per-color deficit the detector's `is_progress` rightly
 /// rejects. Same trick `build_board_with_vanilla` uses for Selvala. Returns the
 /// post-`build()` board with the named permanents in card order.
-fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
-    let mut board = build_board(cards)?;
+fn build_board_green(cards: &[&str]) -> ComboBoard {
+    let mut board = build_board(cards);
     {
         let state = board.runner.state_mut();
         // CR 106.4: replace the WUBRG+C pool floated by `build_board` with a
@@ -824,7 +808,7 @@ fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
         float_single_color(state, ManaType::Green, 500);
         settle_layers(state);
     }
-    Some(board)
+    board
 }
 
 /// Like [`build_board`], but first places a vanilla `power`/`toughness` creature
@@ -832,8 +816,8 @@ fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
 /// X). The vanilla creature is installed BEFORE the named combo cards, so the
 /// combo-card ids are still `ids[0..]` in card order. Returns the board plus the
 /// vanilla creature's id appended LAST in `ids`.
-fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Option<ComboBoard> {
-    let db = card_db()?;
+fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> ComboBoard {
+    let db = card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 40);
@@ -851,7 +835,10 @@ fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Optio
     {
         let state = runner.state_mut();
         for &name in cards {
-            ids.push(install_on_battlefield(state, db, name, P0)?);
+            ids.push(
+                install_on_battlefield(state, db, name, P0)
+                    .expect("corpus card must be present in the committed fixture"),
+            );
         }
         ids.push(vanilla);
         // Float GREEN only (not a full WUBRG+C pool): Selvala produces green and
@@ -862,7 +849,7 @@ fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Optio
         float_single_color(state, ManaType::Green, 500);
         settle_layers(state);
     }
-    Some(ComboBoard { runner, ids })
+    ComboBoard { runner, ids }
 }
 
 /// Float `n` mana of a single `color` into P0's pool from a sentinel source.
@@ -1189,10 +1176,7 @@ fn is_target_creature_untap_effect(e: &crate::types::ability::Effect) -> bool {
 /// gate). Skips (does not fail) if the export is unavailable.
 #[test]
 fn drive_heliod_ballista_certificate() {
-    let Some(db) = card_db() else {
-        eprintln!("skipping drive_heliod_ballista_certificate: card-data export not present");
-        return;
-    };
+    let db = card_db();
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1394,9 +1378,7 @@ fn family_matches_axis(family: ResourceFamily, axis: &ResourceAxis) -> bool {
 /// effectively free and no counter accrues). Board returns identical; +1 {G}/cycle.
 #[test]
 fn drive_combo_04_devoted_vizier() {
-    let Some(board) = build_board(CORPUS[6].cards) else {
-        return;
-    };
+    let board = build_board(CORPUS[6].cards);
     let druid = board.ids[0];
     let untap_idx = ability_index_where(board.runner.state(), druid, is_untap_effect)
         .expect("Druid has an untap ability");
@@ -1417,9 +1399,7 @@ fn drive_combo_04_devoted_vizier() {
 /// {C} (+3); untap it for {2} (-2) → net +1 colorless/cycle, board identical.
 #[test]
 fn drive_combo_02_grim_power() {
-    let Some(mut board) = build_board(CORPUS[4].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[4].cards);
     let grim = board.ids[0];
     let power_artifact = board.ids[1];
     attach_aura(board.runner.state_mut(), power_artifact, grim);
@@ -1443,9 +1423,7 @@ fn drive_combo_02_grim_power() {
 /// unbounded axes are +1/+1 counters and life — `Counters` family.
 #[test]
 fn drive_combo_47_spike_archangel() {
-    let Some(mut board) = build_board(CORPUS[49].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[49].cards);
     let spike = board.ids[0];
     {
         // CR 122: Spike Feeder "enters with two +1/+1 counters" — seed them (the
@@ -1475,9 +1453,7 @@ fn drive_combo_47_spike_archangel() {
 /// untap via Freed for {U} (-1) → net +1 mana/cycle, board identical.
 #[test]
 fn drive_combo_07_bloom_freed() {
-    let Some(mut board) = build_board(CORPUS[9].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[9].cards);
     let bloom = board.ids[0];
     let freed = board.ids[1];
     attach_aura(board.runner.state_mut(), freed, bloom);
@@ -1499,9 +1475,7 @@ fn drive_combo_07_bloom_freed() {
 /// (+N), untap via Pemmin for {U} (−1) → net (N − 1)/cycle, board identical.
 #[test]
 fn drive_combo_11_faeburrow_pemmin() {
-    let Some(mut board) = build_board(CORPUS[13].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[13].cards);
     let faeburrow = board.ids[0];
     let pemmin = board.ids[1];
     attach_aura(board.runner.state_mut(), pemmin, faeburrow);
@@ -1537,9 +1511,7 @@ fn drive_combo_11_faeburrow_pemmin() {
 #[test]
 fn drive_combo_11_selvala_staff() {
     // 7/7 vanilla ⇒ greatest power = 7 ⇒ Selvala adds 7 mana, net +2/cycle.
-    let Some(board) = build_board_with_vanilla(CORPUS[12].cards, 7, 7) else {
-        return;
-    };
+    let board = build_board_with_vanilla(CORPUS[12].cards, 7, 7);
     let selvala = board.ids[0];
     let staff = board.ids[1];
     let selvala_tap = ability_index_where(board.runner.state(), selvala, is_mana_effect)
@@ -1573,9 +1545,7 @@ fn drive_combo_11_selvala_staff() {
 /// proliferate trigger. Board identical.
 #[test]
 fn drive_combo_d2_kilo_freed_relic() {
-    let Some(mut board) = build_board(CORPUS[1].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[1].cards);
     let kilo = board.ids[0];
     let freed = board.ids[1];
     let relic = board.ids[2];
@@ -1656,9 +1626,7 @@ fn seed_subtype_creatures(state: &mut GameState, subtype: &str, count: usize) {
 #[test]
 fn drive_combo_10_priest_umbral() {
     use crate::types::ability::Effect;
-    let Some(mut board) = build_board_green(CORPUS[10].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[10].cards);
     let priest = board.ids[0];
     let umbral = board.ids[1];
     // 4 seeded Elves + Priest (itself an Elf) ⇒ Priest taps for 5 green; net +2 a
@@ -1686,9 +1654,7 @@ fn drive_combo_10_priest_umbral() {
 /// `run_combo` finds no certificate. Proves the untap is load-bearing.
 #[test]
 fn drive_combo_10_priest_umbral_requires_untap() {
-    let Some(mut board) = build_board_green(CORPUS[10].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[10].cards);
     let priest = board.ids[0];
     let umbral = board.ids[1];
     seed_subtype_creatures(board.runner.state_mut(), "Elf", 4);
@@ -1719,9 +1685,7 @@ fn drive_combo_10_priest_umbral_requires_untap() {
 #[test]
 fn drive_combo_14_marwyn_sword() {
     use crate::types::ability::Effect;
-    let Some(mut board) = build_board_green(CORPUS[14].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[14].cards);
     let marwyn = board.ids[0];
     let sword = board.ids[1];
     // CR 122: Marwyn's base power is 1; seed 6 +1/+1 counters (power 7) so a cycle
@@ -1757,9 +1721,7 @@ fn drive_combo_14_marwyn_sword() {
 /// identical ⇒ no certificate. Proves the modal untap is load-bearing.
 #[test]
 fn drive_combo_14_marwyn_sword_requires_untap() {
-    let Some(mut board) = build_board_green(CORPUS[14].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[14].cards);
     let marwyn = board.ids[0];
     let sword = board.ids[1];
     {
