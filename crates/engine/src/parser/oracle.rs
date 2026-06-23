@@ -1027,9 +1027,32 @@ fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
 }
 
 fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
-    let Some(chosen_kind) = chosen_subtype_kind_from_persisted_choice(result)
-        .or_else(|| chosen_kind_from_card_types(types))
-    else {
+    let persisted_kind = chosen_subtype_kind_from_persisted_choice(result);
+
+    // CR 607.2d + CR 205.3 + CR 601.2f: A cost reducer that refers to "the chosen
+    // type" ("Spells of the chosen type you cast cost {W}{U}{B}{R}{G} less",
+    // Morophon) is LINKED to the same card's "choose a [value]" clause and must
+    // match whatever that clause picks. `static_helpers` defaults a bare-"spells"
+    // base (no creature type word) to `IsChosenCardType` — correct only for
+    // card-type choosers (Cloud Key / Umori / Stenn) — so a creature-type chooser
+    // is mis-discriminated and the reduction never matches a spell. Realign here,
+    // the only point with cross-clause visibility, keying STRICTLY on the
+    // persisted choice: a creature that chooses a CARD type (Umori) returns a
+    // card-type kind and must keep `IsChosenCardType`, so the creature-card-type
+    // fallback below must not drive this.
+    if matches!(persisted_kind, Some(ChosenSubtypeKind::CreatureType)) {
+        for static_def in &mut result.statics {
+            if let crate::types::statics::StaticMode::ModifyCost {
+                spell_filter: Some(filter),
+                ..
+            } = &mut static_def.mode
+            {
+                retarget_chosen_card_type_to_creature_type(filter);
+            }
+        }
+    }
+
+    let Some(chosen_kind) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
         return;
     };
 
@@ -1047,6 +1070,33 @@ fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[Str
                 *kind = chosen_kind.clone();
             }
         }
+    }
+}
+
+/// CR 607.2d: Within a creature-type chooser's cost-modifier spell filter,
+/// rewrite the card-type chosen-discriminator (`IsChosenCardType`) to the
+/// creature-type one (`IsChosenCreatureType`) so "the chosen type" matches the
+/// linked creature-type choice. CR 205.3: the linked choice is a creature
+/// subtype, so it must be matched against subtypes. Recurses through every
+/// nested-filter `TargetFilter` variant (`And`/`Or`/`Not`/`TrackedSetFiltered`),
+/// e.g. a typed filter ANDed with `HasChosenName`.
+fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => {
+            for prop in &mut tf.properties {
+                if matches!(prop, FilterProp::IsChosenCardType) {
+                    *prop = FilterProp::IsChosenCreatureType;
+                }
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter_mut()
+            .for_each(retarget_chosen_card_type_to_creature_type),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            retarget_chosen_card_type_to_creature_type(filter)
+        }
+        _ => {}
     }
 }
 
@@ -7474,6 +7524,74 @@ mod tests {
                 .iter()
                 .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })),
             "the Valeyard line must not produce an Unimplemented effect, got {r:#?}"
+        );
+    }
+
+    #[test]
+    fn chosen_type_cost_reducer_links_to_card_choose_clause() {
+        use crate::types::ability::FilterProp;
+        use crate::types::statics::StaticMode;
+
+        // Extract the ModifyCost static's typed spell-filter properties.
+        fn cost_mod_props(r: &ParsedAbilities) -> Vec<FilterProp> {
+            r.statics
+                .iter()
+                .find_map(|s| match &s.mode {
+                    StaticMode::ModifyCost {
+                        spell_filter: Some(TargetFilter::Typed(tf)),
+                        ..
+                    } => Some(tf.properties.clone()),
+                    _ => None,
+                })
+                .expect("expected a ModifyCost static with a typed spell filter")
+        }
+
+        // CR 607.2d: Morophon chooses a CREATURE type, so its bare-"Spells of the
+        // chosen type" reducer must discriminate on the chosen creature type — the
+        // linked-ability reconcile must rewrite the bare-spells default.
+        let morophon = parse(
+            "As ~ enters, choose a creature type.\nSpells of the chosen type you cast cost {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.\nOther creatures you control of the chosen type get +1/+1.",
+            "Morophon, the Boundless",
+            &[],
+            &["Legendary", "Creature"],
+            &["Shapeshifter"],
+        );
+        assert!(
+            cost_mod_props(&morophon).contains(&FilterProp::IsChosenCreatureType),
+            "Morophon's reducer must link to its chosen creature type: {:#?}",
+            morophon.statics
+        );
+
+        // CR 607.2d: Umori is also a creature but chooses a CARD type, so its
+        // reducer must KEEP the card-type discriminator — the creature-card-type
+        // fallback must not rewrite a card-type chooser's filter.
+        let umori = parse(
+            "As ~ enters, choose a card type.\nSpells you cast of the chosen type cost {1} less to cast.",
+            "Umori, the Collector",
+            &[],
+            &["Legendary", "Creature"],
+            &["Ooze", "Avatar"],
+        );
+        assert!(
+            cost_mod_props(&umori).contains(&FilterProp::IsChosenCardType),
+            "Umori's reducer must keep its chosen card-type discriminator: {:#?}",
+            umori.statics
+        );
+
+        // CR 607.2d: Herald's Horn's reducer has an explicit "Creature spells"
+        // base, so `static_helpers` already emits `IsChosenCreatureType`. The
+        // reconcile pass must be idempotent here (nothing to rewrite).
+        let herald = parse(
+            "As ~ enters, choose a creature type.\nCreature spells you cast of the chosen type cost {1} less to cast.",
+            "Herald's Horn",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            cost_mod_props(&herald).contains(&FilterProp::IsChosenCreatureType),
+            "Herald's Horn's creature-base reducer must stay creature-typed: {:#?}",
+            herald.statics
         );
     }
 
