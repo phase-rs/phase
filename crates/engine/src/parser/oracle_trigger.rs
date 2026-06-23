@@ -3251,8 +3251,49 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // --- Source-referential patterns (cannot be StaticConditions) ---
     // These require trigger-source context that StaticCondition can't express.
 
+    // CR 601.2a + CR 603.4: "if you didn't cast it from <zone>" — negated
+    // cast-origin intervening-if (Chainer, Nightmare Adept; Phage the
+    // Untouchable). The entering permanent must NOT have been cast from the
+    // named zone. Ordered before the positive and zoneless arms so neither
+    // shadows it.
+    if let Some((before, zone, rest)) = scan_preceded(&lower, |i: &str| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("if you didn't cast it from ").parse(i)?;
+        let (i, zone) = parse_cast_origin_zone(i)?;
+        Ok((i, zone))
+    }) {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::WasCast {
+                    zone,
+                    controller: None,
+                    owner: None,
+                }),
+            }),
+        );
+    }
+
+    // CR 601.2a + CR 603.4: "if you cast it from <zone>" — zone-specific
+    // positive cast-origin intervening-if. Must precede the zoneless "if you
+    // cast it" arm below so the zone suffix is not lost.
+    if let Some((before, zone, rest)) = scan_preceded(&lower, |i: &str| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("if you cast it from ").parse(i)?;
+        let (i, zone) = parse_cast_origin_zone(i)?;
+        Ok((i, zone))
+    }) {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(TriggerCondition::WasCast {
+                zone,
+                controller: None,
+                owner: None,
+            }),
+        );
+    }
+
     // CR 701.57a: "if you cast it" — zoneless cast check (Discover ETBs).
-    // Guard: must not be followed by " from" (zone-specific variant).
     if let Some(pos) = tp.find("if you cast it") {
         let after = &lower[pos + "if you cast it".len()..];
         if !after.starts_with(" from") {
@@ -16351,6 +16392,95 @@ mod tests {
                 })
             ),
             "expected IsRenowned {{ Source }}, got {self_cond:?}",
+        );
+    }
+
+    /// CR 601.2a + CR 603.4: "if you didn't cast it from your hand" —
+    /// negated cast-origin intervening-if (Chainer, Nightmare Adept; Phage
+    /// the Untouchable). Must produce `Not(WasCast { zone: Hand })`.
+    #[test]
+    fn extract_if_condition_didnt_cast_from_hand() {
+        let (cleaned, cond) = extract_if_condition(
+            "if you didn't cast it from your hand, it gains haste until your next turn.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::Not { ref condition })
+                    if matches!(
+                        **condition,
+                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                    )
+            ),
+            "expected Not(WasCast {{ zone: Hand }}), got {cond:?}",
+        );
+        assert!(
+            !cleaned.contains("didn't cast"),
+            "condition clause must be stripped from effect text: {cleaned}",
+        );
+    }
+
+    /// CR 601.2a + CR 603.4: "if you cast it from your hand" — positive
+    /// zone-specific cast-origin intervening-if.
+    #[test]
+    fn extract_if_condition_cast_from_zone() {
+        let (_, cond) = extract_if_condition(
+            "if you cast it from your graveyard, create a 2/2 black zombie creature token.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::WasCast {
+                    zone: Some(Zone::Graveyard),
+                    ..
+                })
+            ),
+            "expected WasCast {{ zone: Graveyard }}, got {cond:?}",
+        );
+    }
+
+    /// CR 601.2a + CR 603.4: Full Chainer, Nightmare Adept trigger parse —
+    /// the trigger condition must be `Not(WasCast { zone: Hand })` and the
+    /// effect target must be the entering creature (not the source).
+    #[test]
+    fn chainer_nightmare_adept_trigger_condition() {
+        let def = parse_trigger_line(
+            "Whenever a nontoken creature you control enters, if you didn't cast it from your hand, it gains haste until your next turn.",
+            "Chainer, Nightmare Adept",
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(TriggerCondition::Not { ref condition })
+                    if matches!(
+                        **condition,
+                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                    )
+            ),
+            "expected Not(WasCast {{ zone: Hand }}), got {:?}",
+            def.condition,
+        );
+    }
+
+    /// CR 603.4: Phage the Untouchable trigger parse — "if you didn't cast it
+    /// from your hand, you lose the game" must attach `Not(WasCast { zone: Hand })`.
+    #[test]
+    fn phage_the_untouchable_trigger_condition() {
+        let def = parse_trigger_line(
+            "When ~ enters, if you didn't cast it from your hand, you lose the game.",
+            "Phage the Untouchable",
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(TriggerCondition::Not { ref condition })
+                    if matches!(
+                        **condition,
+                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                    )
+            ),
+            "expected Not(WasCast {{ zone: Hand }}), got {:?}",
+            def.condition,
         );
     }
 
