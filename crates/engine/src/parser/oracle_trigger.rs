@@ -14111,8 +14111,9 @@ mod tests {
     }
 
     /// Issue #3682 — Chainer, Nightmare Adept: "if you didn't cast it from your
-    /// hand" must hoist as `Not(WasCast { zone: Hand })`, NOT as
-    /// `Not(EffectOutcome(OptionalEffectPerformed))`.
+    /// hand" must hoist as `Not(WasCast { zone: Hand, caster=you, owner=you })`,
+    /// NOT as `Not(EffectOutcome(OptionalEffectPerformed))`. CR 404.1: "your
+    /// hand" scopes both the caster and the owner-specific zone to you.
     #[test]
     fn trigger_intervening_if_negated_cast_from_hand_chainer() {
         let def = parse_trigger_line(
@@ -14128,15 +14129,15 @@ mod tests {
                         condition.as_ref(),
                         TriggerCondition::WasCast {
                             zone: Some(Zone::Hand),
-                            controller: None,
-                            owner: None,
+                            controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
                         }
                     ),
-                    "expected WasCast {{ zone: Hand }}, got {:?}",
+                    "expected WasCast {{ zone: Hand, you/you }}, got {:?}",
                     condition
                 );
             }
-            other => panic!("expected Not(WasCast {{ zone: Hand }}), got {other:?}"),
+            other => panic!("expected Not(WasCast {{ zone: Hand, you/you }}), got {other:?}"),
         }
     }
 
