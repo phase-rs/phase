@@ -9746,11 +9746,18 @@ fn try_parse_one_or_more_combat_damage_to_player(
             continue;
         };
         // CR 310.1: Try battle-inclusive suffixes first (longer match wins).
-        let (subject_text, recipient_filter) = if let Some(t) = rest
-            .strip_suffix(" deal combat damage to a player or battle")
-            .or_else(|| rest.strip_suffix(" deals combat damage to a player or battle"))
-            .or_else(|| rest.strip_suffix(" deal combat damage to a player or a battle"))
-            .or_else(|| rest.strip_suffix(" deals combat damage to a player or a battle"))
+        // Covers "deal(s) combat damage to a player or (a )battle".
+        let (subject_text, recipient_filter) = if let Ok(("", t)) = terminated(
+            take_until::<_, _, OracleError<'_>>(" deal"),
+            (
+                tag(" deal"),
+                opt(tag("s")),
+                tag(" combat damage to a player or "),
+                opt(tag("a ")),
+                tag("battle"),
+            ),
+        )
+        .parse(rest)
         {
             (
                 t,
