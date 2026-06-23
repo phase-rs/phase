@@ -516,7 +516,7 @@ fn render_markdown(
     let short = base_sha.get(..12).unwrap_or(base_sha);
     let _ = write!(
         s,
-        "### Parse changes introduced by this PR · {} card(s), {} signature(s)  (baseline: merge-base `{}`)\n\n",
+        "### Parse changes introduced by this PR · {} card(s), {} signature(s)  (baseline: main `{}`)\n\n",
         changed_cards,
         clusters.len(),
         short,

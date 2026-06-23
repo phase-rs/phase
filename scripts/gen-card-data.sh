@@ -140,7 +140,7 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      set of requested --bin targets; alternating shapes (e.g. tokens-gen
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
-TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate)
+TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
 TOOL_BIN="target/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
