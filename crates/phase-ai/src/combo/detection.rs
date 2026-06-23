@@ -45,7 +45,7 @@ impl ComboDetector for StructuralComboDetector {
             // Delegates to the engine's color-accurate affordability primitive, which also
             // enforces summoning sickness (CR 302.6).
             let affordable = match &line.mana_cost {
-                ManaCost::NoCost | ManaCost::SelfManaCost => true,
+                ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => true,
                 ManaCost::Cost { .. } => cost_bearing_source(line, state, ai).is_some_and(|src| {
                     can_pay_cost_after_auto_tap(state, ai, src, &line.mana_cost)
                 }),

@@ -255,6 +255,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't be copied",
     "can't be the target",
     "can't be sacrificed",
+    // CR 116.2b + CR 708.7: "Permanents your opponents control can't be turned
+    // face up during your turn" (Karlov Watchdog) — prohibition static. Routes
+    // to parse_static_line so it lowers to StaticMode::CantBeTurnedFaceUp.
+    "can't be turned face up",
     "doesn't untap",
     "don't untap",
     "attacks or blocks each combat if able",
@@ -399,6 +403,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "spells you cast ",
     "spells your opponents cast ",
     "you may look at the top card of your library",
+    // CR 708.5: "You may look at face-down creatures [you don't control | your
+    // opponents control] any time." (Found Footage) — top-level look-permission
+    // static. Routed to `parse_static_line` so it lowers to MayLookAtFaceDown.
+    "you may look at face-down creatures",
     "once during each of your turns, you may cast",
     // CR 601.3e: shorter sibling of "once during each of your turns, you may
     // cast" — Maralen, Fae Ascendant prints "Once each turn, you may cast a

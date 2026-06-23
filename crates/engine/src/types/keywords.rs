@@ -2755,11 +2755,17 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
-        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
-        // Placeholder (mana sub-cost, no exile residual) — the Oracle parser
-        // overwrites with the real compound `EscapeCost::NonMana`.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
-        "Escape" => Ok(Keyword::Escape(EscapeCost::Mana(ManaCost::default()))),
+        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
+        // Accept both legacy ManaCost format and new EscapeCost tagged format
+        // (Mana / NonMana compound) — mirrors Flashback/Evoke/Bestow.
+        "Escape" => {
+            if let Ok(escape_cost) = serde_json::from_value::<EscapeCost>(data.clone()) {
+                Ok(Keyword::Escape(escape_cost))
+            } else {
+                Ok(Keyword::Escape(EscapeCost::Mana(mana(data)?)))
+            }
+        }
         "Evoke" => {
             // Accept both legacy ManaCost format and new EvokeCost tagged format.
             if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {
@@ -4090,6 +4096,52 @@ mod tests {
         let json = serde_json::to_value(&kw).unwrap();
         let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.138a (#3281): card-data export encodes compound escape costs as
+    /// `EscapeCost::NonMana`; deserializing must not collapse them to the bare
+    /// MTGJSON placeholder.
+    #[test]
+    fn escape_compound_cost_deserializes_from_card_data_export() {
+        use crate::types::ability::{
+            AbilityCost, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+        };
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let expected = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![
+                            ManaCostShard::Green,
+                            ManaCostShard::Green,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Blue,
+                        ],
+                    },
+                },
+                AbilityCost::Exile {
+                    count: 5,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .controller(ControllerRef::You)
+                            .properties(vec![
+                                FilterProp::Another,
+                                FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                },
+                            ]),
+                    )),
+                },
+            ],
+        }));
+
+        let json = serde_json::to_value(&expected).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(expected, deserialized, "round-trip failed for {json}");
     }
 
     #[test]

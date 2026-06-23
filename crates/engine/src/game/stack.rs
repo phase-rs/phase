@@ -1349,6 +1349,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.76a: Prowl-cast permanent is tagged so "if its prowl cost
+            // was paid" ETB triggers (Latchkey Faerie) can distinguish a prowl
+            // cast from a hard-cast. The intervening-if re-checks at resolution
+            // (CR 603.4) and the marker must be present.
+            if casting_variant == CastingVariant::Prowl {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Prowl,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
             // tag re-applied after `reset_for_battlefield_entry` cleared it.
             // The "not a creature" layer fixup and the end-step counter-removal
@@ -3622,6 +3635,7 @@ mod tests {
                     duration: None,
 
                     exile_instead_of_graveyard_on_resolve: false,
+                    enters_with_counter: None,
                 });
         }
 
@@ -6302,7 +6316,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Optional { decline: None };
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 
@@ -6315,7 +6329,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Mandatory;
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 

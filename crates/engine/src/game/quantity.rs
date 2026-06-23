@@ -548,6 +548,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
@@ -3590,7 +3591,7 @@ fn resolve_mana_symbols_in_mana_cost(
                     .filter(|shard| shard.contributes_to(color))
                     .count(),
             ),
-            ManaCost::NoCost | ManaCost::SelfManaCost => 0,
+            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
         })
         .unwrap_or(0)
 }

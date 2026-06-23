@@ -482,9 +482,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       ) {
         toggleSelectedCard(objectId);
       }
-    } else if (combatMode === "attackers") {
+    } else if (combatMode === "attackers" && waitingFor?.type === "DeclareAttackers") {
       if (isValidAttacker) toggleAttacker(objectId);
-    } else if (combatMode === "blockers" && combatClickHandler) {
+    } else if (combatMode === "blockers" && waitingFor?.type === "DeclareBlockers" && combatClickHandler) {
       combatClickHandler(objectId);
     } else if (equipTargetChoice?.valid_targets.includes(objectId)) {
       dispatchAction({

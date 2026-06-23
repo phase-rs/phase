@@ -203,8 +203,8 @@ pub(crate) fn parse_except_body<'a>(
     // CR 707.9d: the replacement form ("… and loses all other card types")
     // must be tried before the additive form, which would otherwise leave the
     // "and loses all other card types" tail unconsumed.
-    if let Some((rest, modification)) = parse_its_a_type_loses_others(input) {
-        return Some((rest, vec![modification]));
+    if let Some((rest, modifications)) = parse_its_a_type_loses_others(input) {
+        return Some((rest, modifications));
     }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
         return Some((rest, vec![subtype]));
@@ -705,18 +705,28 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
     Some((rest, modification))
 }
 
-/// CR 205.1a + CR 613.1d + CR 707.9d: "it's a(n) {type} and loses all other
-/// card types" — REPLACES the copied card's entire core card-type set with the
-/// single named type (set-replacement, not addition). Myrkul, Lord of Bones:
-/// "create a token that's a copy of that card, except it's an enchantment and
-/// loses all other card types." Distinct from `parse_its_a_type_in_addition`
-/// (which ADDS the type, keeping the copied types); the "and loses all other
-/// card types" suffix is the replacement signal. `SetCardTypes` names only the
-/// replacement core types; supertype retention and CR 205.1a subtype
-/// correlation are applied downstream when the modification resolves. Emits
-/// [`ContinuousModification::SetCardTypes`].
-fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = alt((
+/// CR 205.1a + CR 613.1d + CR 707.9d: "it's a(n) {type words} [with
+/// "<ability>"] and [it] loses all other card types" — REPLACES the copied
+/// card's core card-type set with the named core type(s), ADDS any named
+/// subtypes, and optionally grants a quoted ability. The "loses all other card
+/// types" suffix is the replacement signal (distinct from
+/// `parse_its_a_type_in_addition`, which keeps the copied types).
+///
+/// Generalizes the single-core-type case (Myrkul, Lord of Bones: "it's an
+/// enchantment and loses all other card types") to the multi-word "Food token"
+/// shape:
+/// - Espers to Magicite: "it's an artifact and it loses all other card types"
+/// - Shelob, Child of Ungoliant: "it's a Food artifact with "{2}, {T},
+///   Sacrifice ~: You gain 3 life," and it loses all other card types"
+///
+/// Each space-delimited type word is classified as a core type (added to the
+/// `SetCardTypes` replacement set) or a subtype (emitted as `AddSubtype`).
+/// `SetCardTypes` names only the replacement core types; supertype retention
+/// and CR 205.1a subtype correlation are applied downstream when the
+/// modification resolves. The optional `with "<ability>"` clause is granted via
+/// the shared quoted-ability parser, mirroring `parse_it_has_quoted_ability`.
+fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (after_article, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it\u{2019}s an "),
@@ -724,24 +734,52 @@ fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, ContinuousModific
     ))
     .parse(input)
     .ok()?;
-    let (type_word, rest) = nom_primitives::split_once_on(rest, " and loses all other card types")
-        .ok()
-        .map(|(_, pair)| pair)?;
-    let type_word = type_word.trim();
-    if type_word.is_empty() {
+    // CR 707.9d: the replacement signal. Accept the subject-repeated "and it
+    // loses" variant (Espers to Magicite, Shelob) longest-first so it is not
+    // split as the elided "and loses" variant (Myrkul) with a dangling "it".
+    let (head, rest) =
+        nom_primitives::split_once_on(after_article, " and it loses all other card types")
+            .or_else(|_| {
+                nom_primitives::split_once_on(after_article, " and loses all other card types")
+            })
+            .ok()
+            .map(|(_, pair)| pair)?;
+    // CR 707.9a: peel an optional `with <…>` clause off the head before the
+    // type list so its text is never mistaken for type words. Only the quoted
+    // form (Shelob's Food sacrifice ability) is granted: `split_single_quoted_ability`
+    // trims leading whitespace and requires a leading `"`, returning `None` for a
+    // non-quoted `with` clause (Imposter Mech's "with crew 3"), which is then
+    // dropped fail-soft via `unwrap_or_default` rather than parsed as bogus subtypes.
+    let (type_text, ability_mods) = match nom_primitives::split_once_on(head, " with ") {
+        Ok((_, (types, after_with))) => {
+            let mods = split_single_quoted_ability(after_with)
+                .map(|(quoted_text, _)| parse_quoted_ability_modifications(quoted_text))
+                .unwrap_or_default();
+            (types, mods)
+        }
+        Err(_) => (head, Vec::new()),
+    };
+    // CR 205.1b + CR 707.9d: classify each type word. Core types form the
+    // replacement set; subtypes are added. "loses all other card types" is a
+    // card-type statement, so a clause naming no recognised core type has
+    // nothing to replace the set with — decline rather than guess.
+    let mut core_types = Vec::new();
+    let mut modifications = Vec::new();
+    for word in type_text.split_whitespace() {
+        let canonical = canonicalize_subtype_name(word);
+        if let Ok(core_type) = CoreType::from_str(&canonical) {
+            core_types.push(core_type);
+        } else {
+            modifications.push(ContinuousModification::AddSubtype { subtype: canonical });
+        }
+    }
+    if core_types.is_empty() {
         return None;
     }
-    // Only a recognised core type can replace the card-type set; a subtype
-    // ("loses all other card types" is a card-type statement, CR 205.1b) would
-    // be a malformed clause, so decline rather than guess.
-    let canonical = canonicalize_subtype_name(type_word);
-    let core_type = CoreType::from_str(&canonical).ok()?;
-    Some((
-        rest,
-        ContinuousModification::SetCardTypes {
-            core_types: vec![core_type],
-        },
-    ))
+    let mut result = vec![ContinuousModification::SetCardTypes { core_types }];
+    result.append(&mut modifications);
+    result.extend(ability_mods);
+    Some((rest, result))
 }
 
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
@@ -1588,6 +1626,90 @@ mod tests {
             vec![ContinuousModification::SetCardTypes {
                 core_types: vec![CoreType::Enchantment],
             }]
+        );
+    }
+
+    /// CR 707.9d: Espers to Magicite — the subject-repeated "and it loses all
+    /// other card types" variant (vs Myrkul's elided "and loses") must also be
+    /// recognised as the replacement signal.
+    #[test]
+    fn its_an_artifact_and_it_loses_others_emits_set_card_types() {
+        let (_, mods) = parse_except_clause(
+            ", except it's an artifact and it loses all other card types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Artifact],
+            }]
+        );
+    }
+
+    /// CR 205.1b + CR 707.9a + CR 707.9d: Shelob, Child of Ungoliant — the "Food
+    /// token" shape. "it's a Food artifact with \"<ability>\" and it loses all
+    /// other card types" must REPLACE the core types with the named core type
+    /// (Artifact), ADD the named subtype (Food), and GRANT the quoted ability.
+    #[test]
+    fn its_a_food_artifact_with_ability_loses_others_emits_full_food_token() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a food artifact with \"{2}, {t}, sacrifice ~: you gain 3 life,\" and it loses all other card types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Artifact],
+            }),
+            "must replace core types with Artifact: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Food".to_string(),
+            }),
+            "must add the Food subtype: {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+            "must grant the quoted sacrifice-for-life ability: {mods:?}"
+        );
+    }
+
+    /// CR 707.9a: a non-quoted `with <…>` clause (Imposter Mech: "it's a Vehicle
+    /// artifact with crew 3 and it loses all other card types") must still yield
+    /// the clean type modifications — Vehicle subtype + Artifact replacement —
+    /// and must NOT emit bogus subtypes ("With"/"Crew"/"3") from the dropped,
+    /// not-yet-supported keyword clause.
+    #[test]
+    fn its_a_vehicle_artifact_with_crew_drops_keyword_clause_cleanly() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a vehicle artifact with crew 3 and it loses all other card types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Artifact],
+            }),
+            "must replace core types with Artifact: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Vehicle".to_string(),
+            }),
+            "must add the Vehicle subtype: {mods:?}"
+        );
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype != "Vehicle"
+            )),
+            "must not emit bogus subtypes from the 'with crew 3' clause: {mods:?}"
         );
     }
 

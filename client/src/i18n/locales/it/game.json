@@ -422,7 +422,8 @@
     "payAmount": "Paga {{value}} {{resource}}",
     "resourceEnergy": "energia",
     "resourceMana": "mana",
-    "resourceCounters": "segnalini"
+    "resourceCounters": "segnalini",
+    "resourceSpeed": "velocità"
   },
   "hand": {
     "viewFullHand_one": "Vedi la mano completa ({{count}} carta)",
@@ -1377,6 +1378,10 @@
     "spectacleNormalLabel": "Lancia normalmente",
     "spectacleAltLabel": "Lancia con Spettacolo",
     "spectacleSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Spettacolo (disponibile perché un avversario ha perso punti vita in questo turno).",
+    "prowlEyebrow": "Prowl",
+    "prowlNormalLabel": "Lancia normalmente",
+    "prowlAltLabel": "Lancia con Prowl",
+    "prowlSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Prowl (disponibile perché una creatura corrispondente ha inflitto danno da combattimento a un giocatore in questo turno).",
     "overloadEyebrow": "Sovraccarico",
     "overloadNormalLabel": "Lancia normalmente",
     "overloadAltLabel": "Lancia con Sovraccarico",

@@ -1033,11 +1033,11 @@ fn graveyard_action_to_destination(
 /// - `Plus(WouldPutCounters_NumberOfCounters, Integer(n))` →
 ///   `QuantityModification::Plus { value: n }`
 /// - `Twice(WouldPutCounters_NumberOfCounters)` →
-///   `QuantityModification::Double`
+///   `QuantityModification::DOUBLE` (`Times { factor: 2 }`)
 ///
-/// Other quantity expressions (multipliers other than 2, references to
-/// other game state) strict-fail until `QuantityModification` grows
-/// additional axes.
+/// Other quantity expressions (multipliers other than 2 — the engine's
+/// `Times { factor }` axis exists but no mtgish counter idiom emits a
+/// non-2 multiplier — or references to other game state) strict-fail.
 pub fn convert_replace_would_put_counters(
     event: &ReplacableEventWouldPutCounters,
     actions: &[ReplacementActionWouldPutCounters],
@@ -1179,7 +1179,7 @@ fn game_number_to_modification(
     idiom: &'static str,
 ) -> ConvResult<QuantityModification> {
     match g {
-        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::Double),
+        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::DOUBLE),
         GameNumber::Plus(a, b) if is_self_ref(a) || is_self_ref(b) => {
             let n_node = if is_self_ref(a) { &**b } else { &**a };
             match n_node {
@@ -1223,8 +1223,8 @@ fn game_number_to_modification(
 ///
 /// - `GainLife(Plus(LifeAmount, Integer(N)))` →
 ///   `QuantityModification::Plus { value: N }` (Hardened-Heart pattern).
-/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::Double`
-///   (Boon Reflection / Rhox Faithmender).
+/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::DOUBLE`
+///   (`Times { factor: 2 }`; Boon Reflection / Rhox Faithmender).
 ///
 /// Other actions (DrawNumberCards, GainNoLifeInstead, LoseLife,
 /// PlayerAction wrappers) strict-fail.

@@ -8977,6 +8977,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);
+    crate::database::augment::synthesize_augment(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);

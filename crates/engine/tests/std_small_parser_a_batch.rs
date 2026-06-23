@@ -1,17 +1,18 @@
 //! Standard small parser-only batch A — three parser seams that route to
 //! existing engine surface, no new engine variant:
 //!
-//! - §16 mana-of-any-type spend permission (Vizier of the Menagerie,
-//!   Outrageous Robbery) — HONEST-DEFER (need a spell-type-filtered any-type
-//!   spend seam / impulse-exile infra beyond the existing surface).
+//! - §16 mana-of-any-type spend permission (Vizier of the Menagerie SHIPPED —
+//!   spell-class-filtered `SpendManaAsAnyColor { spell_filter }`; Outrageous
+//!   Robbery HONEST-DEFER — impulse-exile play infra beyond the existing
+//!   surface).
 //! - §19 Role token attach (Royal Treatment SHIPPED, Become Brutes
 //!   HONEST-DEFER — per-target iteration over the multi-target set).
 //! - §22 "Otherwise" sequence-branch (Wick, the Whorled Mind SHIPPED, Bre of
 //!   Clan Stoutarm HONEST-DEFER — spell-MV-vs-life-gained comparison gate).
 //!
-//! The two SHIPPED cards each carry a discriminating runtime test that drives
-//! `resolve_ability_chain` (the production resolver) and asserts a game-state
-//! outcome that FLIPS if the parser fix is reverted. The four deferred cards
+//! The SHIPPED cards each carry a discriminating test that drives the
+//! production path (`resolve_ability_chain` or the cast cost-payment path) and
+//! asserts an outcome that FLIPS if the fix is reverted. The deferred cards
 //! carry honesty guards asserting the residual gap is exactly the unsupported
 //! clause (not an over-claim).
 
@@ -278,30 +279,69 @@ fn royal_treatment_creates_role_token_attached_to_target() {
 // ===========================================================================
 
 // §16 — Vizier of the Menagerie. "You can spend mana of any type to cast
-// creature spells." Routing this to the unfiltered global `SpendManaAsAnyColor`
-// static would let any-type mana pay for NONcreature spells too (rules-wrong,
-// CR 609.4b). A spell-type-filtered any-type-spend seam does not exist, so this
-// line stays an honest Unimplemented while the look-at-top + cast-from-top
-// statics still parse.
+// creature spells." (CR 609.4b) lowers to a spell-class-filtered
+// `SpendManaAsAnyColor { spell_filter: Some(creature) }` static, NOT the
+// unfiltered global form — routing it to the unfiltered static would let
+// any-type mana pay for NONcreature spells too (rules-wrong). All three lines
+// now parse with zero Unimplemented nodes.
+//
+// Shape test only; the runtime discrimination (off-color mana pays a creature
+// spell ONLY under this static and ONLY for creature spells) lives in
+// `casting.rs::vizier_filtered_static_grants_any_type_mana_for_creature_spells`.
 #[test]
-fn vizier_any_type_spend_is_honestly_deferred() {
+fn vizier_filtered_any_type_spend_static_parses() {
+    use engine::types::ability::{TargetFilter, TypeFilter};
+    use engine::types::statics::StaticMode;
+
     const ORACLE: &str = "You may look at the top card of your library any time.\nYou may cast creature spells from the top of your library.\nYou can spend mana of any type to cast creature spells.";
-    let dbg = parsed_debug(
+    let parsed = parse_oracle_text(
         ORACLE,
         "Vizier of the Menagerie",
+        &[],
         &creature_types(),
         &["Cat".to_string()],
     );
+
+    let dbg = format!("{parsed:#?}");
     assert!(
-        dbg.contains("Unimplemented") && dbg.contains("spend mana of any type"),
-        "the any-type-spend line must remain an honest Unimplemented defer; got:\n{dbg}"
+        !dbg.contains("Unimplemented"),
+        "Vizier must parse with zero Unimplemented nodes; got:\n{dbg}"
     );
+
+    // The any-type-spend line must be the spell-class-FILTERED static (creature
+    // spells), never the unfiltered board-wide `spell_filter: None` form.
+    let spend_static = parsed
+        .statics
+        .iter()
+        .find_map(|s| match &s.mode {
+            StaticMode::SpendManaAsAnyColor { spell_filter } => Some(spell_filter),
+            _ => None,
+        })
+        .expect("the any-type-spend line must lower to a SpendManaAsAnyColor static");
+    let filter = spend_static.as_ref().expect(
+        "the static must be spell-class-FILTERED (Some), not the unfiltered board-wide form",
+    );
+    match filter {
+        TargetFilter::Typed(typed) => assert!(
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "the spell filter must scope to creature spells; got {filter:?}"
+        ),
+        other => panic!("expected a Typed(creature) spell filter, got {other:?}"),
+    }
+
+    // The other two statics must still parse.
     assert!(
-        dbg.contains("MayLookAtTopOfLibrary"),
+        parsed
+            .statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary)),
         "the look-at-top static must still parse"
     );
     assert!(
-        dbg.contains("TopOfLibraryCastPermission"),
+        parsed
+            .statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::TopOfLibraryCastPermission { .. })),
         "the cast-creature-spells-from-top static must still parse"
     );
 }

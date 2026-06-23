@@ -171,20 +171,13 @@ pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
 /// Parse the inner content of a "with" clause.
 fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
-        // CR 510.1c relative comparison — must precede the general P/T
-        // combinator so "toughness greater than its power" wins over a
-        // "toughness <comparator>" numeric parse.
-        value(
-            FilterProp::ToughnessGTPower,
-            tag("toughness greater than its power"),
-        ),
-        // CR 208.1 + CR 613.4b self-comparison — must precede the general P/T
-        // combinator so "power greater than its base power" wins over a numeric
-        // "power greater than N" parse (Ms. Marvel, Elastic Ally).
-        value(
-            FilterProp::PowerExceedsBase,
-            tag("power greater than its base power"),
-        ),
+        // CR 208.1 self-referential comparisons (a creature's own toughness vs its
+        // own power, or own power vs own base power) — must precede the general P/T
+        // combinator so they win over a numeric parse. Singular and plural
+        // possessives both accepted via the shared `parse_self_referential_pt`
+        // helper (also reached through `parse_pt_comparison` for the `parse_target`
+        // call sites that bypass `parse_with_inner`).
+        parse_self_referential_pt,
         // CR 509.1b: "greater power" — relative to source.
         value(FilterProp::PowerGTSource, tag("greater power")),
         // CR 208: the shared power/toughness comparison combinator (handles
@@ -216,6 +209,18 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     // Optional distributive "each " qualifier (no semantic effect).
     let (input, _) = opt(tag("each ")).parse(input)?;
     let (input, _) = opt((tag("with"), space1)).parse(input)?;
+    // CR 208.1: self-referential comparison "(power|toughness) greater than
+    // <poss> (power|toughness)" — a creature's own stat versus its own other
+    // stat. This MUST precede the general "<stat> greater than <quantity>" tail,
+    // which would otherwise resolve the possessive "its/their power" through the
+    // quantity grammar as the *source* object's power (wrong scope for a filter
+    // applied per candidate). Both possessive forms ("its" singular, "their"
+    // plural) and both directions collapse to the dedicated self-referential
+    // props the runtime evaluates against each candidate (`ToughnessGTPower`,
+    // `PowerExceedsBase`).
+    if let Ok((rest, prop)) = parse_self_referential_pt(input) {
+        return Ok((rest, prop));
+    }
     // Optional "base " scope marker (CR 208.4b).
     let (input, scope) = map(opt(tag("base ")), |b| {
         if b.is_some() {
@@ -255,6 +260,40 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         FilterProp::AnyOf { props }
     };
     Ok((rest, prop))
+}
+
+/// CR 208.1: Possessive pronoun introducing a creature's *own* stat in a
+/// self-referential P/T comparison — "its" (singular subject) or "their" (plural
+/// subject). Both refer to the candidate object itself, not the ability source.
+fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("its"), tag("their"))).parse(input)
+}
+
+/// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
+/// and "power greater than <poss> base power" → [`FilterProp::PowerExceedsBase`].
+/// These are the self-referential P/T comparisons (a creature's own stat vs its
+/// own other stat), distinct from the numeric/quantity-threshold comparisons the
+/// rest of `parse_pt_comparison` handles. Accepts singular and plural possessives.
+fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(
+            FilterProp::ToughnessGTPower,
+            (
+                tag("toughness greater than "),
+                parse_pt_possessive,
+                tag(" power"),
+            ),
+        ),
+        value(
+            FilterProp::PowerExceedsBase,
+            (
+                tag("power greater than "),
+                parse_pt_possessive,
+                tag(" base power"),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 208.1 + CR 107.3a: Parse the comparison tail of a P/T constraint, after the

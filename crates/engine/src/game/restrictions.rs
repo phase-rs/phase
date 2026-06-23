@@ -135,8 +135,12 @@ pub fn flash_timing_cost(
 
 pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
     match (base, extra) {
-        (ManaCost::NoCost, other) | (ManaCost::SelfManaCost, other) => other.clone(),
-        (other, ManaCost::NoCost) | (other, ManaCost::SelfManaCost) => other.clone(),
+        (ManaCost::NoCost, other)
+        | (ManaCost::SelfManaCost, other)
+        | (ManaCost::SelfManaValue, other) => other.clone(),
+        (other, ManaCost::NoCost)
+        | (other, ManaCost::SelfManaCost)
+        | (other, ManaCost::SelfManaValue) => other.clone(),
         (
             ManaCost::Cost {
                 shards: base_shards,
@@ -386,6 +390,8 @@ fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &Type
         TypeFilter::AnyOf(filters) => filters
             .iter()
             .any(|inner| entry_type_filter_matches(record, inner)),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
         _ => false,
     }
 }
@@ -792,6 +798,12 @@ fn activation_restriction_applies(
             .get(&source_id)
             .and_then(|obj| obj.case_state.as_ref())
             .is_some_and(|cs| cs.is_solved),
+        // CR 701.64b + CR 702.186b: ∞ activated ability is present (legal to
+        // activate) only while the source permanent is harnessed.
+        ActivationRestriction::SourceIsHarnessed => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.harnessed),
         // CR 716.4: Level N+1 ability can only activate when Class is at level N.
         ActivationRestriction::ClassLevelIs { level } => state
             .objects
@@ -1632,14 +1644,18 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     })
 }
 
-/// CR 307.1: Sorcery-speed timing — main phase, stack empty, active player has priority.
+/// CR 307.1 + CR 805.5a: Sorcery-speed timing — main phase, stack empty,
+/// active player (or, under the shared team turns option, any player on the
+/// active team — CR 805.5a: "A player may cast a spell, activate an ability,
+/// or take a special action when their team has priority") has priority.
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && state.active_player == player
+        && (state.active_player == player
+            || super::players::teammates(state, state.active_player).contains(&player))
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
@@ -3628,5 +3644,45 @@ mod tests {
             &state,
             &CastingVariant::Warp
         ));
+    }
+
+    /// CR 805.5a: "A player may cast a spell, activate an ability, or take a
+    /// special action when their team has priority." Under the shared team
+    /// turns option, the nonactive teammate must also have a legal
+    /// sorcery-speed timing window during the active team's main phase, not
+    /// just the literal active player.
+    #[test]
+    fn is_sorcery_speed_window_two_headed_giant_includes_nonactive_teammate() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        assert!(is_sorcery_speed_window(&state, PlayerId(0)));
+        // P1 is P0's teammate (CR 805.10 team pairing: seats 0+1, 2+3).
+        assert!(is_sorcery_speed_window(&state, PlayerId(1)));
+        // P2/P3 are the OPPOSING team and have no sorcery-speed window during
+        // the active team's main phase.
+        assert!(!is_sorcery_speed_window(&state, PlayerId(2)));
+        assert!(!is_sorcery_speed_window(&state, PlayerId(3)));
+    }
+
+    /// Outside team-based formats, only the literal active player has a
+    /// sorcery-speed window — no regression from the CR 805.5a widening.
+    #[test]
+    fn is_sorcery_speed_window_non_team_format_excludes_other_players() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        assert!(is_sorcery_speed_window(&state, state.active_player));
+        for opponent in crate::game::players::opponents(&state, state.active_player) {
+            assert!(!is_sorcery_speed_window(&state, opponent));
+        }
     }
 }

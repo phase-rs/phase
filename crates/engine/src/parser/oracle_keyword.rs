@@ -1828,12 +1828,14 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
 }
 
 /// Render a `ManaCost` as MTG-style brace symbols (e.g. `{2}{U}{U}`).
-/// `NoCost` collapses to `{0}`; `SelfManaCost` renders the Oracle phrase
-/// players see on cards like Snapcaster Mage's flashback.
+/// `NoCost` collapses to `{0}`; `SelfManaCost` / `SelfManaValue` render the Oracle
+/// phrase players see on cards like Snapcaster Mage's flashback or Sliver
+/// Gravemother's encore grant.
 fn format_mana_cost_symbols(cost: &ManaCost) -> String {
     match cost {
         ManaCost::NoCost => "{0}".to_string(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
+        ManaCost::SelfManaValue => "its mana value".to_string(),
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {
@@ -1928,6 +1930,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
         TypeFilter::Sorcery => "sorcery".to_string(),
         TypeFilter::Planeswalker => "planeswalker".to_string(),
         TypeFilter::Battle => "battle".to_string(),
+        TypeFilter::Kindred => "kindred".to_string(),
         TypeFilter::Permanent => "permanent".to_string(),
         TypeFilter::Card => "card".to_string(),
         TypeFilter::Any => "permanent".to_string(),

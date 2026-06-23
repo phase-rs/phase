@@ -56,8 +56,14 @@ fn duskmantle_seer_each_player_loses_life_for_their_own_revealed_card() {
     let seer = scenario.add_real_card(P0, "Duskmantle Seer", Zone::Battlefield, db);
     // P0's library top: Bonesplitter — mana value 1.
     let p0_top = scenario.add_real_card(P0, "Bonesplitter", Zone::Library, db);
+    // Keep a card under the reveal so the following draw step does not
+    // eliminate P0 and move the revealed hand card to exile.
+    scenario.add_real_card(P0, "Island", Zone::Library, db);
     // P1's library top: Balance — mana value 2, distinct from P0's.
     let p1_top = scenario.add_real_card(P1, "Balance", Zone::Library, db);
+    // Keep a card under the reveal so the following draw step does not
+    // eliminate P1 and move the revealed hand card to exile.
+    scenario.add_real_card(P1, "Island", Zone::Library, db);
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 

@@ -13,12 +13,14 @@
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::scenario::GameScenario;
+use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::triggers::process_triggers;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -214,5 +216,135 @@ fn connive_self_trigger_fires_for_the_conniving_source() {
         runner.life(P0),
         life_before + 2,
         "a permanent's self-connive must fire its own 'whenever ~ connives' trigger"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M.O.D.O.K. (MSH) — ability-word-labeled, pay-life, your-turn-restricted,
+// self-connive ACTIVATED ability.
+//
+// Oracle: "Mental Organism — Pay 3 life: M.O.D.O.K. connives. Activate only
+// during your turn."
+//
+// On main, the whole line landed as `Effect::Unimplemented[unknown]` because
+// `find_activated_colon` did not recognize the cost behind the "Mental Organism
+// —" ability-word label (CR 207.2c). These tests drive the REAL activation
+// pipeline (`GameAction::ActivateAbility` via the `GameScenario`/`GameRunner`
+// harness) through that fix.
+// ---------------------------------------------------------------------------
+
+const MODOK_ABILITY: &str =
+    "Mental Organism — Pay 3 life: M.O.D.O.K. connives. Activate only during your turn.";
+
+/// Resolve the runtime index of M.O.D.O.K.'s self-connive activated ability by
+/// effect shape (it is the only activated ability on the card).
+fn modok_connive_index(runner: &GameRunner, id: ObjectId) -> usize {
+    runner.state().objects[&id]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::Connive { .. }))
+        .expect("M.O.D.O.K. must carry a Connive activated ability")
+}
+
+/// CR 207.2c + CR 118.3b + CR 701.50a: activating M.O.D.O.K.'s ability pays 3
+/// life and connives — draw one card, discard it, and (because the discarded
+/// card is nonland) put a +1/+1 counter on M.O.D.O.K. itself (the `~` /
+/// self-target conniver).
+///
+/// Revert-discriminating: if the `find_activated_colon` ability-word strip is
+/// reverted, the line parses to `Effect::Unimplemented` with no cost, so
+/// `modok_connive_index` panics (no Connive ability) — and even past that, no
+/// `PayLife` cost would be charged and no +1/+1 counter placed. The
+/// `life_delta == -3` AND `counters == 1` pair pins down the cost, the connive
+/// effect, and the self-target simultaneously.
+#[test]
+fn modok_activation_pays_3_life_and_self_connives() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Empty hand + exactly one nonland card on top: connive draws 1 → hand has
+    // 1 → auto-discards it → nonland → one +1/+1 counter. No discard prompt.
+    scenario.with_library_top(P0, &["Spell Top"]);
+    let id = scenario
+        .add_creature_from_oracle(P0, "M.O.D.O.K.", 4, 4, MODOK_ABILITY)
+        .id();
+    let mut runner = scenario.build();
+
+    let idx = modok_connive_index(&runner, id);
+    assert_eq!(
+        runner.state().objects[&id]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "precondition: no +1/+1 counter before activation"
+    );
+
+    let outcome = runner.activate(id, idx).resolve();
+
+    // CR 118.3b: Pay 3 life.
+    assert_eq!(
+        outcome.life_delta(P0),
+        -3,
+        "activating M.O.D.O.K. must pay exactly 3 life"
+    );
+    // CR 701.50a: nonland discard places one +1/+1 counter on the SELF conviver.
+    assert_eq!(
+        outcome.state().objects[&id]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "self-connive with a nonland discard must place one +1/+1 counter on M.O.D.O.K."
+    );
+}
+
+/// CR 602.5 + CR 602.1: "Activate only during your turn" — the ability is
+/// illegal to activate while it is an opponent's turn, even with priority.
+///
+/// Revert-discriminating: drop `ActivationRestriction::DuringYourTurn` from the
+/// parse (or remove the strip so the ability never parses at all) and the
+/// `act(..).is_err()` assertion flips — either the activation is accepted, or
+/// the line never produces an activated ability to gate. Paired with the
+/// positive test above (same turn = legal), this isolates the restriction.
+#[test]
+fn modok_activation_rejected_on_opponents_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Spell Top"]);
+    let id = scenario
+        .add_creature_from_oracle(P0, "M.O.D.O.K.", 4, 4, MODOK_ABILITY)
+        .id();
+    let mut runner = scenario.build();
+
+    let idx = modok_connive_index(&runner, id);
+
+    // It is the OPPONENT's (P1) turn, but P0 (M.O.D.O.K.'s controller) holds
+    // priority — a legal priority window during an opponent's turn at which an
+    // unrestricted activated ability could be used.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    let life_before = runner.life(P0);
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: id,
+        ability_index: idx,
+    });
+
+    assert!(
+        result.is_err(),
+        "CR 602.5: M.O.D.O.K.'s 'Activate only during your turn' ability must be \
+         rejected on the opponent's turn, got {result:?}"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "a rejected activation must not pay the 3-life cost"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "a rejected activation must not put the ability on the stack"
     );
 }

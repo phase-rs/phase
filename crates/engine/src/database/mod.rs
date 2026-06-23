@@ -1,3 +1,4 @@
+pub mod augment;
 pub mod bracket_lists;
 pub mod card_db;
 pub mod embalm_eternalize;
@@ -10,11 +11,14 @@ pub mod legality;
 pub mod meld;
 pub mod mtgjson;
 pub mod oracle_loader;
+pub mod removed_cards;
 pub mod search;
 pub mod set_gating;
 pub mod synthesis;
 pub mod unearth;
 
+#[cfg(test)]
+mod augment_tests;
 #[cfg(test)]
 mod embalm_eternalize_tests;
 #[cfg(test)]

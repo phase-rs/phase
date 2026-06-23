@@ -200,11 +200,13 @@ export function getKeywordName(kw: Keyword): string {
  * ManaCost uses externally-tagged serde (no #[serde(tag)]):
  *   NoCost      → "NoCost"
  *   SelfManaCost → "SelfManaCost"
+ *   SelfManaValue → "SelfManaValue"
  *   Cost { shards, generic } → { "Cost": { "shards": [...], "generic": N } }
  */
 export function formatKeywordManaCost(cost: unknown): string {
   if (cost === "NoCost") return "{0}";
   if (cost === "SelfManaCost") return "its mana cost";
+  if (cost === "SelfManaValue") return "its mana value";
   if (cost && typeof cost === "object") {
     const inner = (cost as Record<string, { shards?: string[]; generic?: number }>).Cost;
     if (inner) {

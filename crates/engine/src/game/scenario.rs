@@ -69,17 +69,33 @@ fn build_face_from_oracle(
     // The parser's `extract_keyword_line` requires keyword name hints to identify
     // keyword-only lines (returns None when hints are empty). Pre-scan each line
     // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
+    //
+    // A line contributes inferred hints ONLY when it is a genuine keyword line —
+    // every comma-separated part parses to a known keyword (e.g. "Flying,
+    // vigilance, trample"). A line with any prose fragment is an effect/ability
+    // line and contributes nothing, even if it lists keywords inside a sentence
+    // (e.g. Super-Adaptoid / Kathril's "Do the same for flying, first strike,
+    // …"): those keyword names are the OBJECT of an effect, not granted
+    // keywords, and must not be inferred as static abilities on the card.
     let inferred_kw_names: Vec<String>;
     let effective_kw_names = if keyword_names.is_empty() {
         inferred_kw_names = oracle_text
             .lines()
             .flat_map(|line| {
-                line.split(',')
+                let parts: Vec<String> = line
+                    .split(',')
                     .map(|part| part.trim().to_lowercase())
-                    .filter(|lower| {
+                    .collect();
+                let is_keyword_line = !parts.is_empty()
+                    && parts.iter().all(|lower| {
                         let kw: Keyword = lower.parse().unwrap_or(Keyword::Unknown(String::new()));
                         !matches!(kw, Keyword::Unknown(_))
-                    })
+                    });
+                if is_keyword_line {
+                    parts
+                } else {
+                    Vec::new()
+                }
             })
             .collect();
         &inferred_kw_names
@@ -913,6 +929,21 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 305: Make this card a land. Strips the Creature core type pushed by
+    /// `add_creature_to_graveyard` and adds Land. Mirrors `as_artifact`/
+    /// `as_enchantment`; reusable for graveyard-return targeting tests.
+    pub fn as_land(&mut self) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types
+            .core_types
+            .retain(|t| *t != CoreType::Creature);
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// CR 302: Make this card a creature. Strips the spell core types
     /// (Instant/Sorcery) pushed by `add_spell_to_library_top` and adds Creature.
     /// Mirrors `as_sorcery`/`as_instant`; reusable for search/tutor library tests.
@@ -1527,6 +1558,9 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Mutate => {
                     "AlternativeCastChoice(Mutate)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Prowl => {
+                    "AlternativeCastChoice(Prowl)"
                 }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",

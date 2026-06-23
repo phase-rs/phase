@@ -1105,17 +1105,20 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         )),
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
-        // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
-        // must be tried BEFORE the scoped-zone combinator so the target-referring
-        // possessive routes to `TargetZoneCardCount` (resolves against the player
-        // target in scope) instead of falling back to a controller-less
-        // `InZone` filter that counts every player's cards.
-        // CR 613.1: "cards in the chosen player's <zone>" — the persisted ETB
-        // choice; must precede the generic target/zone arms below.
-        parse_number_of_cards_in_chosen_player_zone,
-        parse_number_of_cards_in_target_zone,
-        parse_number_of_cards_in_all_players_hands,
-        parse_number_of_cards_in_zone,
+        // CR 109.4 + CR 115.7 + CR 402.1: "cards in …" hand/zone counts share a
+        // nested alt to stay within nom's top-level `alt` arity (nom 8.0 max: 21
+        // items). Ordering within the nest is load-bearing: chosen-player and
+        // extremum-hand phrases must precede the generic target-zone and zone
+        // arms they share a "cards in " prefix with.
+        alt((
+            parse_number_of_cards_in_chosen_player_zone,
+            // CR 402.1: "cards in the hand of the {player|opponent} with the
+            // {most|fewest} cards in hand" (Adamaro P/T CDA class).
+            parse_number_of_cards_in_hand_of_extremum_player,
+            parse_number_of_cards_in_target_zone,
+            parse_number_of_cards_in_all_players_hands,
+            parse_number_of_cards_in_zone,
+        )),
         parse_number_of_opponents,
     ))
     .or(alt((
@@ -1258,33 +1261,63 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
     ))
 }
 
-/// CR 402.1: Parse "the player with the {most|fewest} cards in hand" →
-/// `QuantityRef::HandSize { player: AllPlayers { aggregate } }`. The hand-zone
-/// peer of `parse_cross_player_life_extremum` (the life axis, CR 119): two
-/// independent nom axes — the aggregate direction (most↔fewest) and the fixed
-/// "cards in hand" zone (CR 402, the hand). Used by the catch-up-draw
-/// interceptor (Tales of the Ancestors) and any future card that names the
-/// cross-player hand-size extremum. Hand is CR 402, so this routes to
-/// `HandSize`/`PlayerScope`, never the CR 208/202 object-property `Aggregate`.
-pub(crate) fn parse_player_with_extremum_cards_in_hand(
-    input: &str,
-) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the player with the ").parse(input)?;
-    let (rest, aggregate) = alt((
-        value(AggregateFunction::Max, tag("most")),
-        value(AggregateFunction::Min, tag("fewest")),
-    ))
-    .parse(rest)?;
-    let (rest, _) = tag(" cards in hand").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::HandSize {
-            player: PlayerScope::AllPlayers {
+/// CR 402.1 + CR 102.2/102.3: Shared core for cross-player hand-size extrema.
+/// Two independent nom axes — population scope (`player` ↔ `opponent`) and
+/// aggregate direction (`most` ↔ `fewest`) — plus the fixed "cards in hand"
+/// zone suffix (CR 402). The hand-zone peer of `parse_cross_player_life_extremum`
+/// (the life axis, CR 119): routes to `HandSize`/`PlayerScope`, never the CR
+/// 208/202 object-property `Aggregate`.
+fn parse_extremum_hand_size_scope_and_aggregate(input: &str) -> OracleResult<'_, PlayerScope> {
+    let (rest, player) = alt((
+        map(
+            (
+                tag("player"),
+                tag(" with the "),
+                alt((
+                    value(AggregateFunction::Max, tag("most")),
+                    value(AggregateFunction::Min, tag("fewest")),
+                )),
+            ),
+            |(_, _, aggregate)| PlayerScope::AllPlayers {
                 aggregate,
                 exclude: None,
             },
-        },
+        ),
+        map(
+            (
+                tag("opponent"),
+                tag(" with the "),
+                alt((
+                    value(AggregateFunction::Max, tag("most")),
+                    value(AggregateFunction::Min, tag("fewest")),
+                )),
+            ),
+            |(_, _, aggregate)| PlayerScope::Opponent { aggregate },
+        ),
     ))
+    .parse(input)?;
+    let (rest, _) = tag(" cards in hand").parse(rest)?;
+    Ok((rest, player))
+}
+
+/// CR 402.1: Parse "the {player|opponent} with the {most|fewest} cards in hand"
+/// → `QuantityRef::HandSize`. Used by the catch-up-draw interceptor (Tales of
+/// the Ancestors) and any card naming the short cross-player hand-size extremum.
+pub(crate) fn parse_player_with_extremum_cards_in_hand(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, player) = parse_extremum_hand_size_scope_and_aggregate(rest)?;
+    Ok((rest, QuantityRef::HandSize { player }))
+}
+
+/// CR 402.1: Parse "cards in the hand of the {player|opponent} with the
+/// {most|fewest} cards in hand" after "the number of" → `QuantityRef::HandSize`.
+/// Verbose wrapper for P/T CDAs (Adamaro, First to Desire).
+fn parse_number_of_cards_in_hand_of_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards in the hand of the ").parse(input)?;
+    let (rest, player) = parse_extremum_hand_size_scope_and_aggregate(rest)?;
+    Ok((rest, QuantityRef::HandSize { player }))
 }
 
 /// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
@@ -3711,6 +3744,19 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
     // `FilterProp` from a typed pair.
     let (rest, prop) = alt((
         value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        // CR 301.5a + CR 303.4: source-anaphoric gendered pronoun denotes the
+        // ability source (same id as `~`) — Winter Soldier, Captain America
+        // (MSH templates). Maps to AttachedToSource, identical to the `~` arm.
+        // Distinct from the recipient pronoun "it"/"that creature" arm below.
+        // Only the unambiguously source-anaphoric "him"/"her" are accepted; the
+        // singular-they "them" is excluded because it is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" =
+        // the enchanted player, not the Aura source), which would bind the wrong
+        // object set.
+        value(
+            FilterProp::AttachedToSource,
+            alt((tag(" attached to him"), tag(" attached to her"))),
+        ),
         value(
             FilterProp::AttachedToRecipient,
             alt((tag(" attached to it"), tag(" attached to that creature"))),
@@ -4442,6 +4488,86 @@ mod tests {
                 other => panic!("expected Typed filter, got {other:?}"),
             },
             other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_gendered_animate_pronoun() {
+        // CR 301.5a + CR 303.4: MSH/Marvel templates phrase the attachment count
+        // with the source-anaphoric gendered pronoun "him"/"her"
+        // (Winter Soldier "for each Equipment attached to him"). These denote the
+        // SAME object id as `~`, so the combinator must emit `AttachedToSource`.
+        // Fail-before: no "attached to him/her" arm → Err.
+        for pronoun in ["him", "her"] {
+            let clause = format!("equipment attached to {pronoun}");
+            let (rest, q) = parse_for_each_clause_ref(&clause)
+                .unwrap_or_else(|e| panic!("expected Ok for {clause:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {clause:?}");
+            match q {
+                QuantityRef::ObjectCount { filter } => match filter {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert_eq!(controller, None, "controller for {clause:?}");
+                        assert_eq!(
+                            properties,
+                            vec![FilterProp::AttachedToSource],
+                            "properties for {clause:?}"
+                        );
+                        assert_eq!(
+                            type_filters,
+                            vec![TypeFilter::Subtype("Equipment".into())],
+                            "type_filters for {clause:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter for {clause:?}, got {other:?}"),
+                },
+                other => panic!("expected ObjectCount for {clause:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_them_not_source_bound() {
+        // CR 301.5a + CR 303.4: the singular-they "them" is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" = the
+        // enchanted player), so it must NOT bind to the source. The gendered arm
+        // deliberately omits "them"; this combinator therefore does not produce an
+        // AttachedToSource count for it (the clause is left unconsumed). Guards
+        // against a future re-add that would silently count the wrong object set.
+        let result = parse_for_each_attached_to_source("curse attached to them");
+        match result {
+            Err(_) => {}
+            Ok((rest, q)) => {
+                // If some other arm consumes it, it must not be AttachedToSource.
+                if let QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                } = &q
+                {
+                    assert!(
+                        !properties.contains(&FilterProp::AttachedToSource),
+                        "\"attached to them\" must not bind to the source, got {q:?} (rest {rest:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_it_preserved_after_gendered_arm() {
+        // Discrimination/regression: the recipient authority ("it") must stay
+        // AttachedToRecipient even with the new source-pronoun arm above it.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => {
+                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+            }
+            other => panic!("expected recipient ObjectCount, got {other:?}"),
         }
     }
 
@@ -5528,6 +5654,110 @@ mod tests {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Min,
                     exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_opponent_with_most_cards_in_hand() {
+        // CR 402.1 + CR 102.2/102.3: opponent-scoped MAX extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the opponent with the most cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_opponent_with_fewest_cards_in_hand() {
+        // CR 402.1 + CR 102.2/102.3: opponent-scoped MIN extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the opponent with the fewest cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_all_players_max_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the player with the most cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_all_players_min_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the player with the fewest cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_opponent_max_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the opponent with the most cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_opponent_min_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the opponent with the fewest cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
                 },
             }
         );

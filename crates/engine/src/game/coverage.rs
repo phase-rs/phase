@@ -139,6 +139,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
+            // CR 609.4b: SpendManaAsAnyColor carries an optional spell-class
+            // `TargetFilter`. The board-wide `None` shape is registry-keyed;
+            // the spell-filtered `Some` shape (Vizier of the Menagerie) carries
+            // an unbounded filter value space, so coverage support lives here.
+            // Runtime enforcement is in
+            // casting.rs::player_can_spend_as_any_color_for_optional_spell.
+            | StaticMode::SpendManaAsAnyColor { .. }
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
             | StaticMode::CantDraw { .. }
@@ -185,6 +192,17 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // removing effects). Parameterized — no registry entry; coverage
             // support here.
             | StaticMode::CantHaveKeyword { .. }
+            // CR 708.5: MayLookAtFaceDown is a nullary permission whose affected
+            // filter selects the face-down permanents the controller may look at
+            // (Found Footage, Lumbering Laundry). Runtime enforcement is in
+            // visibility.rs face-down identity redaction. Not registry-keyed.
+            | StaticMode::MayLookAtFaceDown
+            // CR 116.2b + CR 708.7: CantBeTurnedFaceUp is a nullary prohibition
+            // whose affected filter selects the permanents that can't be turned
+            // face up; the optional timing rides on `condition` (Karlov
+            // Watchdog). Runtime enforcement is in morph::turn_face_up. Not
+            // registry-keyed.
+            | StaticMode::CantBeTurnedFaceUp
     )
 }
 
@@ -882,6 +900,7 @@ fn fmt_type_filter(tf: &TypeFilter) -> String {
         TypeFilter::Sorcery => "sorcery",
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
+        TypeFilter::Kindred => "kindred",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "any",
@@ -1989,6 +2008,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
+        // CR 113.1a + CR 611.2: report the donor whose activated abilities are gained.
+        | Effect::GainActivatedAbilitiesOfTarget { target, .. }
         | Effect::Suspect { target, .. }
         | Effect::Unsuspect { target, .. }
         | Effect::Connive { target, .. }
@@ -2006,6 +2027,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
+        Effect::ApplyPerpetual { .. } => {}
         Effect::TurnFaceUp { .. } => {}
         Effect::DestroyAll { target, .. }
         // CR 613.1b: mass gain-control reports its population `filter` like the
@@ -2384,6 +2406,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("on_decline".into(), "present".into()));
             }
         }
+        Effect::CombineHost { source, host } => {
+            d.push(("source".into(), format!("{source:?}")));
+            d.push(("host".into(), fmt_target(host)));
+        }
+        Effect::ChooseAugmentAndCombineWithHost {
+            zones,
+            filter,
+            host,
+        } => {
+            d.push(("zones".into(), zones.iter().map(fmt_zone).collect::<Vec<_>>().join("/")));
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push(("host".into(), fmt_target(host)));
+        }
         Effect::RevealTop { player, count } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), count.to_string()));
@@ -2595,6 +2630,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
+            d.push(("zone".into(), fmt_zone(zone)));
+        }
+        Effect::ForEachCategoryExile { category, zone, .. } => {
+            d.push((
+                "category".into(),
+                match category {
+                    crate::types::ability::IterationCategory::Color => "color".to_string(),
+                    crate::types::ability::IterationCategory::CardType => "card type".to_string(),
+                },
+            ));
             d.push(("zone".into(), fmt_zone(zone)));
         }
         Effect::ChooseObjectsIntoTrackedSet {
@@ -2908,6 +2953,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
         | Effect::Forage
+        | Effect::Harness
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
@@ -2930,6 +2976,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -2961,8 +3009,8 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
             },
         ));
     }
-    if def.condition.is_some() {
-        d.push(("conditional".into(), "yes".into()));
+    if let Some(cond) = &def.condition {
+        d.push(("conditional".into(), format!("{cond:?}")));
     }
     if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
@@ -3016,11 +3064,11 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(vs) = &trig.valid_source {
         d.push(("valid source".into(), fmt_target(vs)));
     }
-    if trig.constraint.is_some() {
-        d.push(("constraint".into(), "yes".into()));
+    if let Some(constraint) = &trig.constraint {
+        d.push(("constraint".into(), format!("{constraint:?}")));
     }
-    if trig.condition.is_some() {
-        d.push(("condition".into(), "yes".into()));
+    if let Some(cond) = &trig.condition {
+        d.push(("condition".into(), format!("{cond:?}")));
     }
     d
 }
@@ -3189,8 +3237,8 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     if !simple.is_empty() {
         d.push(("mods".into(), simple.join(", ")));
     }
-    if stat.condition.is_some() {
-        d.push(("conditional".into(), "yes".into()));
+    if let Some(cond) = &stat.condition {
+        d.push(("conditional".into(), format!("{cond:?}")));
     }
     if stat.characteristic_defining {
         d.push(("CDA".into(), "yes".into()));
@@ -6045,6 +6093,8 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsEnchanted => ("SourceIsEnchanted", Handled),
         // SourceIsMonstrous resolved by layers::evaluate_condition (layers.rs:1071)
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Handled),
+        // SourceIsHarnessed resolved by layers::evaluate_condition (the ∞ gate).
+        StaticCondition::SourceIsHarnessed => ("SourceIsHarnessed", Handled),
         // SourceAttachedToCreature resolved by layers::evaluate_condition (layers.rs:1078)
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
@@ -10939,10 +10989,11 @@ mod tests {
     /// intentionally NOT asserted here so a future stub does not silently pass.
     #[test]
     fn source_state_static_conditions_are_marked_handled() {
-        let conditions: [(StaticCondition, &str); 5] = [
+        let conditions: [(StaticCondition, &str); 6] = [
             (StaticCondition::SourceIsEquipped, "SourceIsEquipped"),
             (StaticCondition::SourceIsEnchanted, "SourceIsEnchanted"),
             (StaticCondition::SourceIsMonstrous, "SourceIsMonstrous"),
+            (StaticCondition::SourceIsHarnessed, "SourceIsHarnessed"),
             (
                 StaticCondition::SourceAttachedToCreature,
                 "SourceAttachedToCreature",

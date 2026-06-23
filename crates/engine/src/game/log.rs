@@ -172,6 +172,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Saddled { .. }
         // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
         | GameEvent::Mutated { .. }
+        // Unstable Host/Augment: a card with augment combined with a Host creature.
+        | GameEvent::Augmented { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
@@ -215,6 +217,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
+        | GameEvent::StickerPlaced { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
         | GameEvent::AttractionVisited { .. }
         | GameEvent::Specialized { .. }
@@ -320,6 +323,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::PowerUp => " activates power-up: ",
                 // CR 702.6a: Equip activation.
                 AbilityTag::Equip => " activates equip: ",
+                AbilityTag::Augment => " activates augment: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -703,6 +707,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *merged_id),
         ],
 
+        GameEvent::Augmented {
+            merged_id,
+            augmenting_id,
+            ..
+        } => vec![
+            card_seg(state, *augmenting_id),
+            text(" augments "),
+            card_seg(state, *merged_id),
+        ],
+
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
         }
@@ -1081,6 +1095,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttractionOpened { object_id, .. } => {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
         }
+        GameEvent::StickerPlaced {
+            object_id, kind, ..
+        } => vec![
+            text("Placed "),
+            text(&format!("{kind:?}").to_lowercase()),
+            text(" sticker on "),
+            card_seg(state, *object_id),
+        ],
         GameEvent::AttractionsRolledToVisit { roll, .. } => {
             vec![
                 text("Rolled "),

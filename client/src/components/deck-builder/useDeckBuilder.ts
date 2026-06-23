@@ -3,15 +3,18 @@ import { useTranslation } from "react-i18next";
 import type { ScryfallCard } from "../../services/scryfall";
 import { resolveOracleIdSync } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   ACTIVE_DECK_KEY,
   STORAGE_KEY_PREFIX,
+  getDeckMeta,
   loadSavedDeck,
   loadSavedDeckBracket,
-  removeDeckMeta,
+  migrateDeckMeta,
+  setDeckFolder,
   stampDeckMeta,
 } from "../../constants/storage";
 import { BASIC_LAND_NAMES } from "../../constants/game";
@@ -20,6 +23,7 @@ import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import type { CardSearchFilters } from "./CardSearch";
 import { hasSearchCriteria } from "./searchFilters";
+import type { GroupMode } from "./deckGrouping";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
 import type { CommanderBracket } from "../../types/bracket";
@@ -63,6 +67,7 @@ export function useDeckBuilder({
   searchFilters,
 }: UseDeckBuilderParams) {
   const { t } = useTranslation("deck-builder");
+  const showNotification = useAppNotificationStore((s) => s.showNotification);
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
@@ -77,6 +82,8 @@ export function useDeckBuilder({
   const [activeSurface, setActiveSurface] = useState<"deck" | "info">("deck");
   // Visual representation of the deck within the main canvas.
   const [deckView, setDeckView] = useState<"list" | "stack">("list");
+  // How the main deck is sub-grouped within the canvas (by card type or color).
+  const [groupMode, setGroupMode] = useState<GroupMode>("type");
   // Unsaved-changes flag: set on any deck mutation, cleared on save/clone/load.
   // Drives the leave/load confirmation and the beforeunload guard.
   const [dirty, setDirty] = useState(false);
@@ -412,7 +419,7 @@ export function useDeckBuilder({
     setDirty(true);
   }, [applyDeckToEditor]);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!deckName.trim()) return;
     // Save-time commander inference: when a Commander-format deck is shaped
     // like a 100-singleton list with no explicit commander, ask the engine
@@ -438,7 +445,13 @@ export function useDeckBuilder({
       && localStorage.getItem(STORAGE_KEY_PREFIX + savedDeckName) !== null
     ) {
       localStorage.removeItem(STORAGE_KEY_PREFIX + savedDeckName);
-      removeDeckMeta(savedDeckName);
+      // Carry folder/star membership + timestamps to the new name; the
+      // trailing stampDeckMeta(nextName) then no-ops since the entry exists.
+      // If nextName already names another deck, the setItem below overwrites
+      // its data (pre-existing Save behavior) and this migration likewise
+      // replaces its metadata — both correctly reflect the surviving deck's
+      // identity now living under nextName.
+      migrateDeckMeta(savedDeckName, nextName);
       if (localStorage.getItem(ACTIVE_DECK_KEY) === savedDeckName) {
         localStorage.setItem(ACTIVE_DECK_KEY, nextName);
       }
@@ -449,7 +462,21 @@ export function useDeckBuilder({
     setSavedDecks(listSavedDecks());
     setJustSaved(true);
     setDirty(false);
-  };
+    showNotification({
+      title: t("toolbar.savedToastTitle"),
+      description: t("toolbar.savedToastDescription", { name: nextName }),
+    });
+  }, [
+    deckName,
+    isCommander,
+    currentDeck,
+    applyDeckToEditor,
+    format,
+    bracket,
+    savedDeckName,
+    showNotification,
+    t,
+  ]);
 
   // Clone = explicit duplicate. Unlike Save (which renames the current deck in
   // place), this always writes a NEW key and leaves the original untouched, then
@@ -465,12 +492,22 @@ export function useDeckBuilder({
     if (bracket !== null) payload.bracket = bracket;
     localStorage.setItem(STORAGE_KEY_PREFIX + cloneName, JSON.stringify(payload));
     stampDeckMeta(cloneName);
+    // A clone lands beside its source: inherit the folder, but start unstarred
+    // (the star is a deliberate per-deck pin, not a copyable property).
+    const sourceFolderId = savedDeckName
+      ? getDeckMeta(savedDeckName)?.folderId ?? null
+      : null;
+    if (sourceFolderId) setDeckFolder(cloneName, sourceFolderId);
     setDeckName(cloneName);
     setSavedDeckName(cloneName);
     setSavedDecks(listSavedDecks());
     setJustSaved(true);
     setDirty(false);
-  }, [deckName, currentDeck, format, bracket]);
+    showNotification({
+      title: t("toolbar.clonedToastTitle"),
+      description: t("toolbar.clonedToastDescription", { name: cloneName }),
+    });
+  }, [deckName, currentDeck, format, bracket, savedDeckName, showNotification, t]);
 
   useEffect(() => {
     if (!justSaved) return;
@@ -657,6 +694,8 @@ export function useDeckBuilder({
     setActiveSurface,
     deckView,
     setDeckView,
+    groupMode,
+    setGroupMode,
     dirty,
     cardDataCache,
     compatibility,

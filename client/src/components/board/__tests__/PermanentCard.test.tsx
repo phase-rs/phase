@@ -329,6 +329,45 @@ describe("PermanentCard attachments", () => {
     });
   });
 
+  it("dispatches a target click even when a stale combat mode lingers during target selection", () => {
+    // Regression: a spell's TargetSelection must win over a leftover
+    // `combatMode` UI flag. PermanentCard routed combat clicks on `combatMode`
+    // alone — unlike GroupedPermanent, which also requires the matching combat
+    // WaitingFor (`waitingFor.type === "DeclareBlockers"`). So a stale
+    // `combatMode` from a just-finished combat step swallowed bounce/target
+    // clicks: targets glowed (validTargetObjectIds) but the click hit the dead
+    // blocker branch and `ChooseTarget` never fired. Reported on Chain of Vapor
+    // cast during combat.
+    const gameState = {
+      ...makeState(),
+      waiting_for: {
+        type: "TargetSelection",
+        data: {
+          pending_cast: { object_id: 99 },
+          target_slots: [],
+          selection: { current_slot: 0, current_legal_targets: [{ Object: 1 }] },
+        },
+      },
+    } as unknown as GameState;
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    const staleBlockerHandler = vi.fn();
+    useUiStore.setState({
+      combatMode: "blockers",
+      combatClickHandler: staleBlockerHandler,
+    });
+
+    const { container } = renderPermanent(new Set([1]));
+    const permanent = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.click(permanent);
+
+    expect(staleBlockerHandler).not.toHaveBeenCalled();
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 1 } },
+    });
+  });
+
   it("submits a single battlefield sacrifice choice from the board", () => {
     const gameState = {
       ...makeState(),

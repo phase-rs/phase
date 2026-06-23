@@ -266,6 +266,17 @@ Sideboard
       { count: 1, name: 'Dark Leo & Shredder' },
     ]);
   });
+
+  it('preserves sticker sheets through repair and expansion', () => {
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      sticker_sheets: ['sheet-1', 'sheet-2', 'sheet-3'],
+    });
+
+    expect(repaired.sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
+    expect(expandParsedDeck(repaired).sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
+  });
 });
 
 describe('detectAndParseDeck', () => {

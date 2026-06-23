@@ -393,7 +393,7 @@ mod tests {
     fn double_counters_replacement_choice_stashes_remaining_counter_additions() {
         let mut state = GameState::default();
         for (id, modification) in [
-            (ObjectId(90), QuantityModification::Double),
+            (ObjectId(90), QuantityModification::DOUBLE),
             (ObjectId(91), QuantityModification::Plus { value: 1 }),
         ] {
             let mut source = GameObject::new(
@@ -599,7 +599,7 @@ mod tests {
         );
         let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
         repl.valid_card = Some(TargetFilter::Any);
-        repl.quantity_modification = Some(QuantityModification::Double);
+        repl.quantity_modification = Some(QuantityModification::DOUBLE);
         doubler.replacement_definitions.push(repl);
         state.objects.insert(doubler_id, doubler);
         state.battlefield.push_back(doubler_id);

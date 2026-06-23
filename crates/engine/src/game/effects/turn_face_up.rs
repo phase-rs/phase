@@ -33,6 +33,12 @@ pub fn resolve(
     let mut restored_any = false;
     let mut turned_ids = Vec::new();
     for id in object_ids {
+        // CR 116.2b + CR 708.7: a `CantBeTurnedFaceUp` static (Karlov Watchdog)
+        // also prohibits a resolving turn-up of a matched permanent, not just
+        // the morph special action. Skip any object the prohibition covers.
+        if crate::game::morph::is_blocked_by_cant_be_turned_face_up(state, id) {
+            continue;
+        }
         if let Some(obj) = state.objects.get_mut(&id) {
             if obj.face_down {
                 obj.face_down = false;
@@ -265,6 +271,70 @@ mod tests {
             .any(|e| matches!(e, GameEvent::TurnedFaceUp { object_id } if *object_id == id)));
     }
 
+    /// CR 116.2b + CR 708.7 (Etrata, Deadly Fugitive class): the granted
+    /// activated ability "{2}{U}{B}: Turn this creature face up. ..." lowers its
+    /// head clause to `Effect::TurnFaceUp { SelfRef }`, where the source IS the
+    /// face-down permanent being turned up. Resolving it flips the source from
+    /// face down to face up and restores its real characteristics.
+    /// Discriminating: if the parser had left the head clause Unimplemented (the
+    /// pre-fix state), no `TurnFaceUp` effect would resolve and the `!face_down`
+    /// assertion would fail.
+    #[test]
+    fn granted_turn_face_up_ability_flips_source_face_up() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let id = create_object(
+            &mut state,
+            CardId(0xE712A),
+            player,
+            "Hidden Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Assassin".to_string()],
+            };
+            let snapshot = crate::game::printed_cards::snapshot_object_face(obj);
+            crate::game::morph::apply_face_down_creature_characteristics(
+                obj,
+                &crate::types::ability::FaceDownProfile::cloaked_2_2(),
+            );
+            obj.back_face = Some(snapshot);
+        }
+        assert!(state.objects[&id].face_down);
+
+        // The granted ability resolves with `target: SelfRef` and `source_id`
+        // bound to the face-down creature itself.
+        let ability = ResolvedAbility::new(
+            Effect::TurnFaceUp {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            id,
+            player,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.face_down,
+            "the granted TurnFaceUp {{ SelfRef }} ability must flip the source face up"
+        );
+        assert_eq!(obj.name, "Hidden Assassin", "real face restored");
+        assert!(obj.card_types.subtypes.contains(&"Assassin".to_string()));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::TurnedFaceUp { object_id } if *object_id == id)));
+    }
+
     #[test]
     fn reveal_then_turn_face_up_chain_turns_up_creature_card() {
         // CR 701.20 + CR 700.1 (Hauntwoods Shrieker reveal ability): the parsed
@@ -360,6 +430,185 @@ mod tests {
         );
         assert_eq!(obj.name, "Hidden Wurm", "real face restored on turn-up");
         assert_eq!(obj.power, Some(6));
+    }
+
+    /// Parse Etrata, Deadly Fugitive's full granted activated ability, build the
+    /// resolved chain from the parsed definition, and return the head + "If you
+    /// can't, exile it, …" rider chain. Shared by both runtime branches below so
+    /// the regression drives the REAL parser output, not a hand-built chain.
+    fn etrata_granted_resolved_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::ContinuousModification;
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Deathtouch\nFace-down creatures you control have \"{2}{U}{B}: Turn this creature face up. If you can't, exile it, then you may cast the exiled card without paying its mana cost.\"\nWhenever an Assassin you control deals combat damage to an opponent, cloak the top card of that player's library.",
+            "Etrata, Deadly Fugitive",
+            &["Deathtouch".to_string()],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Assassin".to_string()],
+        );
+        let def = parsed
+            .statics
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::GrantAbility { definition } => Some(definition.clone()),
+                _ => None,
+            })
+            .expect("Etrata must grant a quoted activated ability");
+        build_resolved_from_def(&def, source, controller)
+    }
+
+    /// CR 708.7 + CR 608.2c (Etrata, Deadly Fugitive): when the granted
+    /// "{2}{U}{B}: Turn this creature face up. If you can't, exile it, …" ability
+    /// SUCCEEDS at turning the creature face up, the "If you can't" rider must NOT
+    /// fire — the creature stays on the battlefield face up and is not exiled.
+    ///
+    /// Discriminating: the rider's condition is parsed as
+    /// `Not { OptionalEffectPerformed }` (rewritten from the generic
+    /// `Not { ZoneChangedThisWay }` because a successful turn-up changes no zone).
+    /// `mandatory_parent_effect_performed` seeds the performed flag from the
+    /// `TurnedFaceUp` event. Reverting EITHER the parser rewrite OR the
+    /// `Effect::TurnFaceUp` arm in `mandatory_parent_effect_performed` makes the
+    /// flag read false after success, the rider fires, and the `Zone::Battlefield`
+    /// / `!face_down` assertions below flip (the creature gets exiled instead).
+    #[test]
+    fn etrata_granted_turn_face_up_success_does_not_exile() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let id = create_object(
+            &mut state,
+            CardId(0xE712B),
+            player,
+            "Hidden Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Assassin".to_string()],
+            };
+            let snapshot = crate::game::printed_cards::snapshot_object_face(obj);
+            crate::game::morph::apply_face_down_creature_characteristics(
+                obj,
+                &crate::types::ability::FaceDownProfile::cloaked_2_2(),
+            );
+            obj.back_face = Some(snapshot);
+        }
+        assert!(state.objects[&id].face_down);
+
+        let ability = etrata_granted_resolved_chain(id, player);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.face_down,
+            "the turn-up succeeded, so the creature is face up"
+        );
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "a successful turn-up must NOT trigger the exile rider — the creature stays on the battlefield"
+        );
+        assert_eq!(obj.name, "Hidden Assassin", "real face restored");
+    }
+
+    /// CR 708.7 + CR 116.2b + CR 608.2c (Etrata under Karlov Watchdog): when a
+    /// `CantBeTurnedFaceUp` static blocks the granted turn-up, the "If you can't"
+    /// rider MUST fire — the creature stays face down and is exiled (the real
+    /// can't-branch behavior).
+    ///
+    /// Discriminating: the turn-up emits no `TurnedFaceUp` event (blocked), so the
+    /// performed flag stays false, `Not { OptionalEffectPerformed }` is true, and
+    /// the exile rider runs. Reverting the `is_blocked_by_cant_be_turned_face_up`
+    /// guard in `resolve` would turn the creature up and suppress the exile,
+    /// flipping the `Zone::Exile` assertion.
+    #[test]
+    fn etrata_granted_turn_face_up_blocked_exiles() {
+        use crate::types::ability::{ControllerRef, FilterProp, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let etrata_controller = PlayerId(1);
+        let watchdog_controller = PlayerId(0);
+
+        // P1 controls a face-down creature granted Etrata's ability.
+        let id = create_object(
+            &mut state,
+            CardId(0xE712C),
+            etrata_controller,
+            "Hidden Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Assassin".to_string()],
+            };
+            let snapshot = crate::game::printed_cards::snapshot_object_face(obj);
+            crate::game::morph::apply_face_down_creature_characteristics(
+                obj,
+                &crate::types::ability::FaceDownProfile::cloaked_2_2(),
+            );
+            obj.back_face = Some(snapshot);
+        }
+
+        // P0 controls a Karlov-Watchdog-class static: "Permanents your opponents
+        // control can't be turned face up during your turn." It is P0's turn.
+        let watchdog = create_object(
+            &mut state,
+            CardId(0x4A13),
+            watchdog_controller,
+            "Karlov Watchdog".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watchdog).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeTurnedFaceUp)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .controller(ControllerRef::Opponent)
+                            .properties(vec![FilterProp::FaceDown]),
+                    ))
+                    .condition(crate::types::ability::StaticCondition::DuringYourTurn),
+            );
+        }
+        state.active_player = watchdog_controller;
+        assert!(
+            crate::game::morph::is_blocked_by_cant_be_turned_face_up(&state, id),
+            "the watchdog static must prohibit the turn-up before resolution"
+        );
+
+        let ability = etrata_granted_resolved_chain(id, etrata_controller);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // The blocked turn-up emits no `TurnedFaceUp`, so the performed flag stays
+        // false and the "If you can't, exile it" rider runs: the creature is
+        // exiled from the battlefield.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::TurnedFaceUp { object_id } if *object_id == id)),
+            "the prohibition must block the turn-up (no TurnedFaceUp event)"
+        );
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "a blocked turn-up fires the \"If you can't, exile it\" rider"
+        );
     }
 
     #[test]

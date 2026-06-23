@@ -1049,6 +1049,7 @@ fn type_filter_core_types(filter: &TypeFilter) -> Option<Vec<CoreType>> {
         TypeFilter::Sorcery => Some(vec![CoreType::Sorcery]),
         TypeFilter::Planeswalker => Some(vec![CoreType::Planeswalker]),
         TypeFilter::Battle => Some(vec![CoreType::Battle]),
+        TypeFilter::Kindred => Some(vec![CoreType::Kindred]),
         TypeFilter::AnyOf(inner) => {
             let mut out = Vec::new();
             for f in inner {
@@ -2045,6 +2046,8 @@ fn junk_ability() -> AbilityDefinition {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -5494,6 +5497,168 @@ mod tests {
         assert!(
             !buff.is_empty(),
             "static buff line must classify to something"
+        );
+    }
+
+    // ── Ka-Zar / Zabu landfall: parse → resolve → trigger ────────────────
+
+    /// Parse Ka-Zar's ETB token line into a real `Effect::Token` (so the test
+    /// exercises the actual parser output, not a hand-built trigger), wrapped in
+    /// a `ResolvedAbility` controlled by `controller`.
+    fn kazar_token_ability(controller: PlayerId) -> ResolvedAbility {
+        let txt = "Create Zabu, a legendary 2/2 green Cat creature token with \"Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.\"";
+        let effect = crate::parser::oracle_effect::token::try_parse_token(
+            &txt.to_lowercase(),
+            txt,
+            &mut crate::parser::oracle_ir::context::ParseContext::default(),
+        )
+        .expect("Ka-Zar token line must parse");
+        ResolvedAbility::new(effect, vec![], ObjectId(500), controller)
+    }
+
+    /// Resolve Ka-Zar's token effect and return the created Zabu's `ObjectId`.
+    fn create_zabu(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let ability = kazar_token_ability(controller);
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+        // CR 604.2: run the layers pass so the token's `GrantTrigger` static
+        // modification is installed as a live trigger_definition before any land
+        // ETB is processed.
+        crate::game::layers::flush_layers(state);
+        *state
+            .battlefield
+            .iter()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.is_token && o.name == "Zabu")
+            })
+            .expect("Zabu token must be on the battlefield")
+    }
+
+    /// Put a land onto the battlefield under `land_controller` and fire its ETB
+    /// event through the real trigger pipeline, then resolve the stack.
+    fn land_enters(state: &mut GameState, land_controller: PlayerId, card_id: u64) {
+        let land = create_object(
+            state,
+            CardId(card_id),
+            land_controller,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.controller = land_controller;
+            obj.owner = land_controller;
+        }
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            land,
+            Some(Zone::Hand),
+            Zone::Battlefield,
+        );
+        record.name = "Forest".to_string();
+        record.core_types = vec![CoreType::Land];
+        record.subtypes = vec!["Forest".to_string()];
+        record.controller = land_controller;
+        record.owner = land_controller;
+        let event = GameEvent::ZoneChanged {
+            object_id: land,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        crate::game::triggers::process_triggers(state, &[event]);
+        // Resolve every triggered ability the land ETB put on the stack.
+        let mut events = Vec::new();
+        while !state.stack.is_empty() {
+            crate::game::stack::resolve_top(state, &mut events);
+        }
+    }
+
+    fn zabu_plus1_counters(state: &GameState, zabu: ObjectId) -> u32 {
+        state
+            .objects
+            .get(&zabu)
+            .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+            .unwrap_or(0)
+    }
+
+    /// CR 603.6a + CR 207.2c: A land entering under Zabu's controller fires
+    /// Zabu's landfall trigger; the +1/+1 counter lands on ZABU. Discriminating:
+    /// reverting the ability-word strip makes the trigger parse as
+    /// `GrantAbility(Unimplemented[landfall])`, which installs no live trigger,
+    /// so this assertion (`counters == 1`) flips to 0.
+    #[test]
+    fn zabu_landfall_puts_counter_on_zabu_for_controllers_land() {
+        let mut state = GameState::new_two_player(42);
+        let zabu = create_zabu(&mut state, PlayerId(0));
+        assert_eq!(
+            zabu_plus1_counters(&state, zabu),
+            0,
+            "no counters before ETB"
+        );
+
+        land_enters(&mut state, PlayerId(0), 700);
+
+        assert_eq!(
+            zabu_plus1_counters(&state, zabu),
+            1,
+            "a land under Zabu's controller must put one +1/+1 counter on Zabu"
+        );
+    }
+
+    /// CR 603.6a: "a land YOU control" binds "you" to Zabu's controller, so a
+    /// land entering under the OPPONENT's control must NOT fire Zabu's landfall.
+    #[test]
+    fn zabu_landfall_ignores_opponents_land() {
+        let mut state = GameState::new_two_player(42);
+        let zabu = create_zabu(&mut state, PlayerId(0));
+
+        land_enters(&mut state, PlayerId(1), 701);
+
+        assert_eq!(
+            zabu_plus1_counters(&state, zabu),
+            0,
+            "an opponent's land must not fire Zabu's landfall trigger"
+        );
+    }
+
+    /// The counter goes on ZABU, not on Ka-Zar (the source permanent). Build a
+    /// distinct Ka-Zar object as the trigger source's controller's other
+    /// permanent and confirm it never receives the counter.
+    #[test]
+    fn zabu_landfall_counter_targets_zabu_not_kazar() {
+        let mut state = GameState::new_two_player(42);
+        // A stand-in Ka-Zar permanent already on the battlefield under P0.
+        let kazar = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ka-Zar of the Savage Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&kazar)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let zabu = create_zabu(&mut state, PlayerId(0));
+
+        land_enters(&mut state, PlayerId(0), 702);
+
+        assert_eq!(
+            zabu_plus1_counters(&state, zabu),
+            1,
+            "counter must land on Zabu"
+        );
+        assert_eq!(
+            zabu_plus1_counters(&state, kazar),
+            0,
+            "counter must NOT land on Ka-Zar"
         );
     }
 }

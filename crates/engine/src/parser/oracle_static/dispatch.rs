@@ -223,6 +223,109 @@ fn parse_reveal_hand_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefin
     )
 }
 
+/// CR 708.5: Single authority for the "[you may ]look at face-down [permanents]
+/// [you don't control | your opponents control] any time" permission phrase.
+/// Strips an optional `"you may "` prefix (the static-line surface form carries
+/// it; the activated-ability effect form arrives already peeled of "you may " by
+/// the clause shell) and the required `"look at "` verb, parses the subject via
+/// the shared `parse_target` (so both controller-scope wordings route through one
+/// handler), and returns the affected filter only when it carries
+/// `FilterProp::FaceDown` and the trailing clause is exactly `"any time"`. Shared
+/// by the static-line builder (Found Footage's continuous permission) and the
+/// activated-ability effect intercept (Lumbering Laundry's `Until end of turn`
+/// grant), so the two surface forms never re-encode the grammar independently.
+pub(crate) fn parse_may_look_at_face_down_filter(
+    original: &str,
+    lower: &str,
+) -> Option<TargetFilter> {
+    let tp = TextPair::new(original, lower);
+    // "you may " is optional: the static line keeps it ("You may look at …"),
+    // while the activated-ability clause shell already peeled it.
+    let tp = nom_tag_tp(&tp, "you may ").unwrap_or(tp);
+    let rest = nom_tag_tp(&tp, "look at ")?;
+    // `parse_target` consumes the original-cased subject phrase that the
+    // lowercase tag matched past.
+    let (filter, remainder) = parse_target(rest.original);
+    // The subject must carry the face-down property; "any time" is the only
+    // permitted trailing clause for this permission.
+    let has_face_down = matches!(
+        &filter,
+        TargetFilter::Typed(t) if t.properties.iter().any(|p| matches!(p, FilterProp::FaceDown))
+    );
+    if !has_face_down {
+        return None;
+    }
+    let tail = remainder.trim().trim_end_matches('.').trim();
+    if !tail.eq_ignore_ascii_case("any time") {
+        return None;
+    }
+    Some(filter)
+}
+
+/// CR 708.5: "You may look at face-down creatures [you don't control | your
+/// opponents control] any time." (Found Footage). Builds a
+/// `StaticMode::MayLookAtFaceDown` whose `affected` filter is the subject phrase
+/// (carrying `FilterProp::FaceDown` plus the controller scope), parsed via the
+/// shared [`parse_may_look_at_face_down_filter`] so both scope wordings — and
+/// the activated-ability duration-bound form — route through one handler.
+fn parse_may_look_at_face_down_static(tp: &TextPair<'_>) -> Option<StaticDefinition> {
+    let filter = parse_may_look_at_face_down_filter(tp.original, tp.lower)?;
+    Some(
+        StaticDefinition::new(StaticMode::MayLookAtFaceDown)
+            .affected(filter)
+            .description(tp.original.to_string()),
+    )
+}
+
+/// CR 116.2b + CR 708.7: "[subject] can't be turned face up [during your turn]."
+/// (Karlov Watchdog). Builds a `StaticMode::CantBeTurnedFaceUp` whose `affected`
+/// filter is the subject phrase and whose optional timing rides on `condition`.
+/// The subject is parsed with `parse_target` so any permanent-scope wording
+/// ("permanents your opponents control", "creatures you control", `~`) is
+/// covered, not just one card.
+fn parse_cant_be_turned_face_up_static(tp: &TextPair<'_>) -> Option<StaticDefinition> {
+    // Split the line on the prohibition predicate via a nom combinator. The
+    // combinator consumes "<subject> can't be turned face up" and yields the
+    // subject's byte length; the remainder (original case) is the timing window.
+    let (subject_len, tail_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, subject) =
+            take_until::<_, _, OracleError<'_>>("can't be turned face up").parse(i)?;
+        let subject_len = subject.len();
+        let (i, _) = tag("can't be turned face up").parse(i)?;
+        Ok((i, subject_len))
+    })?;
+    let subject = tp.original.get(..subject_len)?.trim();
+    let affected = if subject.is_empty() {
+        TargetFilter::SelfRef
+    } else {
+        let (filter, remainder) = parse_target(subject);
+        if matches!(filter, TargetFilter::None) || !remainder.trim().is_empty() {
+            return None;
+        }
+        filter
+    };
+
+    // Trailing timing window after the predicate. Only "during your turn" is
+    // modeled today; a bare prohibition (no timing) leaves `condition` None.
+    let tail = tail_original
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_ascii_lowercase();
+    let mut def = StaticDefinition::new(StaticMode::CantBeTurnedFaceUp)
+        .affected(affected)
+        .description(tp.original.to_string());
+    if tail.is_empty() {
+        // Unconditional prohibition (no timing window).
+    } else if tail == "during your turn" {
+        def = def.condition(StaticCondition::DuringYourTurn);
+    } else {
+        // An unmodeled timing window — fail rather than silently drop it.
+        return None;
+    }
+    Some(def)
+}
+
 /// CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
 /// Builds a `StaticMode::DamageNotRemovedDuringCleanup` static whose `affected`
 /// filter is the subject — `~`/`this creature`/`this permanent` map to SelfRef
@@ -565,10 +668,19 @@ pub(crate) fn parse_static_line_inner(
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
         return Some(
-            StaticDefinition::new(StaticMode::SpendManaAsAnyColor)
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor { spell_filter: None })
                 .affected(TargetFilter::Player)
                 .description(text.to_string()),
         );
+    }
+
+    // CR 609.4b: Spell-class-filtered any-type-mana spend —
+    // "You may/can spend mana of any type to cast <spell-filter> spells."
+    // (Vizier of the Menagerie: "creature spells"). Scoped to the matching
+    // spell class via `spell_filter`, so off-color mana never helps a spell
+    // outside the class.
+    if let Some(def) = try_parse_filtered_spend_any_type_to_cast(&text, tp.lower) {
+        return Some(def);
     }
 
     // CR 107.4f: K'rrik-class life-for-color payment substitution —
@@ -1011,9 +1123,21 @@ pub(crate) fn parse_static_line_inner(
     // "Creatures" from falling through to the subtype path (A1 fix: 162+ cards).
     if let Some(rest_tp) = nom_tag_tp(&tp, "creatures you control ") {
         let after_prefix = rest_tp.original;
-        let (filter, predicate_text) = if let Some((prop, rest)) =
-            strip_counter_condition_prefix(after_prefix)
+        let (filter, predicate_text) = if let Some((owned_prop, rest)) =
+            strip_negated_ownership_qualifier(after_prefix)
         {
+            // CR 108.3 + CR 109.4: "Creatures you control but don't own …"
+            // (Laughing Jasper Flint). Preserve the negated-ownership axis the
+            // controller-prefix arm would otherwise drop.
+            (
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![owned_prop]),
+                ),
+                rest,
+            )
+        } else if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
@@ -2114,6 +2238,22 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
+    // CR 708.5: "You may look at face-down creatures [you don't control | your
+    // opponents control] any time." (Found Footage). The default rule lets you
+    // look only at face-down permanents you control; this static lifts that for
+    // the permanents named by the subject phrase. The affected filter (carrying
+    // FilterProp::FaceDown plus the controller scope) is parsed via
+    // `parse_target` so the same handler covers both scope wordings.
+    if let Some(def) = parse_may_look_at_face_down_static(&tp) {
+        return Some(def);
+    }
+
+    // CR 116.2b + CR 708.7: "Permanents your opponents control can't be turned
+    // face up during your turn." (Karlov Watchdog) — turn-face-up prohibition.
+    if let Some(def) = parse_cant_be_turned_face_up_static(&tp) {
+        return Some(def);
+    }
+
     // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
     // as proper Moved replacement effects (paralleling the "enters tapped" pattern).
 
@@ -2183,6 +2323,7 @@ pub(crate) fn parse_static_line_inner(
                 });
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Reduce,
                     keyword: keyword.trim().to_string(),
                     amount,
                     minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
@@ -2218,9 +2359,58 @@ pub(crate) fn parse_static_line_inner(
         let (affected, _rest) = parse_type_phrase(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
                 keyword: keyword.to_string(),
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
+    // --- "[Subject]'s <keyword> abilities cost {N} less/more to activate" ---
+    // CR 602.1 + CR 601.2f + CR 118.7 + CR 702.6a: Possessive keyword-ability cost
+    // modifier keyed on a tagged activated keyword. Firion, Wild Rose Warrior's
+    // granted ability "This Equipment's equip abilities cost {2} less to activate"
+    // (keyword = "equip", subject = SelfRef). Distinct from the "<keyword>
+    // abilities of [subject]" form above by its possessive ("'s") grammar.
+    if let Some(((subject, keyword, amount, mode), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, subject) = take_until("'s ").parse(i)?;
+        let (i, _) = tag("'s ").parse(i)?;
+        let (i, keyword) = parse_taggable_ability_keyword(i)?;
+        let (i, _) = tag(" abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" ").parse(i)?;
+        let (i, mode) = alt((
+            value(CostModifyMode::Reduce, tag("less to activate")),
+            value(CostModifyMode::Raise, tag("more to activate")),
+        ))
+        .parse(i)?;
+        Ok((i, (subject.to_string(), keyword, amount, mode)))
+    }) {
+        // CR 109.5: "This Equipment's …" (and other "this <type>" possessives)
+        // self-reference the source permanent → SelfRef, so the static affects
+        // only this object's equip ability — not every Equipment. Mirrors the
+        // self-reference dispatch in `evasion.rs`.
+        let subject_lower = subject.to_lowercase();
+        let affected = if subject == "~" || SELF_REF_TYPE_PHRASES.contains(&subject_lower.as_str())
+        {
+            TargetFilter::SelfRef
+        } else {
+            parse_type_phrase(&subject).0
+        };
+        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+            .flatten();
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: keyword.to_string(),
+                amount,
+                minimum_mana,
                 dynamic_count: None,
             })
             .affected(affected)
@@ -2269,6 +2459,7 @@ pub(crate) fn parse_static_line_inner(
         let (affected, _rest) = parse_type_phrase(&filter_text);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
                 keyword: "activated".to_string(),
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
@@ -2279,34 +2470,46 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // --- "Activated abilities of [filter] cost {N} less to activate" ---
-    // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
-    if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
-        if let Ok((_, (filter_part, after_cost))) = nom_primitives::split_once_on(rest, " cost ") {
-            if nom_primitives::scan_contains(after_cost, "less to activate") {
-                let amount = nom_primitives::split_once_on(after_cost, " less")
-                    .ok()
-                    .and_then(|(_, (mana_str, _))| {
-                        let stripped = mana_str.trim().trim_matches('{').trim_matches('}');
-                        stripped.parse::<u32>().ok()
-                    })
-                    .unwrap_or(1);
-                // Parse the filter between "of" and "cost" using parse_type_phrase
-                let filter_text =
-                    &tp.original["activated abilities of ".len()..][..filter_part.len()];
-                let (affected, _rest) = parse_type_phrase(filter_text);
-                return Some(
-                    StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                        keyword: "activated".to_string(),
-                        amount,
-                        minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
-                        dynamic_count: None,
-                    })
-                    .affected(affected)
-                    .description(text.to_string()),
-                );
-            }
-        }
+    // --- "Activated abilities of [filter] cost {N} less/more to activate" ---
+    // CR 602.1 + CR 601.2f + CR 118.7: Generic activated-ability cost modifier,
+    // directional. Reduce (Training Grounds: "Activated abilities of creatures you
+    // control cost {2} less to activate") and Raise (Skyseer's Chariot: "Activated
+    // abilities of sources with the chosen name cost {2} more to activate").
+    // Combinator: prefix → subject → " cost {N} " → direction. The subject is
+    // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
+    if let Some(((amount, mode, subject_filter), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("activated abilities of ").parse(i)?;
+        let (i, subject) = take_until(" cost ").parse(i)?;
+        let (i, _) = tag(" cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" ").parse(i)?;
+        let (i, mode) = alt((
+            value(CostModifyMode::Reduce, tag("less to activate")),
+            value(CostModifyMode::Raise, tag("more to activate")),
+        ))
+        .parse(i)?;
+        Ok((i, (amount, mode, subject.to_string())))
+    }) {
+        // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
+        // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
+        let affected = parse_chosen_name_source_filter(&subject_filter)
+            .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+        // CR 118.7: a one-mana floor only applies to reductions.
+        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+            .flatten();
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
     }
 
     // --- CR 601.2f: Cost-floor statics (Trinisphere class) ---

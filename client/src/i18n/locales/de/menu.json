@@ -199,7 +199,13 @@
     "unknown": "Unbekannt {{count}}",
     "unknownCardsTitle": "Unbekannte Karten:\n{{cards}}",
     "unsupportedTitle": "Nicht unterstützt ({{unique}} eindeutige, {{copies}} Kopien):\n{{cards}}",
-    "setIconAlt": "{{code}} Set-Symbol"
+    "setIconAlt": "{{code}} Set-Symbol",
+    "actionsMenu": "Deck-Optionen",
+    "star": "Favorit",
+    "unstar": "Favorit entfernen",
+    "moveToFolder": "In Ordner verschieben",
+    "unfiled": "Nicht zugeordnet",
+    "newFolder": "Neuer Ordner…"
   },
   "myDecks": {
     "headingManage": "Meine Decks",
@@ -254,7 +260,11 @@
     "loadMore": "Mehr laden",
     "selectedDeck": "Ausgewähltes Deck",
     "chooseDeckToContinue": "Wähle ein Deck, um fortzufahren",
-    "filterAll": "Alle"
+    "filterAll": "Alle",
+    "sectionStarred": "Favoriten",
+    "sectionUnfiled": "Nicht zugeordnet",
+    "collapseAll": "Alle einklappen",
+    "expandAll": "Alle ausklappen"
   },
   "subscriptions": {
     "emptyTitle": "Keine Feed-Abonnements",
@@ -281,5 +291,16 @@
     "alpha": "Alpha",
     "profile": "Profil",
     "settings": "Einstellungen"
+  },
+  "folder": {
+    "actionsMenu": "Ordneroptionen",
+    "rename": "Umbenennen",
+    "delete": "Löschen",
+    "newFolder": "Neuer Ordner",
+    "newFolderPrompt": "Ordnername:",
+    "renamePrompt": "Ordner umbenennen:",
+    "deleteConfirm": "Ordner „{{name}}“ löschen? Decks werden zu „Nicht zugeordnet“ verschoben.",
+    "emptyHint": "Dieser Ordner ist leer.",
+    "unfiledEmptyHint": "Keine nicht zugeordneten Decks."
   }
 }

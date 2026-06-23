@@ -230,6 +230,12 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_object_dirty_with_mana(state, *merged_id);
                 mark_battlefield_display_dirty(state);
             }
+            // Unstable Host/Augment combine uses the same merged-permanent
+            // display surface as mutate, but it is a distinct game event.
+            GameEvent::Augmented { merged_id, .. } => {
+                mark_object_dirty_with_mana(state, *merged_id);
+                mark_battlefield_display_dirty(state);
+            }
             GameEvent::CounterAdded { object_id, .. }
             | GameEvent::ObjectIntensified { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }
@@ -411,7 +417,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CascadeMissed { .. }
             | GameEvent::DebugActionUsed { .. }
             | GameEvent::DebugPermissionGranted { .. }
-            | GameEvent::DebugPermissionRevoked { .. } => {}
+            | GameEvent::DebugPermissionRevoked { .. }
+            | GameEvent::StickerPlaced { .. } => {}
         }
     }
 }

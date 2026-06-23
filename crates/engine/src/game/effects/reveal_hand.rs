@@ -304,6 +304,94 @@ mod tests {
         assert_eq!(state.revealed_cards.len(), 1);
     }
 
+    /// CR 701.20a + CR 107.1: A compound `Offset` reveal count (Klaw — "one plus
+    /// the number of creature cards in your graveyard") resolves to inner+1 and
+    /// truncates the revealed set to exactly that many cards. The controller
+    /// (PlayerId(0)) has 2 creature cards in graveyard, so the count resolves to
+    /// 2 + 1 = 3; the 5-card hand must be truncated to 3 revealed cards. Before
+    /// the parser fix this count was dropped (None) at synthesis, so the whole
+    /// hand would have been revealed — this asserts the Offset both resolves and
+    /// is consumed by the resolver.
+    #[test]
+    fn reveal_hand_offset_count_truncates_to_inner_plus_one() {
+        use crate::types::ability::{CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Controller (PlayerId(0)) graveyard: 2 creature cards.
+        for cid in 10..12 {
+            let gy = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(0),
+                "Dead Bear".to_string(),
+                Zone::Graveyard,
+            );
+            state
+                .objects
+                .get_mut(&gy)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Target (PlayerId(1)) hand: 5 cards (M > N+1 = 3).
+        for cid in 1..6 {
+            create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                format!("Card {cid}"),
+                Zone::Hand,
+            );
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::Any,
+                count: Some(QuantityExpr::Offset {
+                    offset: 1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: vec![TypeFilter::Creature],
+                            filter: None,
+                            scope: CountScope::Controller,
+                        },
+                    }),
+                }),
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 2 creatures in graveyard + 1 = 3 cards revealed (not the full 5).
+        assert_eq!(
+            state.revealed_cards.len(),
+            3,
+            "Offset count must resolve to inner(2) + 1 = 3 revealed cards"
+        );
+        match &state.waiting_for {
+            WaitingFor::RevealChoice { cards, .. } => {
+                assert_eq!(
+                    cards.len(),
+                    3,
+                    "choice set is limited to the 3 revealed cards"
+                );
+            }
+            other => panic!("Expected RevealChoice, got {other:?}"),
+        }
+    }
+
     #[test]
     fn look_at_hand_is_private_to_looker_and_skips_reveal_choice() {
         let mut state = GameState::new_two_player(42);

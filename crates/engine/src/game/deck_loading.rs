@@ -30,6 +30,9 @@ pub struct PlayerDeckPayload {
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
+    /// CR 123.2c: The revealed sticker sheets this player uses this game.
+    #[serde(default)]
+    pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell (instant/sorcery within the
     /// Oathbreaker's color identity) placed in the command zone alongside
     /// the Oathbreaker. Empty for all non-Oathbreaker formats.
@@ -67,6 +70,8 @@ pub struct PlayerDeckList {
     pub commander: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    #[serde(default)]
+    pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,
@@ -123,6 +128,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
         attraction_deck: resolve_names(db, &list.attraction_deck),
+        sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
     }
@@ -142,6 +148,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
+            sticker_sheets: list.player.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.player.signature_spell),
             bracket_tier: list.player.bracket_tier,
         },
@@ -150,6 +157,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
+            sticker_sheets: list.opponent.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.opponent.signature_spell),
             bracket_tier: list.opponent.bracket_tier,
         },
@@ -161,6 +169,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
+                sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
             })
@@ -235,6 +244,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sideboard: Vec::new(),
         commander: Vec::new(),
         attraction_deck: Vec::new(),
+        sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
     };
@@ -510,6 +520,23 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     load_player_attraction_deck(state, &payload.opponent.attraction_deck, PlayerId(1));
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
+    }
+    crate::game::stickers::set_player_sticker_sheets(
+        state,
+        PlayerId(0),
+        &payload.player.sticker_sheets,
+    );
+    crate::game::stickers::set_player_sticker_sheets(
+        state,
+        PlayerId(1),
+        &payload.opponent.sticker_sheets,
+    );
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        crate::game::stickers::set_player_sticker_sheets(
+            state,
+            PlayerId((2 + i) as u8),
+            &ai_deck.sticker_sheets,
+        );
     }
 
     // Oathbreaker RC: Place signature spells in the command zone at game start.

@@ -199,7 +199,13 @@
     "unknown": "Desconhecida {{count}}",
     "unknownCardsTitle": "Cartas desconhecidas:\n{{cards}}",
     "unsupportedTitle": "Não suportadas ({{unique}} únicas, {{copies}} cópias):\n{{cards}}",
-    "setIconAlt": "Ícone da coleção {{code}}"
+    "setIconAlt": "Ícone da coleção {{code}}",
+    "actionsMenu": "Opções do baralho",
+    "star": "Destacar",
+    "unstar": "Remover destaque",
+    "moveToFolder": "Mover para pasta",
+    "unfiled": "Sem pasta",
+    "newFolder": "Nova pasta…"
   },
   "myDecks": {
     "headingManage": "Meus Decks",
@@ -254,7 +260,11 @@
     "loadMore": "Carregar Mais",
     "selectedDeck": "Deck selecionado",
     "chooseDeckToContinue": "Escolha um deck para continuar",
-    "filterAll": "Todos"
+    "filterAll": "Todos",
+    "sectionStarred": "Destacados",
+    "sectionUnfiled": "Sem pasta",
+    "collapseAll": "Recolher tudo",
+    "expandAll": "Expandir tudo"
   },
   "subscriptions": {
     "emptyTitle": "Nenhuma inscrição em feed",
@@ -281,5 +291,16 @@
     "alpha": "Alpha",
     "profile": "Perfil",
     "settings": "Definições"
+  },
+  "folder": {
+    "actionsMenu": "Opções da pasta",
+    "rename": "Renomear",
+    "delete": "Excluir",
+    "newFolder": "Nova pasta",
+    "newFolderPrompt": "Nome da pasta:",
+    "renamePrompt": "Renomear pasta:",
+    "deleteConfirm": "Excluir a pasta \"{{name}}\"? Os baralhos irão para Sem pasta.",
+    "emptyHint": "Esta pasta está vazia.",
+    "unfiledEmptyHint": "Nenhum baralho sem pasta."
   }
 }

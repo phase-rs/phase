@@ -26,7 +26,8 @@ pub enum CounterType {
     /// CR 122.1d: When a permanent with a stun counter would become untapped during its
     /// controller's untap step, one stun counter is removed instead of untapping.
     Stun,
-    /// CR 714.1: Lore counters track Saga chapter progression.
+    /// CR 714.3 + CR 714.4: Lore counters track Saga chapter progression and
+    /// the sacrifice state-based action at the final chapter.
     Lore,
     /// CR 702.62a + CR 702.63a: Time counters track Suspend / Vanishing duration.
     /// One is removed at the start of the controller's upkeep; when the last is
@@ -141,6 +142,46 @@ impl CounterType {
             | CounterType::Shield
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
+        }
+    }
+
+    /// Whether a counter kind is a *monotone* loop resource — one a beneficial
+    /// loop (CR 732.2a) only ever drives in one direction within a cycle, so two
+    /// cycles of the loop must compare as the same board with the counter projected
+    /// out (see `analysis::resource::project_out_resources`).
+    ///
+    /// `true` (monotone — projected out of loop-equality):
+    /// - CR 122.1a + CR 613.4c: `Plus1Plus1`, `Minus1Minus1`, `PowerToughness{..}`
+    ///   modify power/toughness in Layer 7c.
+    /// - CR 306.5b: `Loyalty` on a planeswalker.
+    /// - CR 310.4c: `Defense` on a battle.
+    ///
+    /// `false` (consumable / duration / state-gating — preserved in loop-equality,
+    /// because a loop that *consumes* one of these is making a real board-state
+    /// change, not a monotone resource pump):
+    /// - CR 122.1d: `Stun` (removed instead of untapping).
+    /// - CR 122.1c: `Shield` (removed to prevent destruction/damage).
+    /// - CR 702.62a / CR 702.63a: `Time` (Suspend / Vanishing duration).
+    /// - CR 702.32a: `Fade` (Fading duration).
+    /// - CR 702.24a: `Age` (Cumulative upkeep).
+    /// - CR 714.3 + CR 714.4: `Lore` (Saga chapter progression / sacrifice SBA).
+    /// - CR 122.1b: `Keyword(_)` (grants a keyword).
+    /// - CR 122.1: `Generic(_)` (arbitrary tracked markers).
+    pub fn is_monotone_loop_resource(&self) -> bool {
+        match self {
+            CounterType::Plus1Plus1
+            | CounterType::Minus1Minus1
+            | CounterType::PowerToughness { .. }
+            | CounterType::Loyalty
+            | CounterType::Defense => true,
+            CounterType::Stun
+            | CounterType::Lore
+            | CounterType::Time
+            | CounterType::Fade
+            | CounterType::Age
+            | CounterType::Shield
+            | CounterType::Keyword(_)
+            | CounterType::Generic(_) => false,
         }
     }
 }
@@ -473,6 +514,37 @@ mod tests {
             "\"shield\""
         );
         assert_eq!(CounterType::Shield.power_toughness_delta(), None);
+    }
+
+    #[test]
+    fn monotone_loop_resource_partition_is_exhaustive_and_correct() {
+        use crate::types::keywords::KeywordKind;
+        // CR 122.1a/613.4c, 306.5b, 310.4c: monotone => projected out.
+        for ct in [
+            CounterType::Plus1Plus1,
+            CounterType::Minus1Minus1,
+            CounterType::PowerToughness {
+                power: 2,
+                toughness: -1,
+            },
+            CounterType::Loyalty,
+            CounterType::Defense,
+        ] {
+            assert!(ct.is_monotone_loop_resource(), "{ct:?} must be monotone");
+        }
+        // CR 122.1b/c/d, 702.62a/63a, 702.32a, 702.24a, 714.3/.4: consumable => preserved.
+        for ct in [
+            CounterType::Stun,
+            CounterType::Lore,
+            CounterType::Time,
+            CounterType::Fade,
+            CounterType::Age,
+            CounterType::Shield,
+            CounterType::Keyword(KeywordKind::Flying),
+            CounterType::Generic("quest".to_string()),
+        ] {
+            assert!(!ct.is_monotone_loop_resource(), "{ct:?} must be preserved");
+        }
     }
 
     #[test]

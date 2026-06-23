@@ -504,6 +504,21 @@ pub(crate) fn parse_quantity_ref_with_context(
         {
             return Some(qty);
         }
+        // CR 301.5a + CR 303.4: "the number of <type> attached to <source>" counts
+        // objects whose `attached_to` is the source ("him"/"her"/"~" all denote the
+        // source — Whiplash's "where X is the number of Equipment attached to him";
+        // "them" denotes the recipient (player-enchanting Auras — see
+        // oracle_nom/quantity.rs parse_for_each_attached_to_source)). Delegate to the
+        // shared for-each referent combinator so the source- and recipient-pronoun
+        // authorities stay in one building block; require a full consume so the
+        // generic type-phrase fall-through is unshadowed.
+        if let Ok((rest_after, qty)) = nom_quantity::parse_for_each_clause_ref.parse(rest) {
+            // trim() matches the sibling completeness checks (470/482/489/527) and
+            // tolerates trailing whitespace.
+            if rest_after.trim().is_empty() {
+                return Some(canonicalize_quantity_ref(qty));
+            }
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
@@ -2027,6 +2042,28 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
     None
 }
 
+fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
+    for suffix in [" revealed this way", "revealed this way"] {
+        let result: OracleResult<'_, &str> =
+            terminated(take_until(suffix), tag(suffix)).parse(lower);
+        if let Ok(("", filter_phrase)) = result {
+            let (filter, remainder) =
+                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+            if !remainder.trim().is_empty() {
+                continue;
+            }
+            if filter_is_nontrivial_for_tracked_set(&filter) {
+                return Some(QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                    caused_by: None,
+                });
+            }
+            return Some(QuantityRef::TrackedSetSize);
+        }
+    }
+    None
+}
+
 fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
     match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
         (Some(filter), cause) if filter_is_nontrivial_for_tracked_set(&filter) => {
@@ -2573,6 +2610,9 @@ fn parse_for_each_clause_with_they_controller(
         // Only emit `FilteredTrackedSetSize` when the filter restricts the
         // tracked set. Bare "destroyed this way" still falls through to the
         // unfiltered `TrackedSetSize`.
+        if let Some(qty) = parse_filtered_revealed_this_way(&lower) {
+            return Some(qty);
+        }
         if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
             return Some(qty);
         }
@@ -3531,6 +3571,73 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    /// A2: CR 301.5a + CR 303.4. "the number of <type> attached to <source>" routes
+    /// through the shared for-each referent combinator to a typed ObjectCount with
+    /// `AttachedToSource` (Whiplash's "where X is the number of Equipment attached
+    /// to him"). Fail-before: `QuantityRef::Variable("the number of equipment
+    /// attached to him")` (string fallback), which is explicitly asserted-against.
+    #[test]
+    fn parse_quantity_ref_number_of_equipment_attached_to_source_pronoun() {
+        let qty = parse_quantity_ref("the number of equipment attached to him")
+            .expect("expected Some(ObjectCount)");
+        assert!(
+            !matches!(qty, QuantityRef::Variable { .. }),
+            "must not fall back to Variable, got {qty:?}"
+        );
+        match qty {
+            QuantityRef::ObjectCount {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+            } => {
+                assert_eq!(controller, None);
+                assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                assert_eq!(type_filters, vec![TypeFilter::Subtype("Equipment".into())]);
+            }
+            other => panic!("expected ObjectCount{{AttachedToSource}}, got {other:?}"),
+        }
+    }
+
+    /// A2 NEG (multi-authority): the recipient pronoun "it" must stay
+    /// `AttachedToRecipient`, NOT collapse to the source authority.
+    #[test]
+    fn parse_quantity_ref_number_of_auras_attached_to_recipient_preserved() {
+        let qty = parse_quantity_ref("the number of auras attached to it")
+            .expect("expected Some(ObjectCount)");
+        match qty {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => {
+                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+            }
+            other => panic!("expected recipient ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// A2 REGRESSION: the new for-each arm requires a full consume, so a generic
+    /// "the number of creatures you control" still falls through to the existing
+    /// type-phrase ObjectCount path (no shadowing).
+    #[test]
+    fn parse_quantity_ref_number_of_creatures_you_control_not_shadowed() {
+        let qty = parse_quantity_ref("the number of creatures you control")
+            .expect("expected Some(ObjectCount)");
+        match qty {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => {
+                assert!(
+                    !properties.contains(&FilterProp::AttachedToSource)
+                        && !properties.contains(&FilterProp::AttachedToRecipient),
+                    "generic ObjectCount must not gain an attachment prop, got {properties:?}"
+                );
+            }
+            other => panic!("expected generic ObjectCount, got {other:?}"),
+        }
     }
 
     // A1: "the number of opponents who control <filter>" → PlayerCount over the
@@ -6285,6 +6392,30 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 701.20b: "nonland card revealed this way" (Selvala,
+    /// Explorer Returned parley) must emit `FilteredTrackedSetSize` with a
+    /// nonland filter and no producer-action binding.
+    #[test]
+    fn nonland_card_revealed_this_way_uses_filtered_tracked_set_nonland() {
+        let qty = parse_for_each_clause("nonland card revealed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+                assert_eq!(caused_by, None, "revealed-this-way is action-agnostic");
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.type_filters
+                                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                            "filter must include NonLand; got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
     /// Subtype-only filters must not collapse to plain `TrackedSetSize`; the
     /// parent destroy can move a wider set than the subtype named by the count.
     #[test]
@@ -6636,6 +6767,56 @@ mod tests {
                     filter: None,
                 },
             }),
+        );
+    }
+
+    /// CR 107.1: "one plus the number of creature cards in your graveyard" (Klaw)
+    /// composes via integer arithmetic to `Offset { offset: 1, inner: Ref(ZoneCardCount) }`.
+    #[test]
+    fn cda_offset_plus_zone_card_count() {
+        let got = parse_cda_quantity("one plus the number of creature cards in your graveyard");
+        let Some(QuantityExpr::Offset { inner, offset }) = got else {
+            panic!("expected Offset, got {got:?}");
+        };
+        assert_eq!(offset, 1);
+        assert_eq!(
+            *inner,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            }
+        );
+    }
+
+    /// CR 107.1b: "one minus the number of creature cards in your graveyard"
+    /// generalizes to `Offset { offset: 1, inner: Multiply { -1, Ref(...) } }`,
+    /// proving the minus form negates the inner via the existing Multiply variant
+    /// (no new variant). A negative result is clamped to 0 at resolution.
+    #[test]
+    fn cda_offset_minus_zone_card_count() {
+        let got = parse_cda_quantity("one minus the number of creature cards in your graveyard");
+        let Some(QuantityExpr::Offset { inner, offset }) = got else {
+            panic!("expected Offset, got {got:?}");
+        };
+        assert_eq!(offset, 1);
+        let QuantityExpr::Multiply { factor, inner } = *inner else {
+            panic!("expected Multiply inner, got {inner:?}");
+        };
+        assert_eq!(factor, -1);
+        assert_eq!(
+            *inner,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            }
         );
     }
 }

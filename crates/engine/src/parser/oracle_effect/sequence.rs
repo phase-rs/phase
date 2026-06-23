@@ -884,6 +884,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                     .or_else(|| {
                                         exile_conjunct_prepend(&before_lower, remainder_trimmed)
                                     })
+                                    .or_else(|| {
+                                        untap_restriction_conjunct_prepend(
+                                            before_and,
+                                            remainder_trimmed,
+                                        )
+                                    })
                             {
                                 push_clause_chunk(
                                     &mut chunks,
@@ -1949,6 +1955,20 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // safe. Reuses the shared `parse_become_verb` combinator. Mirrors the anaphoric
     // "it becomes " arm above for the subject-carried form.
     .or(parse_become_verb)
+    // CR 608.2c + CR 400.7i: "may play <card-anaphor>" / "may cast
+    // <card-anaphor>" — a bare optional play/cast grant whose subject was
+    // established by the prior conjunct (Lightstall Inquisitor: "each opponent
+    // exiles a card from their hand and may play that card for as long as it
+    // remains exiled"). "may play"/"may cast" always begins a verb phrase,
+    // never a noun-phrase continuation of the prior conjunct, so the split
+    // routes the conjunct to the per-grantee play-from-exile grant parser
+    // (`try_parse_per_grantee_play_grant`). The "you may " subject-led form is
+    // already covered by the `you may ` arm above; this arm catches the
+    // subject-elided form after a player-scoped exile.
+    .or(alt((
+        value((), tag::<_, _, OracleError<'_>>("may play ")),
+        value((), tag("may cast ")),
+    )))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -2099,10 +2119,42 @@ fn combat_requirement_conjunct_prepend(
     {
         return None;
     }
+    continuous_grant_subject_prepend(before_and)
+}
+
+/// CR 502.3 + CR 611.2a: "<subj> gains <keyword> until end of turn and doesn't
+/// untap during [its controller's | your] next untap step" (Homarid Warrior).
+/// Like the combat-requirement case, the trailing "doesn't untap …" conjunct
+/// is a restriction predicate that is NOT verb-headed by any entry in
+/// `starts_bare_and_clause`, so the bare-and logic never splits it; left
+/// unified, the keyword grant's mid-clause "until end of turn" is hidden from
+/// the suffix-only `strip_trailing_duration` and the grant lowers to
+/// `duration: None` (granted permanently, wrong). Split here and prepend
+/// conjunct 1's subject so the restriction reaches `build_restriction_clause`
+/// with the correct `affected`. Gated on the typed "next untap step" restriction
+/// phrase only, so multi-keyword lists ("gains flying and haste …") stay on the
+/// untouched single-clause path.
+fn untap_restriction_conjunct_prepend(before_and: &str, remainder_trimmed: &str) -> Option<String> {
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let is_doesnt_untap = (nom_primitives::scan_contains(&remainder_lower, "doesn't untap")
+        || nom_primitives::scan_contains(&remainder_lower, "does not untap"))
+        && nom_primitives::scan_contains(&remainder_lower, "next untap step");
+    if !is_doesnt_untap {
+        return None;
+    }
+    continuous_grant_subject_prepend(before_and)
+}
+
+/// Shared subject-reattach for a continuous "gain(s)/get(s)" conjunct-1: returns
+/// the subject text (with a trailing space) to prepend onto conjunct-2 so it
+/// parses as its own subject-predicate clause. `""` when the subject was already
+/// lifted (verb at offset 0); `"it "` for a targeted subject (anaphor); the
+/// literal subject otherwise. `None` when conjunct-1 is not a continuous grant.
+fn continuous_grant_subject_prepend(before_and: &str) -> Option<String> {
     let before_lower = before_and.to_ascii_lowercase();
     // CR 508.1d / CR 509.1c: chunk begins with the gain/get verb at offset 0
     // (subject already lifted by the enclosing compound-subject distribution);
-    // emit an empty subject so the trailing combat-requirement conjunct splits.
+    // emit an empty subject so the trailing conjunct splits.
     // This anchor-start check has PRIORITY over the interior `take_until` arms
     // below — those scan for the FIRST " gain"/" get" in the chunk, which would
     // spuriously bind an interior verb (e.g. "get +2/+0 and gain haste ..." has
@@ -2634,19 +2686,28 @@ pub(super) fn apply_clause_continuation(
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            match &mut *previous.effect {
-                Effect::Destroy {
-                    cant_regenerate, ..
+            // CR 608.2c: walk backward through the definition chain to find
+            // the nearest Destroy/DestroyAll. The regen clause may not be
+            // adjacent — e.g. Kirtar's Wrath threshold has a Token creation
+            // between the DestroyAll and "Creatures destroyed this way can't
+            // be regenerated."
+            if let Some(def) = defs.iter_mut().rev().find(|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::Destroy { .. } | Effect::DestroyAll { .. }
+                )
+            }) {
+                match &mut *def.effect {
+                    Effect::Destroy {
+                        cant_regenerate, ..
+                    }
+                    | Effect::DestroyAll {
+                        cant_regenerate, ..
+                    } => {
+                        *cant_regenerate = true;
+                    }
+                    _ => unreachable!(),
                 }
-                | Effect::DestroyAll {
-                    cant_regenerate, ..
-                } => {
-                    *cant_regenerate = true;
-                }
-                _ => {}
             }
         }
         ContinuationAst::PutRest {
@@ -4308,6 +4369,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
@@ -4370,9 +4432,12 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::Exploit { .. }
@@ -4416,6 +4481,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
         | Effect::BlightEffect { .. }
@@ -4427,7 +4493,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::Intensify { .. }
+        | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
         // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
@@ -4520,11 +4589,25 @@ pub(super) fn parse_followup_continuation_ast(
             })
         }
         Effect::Mana { .. } => {
+            // CR 106.6: Only absorb a parsed spend restriction when at least one of
+            // its branches is payable at a reachable production payment site (see
+            // `ManaSpendRestriction::has_payable_branch`). An all-dead restriction
+            // (every branch's runtime gate is hardcoded-false or never reached — X
+            // costs, face-down casts, turn-face-up) is deliberately left unabsorbed
+            // here so this `Effect::Mana` line lowers to `Effect::Unimplemented`
+            // (honest coverage red) instead of masquerading as supported. Liveness
+            // is decided once on the fully assembled restriction, so a mixed
+            // disjunction keeps its live branches (the `Any` short-circuit) rather
+            // than being dropped wholesale. A dropped all-dead restriction also
+            // drops any paired `grants`; that is intentional (no real card pairs a
+            // grant with an all-dead restriction).
             if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                return Some(ContinuationAst::ManaRestriction {
-                    restriction,
-                    grants,
-                });
+                if restriction.has_payable_branch() {
+                    return Some(ContinuationAst::ManaRestriction {
+                        restriction,
+                        grants,
+                    });
+                }
             }
             // CR 106.6: "that spell can't be countered" as a standalone clause
             // after comma-splitting from the restriction text.
@@ -4797,11 +4880,19 @@ pub(super) fn parse_followup_continuation_ast(
         // imperative verb). Both bare imperative ("put that card", second-person
         // reveal-until) and third-person ("the player puts that card",
         // Polymorph / Proteus Staff / Transmogrify) forms are accepted.
+        //
+        // Plural filtered kept clauses ("put those land cards onto the battlefield tapped",
+        // The Ring Goes South) use the same RevealUntilKept patch — checked before the
+        // RevealUntilAllToZone arm because "those land cards" is not a "those cards"
+        // substring and must not fall through with the default Hand kept destination.
         Effect::RevealUntil { .. }
             if nom_primitives::scan_contains(&lower, "put that card")
                 || nom_primitives::scan_contains(&lower, "puts that card")
                 || nom_primitives::scan_contains(&lower, "put it")
-                || nom_primitives::scan_contains(&lower, "puts it") =>
+                || nom_primitives::scan_contains(&lower, "puts it")
+                || ((nom_primitives::scan_contains(&lower, "put those")
+                    || nom_primitives::scan_contains(&lower, "puts those"))
+                    && nom_primitives::scan_contains(&lower, "onto the battlefield")) =>
         {
             let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
@@ -5138,6 +5229,20 @@ pub(super) fn parse_followup_continuation_ast(
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
+        }
+        // CR 701.19c + CR 608.2c: "Creatures/A creature destroyed this way
+        // can't be regenerated" after any effect — including Token creation
+        // (e.g. Kirtar's Wrath threshold: DestroyAll → Token → this clause).
+        // Must be checked before the Effect::Token arm so a Token preceding
+        // this phrase doesn't shadow the catch-all guard. The Destroy/DestroyAll
+        // target is found by `apply_clause_continuation` walking backward.
+        _ if nom_primitives::scan_contains(&lower, "destroyed this way can't be regenerated")
+            || nom_primitives::scan_contains(
+                &lower,
+                "destroyed this way cannot be regenerated",
+            ) =>
+        {
+            Some(ContinuationAst::CantRegenerate)
         }
         // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
         //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
@@ -5540,16 +5645,24 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
     }
 }
 
-/// CR 608.2c: Parse "Repeat this process for <keyword list>." — Kathril, Aspect
-/// Warper. Returns the keyword list; the chunk loop wraps it in
-/// `SpecialClause::RepeatProcessForKeywords` and lowering replicates the
-/// antecedent conditional keyword-counter clause once per keyword. Mirrors
-/// `try_parse_same_is_true_continuation`; covers every "repeat this process for
-/// <list>" card, not Kathril alone.
+/// CR 608.2c: Parse a counter-class keyword-list continuation —
+/// "Repeat this process for <keyword list>." (Kathril, Aspect Warper) or
+/// "Do the same for <keyword list>." (Super-Adaptoid). Returns the keyword
+/// list; the chunk loop wraps it in `SpecialClause::RepeatProcessForKeywords`
+/// and lowering replicates the antecedent conditional keyword-counter clause
+/// once per keyword. Both phrasings are leaf-level variants of the same
+/// "replicate the prior keyword-counter clause for each listed keyword"
+/// directive, so they share one combinator and one `SpecialClause`. Mirrors
+/// `try_parse_same_is_true_continuation`; covers every card of this class, not
+/// Kathril or Super-Adaptoid alone.
 pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
     let lower = text.to_lowercase();
     let (keywords, rest) = nom_on_lower(text, &lower, |i| {
-        let (i, _) = tag("repeat this process for ").parse(i)?;
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("repeat this process for "),
+            tag("do the same for "),
+        ))
+        .parse(i)?;
         parse_keyword_list(i)
     })?;
     // The sentence must be fully consumed by the keyword list (modulo a trailing
@@ -6574,6 +6687,44 @@ mod tests {
             reveal: false,
             enter_tapped: false,
         }
+    }
+
+    #[test]
+    fn reveal_until_ring_goes_south_followup_continuation() {
+        use crate::types::ability::{
+            RevealUntilDisposition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        let reveal = Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Land],
+                ..Default::default()
+            }),
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: RevealUntilDisposition::KeepEach,
+            kept_destination: Zone::Hand,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
+            &reveal,
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(ContinuationAst::RevealUntilKept {
+                    destination: Zone::Battlefield,
+                    enter_tapped: true,
+                    ..
+                })
+            ),
+            "expected RevealUntilKept to battlefield tapped, got {result:?}"
+        );
     }
 
     #[test]

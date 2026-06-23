@@ -128,6 +128,17 @@ pub(crate) struct ParseContext {
     /// Set when the meld gate is recognized; consumed by the meld effect
     /// combinator. `None` for non-meld faces.
     pub pending_meld_partner: Option<String>,
+    /// CR 116.2b + CR 708.7: True while parsing the body of an explicit granted
+    /// activated ability (a quoted `"{cost}: ..."` granted to another object).
+    /// In that context, a head clause of "turn this/~ creature face up" is the
+    /// printed resolving effect of the granted ability (Etrata, Deadly
+    /// Fugitive's "{2}{U}{B}: Turn this creature face up. ..."), NOT the
+    /// rule-based morph/disguise special action. The imperative parser uses this
+    /// flag to lower such a clause to `Effect::TurnFaceUp { SelfRef }` instead of
+    /// rejecting the self-referential subject (which it must keep rejecting for
+    /// top-level morph reminder/special-action text). Set by
+    /// `parse_quoted_ability`; defaults to `false` everywhere else.
+    pub in_granted_activated_ability: bool,
 }
 
 impl ParseContext {

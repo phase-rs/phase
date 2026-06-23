@@ -2249,6 +2249,7 @@ function manaValueOfCost(cost: ManaCost): number {
   switch (cost.type) {
     case "NoCost":
     case "SelfManaCost":
+    case "SelfManaValue":
       return 0;
     case "Cost":
       return (

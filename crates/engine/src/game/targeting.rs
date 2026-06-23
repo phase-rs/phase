@@ -534,6 +534,9 @@ pub fn resolved_targets(
             .collect();
     }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
+        if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
+            return targets;
+        }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
             return vec![target];
@@ -860,6 +863,29 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
         _ => None,
     }
+}
+
+/// CR 603.2c + CR 608.2c: For batched attack triggers, "those creatures"
+/// anaphorically refers to every attacker that satisfied the trigger subject
+/// in the contextual `AttackersDeclared` event (Champions from Beyond Full Party).
+fn parent_target_refs_from_attack_trigger_context(state: &GameState) -> Option<Vec<TargetRef>> {
+    let events: Vec<&GameEvent> = if state.current_trigger_events.is_empty() {
+        state.current_trigger_event.iter().collect()
+    } else {
+        state.current_trigger_events.iter().collect()
+    };
+    let mut seen = HashSet::new();
+    let targets: Vec<TargetRef> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::AttackersDeclared { attacker_ids, .. } => Some(attacker_ids.as_slice()),
+            _ => None,
+        })
+        .flat_map(|attacker_ids| attacker_ids.iter())
+        .filter(|id| seen.insert(**id))
+        .map(|id| TargetRef::Object(*id))
+        .collect();
+    (!targets.is_empty()).then_some(targets)
 }
 
 fn blocked_attacker_from_event(
@@ -3728,6 +3754,40 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 603.2c + CR 608.2c: batched attack triggers pump every attacker that
+    /// satisfied the subject ("those creatures get +4/+4").
+    #[test]
+    fn resolved_targets_parent_target_for_attack_event_returns_all_attackers() {
+        let (mut state, _, _) = setup_with_creatures();
+        let a1 = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Attacker 1".to_string(),
+            Zone::Battlefield,
+        );
+        let a2 = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Attacker 2".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(crate::types::events::GameEvent::AttackersDeclared {
+            attacker_ids: vec![a1, a2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (a1, crate::game::combat::AttackTarget::Player(PlayerId(1))),
+                (a2, crate::game::combat::AttackTarget::Player(PlayerId(1))),
+            ],
+        });
+        let ability = make_resolved_with_targets(vec![], a1);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(result, vec![TargetRef::Object(a1), TargetRef::Object(a2)]);
     }
 
     /// CR 601.2c (issue #2351): player-chosen stack targets must not be replaced

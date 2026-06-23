@@ -167,6 +167,16 @@ function keywordCopy(
         showOracleText: false,
         subtitle: t("alternativeCost.spectacleSubtitle", { name: cardName }),
       };
+    // CR 702.76a: Prowl — pay the prowl cost if the caster's matching creature
+    // dealt combat damage to a player this turn. Pure cost substitution.
+    case "Prowl":
+      return {
+        eyebrow: t("alternativeCost.prowlEyebrow"),
+        normalLabel: t("alternativeCost.prowlNormalLabel"),
+        altLabel: t("alternativeCost.prowlAltLabel"),
+        showOracleText: false,
+        subtitle: t("alternativeCost.prowlSubtitle", { name: cardName }),
+      };
   }
   return assertNever(keyword);
 }

@@ -1221,9 +1221,41 @@ fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondit
     .parse(rest)
 }
 
+/// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+/// contraction subject ("he's"/"she's" = "_ is", "they're" = "they are") is
+/// source-anaphoric — binds the ability source. Whiplash ("if he's equipped");
+/// The Incredible Hulk ("if he's attacking"). Composes the copula + BARE-predicate
+/// shape of `parse_recipient_is_filter_condition` (the contraction already supplies
+/// the verb, so a BARE predicate tag is matched, NOT "is equipped"). The copula is
+/// paired to its pronoun so the ungrammatical cross-products ("they's"/"he're")
+/// cannot parse. Bare "it's" is deliberately excluded (target-anaphoric in spell
+/// bodies — Awaken the Sleeper); source "it's" is handled by the context-gated
+/// SelfRef rewrite. Straight ASCII apostrophe (0x27) only.
+fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        preceded(alt((tag("he"), tag("she"))), tag("'s ")),
+        preceded(tag("they"), tag("'re ")),
+    ))
+    .parse(input)?;
+    alt((
+        value(StaticCondition::SourceIsEquipped, tag("equipped")),
+        value(StaticCondition::SourceIsEnchanted, tag("enchanted")),
+        value(StaticCondition::SourceIsTapped, tag("tapped")),
+        value(StaticCondition::SourceIsMonstrous, tag("monstrous")),
+        value(StaticCondition::SourceIsAttacking, tag("attacking")),
+        value(StaticCondition::SourceIsBlocking, tag("blocking")),
+        value(StaticCondition::SourceIsBlocked, tag("blocked")),
+    ))
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 301.5a/303.4/508.1k/509.1g/509.1h: gendered/plural contraction subject
+        // ("he's equipped", "she's enchanted", "they're attacking"). Source-only
+        // (never target-anaphoric for a gendered/plural pronoun in MTG templates).
+        parse_contraction_source_state_condition,
         // CR 611.2b: Tapped/untapped — composed as subject × predicate.
         // Parse subject ("~ is", "this creature is", etc.) then branch on "tapped"/"untapped".
         parse_tapped_untapped,
@@ -2946,6 +2978,20 @@ pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> Ta
             }
             TargetFilter::Typed(tf)
         }
+        // CR 109.5: Words like 'you' or 'your' on an object refer to the object's controller.
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, ctrl.clone()))
+                .collect(),
+        },
+        // CR 109.5: Words like 'you' or 'your' on an object refer to the object's controller.
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, ctrl.clone()))
+                .collect(),
+        },
         other => other,
     }
 }
@@ -4109,18 +4155,32 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
-/// "[N] or more mana from <source-filter> was spent to cast <self>".
+/// "[N] or more mana from <source-filter> was spent to cast <self>" and
+/// "at least [N] mana from <source-filter> was spent to cast <self>".
 ///
 /// CR 400.7d: the subject anaphora selects the scope (see
 /// `parse_source_qualified_mana_spent_condition`).
 fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, n) = parse_number(input)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
@@ -4239,30 +4299,48 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 /// CR 601.2h + CR 603.4: Intervening-if comparing the total amount of mana
 /// spent to cast the triggering spell against a fixed threshold.
 ///
-/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~" and
-/// the inverse "[N] or less mana was spent to cast …". Produces a
+/// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~",
+/// "at least [N] mana was spent to cast …", and the inverse
+/// "[N] or less mana was spent to cast …". Produces a
 /// `StaticCondition::QuantityComparison` with LHS
 /// triggering-spell spent-mana ref that bridges to `TriggerCondition::QuantityComparison`
 /// via the existing `static_condition_to_trigger_condition` path.
 ///
 /// Used by Expressive Firedancer's conditional rider ("If five or more mana
-/// was spent to cast that spell, ..."), Opus/Increment family cards with
-/// mana-threshold riders, and any future card that gates on triggering-spell
-/// cost magnitude. Complementary to `parse_mana_spent_vs_source_pt` (which
-/// handles Increment-style `greater than this creature's P/T`).
+/// was spent to cast that spell, ..."), The Emperor of Palamecia's
+/// intervening-if ("if at least four mana was spent to cast it, ..."),
+/// Opus/Increment family cards with mana-threshold riders, and any future
+/// card that gates on triggering-spell cost magnitude. Complementary to
+/// `parse_mana_spent_vs_source_pt` (which handles Increment-style
+/// `greater than this creature's P/T`).
 ///
 /// CR 400.7d: the subject anaphora selects the scope — "that spell" stays
 /// `TriggeringSpell`; "this spell"/"it" on a resolving spell is `SelfObject`.
 fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Number first — combinator verifies word boundary via existing helper.
-    let (rest, n) = parse_number(input)?;
-    // "or more" / "or fewer" / "or less" threshold word — map to comparator.
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::LE, tag(" or less")),
+    // Two surface forms — both are `>= N` thresholds:
+    //   "N or more mana was spent to cast …"
+    //   "at least N mana was spent to cast …"
+    // Plus the inverse: "N or less/fewer mana was spent to cast …"
+    let (rest, (n, comparator)) = alt((
+        // "at least N " → GE
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            Ok((rest, (n, Comparator::GE)))
+        },
+        // "N or more/less/fewer"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, cmp) = alt((
+                value(Comparator::GE, tag(" or more")),
+                value(Comparator::LE, tag(" or fewer")),
+                value(Comparator::LE, tag(" or less")),
+            ))
+            .parse(rest)?;
+            Ok((rest, (n, cmp)))
+        },
     ))
-    .parse(rest)?;
+    .parse(input)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
     let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
@@ -8174,6 +8252,77 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceIsEquipped);
     }
 
+    // CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
+    // contraction subject ("he's"/"she's"/"they're <state>") binds the ability
+    // source. Fail-before: `parse_source_subject` rejects "he's" → no Source
+    // condition (Whiplash "if he's equipped" trigger condition dropped).
+    #[test]
+    fn test_contraction_source_state_pronouns() {
+        for subj in ["he's equipped", "she's equipped", "they're equipped"] {
+            let (rest, c) = parse_inner_condition(subj)
+                .unwrap_or_else(|e| panic!("expected Ok for {subj:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {subj:?}");
+            assert_eq!(c, StaticCondition::SourceIsEquipped, "for {subj:?}");
+        }
+    }
+
+    // CR 508.1k / CR 303.4: the contraction combinator covers the whole source-state
+    // class, not just "equipped" (The Incredible Hulk shape "if he's attacking").
+    #[test]
+    fn test_contraction_source_state_siblings() {
+        let (rest, c) = parse_inner_condition("he's attacking").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsAttacking);
+
+        let (rest, c) = parse_inner_condition("he's enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsEnchanted);
+    }
+
+    // BLOCKER-2 guard (discriminating, REACHABLE): bare "it's" is target-anaphoric
+    // in spell bodies (Awaken the Sleeper reaches this same combinator at
+    // oracle_effect/conditions.rs). It MUST NOT yield a Source condition — fails if
+    // anyone later adds a blanket "it's" source arm.
+    #[test]
+    fn test_bare_its_not_source_equipped() {
+        match parse_inner_condition("it's equipped") {
+            Err(_) => {}
+            Ok((rest, c)) => {
+                assert_ne!(
+                    c,
+                    StaticCondition::SourceIsEquipped,
+                    "bare \"it's equipped\" must not bind the source (rest={rest:?})"
+                );
+            }
+        }
+    }
+
+    // Over-acceptance guard: the copula is paired to its pronoun, so the
+    // ungrammatical cross-products "they's"/"he're" cannot parse a Source condition.
+    #[test]
+    fn test_contraction_cross_products_rejected() {
+        for subj in ["they's equipped", "he're equipped"] {
+            match parse_inner_condition(subj) {
+                Err(_) => {}
+                Ok((rest, c)) => {
+                    assert!(
+                        !matches!(
+                            c,
+                            StaticCondition::SourceIsEquipped
+                                | StaticCondition::SourceIsEnchanted
+                                | StaticCondition::SourceIsTapped
+                                | StaticCondition::SourceIsMonstrous
+                                | StaticCondition::SourceIsAttacking
+                                | StaticCondition::SourceIsBlocking
+                                | StaticCondition::SourceIsBlocked
+                        ),
+                        "ungrammatical {subj:?} must not yield a Source condition (rest={rest:?}, c={c:?})"
+                    );
+                }
+            }
+        }
+    }
+
     // CR 303.4: bare SourceIsEnchanted predicate across subjects.
     // Discriminating (fail-on-revert): if the `parse_source_is_enchanted` arm
     // is removed these fall through to `Unrecognized` (evaluates always-true),
@@ -11655,6 +11804,54 @@ mod tests {
             scope_of("five or more mana was spent to cast that spell"),
             CastManaObjectScope::TriggeringSpell,
         );
+
+        // Site D — "at least N" bare total threshold (Emperor of Palamecia).
+        // "it" maps to SelfObject at the condition level; the trigger bridge
+        // handles context-specific scope adjustment.
+        assert_eq!(
+            scope_of("at least four mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least seven mana was spent to cast it"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("at least four mana was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
+    }
+
+    /// CR 601.2h: "at least N mana was spent to cast it" must parse identically
+    /// to "N or more mana was spent to cast it" — both are `>= N` thresholds.
+    #[test]
+    fn test_at_least_mana_spent_threshold_parses() {
+        let (rest, c) = parse_condition("if at least four mana was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: crate::types::ability::CastManaSpentMetric::Total,
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => {
+                // "it" → SelfObject at condition level; trigger bridge adjusts.
+                assert_eq!(scope, CastManaObjectScope::SelfObject);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(value, 4);
+            }
+            other => panic!("expected ManaSpentToCast QuantityComparison, got {other:?}"),
+        }
     }
 
     #[test]

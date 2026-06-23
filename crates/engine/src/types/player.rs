@@ -99,6 +99,9 @@ pub struct Player {
     /// CR 717.2: Supplementary Attraction deck (command zone), top at front.
     #[serde(default)]
     pub attraction_deck: im::Vector<ObjectId>,
+    /// CR 123.2c: Revealed sticker sheets this player has access to this game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sticker_sheets: Vec<String>,
 
     // Tracking
     pub has_drawn_this_turn: bool,
@@ -195,6 +198,7 @@ impl Default for Player {
             hand: im::Vector::new(),
             graveyard: im::Vector::new(),
             attraction_deck: im::Vector::new(),
+            sticker_sheets: Vec::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,

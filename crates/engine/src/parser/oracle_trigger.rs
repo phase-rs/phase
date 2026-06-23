@@ -1069,6 +1069,16 @@ fn has_later_sentence_if(lower: &str) -> bool {
     })
 }
 
+/// True when a resolution-time optional cast names a player-chosen target that
+/// must be announced when the triggered ability is put on the stack (CR 603.3d).
+fn trigger_effect_requires_stack_time_targets(ability: &AbilityDefinition) -> bool {
+    matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })
+        && ability
+            .effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+}
+
 /// Lowering: assemble a `TriggerDefinition` from a `TriggerIr`.
 ///
 /// Applies all post-extraction transforms: condition composition, target-player
@@ -1124,6 +1134,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
     def.execute = execute;
     def.optional = modifiers.optional;
+    // CR 603.3d + CR 608.2c: "you may cast target … from [public zone]"
+    // (Torrential Gearhulk / Toshiro / Emet-Selch class) — the leading "you
+    // may" is resolution-time optionality on the cast (`execute.optional`), not
+    // permission to skip putting the triggered ability on the stack. Target
+    // selection happens when the ability is put on the stack (CR 603.3d).
+    if def.optional
+        && def
+            .execute
+            .as_ref()
+            .is_some_and(|ability| trigger_effect_requires_stack_time_targets(ability))
+    {
+        def.optional = false;
+    }
     def.unless_pay = modifiers.unless_pay.clone();
 
     // CR 603.4: Compose intervening-if with existing condition via And.
@@ -1131,6 +1154,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(if_cond) => Some(and_trigger_conditions(def.condition.take(), if_cond)),
         None => def.condition.take(),
     };
+
+    // CR 601.2h + CR 400.7d: On a spell-cast-family trigger, an intervening-if
+    // anaphor "mana spent to cast it"/"...this spell" denotes the *triggering
+    // spell*, not the ability's source permanent. The bare anaphor parses to
+    // `CastManaObjectScope::SelfObject` (correct for ETB / resolving-spell
+    // contexts where the object the spell *is* equals the source), so when the
+    // hoisted condition lands on a spell-cast trigger the `SelfObject` snapshot
+    // would read the source's payment-time mana (normally 0) and wrongly block
+    // the trigger. Remap to `TriggeringSpell` so the threshold evaluates the
+    // cast spell that fired the trigger (The Emperor of Palamecia, #1490). The
+    // comparison-form `extract_if_condition` path already emits `TriggeringSpell`
+    // for "cast it"; this converges the threshold-form path with it.
+    if is_spell_cast_trigger_mode(&def.mode) {
+        if let Some(cond) = def.condition.as_mut() {
+            remap_self_cast_scope_to_triggering_spell(cond);
+        }
+    }
 
     // CR 121.1 + CR 603.4: "draw cards equal to the difference" inside a
     // trigger body (Kozilek the Great Distortion, Damia Sage of Stone, Krang
@@ -1261,6 +1301,33 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if trigger_should_rewrite_cost_x(&def) {
         if let Some(execute) = def.execute.as_deref_mut() {
             rewrite_cost_x_in_ability(execute);
+        }
+    }
+
+    // CR 603.4 + CR 111.1: Token intervening-ifs parsed via
+    // `zone_change_object_token_condition` default to destination Battlefield
+    // (correct for ETB). On dies/leave triggers the zone-change event's `to`
+    // is Graveyard — rewrite so "if it's not a token" can match (Vaultborn
+    // Tyrant, issue #3988).
+    if def.destination == Some(Zone::Graveyard) {
+        if let Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+            destination,
+            filter,
+            ..
+        }) = def.condition.as_mut()
+        {
+            if *destination == Zone::Battlefield {
+                let is_token_predicate = matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.properties.iter().any(|p| {
+                            matches!(p, FilterProp::NonToken | FilterProp::Token)
+                        })
+                );
+                if is_token_predicate {
+                    *destination = Zone::Graveyard;
+                }
+            }
         }
     }
 
@@ -2651,7 +2718,82 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 ///
 /// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
 /// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
-fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
+/// CR 601.2i: Trigger modes whose triggering object is a *spell* (or a spell
+/// copy / spell-or-ability cast). For these, a "mana spent to cast it" anaphor
+/// in an intervening-if refers to that triggering spell rather than the ability
+/// source. See `remap_self_cast_scope_to_triggering_spell`.
+fn is_spell_cast_trigger_mode(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::SpellCast
+            | TriggerMode::SpellCopy
+            | TriggerMode::SpellCastOrCopy
+            | TriggerMode::SpellAbilityCast
+            | TriggerMode::SpellAbilityCopy
+    )
+}
+
+/// CR 400.7d + CR 601.2h: Within a spell-cast trigger's intervening-if, remap
+/// every `QuantityRef::ManaSpentToCast { scope: SelfObject }` to
+/// `TriggeringSpell`. The condition parser cannot see the trigger mode, so the
+/// bare "it"/"this spell" anaphor lands as `SelfObject`; only here, where the
+/// owning trigger's mode is known, can it be resolved to the triggering spell.
+/// Recurses through the compound (`And`/`Or`/`Not`) and arithmetic wrappers so
+/// the remap reaches a `ManaSpentToCast` ref wherever it is nested.
+fn remap_self_cast_scope_to_triggering_spell(cond: &mut TriggerCondition) {
+    match cond {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            remap_self_cast_scope_in_quantity(lhs);
+            remap_self_cast_scope_in_quantity(rhs);
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions
+                .iter_mut()
+                .for_each(remap_self_cast_scope_to_triggering_spell);
+        }
+        TriggerCondition::Not { condition } => remap_self_cast_scope_to_triggering_spell(condition),
+        // All other variants are leaves that cannot carry a `ManaSpentToCast`
+        // quantity ref — nothing to remap.
+        _ => {}
+    }
+}
+
+/// Recursive `QuantityExpr` companion of
+/// `remap_self_cast_scope_to_triggering_spell`. Exhaustive over `QuantityExpr`
+/// so a new arithmetic wrapper forces a compile error here rather than silently
+/// skipping a nested `ManaSpentToCast` ref.
+fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: scope @ CastManaObjectScope::SelfObject,
+                    ..
+                },
+        } => *scope = CastManaObjectScope::TriggeringSpell,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => remap_self_cast_scope_in_quantity(inner),
+        QuantityExpr::UpTo { max } => remap_self_cast_scope_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => remap_self_cast_scope_in_quantity(exponent),
+        QuantityExpr::Difference { left, right } => {
+            remap_self_cast_scope_in_quantity(left);
+            remap_self_cast_scope_in_quantity(right);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(remap_self_cast_scope_in_quantity);
+        }
+    }
+}
+
+// pub(crate) so the runtime gate tests in game/triggers.rs can drive the
+// production bridge directly (discriminating against this function rather than a
+// hand-built filter). Sole non-test caller remains parse_trigger_line below.
+pub(crate) fn static_condition_to_trigger_condition(
+    sc: &StaticCondition,
+) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
             player: PlayerFilter::Controller,
@@ -2679,6 +2821,13 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         // CR 702.178a: Speed condition.
         StaticCondition::HasMaxSpeed => Some(TriggerCondition::HasMaxSpeed),
 
+        // CR 701.64b + CR 702.186b: The harnessed designation has an
+        // intervening-if equivalent — an ∞ (Infinity) triggered ability only
+        // fires while the source is harnessed. Unlike `SourceIsMonstrous`
+        // (static-only), this bridges so the ∞ ability-word gate reaches the
+        // trigger's `condition`.
+        StaticCondition::SourceIsHarnessed => Some(TriggerCondition::SourceIsHarnessed),
+
         // CR 103.1: Starting-player status — 1:1 bridge. Radiant Smite's
         // Cycling trigger reads "if you weren't the starting player".
         StaticCondition::WasStartingPlayer { controller } => {
@@ -2699,6 +2848,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         StaticCondition::WasCast { zone } => Some(TriggerCondition::WasCast {
             zone: *zone,
             controller: None,
+            owner: None,
         }),
 
         // CR 702.176a + CR 603.4: Impending's battlefield trigger checks the
@@ -2728,6 +2878,39 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                 filter: filter.clone(),
             })
         }
+
+        // CR 603.4 + CR 301.5a: "if [it/this permanent/this artifact] is equipped"
+        // intervening-if. Source-object-wide, matching the layer evaluator
+        // (game/layers.rs SourceIsEquipped) and FilterProp::HasAttachment
+        // (game/filter.rs) — neither narrows by card type. The HasAttachment{Equipment}
+        // subtype predicate already implies a legal creature host (CR 301.5a/301.5c),
+        // so a creature() card-type gate would be redundant AND would diverge from the
+        // layer path. TypedFilter::default() -> empty type_filters -> no card-type
+        // constraint. SourceExclusion::Include: a permanent is never its own attachment.
+        StaticCondition::SourceIsEquipped => Some(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        }),
+        // CR 603.4 + CR 303.4: "if [it/this permanent/this land] is enchanted"
+        // intervening-if. CR 303.4: an Aura enters the battlefield attached to an
+        // object OR player -- the host is NOT restricted to creatures. Source-object-wide,
+        // matching game/layers.rs SourceIsEnchanted and FilterProp::HasAttachment
+        // (game/filter.rs), neither of which narrows by card type.
+        // TypedFilter::default() -> empty type_filters -> no card-type constraint.
+        StaticCondition::SourceIsEnchanted => Some(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        }),
 
         // Not combinator — handle common negation patterns.
         StaticCondition::Not { condition } => match condition.as_ref() {
@@ -2854,11 +3037,20 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 400.7 + CR 603.4: "if ~ entered this turn" intervening-if bridges to the
+        // trigger-side source-entered check (e.g. Hixus, Prison Warden — "Whenever a
+        // creature deals combat damage to you, if Hixus entered this turn, ..."). Both
+        // sides read GameObject.entered_battlefield_turn (game/conditions.rs
+        // eval_source_entered_this_turn) at trigger fire-time and at the resolution-time
+        // recheck, so the intervening-if is honored rather than silently dropped.
+        StaticCondition::SourceEnteredThisTurn => {
+            Some(TriggerCondition::SourceEnteredThisTurn)
+        }
+
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
-        StaticCondition::SourceEnteredThisTurn
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
-        | StaticCondition::SourceHasDealtDamage
+        StaticCondition::SourceHasDealtDamage
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::DevotionGE { .. }
@@ -2874,8 +3066,6 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::SourceIsEquipped
-        | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
@@ -2919,6 +3109,13 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 /// graveyard (`WasCast`). `owner` carries the graveyard's owner scope: "your
 /// graveyard" (Prized Amalgam) restricts the entered-from filter to objects you
 /// own; "a graveyard" (any graveyard) leaves it unrestricted.
+///
+/// The "your graveyard" form (Prized Amalgam) is templated "entered from your
+/// graveyard or you cast it from your graveyard" — the cast arm carries an
+/// explicit "you cast it" caster clause AND a "your graveyard" owner clause, so
+/// the `WasCast` arm scopes BOTH the caster (`cast_controller`) and the
+/// origin-zone owner (`owner`, CR 400.3 + CR 404.1). The compact "a graveyard"
+/// form (Twilight Diviner) carries neither caster nor owner constraint.
 fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerCondition {
     let filter = match owner {
         Some(ref controller) => with_owner_scope(TargetFilter::Any, controller.clone()),
@@ -2933,7 +3130,8 @@ fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerConditi
             },
             TriggerCondition::WasCast {
                 zone: Some(Zone::Graveyard),
-                controller: owner,
+                controller: owner.clone(),
+                owner,
             },
         ],
     }
@@ -2969,7 +3167,30 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
         tag("entered from your graveyard or you cast it from your graveyard"),
         |_| graveyard_origin_or_condition(Some(ControllerRef::You)),
     );
-    alt((compact, split_your)).parse(rest)
+    // CR 601.2 + CR 603.4: bare "(was|were) cast from [a|your] graveyard" with no
+    // "entered" disjunction (Rocket-Powered Goblin Glider's Mayhem-gated ETB
+    // attach: "if it was cast from your graveyard"). This is the cast-origin
+    // check alone — `WasCast`, not the entered/cast `Or` the disjunctive forms
+    // above build. CR 400.3 + CR 404.1: a graveyard is owner-specific, and this
+    // wording carries NO "you cast it" caster clause, so "your graveyard" scopes
+    // the origin-zone OWNER (`owner = You`), never the caster. "a graveyard" is
+    // unscoped on both axes.
+    let bare_cast = map(
+        (
+            alt((tag("was"), tag("were"))),
+            tag(" cast from "),
+            alt((
+                value(Some(ControllerRef::You), tag("your graveyard")),
+                value(None, tag("a graveyard")),
+            )),
+        ),
+        |(_, _, owner)| TriggerCondition::WasCast {
+            zone: Some(Zone::Graveyard),
+            controller: None,
+            owner,
+        },
+    );
+    alt((compact, split_your, bare_cast)).parse(rest)
 }
 
 /// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become
@@ -3040,6 +3261,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 Some(TriggerCondition::WasCast {
                     zone: None,
                     controller: None,
+                    owner: None,
                 }),
             );
         }
@@ -3074,6 +3296,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                         condition: Box::new(TriggerCondition::WasCast {
                             zone: None,
                             controller: None,
+                            owner: None,
                         }),
                     },
                     TriggerCondition::ManaSpentCondition {
@@ -3145,6 +3368,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::WasCast {
                 zone: None,
                 controller: None,
+                owner: None,
             }),
         );
     }
@@ -3157,6 +3381,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 condition: Box::new(TriggerCondition::WasCast {
                     zone: None,
                     controller: None,
+                    owner: None,
                 }),
             }),
         );
@@ -4332,6 +4557,7 @@ fn try_extract_cast_variant_paid_condition(
         ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
         ("surge cost was paid", CastVariantPaid::Surge), // CR 702.117a
         ("spectacle cost was paid", CastVariantPaid::Spectacle), // CR 702.137a
+        ("prowl cost was paid", CastVariantPaid::Prowl), // CR 702.76a
     ] {
         if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
@@ -5462,8 +5688,42 @@ fn is_new_sentence_not_type_continuation(text: &str) -> bool {
     // Skip the first word (the type word itself) and check remaining words.
     lower.split_whitespace().skip(1).any(|w| {
         let normalized = normalize_verb_token(w);
-        PREDICATE_VERBS.contains(&normalized.as_str())
+        if PREDICATE_VERBS.contains(&normalized.as_str()) {
+            return true;
+        }
+        // CR 608.2c: Negated modal verbs ("can't", "don't", "doesn't", "won't")
+        // indicate a restriction predicate — recognize the base verb before the
+        // negation contraction so "creatures you control can't be the targets ..."
+        // is correctly classified as a new subject-predicate sentence rather than
+        // a type-list continuation.
+        if is_negated_auxiliary_predicate_token(w) {
+            return true;
+        }
+        false
     })
+}
+
+fn is_negated_auxiliary_predicate_token(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| !c.is_alphabetic() && c != '\'');
+    // allow-noncombinator: verb-morphology suffix check on pre-tokenized word
+    let Some(base) = token.strip_suffix("n't") else {
+        return false;
+    };
+    matches!(
+        base,
+        "ca" | "do"
+            | "does"
+            | "did"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "wo"
+            | "sha"
+            | "have"
+            | "has"
+            | "had"
+    )
 }
 
 fn make_base() -> TriggerDefinition {
@@ -18540,6 +18800,49 @@ mod tests {
         }
     }
 
+    /// CR 601.2h + CR 603.4: "at least N mana was spent to cast it" is an
+    /// intervening-if on a spell-cast trigger. Must hoist as a trigger-level
+    /// QuantityComparison so the trigger only fires when the threshold is met.
+    /// Regression: The Emperor of Palamecia (#1490).
+    #[test]
+    fn trigger_at_least_mana_spent_intervening_if() {
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, put a +1/+1 counter on ~. Then if it has three or more +1/+1 counters on it, transform it.",
+            "The Emperor of Palamecia",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        // The intervening-if must hoist to a trigger-level condition.
+        let cond = def
+            .condition
+            .as_ref()
+            .expect("at-least-four mana threshold must hoist as trigger condition");
+        match cond {
+            TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                // CR 400.7d: "it" on a spell-cast trigger denotes
+                                // the triggering spell, NOT the source permanent.
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: crate::types::ability::CastManaSpentMetric::Total,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {}
+            other => panic!(
+                "expected ManaSpentToCast {{ TriggeringSpell, Total }} >= 4 trigger condition, got {other:?}"
+            ),
+        }
+        // The effect text should have the condition stripped.
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::PutCounter { .. } => {}
+            other => panic!("expected PutCounter effect, got {other:?}"),
+        }
+    }
+
     /// CR 601.2a + #538: Ghostly Pilferer. The cast-origin discriminator
     /// "from anywhere other than their hand" must survive parsing as
     /// `NotEquals(Hand)`; without it the trigger fires on every opponent
@@ -23788,6 +24091,44 @@ mod tests {
     }
 
     #[test]
+    fn phase_trigger_braids_sacrifices_artifact_creature_or_land() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player sacrifices an artifact, a creature, or a land.",
+            "Braids, Cabal Minion",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Sacrifice { target, .. }) => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 3);
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters == [TypeFilter::Artifact]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Creature]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Land]
+                    )));
+                    assert!(filters.iter().all(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::ScopedPlayer)
+                    )));
+                }
+                other => panic!("expected Or sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
         let def = parse_trigger_line(
             "At the beginning of each player's upkeep, that player sacrifices a non-Elf creature of their choice.",
@@ -23957,6 +24298,48 @@ mod tests {
             .as_ref()
             .expect("should have sub_ability");
         assert!(sub.optional, "second sentence ability should be optional");
+    }
+
+    #[test]
+    fn trigger_you_may_cast_target_instant_from_graveyard_is_not_trigger_optional() {
+        let def = parse_trigger_line(
+            "When this creature enters, you may cast target instant card from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+            "Torrential Gearhulk",
+        );
+        assert!(
+            !def.optional,
+            "CR 603.3d: targeted cast triggers must go on the stack when legal targets exist"
+        );
+        let execute = def.execute.as_ref().expect("ETB execute body");
+        assert!(
+            execute.optional,
+            "CR 608.2c: the cast itself is optional at resolution"
+        );
+        assert_eq!(
+            execute.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Stack,
+            "graveyard instant target must be chosen when the trigger goes on the stack"
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::CastFromZone { .. }),
+            "expected CastFromZone root effect, got {:?}",
+            execute.effect
+        );
+        if let Effect::CastFromZone {
+            without_paying_mana_cost,
+            duration,
+            ..
+        } = execute.effect.as_ref()
+        {
+            assert!(
+                *without_paying_mana_cost,
+                "Gearhulk cast must be without paying mana cost"
+            );
+            assert!(
+                duration.is_none(),
+                "immediate graveyard cast must not carry a standing duration: {duration:?}"
+            );
+        }
     }
 
     // ── Work Item 1: Leaves-Graveyard Batch Triggers ──────────────
@@ -26829,6 +27212,22 @@ mod tests {
         assert!(!continues_player_action_list("you gain 1 life"));
     }
 
+    #[test]
+    fn continues_player_action_list_rejects_negated_auxiliary_effect_sentences() {
+        assert!(!continues_player_action_list(
+            "creatures you control can't be the targets of spells or abilities"
+        ));
+        assert!(!continues_player_action_list(
+            "creatures you control don't untap during their controllers' untap steps"
+        ));
+        assert!(!continues_player_action_list(
+            "creature doesn't untap during its controller's next untap step"
+        ));
+        assert!(!continues_player_action_list("creatures won't untap"));
+        assert!(!continues_player_action_list("creature isn't tapped"));
+        assert!(!continues_player_action_list("creatures aren't attacking"));
+    }
+
     // --- Fix 2: missing event verbs ---
 
     #[test]
@@ -27061,6 +27460,148 @@ mod tests {
         );
     }
 
+    /// CR 603.4 + CR 301.5a: the equipped intervening-if must bridge to a
+    /// SourceMatchesFilter carrying a creature HasAttachment(Equipment) predicate.
+    /// Fail-before: `SourceIsEquipped` was in the `=> None` arm, so `.expect`
+    /// would panic on `None`.
+    #[test]
+    fn bridge_source_is_equipped_to_has_attachment() {
+        let tc = static_condition_to_trigger_condition(&StaticCondition::SourceIsEquipped)
+            .expect("SourceIsEquipped should bridge to a TriggerCondition");
+        let TriggerCondition::SourceMatchesFilter { filter } = tc else {
+            panic!("expected SourceMatchesFilter, got {tc:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }
+            )),
+            "expected HasAttachment(Equipment, None, Include); got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 603.4 + CR 303.4: the enchanted intervening-if bridges to an Aura
+    /// HasAttachment predicate, and crucially must NOT carry the Equipment
+    /// variant (discriminates attachment kind).
+    #[test]
+    fn bridge_source_is_enchanted_to_has_attachment() {
+        let tc = static_condition_to_trigger_condition(&StaticCondition::SourceIsEnchanted)
+            .expect("SourceIsEnchanted should bridge to a TriggerCondition");
+        let TriggerCondition::SourceMatchesFilter { filter } = tc else {
+            panic!("expected SourceMatchesFilter, got {tc:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }
+            )),
+            "expected HasAttachment(Aura, None, Include); got {:?}",
+            typed.properties
+        );
+        assert!(
+            !typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    ..
+                }
+            )),
+            "enchanted bridge must not carry the Equipment HasAttachment; got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 603.4 + CR 303.4: the enchanted intervening-if is source-object-wide and
+    /// must NOT impose a creature card-type gate (CR 303.4 Auras may enchant any
+    /// object or player; the host is not restricted to creatures). Fail-before:
+    /// the bridge used `TypedFilter::creature()`, so `type_filters == [Creature]`
+    /// and BOTH assertions below would fail. The HasAttachment{Aura} property is
+    /// reasserted as a sibling guard so the swap to `default()` can't silently
+    /// drop the attachment predicate.
+    #[test]
+    fn bridge_source_is_enchanted_no_creature_type() {
+        let tc = static_condition_to_trigger_condition(&StaticCondition::SourceIsEnchanted)
+            .expect("SourceIsEnchanted should bridge to a TriggerCondition");
+        let TriggerCondition::SourceMatchesFilter { filter } = tc else {
+            panic!("expected SourceMatchesFilter, got {tc:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.type_filters.is_empty(),
+            "enchanted bridge must carry no card-type constraint; got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            !typed.type_filters.contains(&TypeFilter::Creature),
+            "enchanted bridge must not gate on Creature; got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }
+            )),
+            "expected HasAttachment(Aura, None, Include); got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 603.4 + CR 301.5a/301.5c: the equipped intervening-if is source-object-wide.
+    /// The HasAttachment{Equipment} subtype predicate already implies a legal
+    /// creature host, so a redundant `creature()` card-type gate would diverge from
+    /// the layer evaluator (game/layers.rs). Fail-before: the bridge used
+    /// `TypedFilter::creature()`, so `type_filters == [Creature]` and the empty
+    /// assertion would fail. HasAttachment{Equipment} reasserted as a sibling guard.
+    #[test]
+    fn bridge_source_is_equipped_no_creature_type() {
+        let tc = static_condition_to_trigger_condition(&StaticCondition::SourceIsEquipped)
+            .expect("SourceIsEquipped should bridge to a TriggerCondition");
+        let TriggerCondition::SourceMatchesFilter { filter } = tc else {
+            panic!("expected SourceMatchesFilter, got {tc:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.type_filters.is_empty(),
+            "equipped bridge must carry no card-type constraint; got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }
+            )),
+            "expected HasAttachment(Equipment, None, Include); got {:?}",
+            typed.properties
+        );
+    }
+
     #[test]
     fn bridge_not_during_your_turn() {
         let sc = StaticCondition::Not {
@@ -27181,11 +27722,51 @@ mod tests {
 
     #[test]
     fn bridge_unmappable_variants_return_none() {
-        assert!(
-            static_condition_to_trigger_condition(&StaticCondition::SourceEnteredThisTurn)
-                .is_none()
-        );
         assert!(static_condition_to_trigger_condition(&StaticCondition::IsRingBearer).is_none());
+        assert!(
+            static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage).is_none()
+        );
+    }
+
+    #[test]
+    fn bridge_source_entered_this_turn() {
+        // CR 400.7 + CR 603.4: "if ~ entered this turn" intervening-if (Hixus, Prison
+        // Warden) bridges to the trigger-side source-entered check instead of being
+        // silently dropped.
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::SourceEnteredThisTurn),
+            Some(TriggerCondition::SourceEnteredThisTurn)
+        );
+    }
+
+    /// Hixus, Prison Warden: "Whenever a creature deals combat damage to you, if Hixus
+    /// entered this turn, exile that creature until Hixus leaves the battlefield." The
+    /// intervening-if "if Hixus entered this turn" must be retained as the trigger
+    /// condition. It was previously dropped to `None` (the static→trigger bridge had no
+    /// arm for `SourceEnteredThisTurn`), so the exile fired on every later turn rather
+    /// than only the turn Hixus flashed in (CR 400.7). The condition is evaluated at
+    /// trigger fire-time and rechecked at resolution (CR 603.4) against
+    /// `GameObject.entered_battlefield_turn`.
+    #[test]
+    fn parse_hixus_keeps_entered_this_turn_intervening_if() {
+        let defs = parse_trigger_lines(
+            "Whenever a creature deals combat damage to you, if Hixus entered this turn, \
+             exile that creature until Hixus leaves the battlefield.",
+            "Hixus, Prison Warden",
+        );
+        let def = defs
+            .iter()
+            .find(|d| d.condition == Some(TriggerCondition::SourceEnteredThisTurn))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a trigger with SourceEnteredThisTurn condition, got {:?}",
+                    defs.iter()
+                        .map(|d| (&d.mode, &d.condition))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.condition, Some(TriggerCondition::SourceEnteredThisTurn));
     }
 
     #[test]
@@ -28729,6 +29310,7 @@ mod tests {
                         condition: Box::new(TriggerCondition::WasCast {
                             zone: None,
                             controller: None,
+                            owner: None,
                         }),
                     }
                 );
@@ -28762,6 +29344,7 @@ mod tests {
                 condition: Box::new(TriggerCondition::WasCast {
                     zone: None,
                     controller: None,
+                    owner: None,
                 }),
             })
         );
@@ -31388,6 +31971,30 @@ mod tests {
             exec.effect
         );
     }
+
+    /// CR 702.11a + CR 603.1: "creatures you control can't be the targets of
+    /// spells or abilities your opponents control this turn" — the effect body
+    /// starts with a type word ("creatures") but the negated modal "can't"
+    /// indicates a new subject-predicate sentence, not a type-list continuation.
+    /// Verify the trigger boundary splits correctly and the Hexproof grant parses.
+    #[test]
+    fn trigger_veilstone_amulet_cant_be_targets() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell, creatures you control can't be the targets of spells or abilities your opponents control this turn.",
+            "Veilstone Amulet",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        let execute = def.execute.as_deref().expect(
+            "Veilstone Amulet trigger execute must not be None — \
+             the boundary splitter should classify 'creatures you control can't ...' \
+             as a new sentence (negated modal 'can't' is a predicate verb)",
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
+            "expected GenericEffect (hexproof grant), got {:?}",
+            execute.effect
+        );
+    }
 }
 
 /// Snapshot tests locking current trigger parser output before the IR split.
@@ -32332,7 +32939,8 @@ mod snapshot_tests {
                     conditions[1],
                     TriggerCondition::WasCast {
                         zone: Some(Zone::Graveyard),
-                        controller: None
+                        controller: None,
+                        owner: None,
                     }
                 );
             }
@@ -32361,7 +32969,8 @@ mod snapshot_tests {
                     conditions[1],
                     TriggerCondition::WasCast {
                         zone: Some(Zone::Graveyard),
-                        controller: None
+                        controller: None,
+                        owner: None,
                     }
                 );
             }
@@ -32862,9 +33471,11 @@ mod slicer_control_handoff_tests {
                         TriggerCondition::WasCast {
                             zone: Some(Zone::Graveyard),
                             controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
                         }
                     ),
-                    "cast-from-your-graveyard branch must be caster-scoped to you, got {condition:?}"
+                    "cast-from-your-graveyard branch must scope BOTH caster (\"you cast it\") \
+                     and origin-zone owner (\"your graveyard\") to you, got {condition:?}"
                 );
             }
             other => panic!("expected Or condition, got {other:?}"),

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-06-21T00:00:00Z",
+  "updated": "2026-06-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -837,18 +837,14 @@
       "main": [
         {
           "count": 1,
-          "name": "Inti, Seneschal of the Sun"
-        },
-        {
-          "count": 4,
           "name": "Concealed Courtyard"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Erode"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Inspiring Vantage"
         },
         {
@@ -856,8 +852,8 @@
           "name": "Iron-Shield Elf"
         },
         {
-          "count": 3,
-          "name": "Burst Lightning"
+          "count": 1,
+          "name": "Cecil, Dark Knight"
         },
         {
           "count": 4,
@@ -872,16 +868,20 @@
           "name": "Mountain"
         },
         {
-          "count": 1,
-          "name": "Multiversal Passage"
-        },
-        {
           "count": 4,
           "name": "Moonshadow"
         },
         {
+          "count": 2,
+          "name": "Sacred Foundry"
+        },
+        {
           "count": 4,
           "name": "Hardened Academic"
+        },
+        {
+          "count": 3,
+          "name": "Requiting Hex"
         },
         {
           "count": 4,
@@ -889,11 +889,11 @@
         },
         {
           "count": 4,
-          "name": "Sacred Foundry"
+          "name": "Cool but Rude"
         },
         {
-          "count": 4,
-          "name": "Cool but Rude"
+          "count": 3,
+          "name": "Blazemire Verge"
         },
         {
           "count": 3,
@@ -912,42 +912,42 @@
           "name": "Blood Crypt"
         },
         {
-          "count": 1,
+          "count": 4,
           "name": "Godless Shrine"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Strategic Betrayal"
+          "name": "Inti, Seneschal of the Sun"
+        },
+        {
+          "count": 2,
+          "name": "Sheltered by Ghosts"
         },
         {
           "count": 1,
           "name": "Requiting Hex"
         },
         {
-          "count": 1,
-          "name": "Seam Rip"
+          "count": 2,
+          "name": "Gastal Thrillroller"
         },
         {
           "count": 1,
           "name": "Shoot the Sheriff"
         },
         {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 2,
-          "name": "Case of the Crimson Pulse"
-        },
-        {
           "count": 4,
-          "name": "Leyline of the Void"
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Dawn's Truce"
         }
       ]
     },
@@ -1079,6 +1079,134 @@
         {
           "count": 2,
           "name": "Rest in Peace"
+        }
+      ]
+    },
+    {
+      "name": "Jeskai Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Mistrise Village"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 4,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 3,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Jeskai Revelation"
+        },
+        {
+          "count": 1,
+          "name": "Sundown Pass"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 2,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 4,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Slagstorm"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Fire Magic"
+        },
+        {
+          "count": 2,
+          "name": "Broadside Barrage"
         }
       ]
     },
@@ -1217,134 +1345,6 @@
         },
         {
           "count": 1,
-          "name": "Broadside Barrage"
-        }
-      ]
-    },
-    {
-      "name": "Jeskai Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Mistrise Village"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "Great Hall of the Biblioplex"
-        },
-        {
-          "count": 3,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Jeskai Revelation"
-        },
-        {
-          "count": 1,
-          "name": "Sundown Pass"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 4,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 4,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Slagstorm"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
-        },
-        {
-          "count": 2,
           "name": "Broadside Barrage"
         }
       ]

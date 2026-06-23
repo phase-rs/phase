@@ -592,6 +592,9 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
     matches!(
         mode,
         StaticMode::MayLookAtTopOfLibrary
+            // CR 708.5: "you may look at face-down creatures [you don't control |
+            // your opponents control] any time" — opt-in look permission.
+            | StaticMode::MayLookAtFaceDown
             | StaticMode::MayChooseNotToUntap
             | StaticMode::MayPlayAdditionalLand
             | StaticMode::TopOfLibraryCastPermission { .. }
@@ -635,9 +638,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
-            // CR 609.4b: "You may spend mana as though it were mana of any color" —
-            // opt-in mana-color substitution, inherently optional by the "you may" surface.
-            | StaticMode::SpendManaAsAnyColor
+            // CR 609.4b: "You may spend mana as though it were mana of any color" /
+            // "you may spend mana of any type to cast [filtered] spells" — opt-in
+            // mana substitution, inherently optional by the "you may" surface.
+            | StaticMode::SpendManaAsAnyColor { .. }
             // CR 602.5a + CR 702.10c: "You may activate abilities of X as though those
             // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
             // activated abilities; the permission is opt-in by the "you may" surface.
@@ -1433,6 +1437,7 @@ fn detect_dynamic_qty(
         // Replicate "cost equal to its mana cost" — encoded as a dynamic
         // mana-cost reference rather than a fixed cost.
         "SelfManaCost",
+        "SelfManaValue",
         "TargetManaCost",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
@@ -2028,6 +2033,12 @@ fn detect_condition_if(
         // skip_serializing_if = is_none) IS the conditional gate (Teferi's
         // Response, Green Slime, Tishana's Tidebinder).
         "\"source_rider\":",
+        // CR 701.6a: Effect::Counter.countered_spell_zone encodes the
+        // "if that spell is countered this way, put it [on top of / on
+        // the bottom of its owner's library | into its owner's hand]"
+        // destination override. Its presence IS the conditional gate
+        // (Memory Lapse, Lapse of Certainty, Remand, Spell Crumple).
+        "\"countered_spell_zone\":",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
@@ -3037,10 +3048,10 @@ mod tests {
             &["Artifact"],
         );
         assert!(
-            parsed
-                .statics
-                .iter()
-                .any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor)),
+            parsed.statics.iter().any(|s| matches!(
+                s.mode,
+                StaticMode::SpendManaAsAnyColor { spell_filter: None }
+            )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
             parsed.statics
         );
@@ -3814,6 +3825,31 @@ mod tests {
             &["Creature"],
         );
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
+    }
+
+    /// CR 701.6a: "If that spell is countered this way, put it [somewhere]"
+    /// — the redirect destination is encoded as `countered_spell_zone` on the
+    /// Counter effect.  Its presence IS the conditional gate (Memory Lapse,
+    /// Lapse of Certainty, Remand, Spell Crumple).
+    #[test]
+    fn condition_if_accepts_countered_spell_zone_redirect() {
+        let memory_lapse = parse_named(
+            "Counter target spell. If that spell is countered this way, \
+             put it on top of its owner's library instead of into that \
+             player's graveyard.",
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&memory_lapse, "Condition_If"));
+
+        let remand = parse_named(
+            "Counter target spell. If that spell is countered this way, \
+             put it into its owner's hand instead of into that player's \
+             graveyard.\nDraw a card.",
+            "Remand",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&remand, "Condition_If"));
     }
 
     /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes
@@ -4842,12 +4878,13 @@ mod tests {
         )));
     }
 
-    /// CR 122.1 + CR 603.2: Construct a Cosmic Cube's second-draw trigger body
-    /// (token + plan counter) parses with zero Unimplemented. The
-    /// seventh-plan-counter sacrifice parses too; ONLY the heavy "you control
-    /// target opponent during their next turn" rider stays honestly
-    /// `Effect::Unimplemented` (intentionally deferred). Shape gate paired with
-    /// `tests/construct_cosmic_cube_second_draw_token.rs`.
+    /// CR 122.1 + CR 603.2 + CR 723.1: Construct a Cosmic Cube parses with zero
+    /// Unimplemented across the whole card. The second-draw trigger body (token +
+    /// plan counter) is fully supported; the seventh-plan-counter sacrifice
+    /// parses; and the reflexive "you control target opponent during their next
+    /// turn" rider now lowers to `Effect::ControlNextTurn` via the shared
+    /// turn-control subsystem (CR 723) rather than staying `Unimplemented`. Shape
+    /// gate paired with `tests/construct_cosmic_cube_second_draw_token.rs`.
     #[test]
     fn construct_second_draw_body_parses_token_and_plan_counter() {
         let parsed = parse_named(
@@ -4872,8 +4909,8 @@ mod tests {
             !def_tree_has_unimplemented(second_draw),
             "the token + plan-counter body must be fully supported"
         );
-        // The deferred control-opponent rider remains honest: exactly one
-        // Unimplemented across the whole card.
+        // CR 723.1: the entire card — including the reflexive control-opponent
+        // rider — now parses with zero Unimplemented effects.
         let total_unimpl: usize = parsed
             .triggers
             .iter()
@@ -4881,8 +4918,125 @@ mod tests {
             .filter(|d| def_tree_has_unimplemented(d))
             .count();
         assert_eq!(
-            total_unimpl, 1,
-            "only the deferred 'you control target opponent' rider stays Unimplemented"
+            total_unimpl, 0,
+            "every effect on Construct a Cosmic Cube must be supported (control-opponent rider now lowers to ControlNextTurn)"
         );
+
+        // CR 723.1: the reflexive rider lowers to `Effect::ControlNextTurn` —
+        // the discriminating shape assertion. Without the "their next turn"
+        // possessive variant in the suffix combinator this would be Unimplemented.
+        fn def_tree_has_control_next_turn(def: &AbilityDefinition) -> bool {
+            if matches!(*def.effect, Effect::ControlNextTurn { .. }) {
+                return true;
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(def_tree_has_control_next_turn)
+                || def
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(def_tree_has_control_next_turn)
+                || def
+                    .mode_abilities
+                    .iter()
+                    .any(def_tree_has_control_next_turn)
+        }
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(def_tree_has_control_next_turn),
+            "the seventh-counter reflexive rider must lower to Effect::ControlNextTurn"
+        );
+    }
+
+    /// CR 514.2 + CR 609.4b + CR 611.2a: Black Widow's "if you don't" branch
+    /// grants a typed `PlayFromExile` impulse cast scoped to end of turn with
+    /// any-type/any-color mana spend permission. Before the
+    /// `try_parse_play_the_exiled_card_grant` extension this branch degraded to
+    /// `GenericEffect { SpendManaAsAnyColor, duration: null }` (dropping the
+    /// cast permission and the EOT window → `Swallow:Duration_UntilEndOfTurn`).
+    /// Discrimination: reverting either leaf addition flips the gated node back
+    /// to `GenericEffect` (proven via revert-probe), so the asserts below fail.
+    #[test]
+    fn black_widow_if_you_dont_grants_typed_play_from_exile_until_eot() {
+        use crate::types::ability::{AbilityCondition, CastingPermission, ManaSpendPermission};
+        use crate::types::statics::StaticMode;
+        use crate::types::Duration;
+
+        let parsed = parse_named(
+            "Menace\n\
+             Whenever Black Widow deals combat damage to a player, that player exiles \
+             cards from the top of their library until they exile a nonland card. You may \
+             put a +1/+1 counter on Black Widow. If you don't, you may cast the exiled \
+             nonland card until end of turn and mana of any type can be spent to cast that spell.",
+            "Black Widow, Super Spy",
+            &["Legendary", "Creature"],
+        );
+
+        // Walk the trigger sub_ability chain to the `Not(OptionalEffectPerformed)`
+        // gated node (the "if you don't" branch).
+        fn find_if_you_dont(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if def
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+            {
+                return Some(def);
+            }
+            def.sub_ability.as_deref().and_then(find_if_you_dont)
+        }
+
+        let gated = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_if_you_dont)
+            .expect("Black Widow trigger must carry a Not(OptionalEffectPerformed) gated node");
+
+        match &*gated.effect {
+            Effect::GrantCastingPermission { permission, .. } => match permission {
+                CastingPermission::PlayFromExile {
+                    duration,
+                    mana_spend_permission,
+                    ..
+                } => {
+                    assert_eq!(*duration, Duration::UntilEndOfTurn);
+                    assert_eq!(
+                        *mana_spend_permission,
+                        Some(ManaSpendPermission::AnyTypeOrColor)
+                    );
+                }
+                other => panic!("expected PlayFromExile permission, got {other:?}"),
+            },
+            other => panic!("expected GrantCastingPermission, got {other:?}"),
+        }
+
+        // The pre-fix degradation lowered to a GenericEffect carrying a
+        // `SpendManaAsAnyColor` static mode; assert no node in the chain does so,
+        // proving the cast permission was not dropped to that fallback.
+        fn chain_has_spend_mana_generic(def: &AbilityDefinition) -> bool {
+            let here = matches!(
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor { .. }))
+            );
+            here || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_spend_mana_generic)
+        }
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(chain_has_spend_mana_generic),
+            "the cast permission must not degrade to GenericEffect{{SpendManaAsAnyColor}}"
+        );
+
+        // No swallowed-clause diagnostic for the dropped EOT duration.
+        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
     }
 }

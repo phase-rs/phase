@@ -3470,4 +3470,39 @@ mod tests {
         );
         assert_eq!(state.players[1].life, 20);
     }
+
+    /// CR 701.19a + CR 510.2: Regeneration shield installed before combat
+    /// damage must survive lethal damage from the combat-damage SBA pass.
+    #[test]
+    fn regeneration_shield_survives_combat_damage_resolution() {
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lotleth Troll", 2, 1);
+        let blocker = create_creature(&mut state, PlayerId(1), "Big Blocker", 5, 5);
+        {
+            let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate".to_string())
+                .regeneration_shield();
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .replacement_definitions
+                .push(shield);
+        }
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&attacker].zone,
+            Zone::Battlefield,
+            "attacker with regen shield must survive lethal combat damage"
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
+    }
 }

@@ -241,6 +241,7 @@ fn player_effect_to_static(
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(affected));
         }

@@ -8,6 +8,7 @@ use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::stickers::StickerKind;
 use super::zones::Zone;
 
 /// CR 121.1: Default `nth_in_step` for `CardDrawn` events deserialized from
@@ -140,6 +141,19 @@ pub enum GameEvent {
     Mutated {
         merged_id: ObjectId,
         merging_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Unstable Host/Augment: a card with augment combined with a Host
+    /// creature, forming a merged permanent. Emitted by `augment.rs`.
+    /// `merged_id` is the surviving permanent's `ObjectId` (the Host
+    /// creature's continuity id); `augmenting_id` is the augment component that
+    /// merged onto it; `controller` is the player who performed the combine.
+    ///
+    /// Distinct from `Mutated`: Augment reuses merge-like bookkeeping but is a
+    /// separate mechanic and must not satisfy `TriggerMode::Mutates`.
+    Augmented {
+        merged_id: ObjectId,
+        augmenting_id: ObjectId,
         controller: PlayerId,
     },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
@@ -701,6 +715,11 @@ pub enum GameEvent {
     AttractionOpened {
         player_id: PlayerId,
         object_id: ObjectId,
+    },
+    StickerPlaced {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        kind: StickerKind,
     },
     /// CR 701.52: The active player rolled to visit their Attractions.
     AttractionsRolledToVisit {

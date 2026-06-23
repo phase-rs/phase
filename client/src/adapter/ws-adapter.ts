@@ -24,6 +24,7 @@ export interface DeckData {
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
+  sticker_sheets?: string[];
 }
 
 /**

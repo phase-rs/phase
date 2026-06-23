@@ -1295,4 +1295,69 @@ mod tests {
             "cast source must be excluded from pitch eligibility"
         );
     }
+
+    /// CR 702.138a (#3281): Uro's escape additional cost uses a typed graveyard
+    /// filter (`card` + `you` + `another` + `in graveyard`). Payability must
+    /// match the simpler `filter: None` escape cards (Phlage class).
+    #[test]
+    fn escape_exile_five_other_graveyard_cards_with_typed_filter() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::ControllerRef;
+
+        let mut scenario = GameScenario::new();
+        let uro = scenario
+            .add_creature_to_graveyard(P0, "Uro, Titan of Nature's Wrath", 6, 6)
+            .id();
+        let cost = AbilityCost::Exile {
+            count: 5,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            )),
+        };
+
+        for idx in 0..4 {
+            scenario.add_creature_to_graveyard(P0, &format!("Filler {idx}"), 1, 1);
+        }
+        assert!(
+            !cost.is_payable(&scenario.state, P0, uro),
+            "four other graveyard cards is not enough to escape"
+        );
+
+        scenario.add_creature_to_graveyard(P0, "Filler 4", 1, 1);
+        assert!(
+            cost.is_payable(&scenario.state, P0, uro),
+            "five other graveyard cards must satisfy Uro's escape exile cost"
+        );
+
+        let eligible = super::eligible_exile_cost_objects(
+            &scenario.state,
+            P0,
+            uro,
+            Zone::Graveyard,
+            Some(&TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            )),
+            5,
+        );
+        assert!(
+            !eligible.contains(&uro),
+            "the escape card itself must not be eligible exile material"
+        );
+        assert_eq!(eligible.len(), 5, "exactly five other cards are eligible");
+    }
 }

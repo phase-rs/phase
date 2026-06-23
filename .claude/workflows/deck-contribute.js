@@ -273,6 +273,7 @@ function clusterPrompt(unsupported) {
     `PRIMARY reason it is unsupported — usually a missing keyword/mechanic ` +
     `(Suspend, Bestow, Cascade, Madness, ...), a missing shared effect, or a ` +
     `missing replacement/trigger primitive. Cross-check data/engine-inventory.json ` +
+    `(gitignored — run \`cargo engine-inventory\` to (re)generate it locally first) ` +
     `to name the gap precisely.\n` +
     `Then:\n` +
     `- mechanicClusters: cards that share the SAME missing reusable mechanic ` +

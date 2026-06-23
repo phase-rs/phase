@@ -964,6 +964,8 @@ pub(crate) fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFil
         TypeFilter::Sorcery => face.card_type.core_types.contains(&CoreType::Sorcery),
         TypeFilter::Planeswalker => face.card_type.core_types.contains(&CoreType::Planeswalker),
         TypeFilter::Battle => face.card_type.core_types.contains(&CoreType::Battle),
+        // CR 308.1: Kindred card-type check.
+        TypeFilter::Kindred => face.card_type.core_types.contains(&CoreType::Kindred),
         TypeFilter::Permanent => face
             .card_type
             .core_types
@@ -1393,6 +1395,12 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::Opponent => {
                         if source_controller == Some(obj_ctrl) {
+                            return false;
+                        }
+                        // CR 102.3 + CR 800.4a: A player who has left the game is
+                        // not an opponent; cards in their zones are not legal
+                        // targets (Captain N'ghathrod class).
+                        if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }
                     }
@@ -1966,6 +1974,10 @@ fn subtype_matches_with_changeling(
     false
 }
 
+fn subtype_matches_host_supertype(subtype: &str, supertypes: &[Supertype]) -> bool {
+    subtype.eq_ignore_ascii_case("host") && supertypes.contains(&Supertype::Host)
+}
+
 /// Check if an object matches a TypeFilter variant.
 /// Check if an object's card types match a `TypeFilter`.
 /// CR 205.2a: Each card type has its own rules for how it behaves.
@@ -1988,6 +2000,8 @@ pub fn type_filter_matches(
         TypeFilter::Planeswalker => obj.card_types.core_types.contains(&CoreType::Planeswalker),
         // CR 310: Battle type check.
         TypeFilter::Battle => obj.card_types.core_types.contains(&CoreType::Battle),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => obj.card_types.core_types.contains(&CoreType::Kindred),
         // CR 403.3: Permanents exist only on the battlefield — creatures, artifacts, enchantments, lands, planeswalkers, battles.
         TypeFilter::Permanent => {
             obj.card_types.core_types.contains(&CoreType::Creature)
@@ -2003,12 +2017,14 @@ pub fn type_filter_matches(
         // expands Changeling into `obj.card_types.subtypes`, but for cards in
         // library/hand/graveyard/exile the helper below handles the expansion
         // by inspecting `obj.keywords` and the runtime creature-type catalog.
-        TypeFilter::Subtype(ref sub) => subtype_matches_with_changeling(
-            sub,
-            &obj.card_types.subtypes,
-            &obj.keywords,
-            all_creature_types,
-        ),
+        TypeFilter::Subtype(ref sub) => {
+            subtype_matches_with_changeling(
+                sub,
+                &obj.card_types.subtypes,
+                &obj.keywords,
+                all_creature_types,
+            ) || subtype_matches_host_supertype(sub, &obj.card_types.supertypes)
+        }
         // CR 608.2b: Disjunction — matches if any inner filter matches.
         TypeFilter::AnyOf(ref filters) => filters
             .iter()
@@ -2030,6 +2046,8 @@ fn zone_change_record_matches_type_filter(
         TypeFilter::Sorcery => record.core_types.contains(&CoreType::Sorcery),
         TypeFilter::Planeswalker => record.core_types.contains(&CoreType::Planeswalker),
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -2045,12 +2063,14 @@ fn zone_change_record_matches_type_filter(
         // CR 205.3 + CR 702.73a: Subtype match through the Changeling helper —
         // zone-change records snapshot the object's keywords, so Changeling
         // travels with the snapshot.
-        TypeFilter::Subtype(subtype) => subtype_matches_with_changeling(
-            subtype,
-            &record.subtypes,
-            &record.keywords,
-            all_creature_types,
-        ),
+        TypeFilter::Subtype(subtype) => {
+            subtype_matches_with_changeling(
+                subtype,
+                &record.subtypes,
+                &record.keywords,
+                all_creature_types,
+            ) || subtype_matches_host_supertype(subtype, &record.supertypes)
+        }
         TypeFilter::AnyOf(filters) => filters
             .iter()
             .any(|inner| zone_change_record_matches_type_filter(record, inner, all_creature_types)),
@@ -2549,6 +2569,8 @@ fn spell_record_matches_type_filter(
         TypeFilter::Sorcery => record.core_types.contains(&CoreType::Sorcery),
         TypeFilter::Planeswalker => record.core_types.contains(&CoreType::Planeswalker),
         TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
         TypeFilter::Permanent => {
             record.core_types.contains(&CoreType::Creature)
                 || record.core_types.contains(&CoreType::Artifact)
@@ -2564,12 +2586,14 @@ fn spell_record_matches_type_filter(
         // CR 205.3 + CR 702.73a: Spell-cast records snapshot keywords, so
         // Ur-Dragon's "Dragon spells you cast" matches Mistform Ultimus on the
         // stack via Changeling.
-        TypeFilter::Subtype(subtype) => subtype_matches_with_changeling(
-            subtype,
-            &record.subtypes,
-            &record.keywords,
-            all_creature_types,
-        ),
+        TypeFilter::Subtype(subtype) => {
+            subtype_matches_with_changeling(
+                subtype,
+                &record.subtypes,
+                &record.keywords,
+                all_creature_types,
+            ) || subtype_matches_host_supertype(subtype, &record.supertypes)
+        }
         TypeFilter::AnyOf(filters) => filters
             .iter()
             .any(|inner| spell_record_matches_type_filter(record, inner, all_creature_types)),
@@ -3220,7 +3244,9 @@ fn matches_filter_prop(
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(obj.owner),
             ControllerRef::Opponent => {
-                source.controller.is_some() && source.controller != Some(obj.owner)
+                source.controller.is_some()
+                    && source.controller != Some(obj.owner)
+                    && super::players::is_alive(state, obj.owner)
             }
             ControllerRef::ScopedPlayer => {
                 scoped_player_or_controller(state, source.ability, source.controller, None)
@@ -3834,7 +3860,9 @@ fn zone_change_record_matches_property(
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(record.owner),
             ControllerRef::Opponent => {
-                source.controller.is_some() && source.controller != Some(record.owner)
+                source.controller.is_some()
+                    && source.controller != Some(record.owner)
+                    && super::players::is_alive(state, record.owner)
             }
             ControllerRef::ScopedPlayer => {
                 scoped_player_or_controller(state, source.ability, source.controller, None)

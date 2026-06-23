@@ -199,7 +199,13 @@
     "unknown": "Nieznane {{count}}",
     "unknownCardsTitle": "Nieznane karty:\n{{cards}}",
     "unsupportedTitle": "Nieobsługiwane ({{unique}} unikalnych, {{copies}} kopii):\n{{cards}}",
-    "setIconAlt": "Ikona dodatku {{code}}"
+    "setIconAlt": "Ikona dodatku {{code}}",
+    "actionsMenu": "Opcje talii",
+    "star": "Oznacz gwiazdką",
+    "unstar": "Usuń gwiazdkę",
+    "moveToFolder": "Przenieś do folderu",
+    "unfiled": "Bez folderu",
+    "newFolder": "Nowy folder…"
   },
   "myDecks": {
     "headingManage": "Moje talie",
@@ -254,7 +260,11 @@
     "loadMore": "Wczytaj więcej",
     "selectedDeck": "Wybrana talia",
     "chooseDeckToContinue": "Wybierz talię, aby kontynuować",
-    "filterAll": "Wszystkie"
+    "filterAll": "Wszystkie",
+    "sectionStarred": "Ulubione",
+    "sectionUnfiled": "Bez folderu",
+    "collapseAll": "Zwiń wszystko",
+    "expandAll": "Rozwiń wszystko"
   },
   "subscriptions": {
     "emptyTitle": "Brak subskrypcji kanałów",
@@ -281,5 +291,16 @@
     "alpha": "Alfa",
     "profile": "Profil",
     "settings": "Ustawienia"
+  },
+  "folder": {
+    "actionsMenu": "Opcje folderu",
+    "rename": "Zmień nazwę",
+    "delete": "Usuń",
+    "newFolder": "Nowy folder",
+    "newFolderPrompt": "Nazwa folderu:",
+    "renamePrompt": "Zmień nazwę folderu:",
+    "deleteConfirm": "Usunąć folder „{{name}}”? Talie zostaną przeniesione do „Bez folderu”.",
+    "emptyHint": "Ten folder jest pusty.",
+    "unfiledEmptyHint": "Brak talii bez folderu."
   }
 }

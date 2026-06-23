@@ -1,9 +1,11 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
-import { MenuSelect } from "../ui/MenuSelect";
+import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
+import { useDeckFolders } from "../../hooks/useDeckFolders";
 
 function PencilIcon({ className }: { className?: string }) {
   return (
@@ -50,6 +52,31 @@ export function DeckBuilderToolbar({
     label,
   }));
 
+  // Folder-aware deck switcher: group the saved decks the same way the library
+  // does so jumping between decks while editing mirrors the library structure.
+  const { group } = useDeckFolders();
+  const grouped = useMemo(() => group(savedDecks), [group, savedDecks]);
+  const isOrganized =
+    grouped.starred.length > 0 || grouped.folders.some((entry) => entry.decks.length > 0);
+  const deckGroups = useMemo<MenuSelectGroup[]>(() => {
+    const toItems = (names: string[]) => names.map((name) => ({ value: name, label: name }));
+    const result: MenuSelectGroup[] = [];
+    if (grouped.starred.length > 0) {
+      result.push({ label: t("switcher.starred"), items: toItems(grouped.starred) });
+    }
+    for (const { folder, decks } of grouped.folders) {
+      if (decks.length > 0) result.push({ label: folder.name, items: toItems(decks) });
+    }
+    if (grouped.unfiled.length > 0) {
+      result.push({ label: t("switcher.unfiled"), items: toItems(grouped.unfiled) });
+    }
+    return result;
+  }, [grouped, t]);
+  const flatDeckItems = useMemo(
+    () => savedDecks.map((name) => ({ value: name, label: name })),
+    [savedDecks],
+  );
+
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-white/8 bg-black/18 px-3 py-2 backdrop-blur-md lg:px-4">
       <div className="flex min-w-0 flex-1 items-center gap-3 lg:flex-none">
@@ -92,7 +119,8 @@ export function DeckBuilderToolbar({
           selectedValue={format}
           items={formatMenuItems}
           onSelect={(value) => onFormatChange(value as GameFormat)}
-          wrapperClassName="w-full lg:hidden"
+          fitContainer
+          wrapperClassName="w-full min-w-0 lg:hidden"
         />
         <div className="hidden lg:block">
           <FormatFilter selected={format} onChange={onFormatChange} />
@@ -124,7 +152,12 @@ export function DeckBuilderToolbar({
         {savedDecks.length > 0 && (
           <MenuSelect
             label={t("toolbar.loadDeck")}
-            items={savedDecks.map((name) => ({ value: name, label: name }))}
+            items={isOrganized ? undefined : flatDeckItems}
+            groups={isOrganized ? deckGroups : undefined}
+            selectedValue={deckName}
+            filterable={savedDecks.length > 8}
+            filterPlaceholder={t("switcher.searchPlaceholder")}
+            noMatchesLabel={t("switcher.noMatches")}
             onSelect={onLoad}
             wrapperClassName="min-w-0 w-full lg:w-auto lg:shrink-0"
           />

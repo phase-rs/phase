@@ -299,7 +299,7 @@ mod tests {
             Zone::Battlefield,
         );
         let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         state
             .objects
             .get_mut(&doubler)

@@ -1,0 +1,1442 @@
+[
+  {
+    "name": "Playable Delusionary Hydra",
+    "names": [
+      "Playable",
+      "Delusionary",
+      "Hydra"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Draw a card, then discard a card."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature attacks, you gain 3 life and draw a card."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 5
+      },
+      {
+        "cost": 3,
+        "power": 4,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Notorious Sliver War",
+    "names": [
+      "Notorious",
+      "Sliver",
+      "War"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{5}: Creatures you control get +1/+1 until end of turn."
+      },
+      {
+        "cost": 3,
+        "text": "Protection from creatures with two or more creature types"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 3
+      },
+      {
+        "cost": 5,
+        "power": 9,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Demonic Tourist Laser",
+    "names": [
+      "Demonic",
+      "Tourist",
+      "Laser"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Outlast {1} ({1}, {T}: Put a +1/+1 counter on this creature. Outlast only as a sorcery.)"
+      },
+      {
+        "cost": 3,
+        "text": "When this permanent dies, you get seven {TK}."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 9,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Night Brushwagg Ringmaster",
+    "names": [
+      "Night",
+      "Brushwagg",
+      "Ringmaster"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Menace"
+      },
+      {
+        "cost": 3,
+        "text": "Persist (When this permanent dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 3
+      },
+      {
+        "cost": 6,
+        "power": 10,
+        "toughness": 10
+      }
+    ]
+  },
+  {
+    "name": "Sassy Gremlin Blood",
+    "names": [
+      "Sassy",
+      "Gremlin",
+      "Blood"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, create a Treasure token."
+      },
+      {
+        "cost": 5,
+        "text": "{3}: Target creature gains flying until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 2
+      },
+      {
+        "cost": 6,
+        "power": 10,
+        "toughness": 10
+      }
+    ]
+  },
+  {
+    "name": "Giant Mana Cake",
+    "names": [
+      "Giant",
+      "Mana",
+      "Cake"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "When this permanent leaves the battlefield, create two Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")"
+      },
+      {
+        "cost": 4,
+        "text": "When this permanent dies, destroy target nonland permanent."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 3
+      },
+      {
+        "cost": 3,
+        "power": 6,
+        "toughness": 2
+      }
+    ]
+  },
+  {
+    "name": "Weird Angel Flame",
+    "names": [
+      "Weird",
+      "Angel",
+      "Flame"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Heroic \u2014 Whenever you cast a spell that targets this permanent, put two +1/+1 counters on it."
+      },
+      {
+        "cost": 3,
+        "text": "Protection from even mana values"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 3
+      },
+      {
+        "cost": 5,
+        "power": 7,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Slimy Burrito Illusion",
+    "names": [
+      "Slimy",
+      "Burrito",
+      "Illusion"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Bushido 2 (Whenever this creature blocks or becomes blocked, it gets +2/+2 until end of turn.)"
+      },
+      {
+        "cost": 3,
+        "text": "Double strike"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 4
+      },
+      {
+        "cost": 4,
+        "power": 5,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Narrow-Minded Baloney Fireworks",
+    "names": [
+      "Narrow-Minded",
+      "Baloney",
+      "Fireworks"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, you gain 2 life."
+      },
+      {
+        "cost": 3,
+        "text": "Vigilance, reach"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 7,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Sticky Kavu Daredevil",
+    "names": [
+      "Sticky",
+      "Kavu",
+      "Daredevil"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this permanent dies, you may return target creature to its owner's hand."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature attacks, creatures you control get +1/+1 until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 3
+      },
+      {
+        "cost": 3,
+        "power": 2,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Snazzy Aether Homunculus",
+    "names": [
+      "Snazzy",
+      "Aether",
+      "Homunculus"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{1}: Target creature gains all creature types until end of turn."
+      },
+      {
+        "cost": 3,
+        "text": "Magecraft \u2014 Whenever you cast or copy an instant or sorcery spell, draw a card."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 8,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Familiar Beeble Mascot",
+    "names": [
+      "Familiar",
+      "Beeble",
+      "Mascot"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, untap target permanent."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever a creature enters under your control, creatures you control get +1/+1 until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 3
+      },
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 3
+      }
+    ]
+  },
+  {
+    "name": "Deep-Fried Plague Myr",
+    "names": [
+      "Deep-Fried",
+      "Plague",
+      "Myr"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, scry 1."
+      },
+      {
+        "cost": 3,
+        "text": "Whenever this permanent leaves the battlefield, you may destroy target artifact or enchantment."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 3,
+        "power": 4,
+        "toughness": 5
+      },
+      {
+        "cost": 4,
+        "power": 8,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Unsanctioned Ancient Juggler",
+    "names": [
+      "Unsanctioned",
+      "Ancient",
+      "Juggler"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, bolster 1. (Choose a creature with the least toughness among creatures you control and put a +1/+1 counter on it.)"
+      },
+      {
+        "cost": 4,
+        "text": "Indestructible"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 2
+      },
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Ancestral Hot Dog Minotaur",
+    "names": [
+      "Ancestral",
+      "Hot Dog",
+      "Minotaur"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Afflict 2 (Whenever this creature becomes blocked, defending player loses 2 life.)"
+      },
+      {
+        "cost": 3,
+        "text": "Flying"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 8,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Yawgmoth Merfolk Soul",
+    "names": [
+      "Yawgmoth",
+      "Merfolk",
+      "Soul"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "When this permanent leaves the battlefield, target player discards a card."
+      },
+      {
+        "cost": 5,
+        "text": "When this permanent leaves the battlefield, create five 1/1 white Clown Robot artifact creature tokens."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 3
+      },
+      {
+        "cost": 4,
+        "power": 6,
+        "toughness": 5
+      }
+    ]
+  },
+  {
+    "name": "Cursed Firebreathing Yogurt",
+    "names": [
+      "Cursed",
+      "Firebreathing",
+      "Yogurt"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Prowess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)"
+      },
+      {
+        "cost": 5,
+        "text": "{2}, {T}: This permanent deals 2 damage to any target."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 2
+      },
+      {
+        "cost": 4,
+        "power": 4,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Wild Ogre Bupkis",
+    "names": [
+      "Wild",
+      "Ogre",
+      "Bupkis"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, put a +1/+1 counter on it."
+      },
+      {
+        "cost": 3,
+        "text": "Metalcraft \u2014 This permanent has protection from noncreature permanents as long as you control three or more artifacts."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 5,
+        "toughness": 1
+      },
+      {
+        "cost": 4,
+        "power": 7,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Elemental Time Flamingo",
+    "names": [
+      "Elemental",
+      "Time",
+      "Flamingo"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Exile this permanent: You may cast target nonland card from your graveyard this turn."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever a creature you control dies, each opponent loses 1 life and you gain 1 life."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 5
+      },
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Squid Fire Knight",
+    "names": [
+      "Squid",
+      "Fire",
+      "Knight"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: The next time target player would roll one or more dice this turn, instead they roll that many dice plus one, then you choose one of those rolls to ignore."
+      },
+      {
+        "cost": 3,
+        "text": "Protection from odd mana values"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 1
+      },
+      {
+        "cost": 4,
+        "power": 6,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Eternal Acrobat Toast",
+    "names": [
+      "Eternal",
+      "Acrobat",
+      "Toast"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature deals combat damage to a player, exile target creature you control, then return it to the battlefield under its owner's control."
+      },
+      {
+        "cost": 3,
+        "text": "{T}: Untap another target permanent."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 3,
+        "power": 4,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 7,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Misunderstood Trapeze Elf",
+    "names": [
+      "Misunderstood",
+      "Trapeze",
+      "Elf"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever you cast a spell, this creature gets +X/+X until end of turn, where X is the amount of generic mana in that spell's mana cost."
+      },
+      {
+        "cost": 3,
+        "text": "Hexproof"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 2
+      },
+      {
+        "cost": 4,
+        "power": 6,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Eldrazi Guacamole Tightrope",
+    "names": [
+      "Eldrazi",
+      "Guacamole",
+      "Tightrope"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Haste"
+      },
+      {
+        "cost": 5,
+        "text": "You may cast this card from your graveyard by paying 2 life in addition to paying its other costs."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 4
+      },
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 3
+      }
+    ]
+  },
+  {
+    "name": "Contortionist Otter Storm",
+    "names": [
+      "Contortionist",
+      "Otter",
+      "Storm"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Target creature gains haste until end of turn."
+      },
+      {
+        "cost": 4,
+        "text": "Deathtouch, lifelink"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 5,
+        "toughness": 1
+      },
+      {
+        "cost": 3,
+        "power": 3,
+        "toughness": 5
+      }
+    ]
+  },
+  {
+    "name": "Unstable Robot Dragon",
+    "names": [
+      "Unstable",
+      "Robot",
+      "Dragon"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{1}: Switch this creature's power and toughness until end of turn."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature attacks, it gets +5/+5 until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 2
+      },
+      {
+        "cost": 3,
+        "power": 2,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Unassuming Gelatinous Serpent",
+    "names": [
+      "Unassuming",
+      "Gelatinous",
+      "Serpent"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "When this permanent dies, return target noncreature, nonland card from your graveyard to your hand."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature deals combat damage to a player, that player mills twice that many cards."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 3
+      },
+      {
+        "cost": 3,
+        "power": 7,
+        "toughness": 2
+      }
+    ]
+  },
+  {
+    "name": "Spooky Clown Mox",
+    "names": [
+      "Spooky",
+      "Clown",
+      "Mox"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Vigilance"
+      },
+      {
+        "cost": 4,
+        "text": "{1}, {T}: Tap target creature."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 5
+      },
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Zombie Cheese Magician",
+    "names": [
+      "Zombie",
+      "Cheese",
+      "Magician"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "First strike"
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature deals combat damage to a player, draw that many cards."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 3
+      },
+      {
+        "cost": 3,
+        "power": 6,
+        "toughness": 2
+      }
+    ]
+  },
+  {
+    "name": "Trained Blessed Mind",
+    "names": [
+      "Trained",
+      "Blessed",
+      "Mind"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Exile target card from a graveyard."
+      },
+      {
+        "cost": 3,
+        "text": "Threshold \u2014 As long as seven or more cards are in your graveyard, this creature gets +4/+0 and has trample."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 2
+      },
+      {
+        "cost": 5,
+        "power": 6,
+        "toughness": 9
+      }
+    ]
+  },
+  {
+    "name": "Urza's Dark Cannonball",
+    "names": [
+      "Urza's",
+      "Dark",
+      "Cannonball"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Exalted, exalted (Whenever a creature you control attacks alone, it gets +1/+1 until end of turn for each instance of exalted among permanents you control.)"
+      },
+      {
+        "cost": 3,
+        "text": "Shadow (This creature can block or be blocked only by creatures with shadow.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 5
+      },
+      {
+        "cost": 4,
+        "power": 7,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Goblin Coward Parade",
+    "names": [
+      "Goblin",
+      "Coward",
+      "Parade"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Mentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)"
+      },
+      {
+        "cost": 3,
+        "text": "When this permanent leaves the battlefield, you may destroy target creature with power 4 or greater."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 3
+      },
+      {
+        "cost": 4,
+        "power": 8,
+        "toughness": 4
+      }
+    ]
+  },
+  {
+    "name": "Carnival Elephant Meteor",
+    "names": [
+      "Carnival",
+      "Elephant",
+      "Meteor"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Sacrifice this permanent: Draw two cards."
+      },
+      {
+        "cost": 3,
+        "text": "Whenever this creature attacks, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 1
+      },
+      {
+        "cost": 5,
+        "power": 8,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Unique Charmed Pants",
+    "names": [
+      "Unique",
+      "Charmed",
+      "Pants"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Add one mana of any color."
+      },
+      {
+        "cost": 3,
+        "text": "Whenever this creature attacks, if it's not a Brushwagg, it gets +X/+0 until end of turn, where X is the number of supertypes, card types, and subtypes it has."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 5,
+        "toughness": 1
+      },
+      {
+        "cost": 4,
+        "power": 4,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Werewolf Lightning Mage",
+    "names": [
+      "Werewolf",
+      "Lightning",
+      "Mage"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Landfall \u2014 Whenever a land enters under your control, put a +1/+1 counter on this permanent."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever a creature blocks this creature, that creature gets -4/-4 until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 1
+      },
+      {
+        "cost": 3,
+        "power": 3,
+        "toughness": 5
+      }
+    ]
+  },
+  {
+    "name": "Primal Elder Kitty",
+    "names": [
+      "Primal",
+      "Elder",
+      "Kitty"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{1}: This creature gets +1/-1 until end of turn."
+      },
+      {
+        "cost": 3,
+        "text": "When this creature dies, you may put X +1/+1 counters on target creature, where X is this creature's power."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 5,
+        "toughness": 1
+      },
+      {
+        "cost": 4,
+        "power": 4,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Cool Fluffy Loxodon",
+    "names": [
+      "Cool",
+      "Fluffy",
+      "Loxodon"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "When this permanent leaves the battlefield, draw a card."
+      },
+      {
+        "cost": 5,
+        "text": "Whenever a creature enters under your control, this permanent becomes a 13/13 Eldrazi creature in addition to its other types until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 2
+      },
+      {
+        "cost": 4,
+        "power": 5,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Vampire Champion Fury",
+    "names": [
+      "Vampire",
+      "Champion",
+      "Fury"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Hellbent \u2014 This creature gets +3/+3 as long as you have no cards in hand."
+      },
+      {
+        "cost": 4,
+        "text": "{2}, Sacrifice this creature: It deals X damage divided as you choose among any number of target creatures, where X is its power."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 5
+      },
+      {
+        "cost": 3,
+        "power": 6,
+        "toughness": 3
+      }
+    ]
+  },
+  {
+    "name": "Geek Lotus Warrior",
+    "names": [
+      "Geek",
+      "Lotus",
+      "Warrior"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{2}: This creature gets +2/+0 until end of turn."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever a creature enters under your control, this permanent deals 2 damage to target player."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 1
+      },
+      {
+        "cost": 3,
+        "power": 3,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Happy Dead Squirrel",
+    "names": [
+      "Happy",
+      "Dead",
+      "Squirrel"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Add {C}{C}. Spend this mana only to cast noncreature spells."
+      },
+      {
+        "cost": 3,
+        "text": "Infect (This permanent deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 2
+      },
+      {
+        "cost": 4,
+        "power": 4,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Mystic Doom Sandwich",
+    "names": [
+      "Mystic",
+      "Doom",
+      "Sandwich"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Lifelink"
+      },
+      {
+        "cost": 3,
+        "text": "This creature must be blocked if able. Whenever this creature becomes blocked, it gets +1/+1 until end of turn for each creature blocking it."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 1,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 6,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Squishy Sphinx Ninja",
+    "names": [
+      "Squishy",
+      "Sphinx",
+      "Ninja"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Ward {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)"
+      },
+      {
+        "cost": 4,
+        "text": "Provoke (Whenever this creature attacks, you may have target creature defending player controls untap and block it if able.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 3,
+        "power": 5,
+        "toughness": 3
+      },
+      {
+        "cost": 5,
+        "power": 7,
+        "toughness": 7
+      }
+    ]
+  },
+  {
+    "name": "Phyrexian Midway Bamboozle",
+    "names": [
+      "Phyrexian",
+      "Midway",
+      "Bamboozle"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Whenever this creature attacks, you get {TK}."
+      },
+      {
+        "cost": 3,
+        "text": "Undying (When this creature dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 2
+      },
+      {
+        "cost": 5,
+        "power": 6,
+        "toughness": 9
+      }
+    ]
+  },
+  {
+    "name": "Unhinged Beast Hunt",
+    "names": [
+      "Unhinged",
+      "Beast",
+      "Hunt"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: You gain 1 life."
+      },
+      {
+        "cost": 4,
+        "text": "Whenever this creature attacks, tap each creature an opponent controls with the same power and/or same toughness as this creature."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 4,
+        "toughness": 1
+      },
+      {
+        "cost": 3,
+        "power": 2,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Unglued Pea-Brained Dinosaur",
+    "names": [
+      "Unglued",
+      "Pea-Brained",
+      "Dinosaur"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{T}: Add {2}. Spend this mana only to cast creature spells."
+      },
+      {
+        "cost": 4,
+        "text": "At the beginning of combat on your turn, target noncreature artifact you control becomes a 4/4 artifact creature with flying until end of turn."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 4
+      },
+      {
+        "cost": 5,
+        "power": 8,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Trendy Circus Pirate",
+    "names": [
+      "Trendy",
+      "Circus",
+      "Pirate"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Deathtouch"
+      },
+      {
+        "cost": 5,
+        "text": "Whenever this creature deals combat damage to a player, create that many 1/1 green Squirrel creature tokens."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 5,
+        "toughness": 1
+      },
+      {
+        "cost": 3,
+        "power": 3,
+        "toughness": 6
+      }
+    ]
+  },
+  {
+    "name": "Wrinkly Monkey Shenanigans",
+    "names": [
+      "Wrinkly",
+      "Monkey",
+      "Shenanigans"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "{1}: Target creature can't block this creature this turn."
+      },
+      {
+        "cost": 4,
+        "text": "Morbid \u2014 At the beginning of each end step, if a creature died this turn and this permanent is a creature, put a -1/-1 counter on this permanent and draw a card."
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 2,
+        "toughness": 4
+      },
+      {
+        "cost": 3,
+        "power": 7,
+        "toughness": 2
+      }
+    ]
+  },
+  {
+    "name": "Space Fungus Snickerdoodle",
+    "names": [
+      "Space",
+      "Fungus",
+      "Snickerdoodle"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Skulk (This creature can't be blocked by creatures with greater power.)"
+      },
+      {
+        "cost": 3,
+        "text": "Battle cry (Whenever this creature attacks, each other attacking creature gets +1/+0 until end of turn.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 2,
+        "power": 3,
+        "toughness": 2
+      },
+      {
+        "cost": 5,
+        "power": 6,
+        "toughness": 8
+      }
+    ]
+  },
+  {
+    "name": "Jetpack Death Seltzer",
+    "names": [
+      "Jetpack",
+      "Death",
+      "Seltzer"
+    ],
+    "abilities": [
+      {
+        "cost": 2,
+        "text": "Trample"
+      },
+      {
+        "cost": 3,
+        "text": "{3}: Monstrosity 3. (If this creature isn't monstrous, put three +1/+1 counters on it and it becomes monstrous.)"
+      }
+    ],
+    "power_toughness": [
+      {
+        "cost": 3,
+        "power": 2,
+        "toughness": 7
+      },
+      {
+        "cost": 4,
+        "power": 6,
+        "toughness": 5
+      }
+    ]
+  }
+]

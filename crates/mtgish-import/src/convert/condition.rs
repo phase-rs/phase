@@ -870,6 +870,7 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast {
             zone: None,
             controller: None,
+            owner: None,
         },
         // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {

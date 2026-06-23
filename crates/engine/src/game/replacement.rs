@@ -1607,11 +1607,13 @@ fn draw_replacement_count(
         .as_deref()?;
 
     match &*execute.effect {
-        Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
+        Effect::Draw { count: qty, .. } => {
             // CR 121.2 + CR 614.11a: "draw N cards instead" replacements
             // (Teferi's Ageless Insight: Fixed(2)) apply to each card draw
             // in the draw sequence — Brainsurge drawing four becomes eight,
-            // not two.
+            // not two. Chained riders (Blood Scrivener's life loss, issue
+            // #3305) are resolved via the post-replacement continuation after
+            // the count-modified draw executes.
             let resolved = match qty {
                 QuantityExpr::Fixed { value } => value.saturating_mul(*count as i32),
                 _ => resolve_event_replacement_quantity(qty, *count)?,
@@ -1743,6 +1745,204 @@ fn explore_applier(
                 let mut ability = build_resolved_from_def(def, rid.source, controller);
                 ability.targets = vec![TargetRef::Object(object_id)];
                 let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            }
+        }
+        current = def.sub_ability.as_deref();
+    }
+
+    ApplyResult::Prevented
+}
+
+// --- 4b2. Connive (Leader, Super-Genius) ---
+
+fn connive_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Connive { .. })
+}
+
+/// CR 701.50a + CR 614.5 + CR 616.1f: Apply a connive replacement (Leader,
+/// Super-Genius — "If a creature you control would connive, instead you draw a
+/// card, then that creature connives"). CR 701.50a's replacement reads "you draw
+/// a card, THEN that creature connives" — the "then" fixes the printed order, so
+/// the connive link runs only after the leading draw completes. Runs the
+/// replacement's `execute` chain (the sole production chain is exactly `Draw 1`
+/// then `Connive`) and fully replaces the original connive event (`Prevented`).
+/// The `Connive` link in the chain RE-ENTERS the replacement pipeline via
+/// `propose_connive`, carrying the `applied` set (which already contains this rid
+/// — the loop/resume marked it before the applier ran), so the process repeats
+/// over the OTHER still-applicable connive replacements (CR 616.1f) while
+/// `find_applicable_replacements` excludes this one (CR 614.5) — this replacement
+/// cannot self-invoke.
+///
+/// When the leading draw link itself parks an interactive `ReplacementChoice`
+/// (the controller's own draw is replaced), the applier must NOT run the
+/// `Connive` link early — that would violate CR 701.50a's printed order and
+/// clobber the live draw choice. Instead it defers the remaining `Connive` link
+/// (always a single link for this chain) into the DEDICATED
+/// `state.pending_connive_reentry` slot (NOT `post_replacement_continuation`, so
+/// the shared zone-delivery tail cannot drain it mid-draw) and returns
+/// `Prevented`; the post-replacement-choice epilogue
+/// (`engine_replacement::handle_replacement_choice`) resumes the connive in order
+/// once the parked draw choice resolves. (CR 614.11a — completing a replacement's
+/// actions before resuming a draw sequence — is the analogous supporting
+/// principle.) This parking path is specific to this one caller; it is not a
+/// general mechanism.
+fn connive_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Connive {
+        object_id,
+        count,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        // CR 614.5: carry the captured `applied` set (already marks this rid) so
+        // the fallback survivor event cannot re-apply the same replacement.
+        return ApplyResult::Modified(ProposedEvent::Connive {
+            object_id,
+            count,
+            applied,
+        });
+    };
+    let Some(execute) = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone())
+    else {
+        // CR 614.5: carry the captured `applied` set (already marks this rid) so
+        // the fallback survivor event cannot re-apply the same replacement.
+        return ApplyResult::Modified(ProposedEvent::Connive {
+            object_id,
+            count,
+            applied,
+        });
+    };
+
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::types::ability::TargetRef;
+
+    let controller = source.controller;
+    let mut current = Some(execute.as_ref());
+    while let Some(def) = current {
+        match &*def.effect {
+            // CR 701.50a + CR 701.50e: "then that creature connives" runs the
+            // chain's OWN connive at its parsed count (plain connive = Fixed(1);
+            // connive N = Fixed(N) / dynamic), NOT the replaced event's count.
+            // Resolve the def's QuantityExpr against the conniving permanent as
+            // the target, mirroring the normal connive resolver
+            // (effects/connive.rs).
+            //
+            // Build the ResolvedAbility from `def` directly (NOT a
+            // sub_ability-stripped clone like the `_ =>` arm): resolve_quantity_
+            // with_targets reads only ability.effect/targets/controller/source_id
+            // and never walks `sub_ability`, so the extra clone is unnecessary
+            // here.
+            Effect::Connive {
+                count: connive_count_expr,
+                ..
+            } => {
+                let mut ability = build_resolved_from_def(def, rid.source, controller);
+                ability.targets = vec![TargetRef::Object(object_id)];
+                let connive_count = crate::game::quantity::resolve_quantity_with_targets(
+                    state,
+                    connive_count_expr,
+                    &ability,
+                )
+                .max(0) as u32;
+                // CR 616.1f + CR 614.5: re-propose the nested connive through the
+                // pipeline so OTHER still-applicable connive replacements get
+                // their CR 616.1f repeat. `applied` already contains this rid (the
+                // loop/resume marked it before the applier ran), so
+                // `find_applicable_replacements` excludes it (CR 614.5) — this
+                // replacement cannot self-invoke. The link's OWN parsed count
+                // (Fixed(1)/N) still seeds the re-proposed event, preserving the
+                // count fix. The chain loop may drive multiple links, so clone the
+                // (small) `applied` set per re-entry.
+                let _ = crate::game::effects::connive::propose_connive(
+                    state,
+                    object_id,
+                    connive_count,
+                    applied.clone(),
+                    events,
+                );
+            }
+            // CR 701.50a: "you draw a card" and any other modeled effect in the
+            // chain resolve against the replacement source / conniving permanent.
+            // Resolve THIS link only — `connive_applier`'s loop drives the chain,
+            // so the def's `sub_ability` is stripped before dispatch. Otherwise
+            // `resolve_ability_chain` would also walk the `then ... connives`
+            // sub-link through the propose path and re-trigger this replacement
+            // (infinite recursion; CR 614.5 bars self-invocation).
+            _ => {
+                let mut single = def.clone();
+                single.sub_ability = None;
+                let mut ability = build_resolved_from_def(&single, rid.source, controller);
+                ability.targets = vec![TargetRef::Object(object_id)];
+                let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+
+                // CR 701.50a + CR 614.5 + CR 616.1f: if this draw link parked an
+                // interactive ReplacementChoice (the controller's own draw is
+                // itself replaced) and its successor is the `then ... connives`
+                // link, the connive must NOT run now — CR 701.50a's "then" fixes
+                // the printed order. Defer the connive into the dedicated
+                // `state.pending_connive_reentry` slot (resumed by the
+                // post-replacement-choice epilogue once the parked draw choice
+                // resolves) and return `Prevented`.
+                //
+                // The park signal is precise: `draw_through_replacement` parks via
+                // `replace_event`'s `NeedsChoice`, which BOTH sets `waiting_for` to
+                // a `ReplacementChoice` AND leaves a live `pending_replacement`
+                // record. A normally-completed draw (the multi-Leader connive
+                // re-entry path) consumes its pending record and leaves
+                // `pending_replacement == None`, so this guard does not misfire on
+                // a stale non-Priority `waiting_for` left by the surrounding
+                // connive-ordering resume. Reached ONLY on the parked-draw +
+                // Connive-successor path; every other case advances the loop
+                // unchanged.
+                if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                    && state.pending_replacement.is_some()
+                {
+                    if let Some(next) = def.sub_ability.as_deref() {
+                        if let Effect::Connive {
+                            count: connive_count_expr,
+                            ..
+                        } = &*next.effect
+                        {
+                            let mut next_ability =
+                                build_resolved_from_def(next, rid.source, controller);
+                            next_ability.targets = vec![TargetRef::Object(object_id)];
+                            let connive_count =
+                                crate::game::quantity::resolve_quantity_with_targets(
+                                    state,
+                                    connive_count_expr,
+                                    &next_ability,
+                                )
+                                .max(0) as u32;
+                            // CR 614.5: `applied` already excludes this rid, so the
+                            // resumed `propose_connive` cannot self-invoke and the
+                            // CR 616.1f repeat covers the remaining connives.
+                            // Dedicated slot (NOT post_replacement_continuation) so
+                            // the leading draw's DeliveryTail drain cannot consume it
+                            // mid-draw; the post-replacement-choice epilogue drains
+                            // it after the draw fully delivers (CR 701.50a order).
+                            if state.pending_connive_reentry.is_none() {
+                                state.pending_connive_reentry =
+                                    Some(crate::types::game_state::PendingConniveReentry {
+                                        conniver: object_id,
+                                        count: connive_count,
+                                        applied: applied.clone(),
+                                    });
+                            }
+                            return ApplyResult::Prevented;
+                        }
+                    }
+                }
             }
         }
         current = def.sub_ability.as_deref();
@@ -1947,7 +2147,7 @@ fn gain_life_applier(
         } = event
         {
             let new_amount = match modification {
-                QuantityModification::Double => amount.saturating_mul(2),
+                QuantityModification::Times { factor } => amount.saturating_mul(factor),
                 QuantityModification::Half => amount / 2,
                 QuantityModification::Plus { value } => amount.saturating_add(value),
                 QuantityModification::Minus { value } => amount.saturating_sub(value),
@@ -2155,7 +2355,7 @@ fn add_counter_applier(
         return ApplyResult::Prevented;
     }
     let new_count = |count: u32| match modification {
-        QuantityModification::Double => count.saturating_mul(2),
+        QuantityModification::Times { factor } => count.saturating_mul(factor),
         QuantityModification::Half => count / 2,
         QuantityModification::Plus { value } => count.saturating_add(value),
         QuantityModification::Minus { value } => count.saturating_sub(value),
@@ -2305,7 +2505,7 @@ fn create_token_applier(
         }
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
-            Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Times { factor }) => count.saturating_mul(factor),
             Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
@@ -3056,6 +3256,15 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: explore_applier,
         },
     );
+    // CR 701.50a + CR 614.1a: Connive replacements (Leader, Super-Genius)
+    // intercept "a creature would connive" and substitute a modified action.
+    registry.insert(
+        ReplacementEvent::Connive,
+        ReplacementHandlerEntry {
+            matcher: connive_matcher,
+            applier: connive_applier,
+        },
+    );
     registry.insert(
         ReplacementEvent::CoinFlip,
         ReplacementHandlerEntry {
@@ -3376,6 +3585,35 @@ fn matches_damage_target_filter(
 }
 
 // --- Pipeline functions ---
+
+/// CR 702.26f + CR 611.2b: "for as long as you control [source]" applicability
+/// gate — true only while the captured originating source is on the battlefield,
+/// still controlled by the captured installer, AND phased in. A "for as long as"
+/// duration that tracks a permanent ends when that permanent phases out because
+/// the effect can no longer see it (CR 702.26f); per CR 702.26b/d a phased-out
+/// permanent is treated as not on the battlefield and not under its controller's
+/// control even though phasing never changes its zone or controller, so it lapses
+/// this duration (CR 611.2b: the duration ends and does not begin again).
+/// CR 613.1b: the captured control reference is a Layer-2 control concept.
+/// Single authority shared by the `ControllerControlsSource` condition arm (live
+/// re-evaluation) and the layer-pass lapse prune
+/// (`layers::prune_lapsed_controller_controls_source`), so both agree on exactly
+/// when the CR 611.2b duration has ended.
+pub(crate) fn controller_controls_source_gate(
+    state: &GameState,
+    source: ObjectId,
+    installer: PlayerId,
+) -> bool {
+    state.objects.get(&source).is_some_and(|o| {
+        // CR 702.26f: a "for as long as you control ~" continuous effect that
+        // tracks a permanent ends when that permanent phases out, because the
+        // effect can no longer see it (CR 611.2b: the duration ends and does not
+        // begin again). CR 702.26b/d: phasing never changes zone or controller,
+        // so the zone/controller checks alone would wrongly keep this gate true;
+        // the phased-in requirement is load-bearing.
+        o.zone == Zone::Battlefield && o.controller == installer && o.is_phased_in()
+    })
+}
 
 /// Evaluate a replacement condition against the current game state.
 /// Returns `true` if the replacement should apply, `false` if it should be skipped.
@@ -3801,6 +4039,19 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.class_level >= Some(*level)),
+        // CR 611.2b: "for as long as you control [source]" — the replacement
+        // applies only while the captured source object is on the battlefield AND
+        // still controlled by the captured installing player. Either departure
+        // (leaving play, or a control swap) ends the continuous effect, matching
+        // the Master Thief example. Both `source` and `controller` are captured at
+        // install time and refer to the ORIGINATING source (e.g. Spider-Woman) and
+        // its controller — NOT the host the replacement rides on, so the threaded
+        // `controller`/`source_id` (which describe that host) are deliberately
+        // ignored here.
+        ReplacementCondition::ControllerControlsSource {
+            source,
+            controller: installer,
+        } => controller_controls_source_gate(state, *source, *installer),
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -4255,7 +4506,7 @@ pub fn find_applicable_replacements(
                             if !matches!(
                                 repl_def.quantity_modification,
                                 Some(
-                                    QuantityModification::Double
+                                    QuantityModification::Times { .. }
                                         | QuantityModification::Half
                                         | QuantityModification::Plus { .. }
                                         | QuantityModification::Minus { .. }
@@ -5013,6 +5264,20 @@ fn apply_single_replacement(
                         Some(PostReplacementContinuation::Resolved(runtime))
                     } else {
                         repl_def.execute.as_deref().and_then(|def| {
+                            // CR 608.2c + CR 614.11: Draw-count replacements with
+                            // chained riders (Blood Scrivener: draw two, then lose
+                            // 1 life) modify the draw via `draw_replacement_count`
+                            // and stash only the rider chain for post-draw drain.
+                            if matches!(*def.effect, Effect::Draw { .. })
+                                && def.sub_ability.is_some()
+                                && matches!(proposed, ProposedEvent::Draw { .. })
+                                && draw_replacement_count(state, rid, &proposed).is_some()
+                            {
+                                return def
+                                    .sub_ability
+                                    .clone()
+                                    .map(PostReplacementContinuation::Template);
+                            }
                             // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
                             // PutCounter/ChangeZone) in the sub_ability chain to find
                             // the first non-modifier work. Covers both the existing
@@ -5082,6 +5347,19 @@ fn apply_single_replacement(
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
                 )
             });
+            // CR 701.50a + CR 614.5: The connive applier runs the entire
+            // replacement `execute` chain ("instead you draw a card, then that
+            // creature connives") itself and returns `Prevented`. Stashing the
+            // same chain as a post-replacement continuation would re-run it when
+            // the continuation drains (e.g. after the connive's `ConniveDiscard`
+            // choice resolves), executing the modified action twice. The applier
+            // is the single authority for this event, so suppress the generic
+            // stash. On its parking path the applier stashes its deferred connive
+            // into the DEDICATED `state.pending_connive_reentry` slot (only the
+            // deferred connive link, not the whole chain), so suppressing this
+            // generic Template stash here does not drop the deferred connive.
+            let post_effect =
+                post_effect.filter(|_| !matches!(proposed, ProposedEvent::Connive { .. }));
             let mut modifiers = event_modifiers_for_ability(ability, state, rid.source, &proposed);
             // CR 110.2a: A self-ETB controller override is carried directly on the
             // replacement definition (not derived from `execute`), parallel to the
@@ -5331,7 +5609,11 @@ impl CommuteClass {
 
 fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
     match modification {
-        QuantityModification::Double => CommuteClass::Multiplicative,
+        // CR 616.1: all multiplicative modifiers commute with each other
+        // (×2 then ×3 == ×3 then ×2), so Doubling Season + Ojer Taq auto-apply
+        // without a degenerate ordering prompt — the same Multiplicative class
+        // as `ManaModification::Multiply` and `DamageModification::Double/Triple`.
+        QuantityModification::Times { .. } => CommuteClass::Multiplicative,
         // CR 616.1: integer halving (rounded down) does NOT commute with ×2 —
         // e.g. count 3 gives ×2÷2 = 3 but ÷2×2 = 2 — so it cannot share the
         // Multiplicative commuting class. The affected player must always choose
@@ -5485,7 +5767,7 @@ fn candidate_materiality(
     // Tekuthal) multiplies the proliferate action count via a `Multiply`
     // `repeat_for`. Two such doublers commute (x2 then x2 == x2 then x2 == x4),
     // so the ordering is immaterial and they must auto-apply — mirroring the
-    // `QuantityModification::Double` -> `Multiplicative` count-write path. Without
+    // `QuantityModification::DOUBLE` -> `Multiplicative` count-write path. Without
     // this they fall to the conservative `Unconditional` default below and force
     // a degenerate CR 616.1 ordering choice. (A non-`Multiply` `repeat_for` is not
     // a doubler and correctly falls through to the conservative default.)
@@ -6443,7 +6725,7 @@ mod tests {
         );
         doubler.replacement_definitions =
             vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
-                .quantity_modification(QuantityModification::Double)]
+                .quantity_modification(QuantityModification::DOUBLE)]
             .into();
         state.objects.insert(doubling_season, doubler);
         state.battlefield.push_back(doubling_season);
@@ -6671,7 +6953,7 @@ mod tests {
         use crate::types::counter::CounterType;
 
         let doubling_season = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         let hardened_scales = ReplacementDefinition::new(ReplacementEvent::AddCounter)
             .quantity_modification(QuantityModification::Plus { value: 1 });
 
@@ -6732,7 +7014,7 @@ mod tests {
         let prevent_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
             .quantity_modification(QuantityModification::Prevent);
         let double_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
 
         let mut state = GameState::new_two_player(42);
         let mut solemnity = GameObject::new(
@@ -11214,7 +11496,7 @@ mod tests {
         let primal_vigor = ObjectId(30);
 
         let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
 
         let mut state = GameState::new_two_player(42);
         let mut ds = GameObject::new(
@@ -11295,6 +11577,117 @@ mod tests {
         assert_eq!(
             count, 8,
             "Three doublers should multiply: 1 * 2 * 2 * 2 = 8"
+        );
+    }
+
+    /// Build a `TokenSpec` of the given core type for replacement-pipeline tests.
+    fn token_spec_of(name: &str, core: CoreType, subtype: &str) -> TokenSpec {
+        use crate::types::proposed_event::TokenCharacteristics;
+        TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: name.to_string(),
+                power: (core == CoreType::Creature).then_some(1),
+                toughness: (core == CoreType::Creature).then_some(1),
+                core_types: vec![core],
+                subtypes: vec![subtype.to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: name.to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: PlayerId(0),
+            attach_to: None,
+        }
+    }
+
+    /// Run the Ojer Taq creature-token replacement against `spec` with the given
+    /// proposed `count`, returning the post-replacement count. Parses the real
+    /// Oracle line so the test exercises parser → pipeline end-to-end.
+    fn ojer_taq_replaced_count(spec: TokenSpec, count: u32) -> u32 {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "If one or more creature tokens would be created under your control, \
+             three times that many of those tokens are created instead.",
+            "Ojer Taq, Deepest Foundation",
+            &[],
+            &["Creature".to_string()],
+            &["God".to_string()],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "Ojer Taq token-multiplier line must parse to exactly one replacement"
+        );
+        let repl = parsed.replacements[0].clone();
+        // CR 614.1a: the multiplier is the parameterized ×N factor (×3 here),
+        // not the legacy ×2 `Double`.
+        assert_eq!(
+            repl.quantity_modification,
+            Some(QuantityModification::Times { factor: 3 }),
+            "Ojer Taq must parse to Times {{ factor: 3 }}"
+        );
+
+        let ojer = ObjectId(10);
+        let mut state = GameState::new_two_player(42);
+        let mut obj = GameObject::new(
+            ojer,
+            CardId(1),
+            PlayerId(0),
+            "Ojer Taq, Deepest Foundation".to_string(),
+            Zone::Battlefield,
+        );
+        obj.replacement_definitions = vec![repl].into();
+        state.objects.insert(ojer, obj);
+        state.battlefield.push_back(ojer);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        match replace_event(&mut state, proposed, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::CreateToken { count, .. }) => count,
+            other => panic!("expected Execute(CreateToken), got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 111.1: Ojer Taq, Deepest Foundation triplicates creature
+    /// tokens created under its controller ("three times that many"). Drives the
+    /// real parser output through `replace_event`: a proposed 2 creature tokens
+    /// resolves to 6. Reverting the ×N parameterization (factor 3 → the old ×2
+    /// `Double`) would yield 4, and dropping the replacement entirely yields 2 —
+    /// so the `== 6` assertion flips on either regression.
+    #[test]
+    fn ojer_taq_triplicates_creature_tokens() {
+        let spec = token_spec_of("Soldier", CoreType::Creature, "Soldier");
+        assert_eq!(
+            ojer_taq_replaced_count(spec, 2),
+            6,
+            "Ojer Taq must triple creature-token creation: 2 * 3 = 6"
+        );
+    }
+
+    /// CR 111.1: Ojer Taq's multiplier is gated on creature tokens ("if one or
+    /// more CREATURE tokens would be created") via `TokenCoreTypeMatches`. A
+    /// non-creature (Treasure artifact) token is NOT triplicated — the proposed
+    /// count passes through unchanged. Discriminates the core-type gate: without
+    /// it, the artifact count would become 6.
+    #[test]
+    fn ojer_taq_does_not_multiply_noncreature_tokens() {
+        let spec = token_spec_of("Treasure", CoreType::Artifact, "Treasure");
+        assert_eq!(
+            ojer_taq_replaced_count(spec, 2),
+            2,
+            "Ojer Taq must leave non-creature token creation untouched"
         );
     }
 
@@ -11578,7 +11971,7 @@ mod tests {
         let bloodletter = ObjectId(10);
         let repl = {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             repl.valid_player = Some(ReplacementPlayerScope::Opponent);
             repl
         };
@@ -11615,7 +12008,7 @@ mod tests {
         let bloodletter = ObjectId(10);
         let repl = {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             repl.valid_player = Some(ReplacementPlayerScope::Opponent);
             repl
         };
@@ -11658,7 +12051,7 @@ mod tests {
         let hardened_scales = ObjectId(20);
 
         let doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         let plus_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
             .quantity_modification(QuantityModification::Plus { value: 1 });
 
@@ -11727,7 +12120,7 @@ mod tests {
         use crate::types::counter::CounterType;
 
         let doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         let halver_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
             .quantity_modification(QuantityModification::Half);
 
@@ -11836,7 +12229,7 @@ mod tests {
             ]);
 
         let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
 
         let mut state = GameState::new_two_player(42);
         let mut m = GameObject::new(
@@ -12024,7 +12417,7 @@ mod tests {
         let tap_effect2 = ObjectId(25);
 
         let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
 
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
             AbilityDefinition::new(
@@ -12353,7 +12746,7 @@ mod tests {
         let target = ObjectId(40);
 
         let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(crate::types::ability::QuantityModification::Double);
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE);
         // Note: counter_match is left as None.
         let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
         let mut creature = crate::game::game_object::GameObject::new(
@@ -12733,7 +13126,7 @@ mod tests {
     fn object_counter_replacement_without_player_scope_ignores_player_counter_events() {
         let source = ObjectId(90);
         let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         let state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
         let registry = build_replacement_registry();
 

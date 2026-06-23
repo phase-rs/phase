@@ -179,6 +179,29 @@ pub fn play_face_down(
     }
 }
 
+/// CR 116.2b + CR 708.7: True when an active `CantBeTurnedFaceUp` static
+/// prohibits turning `object_id` face up. Each such static's affected filter is
+/// resolved from its source controller, so Karlov Watchdog's "permanents your
+/// opponents control" (`controller: Opponent`) scopes to the watchdog
+/// controller's opponents. The timing window ("during your turn") rides on the
+/// static's `condition`, already applied by `battlefield_active_statics`.
+pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id: ObjectId) -> bool {
+    use crate::types::statics::StaticMode;
+    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if !matches!(def.mode, StaticMode::CantBeTurnedFaceUp) {
+            continue;
+        }
+        let Some(filter) = def.affected.as_ref() else {
+            continue;
+        };
+        let ctx = super::filter::FilterContext::from_source(state, source.id);
+        if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
 ///
 /// Validates that the player controls the permanent and that it has morph/disguise
@@ -210,6 +233,18 @@ pub fn turn_face_up(
     if obj.zone != Zone::Battlefield {
         return Err(EngineError::InvalidAction(
             "Object is not on the battlefield".to_string(),
+        ));
+    }
+
+    // CR 116.2b + CR 708.7: a `CantBeTurnedFaceUp` static prohibits turning the
+    // matched permanents face up (Karlov Watchdog: "Permanents your opponents
+    // control can't be turned face up during your turn"). The static's timing
+    // window rides on its `condition` (already gated by `battlefield_active_statics`)
+    // and the affected permanents on its `affected` filter, resolved from the
+    // static's source controller.
+    if is_blocked_by_cant_be_turned_face_up(state, object_id) {
+        return Err(EngineError::InvalidAction(
+            "This permanent can't be turned face up right now".to_string(),
         ));
     }
 
@@ -609,6 +644,76 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    /// CR 116.2b + CR 708.7: Karlov Watchdog — "Permanents your opponents
+    /// control can't be turned face up during your turn." A `CantBeTurnedFaceUp`
+    /// static controlled by P0 blocks P1 from turning their own face-down
+    /// creature up while it is P0's turn (the prohibition's `DuringYourTurn`
+    /// condition), but permits it on P1's own turn. Discriminating: the assert
+    /// `is_err()` on P0's turn flips to a successful turn-up if the prohibition
+    /// check in `turn_face_up` is removed.
+    #[test]
+    fn karlov_watchdog_blocks_opponent_turn_face_up_during_your_turn() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let watchdog_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // P1 controls a face-down morph creature.
+        let face_down = setup_morph_creature(&mut state, opponent);
+        let mut events = Vec::new();
+        play_face_down(&mut state, opponent, face_down, &mut events).unwrap();
+        assert!(state.objects[&face_down].face_down);
+
+        // P0 controls a Karlov-Watchdog-class permanent: "Permanents your
+        // opponents control can't be turned face up during your turn."
+        let watchdog = create_object(
+            &mut state,
+            CardId(0x4A12),
+            watchdog_controller,
+            "Karlov Watchdog".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watchdog).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeTurnedFaceUp)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .controller(ControllerRef::Opponent)
+                            .properties(vec![FilterProp::FaceDown]),
+                    ))
+                    .condition(crate::types::ability::StaticCondition::DuringYourTurn),
+            );
+        }
+
+        // On P0's turn, the opponent's face-down permanent can't be turned up.
+        state.active_player = watchdog_controller;
+        let blocked = turn_face_up(&mut state, opponent, face_down, &mut events);
+        assert!(
+            blocked.is_err(),
+            "during the watchdog controller's turn, the opponent must not be \
+             able to turn their face-down creature up"
+        );
+        assert!(
+            state.objects[&face_down].face_down,
+            "the face-down creature must remain face down while prohibited"
+        );
+
+        // On the opponent's own turn, the prohibition's DuringYourTurn condition
+        // (bound to the watchdog controller) no longer holds, so the turn-up is
+        // permitted.
+        state.active_player = opponent;
+        turn_face_up(&mut state, opponent, face_down, &mut events)
+            .expect("the opponent may turn their creature up on their own turn");
+        assert!(!state.objects[&face_down].face_down);
     }
 
     #[test]

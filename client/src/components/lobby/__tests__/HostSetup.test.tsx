@@ -60,7 +60,8 @@ describe("HostSetup", () => {
       />,
     );
 
-    await user.selectOptions(screen.getByLabelText("Format"), "FreeForAll");
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Free-for-All" }));
     await user.click(screen.getByRole("button", { name: "40" }));
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
@@ -72,5 +73,29 @@ describe("HostSetup", () => {
         }),
       }),
     );
+  });
+
+  it("renders and updates AI seat difficulty with translated labels", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <HostSetup
+        onHost={vi.fn()}
+        onBack={vi.fn()}
+        connectionMode="server"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Human" }));
+
+    const difficultyButton = screen.getByRole("button", { name: "AI difficulty" });
+    expect(difficultyButton).toHaveTextContent("Medium");
+    expect(screen.queryByText("VeryHard")).not.toBeInTheDocument();
+
+    await user.click(difficultyButton);
+    await user.click(screen.getByRole("option", { name: "Very Hard" }));
+
+    expect(difficultyButton).toHaveTextContent("Very Hard");
+    expect(screen.queryByText("VeryHard")).not.toBeInTheDocument();
   });
 });

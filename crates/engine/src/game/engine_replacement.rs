@@ -64,6 +64,34 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
     })
 }
 
+/// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
+/// Draw link parked a replacement-ordering choice. Runs only when the dedicated
+/// `pending_connive_reentry` slot is set (the connive applier's parked-draw
+/// path). `propose_connive` re-enters with the already-applied rids excluded
+/// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements.
+/// Called from BOTH the Execute arm (the leading draw delivered) and the
+/// Prevented arm (the inner draw was prevented, but CR 701.50a's "draw a card,
+/// THEN that creature connives" still runs the connive step — the prevention
+/// replaced only the draw). Returns the parked `WaitingFor` (ConniveDiscard /
+/// fresh ReplacementChoice) if `propose_connive` parked one, else `None`.
+fn drain_pending_connive_reentry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let reentry = state.pending_connive_reentry.take()?;
+    let _ = crate::game::effects::connive::propose_connive(
+        state,
+        reentry.conniver,
+        reentry.count,
+        reentry.applied,
+        events,
+    );
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => None,
+        wf => Some(wf.clone()),
+    }
+}
+
 pub(super) fn handle_replacement_choice(
     state: &mut GameState,
     index: usize,
@@ -282,8 +310,22 @@ pub(super) fn handle_replacement_choice(
                 // (`execute` is a non-Draw chain), `draw_applier` has zeroed
                 // the count and the central `post_replacement_continuation`
                 // drain below runs the chain (Choose → RevealUntil).
-                draw @ ProposedEvent::Draw { .. } => {
+                draw @ ProposedEvent::Draw { player_id, .. } => {
                     apply_draw_after_replacement(state, draw, events);
+                    // CR 805.4b: if this resumed draw IS the front of the
+                    // team draw-step queue (the active player's mandatory
+                    // draw, parked here by a CR 616.1 competing-replacement
+                    // choice), it has now actually completed — pop it so the
+                    // drain below advances to any remaining queued teammate
+                    // instead of re-entering `execute_draw_for` for the same
+                    // player and drawing them a second card. A Draw choice
+                    // unrelated to the team draw-step queue (a spell's "draw
+                    // two cards" hitting a competing replacement, e.g.) finds
+                    // a front that doesn't match `player_id` and is correctly
+                    // left untouched.
+                    if state.pending_team_draw_step.first() == Some(&player_id) {
+                        state.pending_team_draw_step.remove(0);
+                    }
                 }
                 // CR 701.22a: Scry accepted after replacement choice.
                 scry @ ProposedEvent::Scry { .. } => {
@@ -292,6 +334,23 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
                 ProposedEvent::Explore { .. } => {}
+                // CR 701.50a + CR 616.1: Connive surviving as an `Execute`
+                // payload after a replacement-ordering choice (the count-modifier
+                // case — a full-substitution connive replacement returns
+                // `Prevented` and never reaches here). The connive keyword action
+                // still has to run with the surviving count; resolve its internals
+                // directly so it does not re-enter the propose pipeline (CR 614.5).
+                // CR 616.1f: this is the TERMINAL survivor — `pipeline_loop`
+                // already repeated over and exhausted every applicable connive
+                // replacement, so no connive replacement remains to apply here and
+                // a direct `resolve_connive_effect` is correct.
+                ProposedEvent::Connive {
+                    object_id, count, ..
+                } => {
+                    let _ = crate::game::effects::connive::resolve_connive_effect(
+                        state, object_id, count, events,
+                    );
+                }
                 // CR 701.34a: Proliferate accepted after replacement choice.
                 proliferate @ ProposedEvent::Proliferate { .. } => {
                     crate::game::effects::proliferate::apply_proliferate_after_replacement(
@@ -509,6 +568,39 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 805.4b: a draw-step draw that paused on the choice just
+            // resolved above may have queued teammate(s) still owed their
+            // own draw this step (`turns::execute_draw` seeds the queue; the
+            // `ProposedEvent::Draw` arm above already popped the
+            // just-completed player off the FRONT so this drain doesn't
+            // redraw them; `drain_pending_team_draw_step` is the single
+            // authority that empties the rest). Drain before falling through
+            // to the generic Priority reset so a 2HG teammate's mandatory
+            // draw is never silently dropped when the active player's own
+            // draw needed a CR 616.1 competing-replacement choice.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && !state.pending_team_draw_step.is_empty()
+            {
+                if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
+                    waiting_for = wf;
+                }
+            }
+
+            // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
+            // leading Draw link parked this just-resolved ReplacementChoice. The
+            // draw fully delivered above (Draw arm), so "draw a card, THEN that
+            // creature connives" (CR 701.50a) order is honored. `propose_connive`
+            // re-enters with the already-applied rids excluded (CR 614.5) so the
+            // CR 616.1f repeat covers the remaining connive replacements; it sets a
+            // parked ConniveDiscard / fresh ReplacementChoice on state.waiting_for,
+            // which we surface instead of the Priority reset. Drained from the
+            // DEDICATED slot so the leading draw's DeliveryTail could not consume it.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = drain_pending_connive_reentry(state, events) {
+                    waiting_for = wf;
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_counter_moves.is_some()
             {
@@ -627,6 +719,59 @@ pub(super) fn handle_replacement_choice(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
+            // Super-Genius connive replacement) can park its OWN interactive
+            // choice while running the replacing action. Two shapes occur:
+            //  - a `ConniveDiscard` prompt — the surviving plain connive pauses
+            //    when the controller must choose which card to discard, or
+            //  - a FRESH `ReplacementChoice` — the nested "then that creature
+            //    connives" re-entry found two or more OTHER still-applicable
+            //    connive replacements, so CR 616.1f repeats over them and the
+            //    controller must order the next one (the 3+ co-applicable case).
+            // `continue_replacement` returned `Prevented` (the original event was
+            // fully replaced), but the applier already set `state.waiting_for` to
+            // that live prompt. Surface it instead of clobbering it with
+            // `Priority`; the prompt's own resolution finishes the parked work.
+            //
+            // A bare `ReplacementChoice` whitelist is insufficient: it cannot
+            // tell the JUST-RESOLVED ordering prompt (already consumed) from a
+            // freshly-parked nested one. `continue_replacement` `.take()`-consumed
+            // the prior pending record at its start, so a `pending_replacement`
+            // that is still `Some` here is necessarily the applier's freshly-
+            // parked nested ordering choice — surface it so the next
+            // `ChooseReplacement` resumes the CR 616.1f repeat instead of orphaning
+            // the record and dropping replacements C onward.
+            if state.pending_replacement.is_some()
+                || !matches!(
+                    state.waiting_for,
+                    WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+                )
+            {
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 701.50a + CR 614.5 + CR 616.1f: the leading Draw of a connive
+            // replacement was PREVENTED (a draw-Prevent replacement ordered
+            // first). The prevention replaced only the draw — CR 701.50a's
+            // "instead you draw a card, THEN that creature connives" still runs
+            // the connive step. Drain the deferred connive from the dedicated
+            // slot (the Execute arm above did not run because the draw was
+            // prevented). Reset the stale leading-draw `ReplacementChoice`
+            // waiting_for to Priority first (mirrors the Execute arm and every
+            // other Prevented-arm drain below) so the connive's own draw
+            // re-enters from a clean state instead of seeing the parked prompt.
+            // `propose_connive` may park a ConniveDiscard / fresh
+            // ReplacementChoice — surface it. If the slot is None (every
+            // non-connive Prevented resolution) skip entirely so control falls
+            // through to the existing pending-* blocks unchanged.
+            if state.pending_connive_reentry.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                if let Some(wf) = drain_pending_connive_reentry(state, events) {
+                    return Ok(wf);
+                }
+                return Ok(state.waiting_for.clone());
+            }
             if state.pending_counter_additions.is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
@@ -1427,6 +1572,102 @@ mod tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         id
+    }
+
+    /// CR 805.4b + CR 616.1: regression for a review-flagged bug where the
+    /// active player's draw-step draw, after pausing on a CR 616.1
+    /// competing-replacement choice and being resumed via the REAL
+    /// `GameAction::ChooseReplacement` path, was drawn for a SECOND time
+    /// instead of the queue advancing to the teammate. Drives the actual
+    /// production path end to end: `turns::execute_draw` seeds
+    /// `pending_team_draw_step` with `[P0, P1]` and pauses on P0's own draw;
+    /// `apply_as_current(ChooseReplacement)` resolves that choice through
+    /// `handle_replacement_choice`, which must pop P0 off the queue's front
+    /// (not redraw them) and then drain through to P1.
+    #[test]
+    fn two_headed_giant_draw_step_resume_draws_active_player_once_then_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.active_player = PlayerId(0);
+
+        // A CR 616.1 optional replacement on P0's own draw — accepting or
+        // declining is the choice that pauses the draw (mirrors
+        // `install_optional_replacement` above, but controlled by P0 so it
+        // matches P0's draw under the default "source player only" scope —
+        // `ReplacementDefinition::valid_player: None` — rather than P1's).
+        let shield = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut shield_obj = GameObject::new(
+            shield,
+            CardId(1),
+            PlayerId(0),
+            "Draw Shield".to_string(),
+            Zone::Battlefield,
+        );
+        shield_obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Draw Shield".to_string()),
+        );
+        state.objects.insert(shield, shield_obj);
+        state.battlefield.push_back(shield);
+
+        let p0_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "P0 Card".to_string(),
+            Zone::Library,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "P1 Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let paused = super::super::turns::execute_draw(&mut state, &mut events);
+        assert!(
+            paused.is_some(),
+            "P0's draw must pause on the competing-replacement choice"
+        );
+        assert_eq!(
+            state.pending_team_draw_step,
+            vec![PlayerId(0), PlayerId(1)],
+            "both active-team players must still be queued while P0's choice is pending"
+        );
+
+        // Resolve P0's choice through the REAL action-dispatch path.
+        let choosing_player = match &state.waiting_for {
+            WaitingFor::ReplacementChoice { player, .. } => *player,
+            other => panic!("expected ReplacementChoice, got {other:?}"),
+        };
+        state.priority_player = choosing_player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        // P0 drew exactly once (the queue's front was popped on resume, not
+        // re-entered) and the queue advanced to P1, who also drew their own
+        // single card — neither dropped nor double-drawn.
+        assert!(
+            state.players[0].hand.contains(&p0_card),
+            "P0 must have drawn their card"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "P0 must draw exactly once, not twice, after the resume"
+        );
+        assert!(
+            state.players[1].hand.contains(&p1_card),
+            "P1's queued draw-step draw must still happen after P0's resume"
+        );
+        assert_eq!(state.players[1].hand.len(), 1, "P1 must draw exactly once");
+        assert!(
+            state.pending_team_draw_step.is_empty(),
+            "the draw-step queue must be fully drained after resume"
+        );
     }
 
     /// CR 122.1: When a player accepts an AddCounter replacement choice, the

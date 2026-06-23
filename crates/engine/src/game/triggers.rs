@@ -2049,6 +2049,7 @@ fn collect_pending_triggers(
                     .condition(TriggerCondition::WasCast {
                         zone: None,
                         controller: None,
+                        owner: None,
                     });
                 let cascade_ability =
                     ResolvedAbility::new(Effect::Cascade, Vec::new(), *cast_obj_id, controller);
@@ -2093,6 +2094,7 @@ fn collect_pending_triggers(
                     .condition(TriggerCondition::WasCast {
                         zone: None,
                         controller: None,
+                        owner: None,
                     });
                 let ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
@@ -3042,7 +3044,7 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
     let mut events_out = Vec::new();
     let mut iter = pending.into_iter();
     while let Some(trigger_context) = iter.next() {
-        if dispatch_pending_trigger_context(state, trigger_context, &mut events_out) {
+        if dispatch_pending_trigger_context(state, trigger_context, &mut events_out).paused() {
             // Active trigger paused on player input. Stash the remaining
             // contexts to be drained by `drain_deferred_trigger_queue` after
             // the active trigger is finalized.
@@ -3666,6 +3668,46 @@ pub(crate) fn take_pending_trigger_event_batch(
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
 /// being constructed in pieces across multiple `WaitingFor` cycles (mode
 /// choice, target selection, distribute-among).
+///
+/// CR 603.2c + CR 608.2c: Batched attack triggers whose root resolving effect
+/// anaphorically binds `ParentTarget` to the attackers that satisfied the
+/// trigger ("those creatures get +4/+4") inherit that set as propagated
+/// targets at stack-push time. Only the root ability is seeded — downstream
+/// sub-abilities that produce a new parent referent during resolution (The
+/// Tenth Doctor's Allons-y! Suspend grant) keep the existing rebinding path.
+fn seed_batched_attack_parent_targets(
+    ability: &mut ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) {
+    let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
+        return;
+    };
+    if attacker_ids.is_empty() {
+        return;
+    }
+    if !effect_uses_parent_target(&ability.effect) || !ability.targets.is_empty() {
+        return;
+    }
+    ability.targets = attacker_ids
+        .iter()
+        .map(|id| TargetRef::Object(*id))
+        .collect();
+}
+
+fn effect_uses_parent_target(effect: &Effect) -> bool {
+    match effect {
+        Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
+            matches!(target, TargetFilter::ParentTarget)
+        }
+        Effect::GenericEffect { target, .. } => {
+            matches!(target, Some(TargetFilter::ParentTarget))
+        }
+        _ => effect
+            .target_filter()
+            .is_some_and(|f| matches!(f, TargetFilter::ParentTarget)),
+    }
+}
+
 pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     state: &mut GameState,
     trigger: PendingTrigger,
@@ -3688,6 +3730,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     if let Some(origin) = may_trigger_origin {
         ability.set_may_trigger_origin_recursive(origin);
     }
+    seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -3792,6 +3835,58 @@ fn assign_pending_trigger_entry_ability(
     *ability = source_ability.clone();
 }
 
+/// Outcome of dispatching one pending-trigger context through
+/// [`dispatch_pending_trigger_context`]. Replaces the prior `bool` (which only
+/// distinguished "paused" from "everything else") so callers — in particular
+/// `check_delayed_triggers` — can tell a trigger that *legitimately left no
+/// stack object* (CR 603.3c no-legal-mode removal, CR 605.1b inline mana
+/// resolution) apart from a trigger that was *dropped on a resolution-time
+/// filter slot* and must still reach the stack (CR 603.3).
+///
+/// The variants are mutually exclusive terminal classifications of a single
+/// dispatch call; ordering carries no meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerDispatchDisposition {
+    /// The trigger paused on player input (modal mode choice, target
+    /// selection, or distribute-among). `state.pending_trigger` /
+    /// `state.waiting_for` are set; the entry is already on the stack
+    /// mid-construction. Callers must stash any remaining queue into
+    /// `state.deferred_triggers`.
+    Paused,
+    /// The trigger reached the stack as its own object (CR 603.3) with no
+    /// further player input required — degenerate auto-selected targets, no
+    /// target slots, or a random-modal mode that resolved without prompting.
+    Pushed,
+    /// CR 605.1b: a triggered mana ability resolved immediately without using
+    /// the stack. Terminal — never re-pushed.
+    ResolvedInline,
+    /// CR 603.3c: the ability is modal and no legal mode could be chosen, so it
+    /// was removed before reaching (or while on) the stack. Terminal — never
+    /// re-pushed.
+    DroppedNoLegalMode,
+    /// A target/resolution slot could not be auto-resolved (`build_target_slots`,
+    /// `auto_select_targets_for_ability`, or `assign_targets_in_chain` returned
+    /// `Err`). For a genuine CR 115.1d target with no legal option this matches
+    /// CR 603.3d removal; but `build_target_slots` also surfaces resolution-time
+    /// filter slots that are *not* CR 115.1d targets (e.g. Good King Mog's "a
+    /// token that's a copy of a non-Saga token you control" copy-source), and
+    /// those must still reach the stack per CR 603.3. The
+    /// `check_delayed_triggers` fallback re-pushes this case to preserve the
+    /// pre-dispatch unconditional-push contract for delayed triggers; the
+    /// regular collected-trigger paths treat it as a drop, matching their prior
+    /// `false` behavior.
+    DroppedTargetUnresolved,
+}
+
+impl TriggerDispatchDisposition {
+    /// `true` only for [`Self::Paused`]. Callers that previously branched on the
+    /// raw `bool` ("did dispatch pause on input?") use this to keep identical
+    /// behavior.
+    pub(crate) fn paused(self) -> bool {
+        matches!(self, Self::Paused)
+    }
+}
+
 /// CR 603.2 + CR 603.3b + CR 309.4c: Dispatch a synthetic
 /// single trigger (game-rule trigger queued mid-resolution, e.g. dungeon
 /// room ability from `effects::venture::queue_room_trigger`). Delegates
@@ -3806,14 +3901,20 @@ pub(crate) fn dispatch_synthetic_trigger(
     events_out: &mut Vec<GameEvent>,
 ) -> bool {
     dispatch_pending_trigger_context(state, PendingTriggerContext::single(trigger), events_out)
+        .paused()
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drive a single collected trigger through
-/// its disposition. Returns `true` when the trigger paused on player input
-/// (modal mode choice, target selection, or division-among) — callers must
-/// then stash the remaining queue into `state.deferred_triggers`. Returns
-/// `false` when the trigger reached the stack (or resolved inline as a mana
-/// ability, or was dropped because targets became illegal).
+/// its disposition. Returns a [`TriggerDispatchDisposition`] classifying the
+/// terminal outcome: [`Paused`](TriggerDispatchDisposition::Paused) when the
+/// trigger paused on player input (modal mode choice, target selection, or
+/// division-among) — callers must then stash the remaining queue into
+/// `state.deferred_triggers`; [`Pushed`](TriggerDispatchDisposition::Pushed)
+/// when it reached the stack; [`ResolvedInline`](TriggerDispatchDisposition::ResolvedInline)
+/// for a CR 605.1b mana ability; [`DroppedNoLegalMode`](TriggerDispatchDisposition::DroppedNoLegalMode)
+/// for CR 603.3c no-legal-mode removal; or
+/// [`DroppedTargetUnresolved`](TriggerDispatchDisposition::DroppedTargetUnresolved)
+/// when a target/resolution slot could not be auto-resolved.
 ///
 /// All three pause paths set `state.pending_trigger` / `state.waiting_for`
 /// (where appropriate) before returning so the engine's existing
@@ -3823,7 +3924,7 @@ fn dispatch_pending_trigger_context(
     state: &mut GameState,
     trigger_context: PendingTriggerContext,
     events_out: &mut Vec<GameEvent>,
-) -> bool {
+) -> TriggerDispatchDisposition {
     let PendingTriggerContext {
         pending: mut trigger,
         trigger_events,
@@ -3873,7 +3974,7 @@ fn dispatch_pending_trigger_context(
             restore_trigger_event_context(state, context_snapshot);
             if unavailable_modes.len() >= modal_for_player.mode_count {
                 // CR 603.3c: No legal mode; drop the trigger entirely.
-                return false;
+                return TriggerDispatchDisposition::DroppedNoLegalMode;
             }
             let mode_abilities = trigger.mode_abilities.clone();
             let controller = trigger.controller;
@@ -3909,24 +4010,25 @@ fn dispatch_pending_trigger_context(
                         // mode; surface it through `state.waiting_for` the same
                         // way the DistributeAmong branch does. A `Priority`
                         // result means the trigger reached the stack with no
-                        // further input — report "not paused".
+                        // further input — report it as pushed (the entry was
+                        // already placed on the stack above).
                         if matches!(
                             waiting_for,
                             crate::types::game_state::WaitingFor::Priority { .. }
                         ) {
-                            return false;
+                            return TriggerDispatchDisposition::Pushed;
                         }
                         state.waiting_for = waiting_for;
-                        return true;
+                        return TriggerDispatchDisposition::Paused;
                     }
                     // CR 603.3c: No mode could be chosen — trigger already
                     // dropped and stack entry removed inside the resolver.
-                    Ok(None) => return false,
-                    Err(_) => return false,
+                    Ok(None) => return TriggerDispatchDisposition::DroppedNoLegalMode,
+                    Err(_) => return TriggerDispatchDisposition::DroppedNoLegalMode,
                 }
             }
 
-            return true;
+            return TriggerDispatchDisposition::Paused;
         }
     }
 
@@ -3943,7 +4045,7 @@ fn dispatch_pending_trigger_context(
         Ok(target_slots) => target_slots,
         Err(_) => {
             restore_trigger_event_context(state, context_snapshot);
-            return false;
+            return TriggerDispatchDisposition::DroppedTargetUnresolved;
         }
     };
 
@@ -3963,11 +4065,11 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             restore_trigger_event_context(state, context_snapshot);
-            return false;
+            return TriggerDispatchDisposition::ResolvedInline;
         }
         push_pending_trigger_to_stack_with_event_batch(state, trigger, trigger_events, events_out);
         restore_trigger_event_context(state, context_snapshot);
-        return false;
+        return TriggerDispatchDisposition::Pushed;
     }
 
     // CR 115.1 + CR 701.9b: Random-target triggered abilities short-circuit
@@ -3998,7 +4100,7 @@ fn dispatch_pending_trigger_context(
                 .is_err()
             {
                 restore_trigger_event_context(state, context_snapshot);
-                return false;
+                return TriggerDispatchDisposition::DroppedTargetUnresolved;
             }
             super::casting::emit_targeting_events(
                 state,
@@ -4044,7 +4146,7 @@ fn dispatch_pending_trigger_context(
                             unit,
                         };
                         restore_trigger_event_context(state, context_snapshot);
-                        return true;
+                        return TriggerDispatchDisposition::Paused;
                     }
                 }
             }
@@ -4055,7 +4157,7 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             restore_trigger_event_context(state, context_snapshot);
-            false
+            TriggerDispatchDisposition::Pushed
         }
         Ok(None) => {
             // CR 601.2c + CR 603.3d: Manual target selection pending. Push the
@@ -4074,11 +4176,11 @@ fn dispatch_pending_trigger_context(
             state.pending_trigger = Some(pending_for_state);
             state.pending_trigger_entry = Some(entry_id);
             restore_trigger_event_context(state, context_snapshot);
-            true
+            TriggerDispatchDisposition::Paused
         }
         Err(_) => {
             restore_trigger_event_context(state, context_snapshot);
-            false
+            TriggerDispatchDisposition::DroppedTargetUnresolved
         }
     }
 }
@@ -4208,7 +4310,7 @@ fn dispatch_deferred_triggers_in_order(
 ) -> Option<crate::types::game_state::WaitingFor> {
     let mut iter = pending.into_iter();
     while let Some(trigger_context) = iter.next() {
-        if dispatch_pending_trigger_context(state, trigger_context, events_out) {
+        if dispatch_pending_trigger_context(state, trigger_context, events_out).paused() {
             state.deferred_triggers.extend(iter);
             if matches!(
                 state.waiting_for,
@@ -4494,6 +4596,15 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     let mut to_fire: Vec<(DelayedTrigger, Option<GameEvent>)> = Vec::new();
     let mut to_remove: Vec<(usize, GameEvent)> = Vec::new();
 
+    // CR 603.12: A reflexive coin-flip trigger ("when you win/lose the flip") is
+    // checked immediately after creation and triggers based on whether the flip
+    // occurred during the creating resolution. If the flip happened but its
+    // result did not match the trigger's filter (the "win" reflexive on a lost
+    // flip, or vice versa), the reflexive simply does not trigger — and, being
+    // tied to that one flip, must be discarded rather than left to fire on a
+    // later coin flip this turn (which a bare CR 603.7 `WhenNextEvent` would do).
+    let mut to_discard: Vec<usize> = Vec::new();
+
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
         if let Some(trigger_event) = delayed_trigger_event(
             &delayed.condition,
@@ -4507,6 +4618,15 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             } else {
                 to_fire.push((delayed.clone(), Some(trigger_event)));
             }
+        } else if reflexive_coin_flip_resolved_without_match(
+            &delayed.condition,
+            events,
+            state,
+            delayed.source_id,
+        ) {
+            // CR 603.12: the creating flip occurred but the result was opposite —
+            // discard this reflexive trigger; it never gets a "next" flip.
+            to_discard.push(idx);
         }
     }
 
@@ -4527,10 +4647,26 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
         }
     }
 
-    // Remove one-shot triggers in reverse order to preserve indices, collecting into to_fire
-    for (idx, trigger_event) in to_remove.into_iter().rev() {
+    // Remove fired one-shot triggers AND discarded non-matching reflexive
+    // coin-flip triggers from `delayed_triggers` in a single descending-index
+    // pass so every index stays valid (a `to_remove`-then-`to_discard` two-pass
+    // removal would invalidate the discard indices once the vec shrinks). Fired
+    // one-shots are collected into `to_fire`; discarded reflexives (CR 603.12)
+    // are dropped without firing. The two index sets are disjoint — a trigger
+    // either matched (fire) or resolved-without-match (discard), never both.
+    let mut fired_events: std::collections::HashMap<usize, GameEvent> =
+        to_remove.iter().cloned().collect();
+    let mut combined: Vec<usize> = to_remove
+        .iter()
+        .map(|(idx, _)| *idx)
+        .chain(to_discard.iter().copied())
+        .collect();
+    combined.sort_unstable();
+    for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
-        to_fire.push((trigger, Some(trigger_event)));
+        if let Some(trigger_event) = fired_events.remove(&idx) {
+            to_fire.push((trigger, Some(trigger_event)));
+        }
     }
 
     if to_fire.is_empty() {
@@ -4547,7 +4683,20 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     let apnap = crate::game::players::apnap_order(state);
     to_fire.sort_by_key(|(trigger, _)| apnap_rank(&apnap, trigger.controller));
 
-    for (trigger, trigger_event) in to_fire {
+    // CR 603.3 + CR 603.3d + CR 601.2c: Dispatch each firing delayed trigger
+    // through the shared trigger dispatcher rather than a bare stack push. The
+    // dispatcher sets up `pending_trigger` / `pending_trigger_entry` and begins
+    // target selection (`WaitingFor::TriggerTargetSelection`) for a delayed
+    // trigger whose ability needs a player-chosen target — e.g. Breeches, the
+    // Blastmaker's reflexive "When you lose the flip, ~ deals damage … to any
+    // target" (CR 603.12). Context-ref-only delayed triggers (Flickerwisp's
+    // `ParentTarget` return, dies/leaves triggers using `TriggeringSource`)
+    // report `Pushed` and reach the stack with no input, identical to the prior
+    // bare push. When a trigger pauses for input, the remaining triggers are
+    // stashed into `deferred_triggers` and reach the stack once the active one
+    // resolves, mirroring `dispatch_collected_triggers` (issue #416).
+    let mut iter = to_fire.into_iter();
+    for (trigger, trigger_event) in iter.by_ref() {
         let pending = PendingTrigger {
             source_id: trigger.source_id,
             controller: trigger.controller,
@@ -4564,10 +4713,107 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             subject_match_count: None,
             die_result: None,
         };
-        push_pending_trigger_to_stack(state, pending, &mut new_events);
+        let context = PendingTriggerContext::single(pending);
+        let context_pending = context.pending.clone();
+        let context_events = context.trigger_events.clone();
+        match dispatch_pending_trigger_context(state, context, &mut new_events) {
+            TriggerDispatchDisposition::Paused => {
+                // The active delayed trigger paused on player input (target /
+                // mode / distribution). Stash the remaining firing triggers so
+                // they reach the stack once the active one is finalized.
+                state
+                    .deferred_triggers
+                    .extend(iter.map(|(trigger, trigger_event)| {
+                        PendingTriggerContext::single(PendingTrigger {
+                            source_id: trigger.source_id,
+                            controller: trigger.controller,
+                            condition: None,
+                            ability: trigger.ability,
+                            timestamp: state.turn_number,
+                            target_constraints: Vec::new(),
+                            distribute: None,
+                            trigger_event,
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: None,
+                            may_trigger_origin: None,
+                            subject_match_count: None,
+                            die_result: None,
+                        })
+                    }));
+                break;
+            }
+            // CR 603.3: A delayed triggered ability goes on the stack the next
+            // time a player would receive priority. The dispatcher already
+            // placed it there (`Pushed`) or it pauses for input (`Paused`
+            // above) — nothing more to do.
+            TriggerDispatchDisposition::Pushed => {}
+            // CR 603.3d: The dispatcher dropped the trigger because a slot could
+            // not be auto-resolved. For a delayed trigger this is the Good King
+            // Mog case — the unresolved slot is a *resolution-time filter* ("a
+            // token that's a copy of a non-Saga token you control"), NOT a
+            // CR 115.1d target (it uses no "target" keyword), so CR 603.3d does
+            // not remove it; place it on the stack directly per CR 603.3.
+            // Resolution-time selection then handles the empty filter set (e.g.
+            // copies no token). This restores the pre-dispatch unconditional-push
+            // contract for the non-targeted resolution-filter case. Breeches'
+            // lose branch ("deals damage … to any target") always has a legal
+            // target, so it pauses through the dispatcher and never reaches here.
+            TriggerDispatchDisposition::DroppedTargetUnresolved => {
+                push_pending_trigger_to_stack_with_event_batch(
+                    state,
+                    context_pending,
+                    context_events,
+                    &mut new_events,
+                );
+            }
+            // CR 603.3c: no legal mode — the modal ability is removed from the
+            // stack and is a terminal no-stack outcome; do NOT resurrect it.
+            // CR 605.1b: a triggered mana ability resolved inline without using
+            // the stack; re-pushing it would duplicate the produced mana.
+            TriggerDispatchDisposition::DroppedNoLegalMode
+            | TriggerDispatchDisposition::ResolvedInline => {}
+        }
     }
 
     new_events
+}
+
+/// CR 603.12: True when `condition` is a reflexive coin-flip trigger
+/// (`WhenNextEvent` wrapping a `FlippedCoin` trigger with a `coin_flip_result`
+/// filter) whose creating flip occurred this batch but came up the opposite way,
+/// so the reflexive does not trigger and must be discarded rather than left
+/// pending for a later flip. Returns `false` for any other condition shape and
+/// for a `FlippedCoin` reflexive whose result filter *did* match (that case is
+/// handled by the normal fire/remove path) or whose flipper did not flip.
+fn reflexive_coin_flip_resolved_without_match(
+    condition: &crate::types::ability::DelayedTriggerCondition,
+    events: &[GameEvent],
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    use crate::types::ability::DelayedTriggerCondition;
+    let DelayedTriggerCondition::WhenNextEvent {
+        trigger,
+        or_trigger: None,
+    } = condition
+    else {
+        return false;
+    };
+    // Scope strictly to coin-flip reflexives with a result filter — generic
+    // `WhenNextEvent` delayed triggers keep their "next time" CR 603.7 semantics.
+    if trigger.mode != TriggerMode::FlippedCoin || trigger.coin_flip_result.is_none() {
+        return false;
+    }
+    // The creating flip occurred this batch iff a `CoinFlipped` event by the
+    // trigger's eligible flipper is present, regardless of won/lost. Reuse the
+    // matcher with the result filter cleared so only the flipper scope is checked.
+    let mut flipper_only = (**trigger).clone();
+    flipper_only.coin_flip_result = None;
+    events.iter().any(|event| {
+        matches!(event, GameEvent::CoinFlipped { .. })
+            && super::trigger_matchers::match_flipped_coin(event, &flipper_only, source_id, state)
+    })
 }
 
 /// CR 603.7: Check if a delayed trigger condition is met by recent events.
@@ -4958,6 +5204,12 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::ClassLevelGE { level } => {
             source_id.is_some_and(|id| eval_class_level_ge(state, id, *level))
         }
+        // CR 701.64b + CR 702.186b: True when the source permanent is harnessed.
+        // Gates an ∞ (Infinity) triggered ability so it only fires while
+        // harnessed (the ∞ ability word maps to this condition).
+        TriggerCondition::SourceIsHarnessed => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.harnessed),
         TriggerCondition::AttractionVisitRoll { min, max } => trigger_event
             .and_then(|e| match e {
                 GameEvent::AttractionVisited { roll, .. } => Some(*roll),
@@ -4980,13 +5232,22 @@ pub(crate) fn check_trigger_condition(
         // anyway per CR 603.4 if the source has left the relevant zone).
         // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
         // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
-        // from zone z (Twilight Diviner: graveyard). controller=Some(c) additionally
-        // gates the caster relative to the trigger controller (Prized Amalgam:
-        // "you cast it from your graveyard"). Reads the ENTERING object's cast
-        // provenance, never the trigger source.
+        // from zone z (Twilight Diviner: graveyard). Two independent scope axes:
+        //   - caster_scope=Some(c) gates the CASTER relative to the trigger
+        //     controller against `cast_controller` (Prized Amalgam: "you cast it
+        //     from your graveyard").
+        //   - owner_scope=Some(c) gates the ORIGIN-ZONE OWNER. CR 400.3 + CR 404.1:
+        //     graveyard/hand/library are owner-specific zones, so "your graveyard"
+        //     means the card's owner is you — checked against `obj.owner`,
+        //     independent of who cast it (Rocket-Powered Goblin Glider: "if it was
+        //     cast from your graveyard"). An opponent casting your card from your
+        //     graveyard satisfies owner=You; you casting from an opponent's
+        //     graveyard does not.
+        // Reads the ENTERING object's cast provenance, never the trigger source.
         TriggerCondition::WasCast {
             zone,
             controller: caster_scope,
+            owner: owner_scope,
         } => {
             let checked_id = trigger_event
                 .and_then(|e| match e {
@@ -5003,6 +5264,9 @@ pub(crate) fn check_trigger_condition(
                             obj.cast_controller.is_some_and(|caster| {
                                 controller_ref_matches_player(caster, controller, scope)
                             })
+                        })
+                        && owner_scope.as_ref().is_none_or(|scope| {
+                            controller_ref_matches_player(obj.owner, controller, scope)
                         })
                 })
         }
@@ -12172,6 +12436,189 @@ pub mod tests {
         ));
     }
 
+    /// CR 603.4 + CR 301.5a: runtime gate for the equipped intervening-if bridge
+    /// (oracle_trigger.rs `static_condition_to_trigger_condition`,
+    /// `SourceIsEquipped → SourceMatchesFilter{HasAttachment(Equipment)}`).
+    /// Discriminates: false with no attachment, false with only an Aura attached
+    /// (proves kind matters), true once an Equipment is attached.
+    #[test]
+    fn source_matches_filter_gates_on_equipped() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Equipped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let cond = TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: crate::types::ability::AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        };
+
+        // No attachment → does not fire.
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Hostile: an Aura attached must NOT satisfy the Equipment predicate.
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(aura);
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Equipment attached → fires.
+        let equip = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let equip_obj = state.objects.get_mut(&equip).unwrap();
+            equip_obj.card_types.core_types.push(CoreType::Artifact);
+            equip_obj.card_types.subtypes.push("Equipment".to_string());
+            equip_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(equip);
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    /// CR 603.4 + CR 303.4: runtime gate for the enchanted intervening-if bridge on
+    /// a NON-creature source (a bare Artifact). CR 303.4 allows an Aura to enchant
+    /// any object, so the source-object-wide bridge must fire when an Aura is
+    /// attached even though the source is not a creature.
+    ///
+    /// Drives the PRODUCTION bridge
+    /// (`parser::oracle_trigger::static_condition_to_trigger_condition`) rather than
+    /// a hand-built filter, so the test discriminates against the bridge code.
+    /// Fail-before: the bridge produced `TypedFilter::creature()`, so the
+    /// non-creature artifact source failed the card-type gate and
+    /// `check_trigger_condition` returned `false` even with the Aura attached.
+    /// Hostile negatives: no attachment → false; an Equipment (wrong kind) on the
+    /// non-creature source → false.
+    #[test]
+    fn source_matches_filter_gates_on_enchanted_noncreature() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Enchanted Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        // Artifact only — deliberately NOT a Creature.
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let cond = crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+            &StaticCondition::SourceIsEnchanted,
+        )
+        .expect("SourceIsEnchanted should bridge to a TriggerCondition");
+
+        // No attachment → does not fire.
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Hostile: an Equipment attached to the non-creature source must NOT
+        // satisfy the Aura predicate (attachment-kind discrimination).
+        let equip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let equip_obj = state.objects.get_mut(&equip).unwrap();
+            equip_obj.card_types.core_types.push(CoreType::Artifact);
+            equip_obj.card_types.subtypes.push("Equipment".to_string());
+            equip_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(equip);
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Aura attached to the non-creature source → fires (the revert-failing case).
+        let aura = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(aura);
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
     // === CR 701.27g + CR 708.2: Source-state predicates (Transformed/FaceUp/FaceDown) ===
 
     #[test]
@@ -15623,6 +16070,7 @@ pub mod tests {
             &TriggerCondition::WasCast {
                 zone: None,
                 controller: None,
+                owner: None,
             },
             PlayerId(0),
             Some(light_paws),
@@ -15664,6 +16112,7 @@ pub mod tests {
             &TriggerCondition::WasCast {
                 zone: None,
                 controller: None,
+                owner: None,
             },
             PlayerId(0),
             Some(light_paws),
@@ -15696,6 +16145,7 @@ pub mod tests {
         let condition = TriggerCondition::WasCast {
             zone: Some(Zone::Graveyard),
             controller: Some(ControllerRef::You),
+            owner: None,
         };
         let event = zone_changed_event(
             entering,
@@ -15727,6 +16177,105 @@ pub mod tests {
             ),
             "controller-scoped WasCast should pass when the trigger controller cast it"
         );
+    }
+
+    /// CR 400.3 + CR 404.1 + CR 603.4: "if it was cast from your graveyard"
+    /// (Rocket-Powered Goblin Glider) scopes the ORIGIN-ZONE OWNER, not the
+    /// caster. A graveyard is owner-specific, so the only thing "your" constrains
+    /// is the card's owner — who cast it is irrelevant. Drives the parsed trigger
+    /// condition through `check_trigger_condition` (the runtime trigger-collection
+    /// seam) across all four owner × caster combinations relative to the trigger
+    /// controller (P0). Before the owner-axis fix the `owner = You` scope was
+    /// modeled as `controller = You` (caster), which inverted two of the four
+    /// rows: it WRONGLY rejected an opponent casting your card from your graveyard
+    /// and WRONGLY accepted you casting a card from an opponent's graveyard.
+    #[test]
+    fn rocket_glider_was_cast_from_your_graveyard_is_owner_scoped_not_caster() {
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "When this Equipment enters, if it was cast from your graveyard, attach it to target creature you control.",
+            "Rocket-Powered Goblin Glider",
+        );
+        let condition = trigger
+            .condition
+            .expect("the gravecast ETB trigger must carry an intervening-if condition");
+        // The parser must emit the owner axis, not the caster axis, for the bare
+        // "cast from your graveyard" wording (no "you cast it" clause).
+        assert_eq!(
+            condition,
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Graveyard),
+                controller: None,
+                owner: Some(ControllerRef::You),
+            },
+            "bare 'cast from your graveyard' must scope the origin-zone OWNER, not the caster"
+        );
+
+        // trigger controller = P0 (controls the Equipment). Each case sets the
+        // ENTERING object's owner (graveyard owner, CR 404.1) and caster, casts
+        // it from the graveyard, then evaluates the parsed condition.
+        // (owner, caster, expected) — the assertion that flips on revert is the
+        // two opp/your-yard and you/opp-yard rows.
+        let cases = [
+            (
+                PlayerId(0),
+                PlayerId(0),
+                true,
+                "you cast your own card from your graveyard",
+            ),
+            (
+                PlayerId(0),
+                PlayerId(1),
+                true,
+                "an opponent casts your card from your graveyard",
+            ),
+            (
+                PlayerId(1),
+                PlayerId(0),
+                false,
+                "you cast a card from an opponent's graveyard",
+            ),
+            (
+                PlayerId(1),
+                PlayerId(1),
+                false,
+                "an opponent casts their card from their graveyard",
+            ),
+        ];
+        for (owner, caster, expected, label) in cases {
+            let mut state = setup();
+            // The Equipment is self-referential: "it" is the entering Equipment,
+            // owned by `owner`, cast by `caster` from its owner's graveyard.
+            let equipment = create_object(
+                &mut state,
+                CardId(1),
+                owner,
+                "Rocket-Powered Goblin Glider".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&equipment).unwrap();
+                obj.cast_from_zone = Some(Zone::Graveyard);
+                obj.cast_controller = Some(caster);
+            }
+            let event = zone_changed_event(
+                equipment,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Artifact],
+                vec!["Equipment"],
+            );
+            assert_eq!(
+                check_trigger_condition(
+                    &state,
+                    &condition,
+                    PlayerId(0),
+                    Some(equipment),
+                    Some(&event),
+                ),
+                expected,
+                "owner-scoped gravecast mismatch: {label}"
+            );
+        }
     }
 
     /// CR 603.4 + CR 601.2h: Satoru's intervening-if must fail at resolution
@@ -15798,6 +16347,7 @@ pub mod tests {
             &TriggerCondition::WasCast {
                 zone: None,
                 controller: None,
+                owner: None,
             },
             PlayerId(0),
             Some(cast_spell),
@@ -15811,6 +16361,7 @@ pub mod tests {
             &TriggerCondition::WasCast {
                 zone: None,
                 controller: None,
+                owner: None,
             },
             PlayerId(0),
             Some(cast_spell),
@@ -24640,7 +25191,8 @@ mod push_first_contract_tests {
             &mut state,
             super::PendingTriggerContext::single(trigger),
             &mut events,
-        );
+        )
+        .paused();
 
         // CR 603.3c "If no mode can be chosen, the ability is removed from
         // the stack": dispatcher reports no pause; nothing pushed; no cursor.
@@ -24748,7 +25300,8 @@ mod push_first_contract_tests {
             &mut state,
             super::PendingTriggerContext::single(trigger),
             &mut events,
-        );
+        )
+        .paused();
 
         // The game chose the mode — neither modes need targets, so dispatch
         // reports "not paused" and never raises an interactive prompt.

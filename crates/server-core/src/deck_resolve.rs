@@ -77,6 +77,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         commander,
         attraction_deck,
         signature_spell,
+        sticker_sheets: deck.sticker_sheets.clone(),
         bracket_tier: deck.bracket_tier,
     })
 }
@@ -96,6 +97,19 @@ mod tests {
             commander: v(commander),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn resolve_deck_preserves_selected_sticker_sheets() {
+        let db = db_from(&["Forest"]);
+        let mut deck = deck(&["Forest"], &[], &[]);
+        deck.sticker_sheets = vec![
+            "Vampire Champion Fury".to_string(),
+            "Wild Ogre Bupkis".to_string(),
+        ];
+
+        let payload = resolve_deck(&db, &deck).expect("deck resolves");
+        assert_eq!(payload.sticker_sheets, deck.sticker_sheets);
     }
 
     fn card(name: &str) -> Value {

@@ -1100,6 +1100,29 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
+/// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
+/// `Effect::ForEachCategoryExile` iteration paused by the current member's
+/// interactive choice. Mirrors [`PendingPerPlayerZoneChoice`], but the
+/// iteration unit is a fixed-category member (a color or card type) rather than
+/// a player: each `remaining_member_filters` entry is the `TargetFilter`
+/// restricting the shared pool to cards of that member ("a card of that color/
+/// type"). Each pick accumulates into the resolution chain's tracked object set
+/// so a downstream "from among them" / "put the rest …" reads exactly the cards
+/// exiled across all members.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPerCategoryZoneChoice {
+    /// The `Effect::ForEachCategoryExile` ability whose per-member body repeats.
+    pub ability: Box<ResolvedAbility>,
+    /// CR 608.2c: The full revealed/exiled pool snapshot, captured once at the
+    /// start of the iteration. Each member filters THIS pool (minus cards
+    /// already exiled by an earlier member) — it must not read the mutating
+    /// chain tracked set, which the drain rebinds to the exiled cards.
+    pub pool: Vec<ObjectId>,
+    /// Per-member candidate filters not yet prompted, in category member order
+    /// (WUBRG for colors, CR 205.2a order for card types).
+    pub remaining_member_filters: Vec<crate::types::ability::TargetFilter>,
+}
+
 /// CR 701.38d + CR 608.2c: Stores the remaining voters whose per-ballot
 /// interactive body has not yet been resolved. Created when the first
 /// ballot's ChooseFromZone parks WaitingFor::ChooseFromZoneChoice; drained
@@ -1791,6 +1814,13 @@ pub enum CollectEvidenceResume {
     Effect {
         pending_ability: Box<ResolvedAbility>,
     },
+    /// CR 605.2 + CR 701.59: Collect evidence paid as a mana ability's
+    /// activation cost (Cryptex's `{T}, Collect evidence 3: Add one mana...`).
+    /// Resumes the parked mana-ability activation with the chosen cards stamped
+    /// into `PendingManaAbility::collected_evidence`, rather than a `PendingCast`.
+    ManaAbility {
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1904,6 +1934,18 @@ pub struct PendingManaAbility {
     /// in a mana-ability cost. The amount is chosen before mana production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_count: Option<u32>,
+    /// CR 107.3a + CR 601.2b + CR 702.179e/f: Announced value of X for a
+    /// `Pay X speed` mana-ability cost (Chicago Loop's `Pay X speed: Add X mana
+    /// in any combination of colors`). Chosen before cost payment and mana
+    /// production; bound to BOTH the speed cost and the produced-mana count via
+    /// `set_chosen_x_recursive`. `None` until the player announces X.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_x: Option<u32>,
+    /// CR 605.2 + CR 701.59: Cards exiled to pay a `Collect evidence N`
+    /// mana-ability cost (Cryptex). Filled by the `CollectEvidenceChoice` resume
+    /// before mana production; empty until the player selects cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected_evidence: Vec<ObjectId>,
     /// CR 117.1 + CR 118.3: Pre-selected objects to exile as part of an
     /// `AbilityCost::Exile { filter: !SelfRef, .. }` mana ability cost. Used
     /// by Food Chain's battlefield exile cost and Titans' Nest's graveyard
@@ -2416,6 +2458,12 @@ pub enum AlternativeCastKeyword {
     /// an opponent lost life this turn. A pure cost substitution — the spell
     /// resolves normally (no riders); spectacle changes only how the cost is paid.
     Spectacle,
+    /// CR 702.76a: Prowl alternative cost paid from hand, available only if a
+    /// creature the caster controlled dealt combat damage to a player this turn
+    /// while sharing one of the spell's creature types. A pure cost substitution
+    /// — the spell resolves normally; the prowl provenance is recorded so "if
+    /// its prowl cost was paid" intervening-ifs (Latchkey Faerie) can read it.
+    Prowl,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -4214,6 +4262,14 @@ pub enum PayableResource {
     },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
+    /// CR 119.4: Pay any amount of life — N is deducted as life loss via
+    /// life_costs::pay_life_as_cost (life-loss replacement pipeline + CantLoseLife).
+    Life,
+    /// CR 702.179e/f: Announce X for a `Pay X speed` mana-ability cost. The chosen
+    /// amount is the announced X, bounded above by the player's current speed
+    /// (CR 702.179f: no speed counts as 0). Mana-ability only — paid via the
+    /// `PendingManaAbility::chosen_x` path, never the standalone resource branch.
+    Speed,
 }
 
 fn default_one() -> u32 {
@@ -4558,7 +4614,8 @@ impl WaitingFor {
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
-                CollectEvidenceResume::Effect { .. } => None,
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
         }
@@ -4589,7 +4646,8 @@ impl WaitingFor {
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
-                CollectEvidenceResume::Effect { .. } => None,
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
         }
@@ -5058,6 +5116,19 @@ impl CastingVariant {
         *self == CastingVariant::Normal
     }
 
+    /// CR 601.2a: The `ObjectId` of the `StaticMode::ExileCastPermission` source
+    /// elected for this cast, when the variant is `ExilePermission`. The cast
+    /// pipeline carries the elected source so per-source cost treatment
+    /// (extra-cost riders) binds to the permission the player actually cast
+    /// through — not whichever functioning source a battlefield scan reaches
+    /// first when several permissions offer the same exiled spell.
+    pub fn exile_permission_source(self) -> Option<ObjectId> {
+        match self {
+            CastingVariant::ExilePermission { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
     /// CR 118.9a: Only one alternative cost can be applied to a spell.
     pub fn uses_alternative_cost(self) -> bool {
         match self {
@@ -5479,6 +5550,15 @@ pub struct GameState {
     /// prevented and replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_event_target: Option<crate::types::ability::TargetRef>,
+
+    /// CR 701.50a + CR 614.5 + CR 616.1f: deferred connive link of a connive
+    /// replacement whose leading draw parked a replacement-ordering choice. See
+    /// `PendingConniveReentry`. Drained only by
+    /// `engine_replacement::handle_replacement_choice` (accept and decline) —
+    /// never by the shared zone-delivery tail. Transient; serde-skipped when None;
+    /// `.take()`-cleared at drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_connive_reentry: Option<PendingConniveReentry>,
 
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
@@ -6292,6 +6372,15 @@ pub struct GameState {
     /// tracked set before "put those cards onto the battlefield" resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
+    /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
+    /// `Effect::ForEachCategoryExile` iteration paused by the current member's
+    /// interactive choice ("for each color/card type, you may exile a card of
+    /// that color/type"). Drained alongside `pending_per_player_zone_choice`,
+    /// BEFORE `pending_continuation` runs, so every member's pool pick
+    /// accumulates into the chain's tracked set before a downstream
+    /// "from among them" clause resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
 
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
@@ -6585,6 +6674,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
 
+    /// CR 805.4b: queue of players who still owe their turn-based draw-step
+    /// draw THIS step. Seeded by `turns::enter_phase`'s `Phase::Draw` arm on
+    /// first entry (`[active_player]` normally, or `[active_player,
+    /// teammate]` under the shared team turns option) and drained front-to-
+    /// back by `turns::drain_pending_team_draw_step`. A draw that pauses on
+    /// a CR 616.1 competing-replacement choice leaves its player at the
+    /// front of the queue (not popped) so resumption — via
+    /// `handle_replacement_choice`'s epilogue, which also calls the same
+    /// drain function — retries exactly that player's draw and then
+    /// continues to any still-queued teammate, instead of either redrawing
+    /// a completed player or silently dropping a queued one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_team_draw_step: Vec<PlayerId>,
+
     /// CR 502.3: Transient untap-step carry. When a `MaxUntapPerType` cap
     /// (Smoke / Stoic Angel / Damping Field) raises `WaitingFor::ChooseUntapSubset`,
     /// the permanents the active player already chose not to untap (from the
@@ -6748,6 +6851,28 @@ pub struct TransientContinuousEffect {
     /// Giant Growth") survives the source's zone change.
     #[serde(default)]
     pub source_name: String,
+}
+
+/// CR 701.50a + CR 614.5 + CR 616.1f: deferred "then that creature connives"
+/// link of a connive replacement whose LEADING `Draw` link parked an interactive
+/// `ReplacementChoice` (the controller's own draw is itself replaced). CR 701.50a's
+/// replacement reads "instead you draw a card, THEN that creature connives" — the
+/// "then" fixes the printed order, so the connive must run only AFTER the parked
+/// draw choice resolves. Held in a DEDICATED slot (NOT
+/// `post_replacement_continuation`) so the shared zone-delivery tail
+/// (`apply_zone_delivery_tail`, `DeliveryTail` owner) cannot drain it mid-draw —
+/// it is drained ONLY by the post-replacement-choice epilogue
+/// (`engine_replacement::handle_replacement_choice`), after the leading draw fully
+/// delivers, on both the accept and decline resume paths. On drain it re-enters
+/// the pipeline via `propose_connive` with the already-applied rids excluded
+/// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements
+/// without self-invoking. (CR 614.11a — completing a replacement's actions before
+/// resuming a draw — is the analogous supporting principle.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingConniveReentry {
+    pub conniver: ObjectId,
+    pub count: u32,
+    pub applied: HashSet<ReplacementId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7038,10 +7163,25 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
+        // CR 810.4 + CR 810.11: `FormatConfig::starting_life` is the TEAM's
+        // shared total in a team-based format (Two-Headed Giant: 30, not 30
+        // per player / 60 per team). `game::players::team_life_total` derives
+        // the shared total by summing each living teammate's own `life`
+        // field, so the individual starting values must already split the
+        // shared total rather than each duplicating it. The engine currently
+        // only models 2-player teams (seats paired {0,1}, {2,3}, ... — see
+        // `game::players::teammates`/`team_index`), so the split is an even
+        // halving; CR 810.11 (3+-player teams) would need this to divide by
+        // the actual team size instead.
+        let per_player_life = if config.team_based {
+            config.starting_life / 2
+        } else {
+            config.starting_life
+        };
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: config.starting_life,
+                life: per_player_life,
                 ..Player::default()
             })
             .collect();
@@ -7079,6 +7219,7 @@ impl GameState {
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,
+            pending_connive_reentry: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
@@ -7206,6 +7347,7 @@ impl GameState {
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
+            pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,
@@ -7245,6 +7387,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             current_trigger_match_count: None,
@@ -7536,6 +7679,7 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
+            && self.pending_connive_reentry == other.pending_connive_reentry
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
@@ -8416,6 +8560,8 @@ mod tests {
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
                     chosen_counter_count: None,
+                    chosen_x: None,
+                    collected_evidence: Vec::new(),
                     chosen_exiled: Vec::new(),
                     chosen_sacrificed_battlefield: Vec::new(),
                     cost_paid_object: None,
