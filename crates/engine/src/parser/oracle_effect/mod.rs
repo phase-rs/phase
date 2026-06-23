@@ -13368,6 +13368,17 @@ fn lower_subject_predicate_ast(
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
+            // CR 113.1a + CR 611.2: "each <type> you control gains all activated
+            // abilities of target <donor>" (Grell Philosopher). The imperative
+            // path lowered the verb to `GainActivatedAbilitiesOfTarget` with the
+            // default `SelfRef` recipient; rebind the recipient to the subject's
+            // resolved group filter so the grant lands on each matching object
+            // rather than the spell source. The donor `target` and `duration`
+            // were already parsed by the imperative combinator.
+            if let Effect::GainActivatedAbilitiesOfTarget { recipient, .. } = &mut clause.effect {
+                *recipient = subject.affected.clone();
+                return clause;
+            }
             if matches!(
                 &clause.effect,
                 Effect::ChooseFromZone {

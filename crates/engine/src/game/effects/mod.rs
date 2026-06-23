@@ -109,6 +109,7 @@ pub mod forage;
 pub mod force_attack;
 pub mod force_block;
 pub mod free_cast_from_zones;
+pub mod gain_activated_abilities;
 pub mod gain_control;
 pub mod gift_delivery;
 pub mod goad;
@@ -2688,6 +2689,9 @@ pub fn resolve_effect(
             copy_token_blocking::resolve(state, ability, events)
         }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
+        Effect::GainActivatedAbilitiesOfTarget { .. } => {
+            gain_activated_abilities::resolve(state, ability, events)
+        }
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
         Effect::PutCounterAll { .. } => counters::resolve_add_all(state, ability, events),

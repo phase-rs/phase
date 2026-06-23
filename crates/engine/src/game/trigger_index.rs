@@ -760,6 +760,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
+        | EffectKind::GainActivatedAbilitiesOfTarget
         | EffectKind::ChooseCard
         | EffectKind::PutCounter
         | EffectKind::PutCounterAll
