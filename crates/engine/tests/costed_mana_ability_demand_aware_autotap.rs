@@ -47,6 +47,8 @@ use engine::types::zones::Zone;
 
 const DIMIR_SIGNET_ORACLE: &str = "{1}, {T}: Add {U}{B}.";
 const GRUUL_SIGNET_ORACLE: &str = "{1}, {T}: Add {R}{G}.";
+const AZORIUS_SIGNET_ORACLE: &str = "{1}, {T}: Add {W}{U}.";
+const MIND_STONE_ORACLE: &str = "{T}: Add {C}.";
 
 /// Signets are artifacts, not creatures. The scenario creature helper parses
 /// Oracle text onto a battlefield permanent; convert it to a pure artifact and
@@ -292,5 +294,288 @@ fn reserved_sibling_rock_not_cross_tapped_for_nested_sub_cost() {
         outcome.state().players[0].mana_pool.total(),
         0,
         "the full {{U}}{{B}}{{R}}{{G}} was spent — no stranded leftover mana"
+    );
+}
+
+#[test]
+fn wurg_spell_funded_by_two_disjoint_signets_with_surplus_white_resolves() {
+    // PRIMARY discriminating test for the multiplicity-aware reserve predicate.
+    //
+    // Azorius Signet ({W}{U}) + Gruul Signet ({R}{G}) + two Plains, cost
+    // {W}{U}{R}{G}. The outer cost reserves both Signets (only they make U/R/G);
+    // each Signet `{1}` is funded by a Plains. While the Azorius/Gruul sub-costs
+    // resolve, the pool transiently holds floated {W} alongside a single floated
+    // {U} the outer {U} shard reserves. Pre-fix, the spend treated ColorDemand as
+    // a BOOLEAN (`demand[i] > 0`): both white AND blue were "demanded," and the
+    // soft-deprioritize collapsed to "least-available among demanded," spending
+    // the singleton {U} the outer cost reserved — stranding it, so the cast was
+    // rejected with "Cannot pay mana cost" and `resolve()`'s `.expect` panics.
+    //
+    // Post-fix the predicate is multiplicity-aware: white sits in SURPLUS
+    // (count > demand) and is spent for the `{1}`, while the singleton {U}
+    // (count == demand, no surplus) is left for the outer cost. The legal line
+    // (Plains -> Azorius, Plains -> Gruul, pool {W}{U}{R}{G}) resolves.
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let plains1 = scenario.add_basic_land(P0, ManaColor::White);
+    let plains2 = scenario.add_basic_land(P0, ManaColor::White);
+
+    let azorius = scenario
+        .add_creature_from_oracle(P0, "Azorius Signet", 0, 0, AZORIUS_SIGNET_ORACLE)
+        .id();
+    let gruul = scenario
+        .add_creature_from_oracle(P0, "Gruul Signet", 0, 0, GRUUL_SIGNET_ORACLE)
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "WURG Test Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    make_artifact(&mut runner, azorius);
+    make_artifact(&mut runner, gruul);
+
+    let outcome = runner.cast(spell).resolve();
+
+    // PRIMARY revert-failing assertion: the cost was genuinely payable and the
+    // spell resolved off the stack. Reverting the multiplicity predicate (back to
+    // `demand[i] > 0`) makes funding a Signet `{1}` steal the singleton reserved
+    // {U}, the outer {U} is short, and this assertion flips (spell stays in
+    // Hand/Stack and the cast `.expect` panics first).
+    let resolved_zone = outcome.zone_of(spell);
+    assert!(
+        !matches!(resolved_zone, Zone::Hand | Zone::Stack),
+        "the {{W}}{{U}}{{R}}{{G}} spell must have cast and resolved, but it is \
+         still in {resolved_zone:?} — a Signet `{{1}}` consumed a reserved color"
+    );
+
+    assert!(
+        outcome.state().objects.get(&azorius).unwrap().tapped,
+        "Azorius Signet was tapped for {{W}}{{U}}"
+    );
+    assert!(
+        outcome.state().objects.get(&gruul).unwrap().tapped,
+        "Gruul Signet was tapped for {{R}}{{G}}"
+    );
+    assert!(
+        outcome.state().objects.get(&plains1).unwrap().tapped,
+        "the first Plains was tapped to fund a Signet `{{1}}`"
+    );
+    assert!(
+        outcome.state().objects.get(&plains2).unwrap().tapped,
+        "the second Plains was tapped to fund a Signet `{{1}}` — surplus white was \
+         spent, not the reserved singleton {{U}}"
+    );
+    assert_eq!(
+        outcome.state().players[0].mana_pool.total(),
+        0,
+        "the full {{W}}{{U}}{{R}}{{G}} was spent — no leftover floated mana"
+    );
+}
+
+#[test]
+fn wubrg_three_signets_resolves() {
+    // Five-color scale. Azorius ({W}{U}) + Dimir ({U}{B}) + Gruul ({R}{G}) cover
+    // every color; three Plains fund the three Signet `{1}` sub-costs. Cost
+    // {W}{U}{B}{R}{G}. The multiplicity predicate keeps each reserved singleton
+    // (every demanded color is needed exactly once) intact while spending the
+    // surplus white Plains units for the generic `{1}` pips. Resolves.
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let plains: Vec<ObjectId> = (0..3)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::White))
+        .collect();
+
+    let azorius = scenario
+        .add_creature_from_oracle(P0, "Azorius Signet", 0, 0, AZORIUS_SIGNET_ORACLE)
+        .id();
+    let dimir = scenario
+        .add_creature_from_oracle(P0, "Dimir Signet", 0, 0, DIMIR_SIGNET_ORACLE)
+        .id();
+    let gruul = scenario
+        .add_creature_from_oracle(P0, "Gruul Signet", 0, 0, GRUUL_SIGNET_ORACLE)
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "WUBRG Five Test Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    make_artifact(&mut runner, azorius);
+    make_artifact(&mut runner, dimir);
+    make_artifact(&mut runner, gruul);
+
+    let outcome = runner.cast(spell).resolve();
+
+    let resolved_zone = outcome.zone_of(spell);
+    assert!(
+        !matches!(resolved_zone, Zone::Hand | Zone::Stack),
+        "the five-color spell must have cast and resolved, but it is still in \
+         {resolved_zone:?} — a Signet `{{1}}` consumed a reserved color"
+    );
+    for (name, id) in [("Azorius", azorius), ("Dimir", dimir), ("Gruul", gruul)] {
+        assert!(
+            outcome.state().objects.get(&id).unwrap().tapped,
+            "{name} Signet was tapped to supply its colors for the outer cost"
+        );
+    }
+    // The Plains funded the Signet `{1}` sub-costs (surplus floated white from an
+    // earlier Signet may also fund a later `{1}`, so not every Plains need tap);
+    // every demanded color survived and the spell resolved with an empty pool.
+    let _ = &plains;
+    assert_eq!(
+        outcome.state().players[0].mana_pool.total(),
+        0,
+        "the full {{W}}{{U}}{{B}}{{R}}{{G}} was spent — no leftover floated mana"
+    );
+}
+
+#[test]
+fn ww_u_cost_does_not_touch_demanded_white_at_count_equal_demand_resolves() {
+    // Multi-authority per-color multiplicity. Cost {W}{W}{U}: white is demanded
+    // TWICE, blue once. Azorius Signet ({W}{U}) + one Plains + a Mind Stone
+    // ({T}: Add {C}). The Mind Stone funds Azorius's `{1}` (the only colorless
+    // source), so Azorius floats {W}{U}; the Plains adds {W}. The pool then holds
+    // exactly {W}{W} and {U} — white count 2 EQUALS demand 2 (no surplus), blue
+    // count 1 equals demand 1. A boolean `demand[i] > 0` predicate would refuse to
+    // distinguish "two whites, two demanded" (correctly fully reserved) from a
+    // surplus case; the multiplicity predicate confirms white is exactly reserved
+    // and never spends it for a generic pip. The spell has no generic pip itself,
+    // so the only generic spend is Azorius's `{1}`, paid from the colorless Mind
+    // Stone — never the reserved white or singleton blue. Resolves.
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let plains = scenario.add_basic_land(P0, ManaColor::White);
+
+    let azorius = scenario
+        .add_creature_from_oracle(P0, "Azorius Signet", 0, 0, AZORIUS_SIGNET_ORACLE)
+        .id();
+    let mind_stone = scenario
+        .add_creature_from_oracle(P0, "Mind Stone", 0, 0, MIND_STONE_ORACLE)
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "WWU Test Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+            ],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    make_artifact(&mut runner, azorius);
+    make_artifact(&mut runner, mind_stone);
+
+    let outcome = runner.cast(spell).resolve();
+
+    // Revert-failing assertion: the cost resolved. If `{1}` were funded from the
+    // reserved white or singleton blue, the outer {W}{W}{U} would be short and the
+    // cast rejected.
+    let resolved_zone = outcome.zone_of(spell);
+    assert!(
+        !matches!(resolved_zone, Zone::Hand | Zone::Stack),
+        "the {{W}}{{W}}{{U}} spell must have resolved, but it is still in \
+         {resolved_zone:?} — a reserved color funded the `{{1}}`"
+    );
+    assert!(
+        outcome.state().objects.get(&azorius).unwrap().tapped,
+        "Azorius Signet was tapped for {{W}}{{U}}"
+    );
+    assert!(
+        outcome.state().objects.get(&mind_stone).unwrap().tapped,
+        "Mind Stone was tapped — the colorless {{C}} funded Azorius's `{{1}}`"
+    );
+    assert!(
+        outcome.state().objects.get(&plains).unwrap().tapped,
+        "the Plains was tapped to supply the second {{W}}"
+    );
+    assert_eq!(
+        outcome.state().players[0].mana_pool.total(),
+        0,
+        "the full {{W}}{{W}}{{U}} was spent — no leftover floated mana"
+    );
+}
+
+#[test]
+fn signet_one_cost_paid_from_only_demanded_float_no_surplus_no_hard_block() {
+    // CR 601.2h negative: the multiplicity change must never report a payable cost
+    // unpayable. Cast a {W}{U} spell whose only colorless/generic fund for the
+    // Azorius Signet's `{1}` is a single pre-floated {W} — a color the OUTER
+    // {W}{U} cost demands (count 1 == demand 1, NO surplus). The multiplicity
+    // predicate marks white "would dip into reserve," but the soft fallback must
+    // STILL pay the `{1}` from that only available unit (CR 601.2h) rather than
+    // hard-block. After Azorius floats {W}{U}, the outer cost is paid from the
+    // produced {W}{U}. Resolves.
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let azorius = scenario
+        .add_creature_from_oracle(P0, "Azorius Signet", 0, 0, AZORIUS_SIGNET_ORACLE)
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "WU Fallback Test Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    make_artifact(&mut runner, azorius);
+
+    // Pre-float exactly one {W} — the only mana available to pay Azorius's `{1}`
+    // (no untapped land or other rock exists). White is demanded by the outer
+    // {W}{U}, so the multiplicity predicate flags it reserved; the soft fallback
+    // must still spend it (CR 601.2h).
+    add_mana(&mut runner, ManaType::White, 1);
+
+    let outcome = runner.cast(spell).resolve();
+
+    // Revert-failing assertion: the cost was payable. If the multiplicity change
+    // hard-refused the only-demanded float, the `{1}` is unfundable, Azorius never
+    // taps, and the cast `.expect` panics with the spell still in hand.
+    let resolved_zone = outcome.zone_of(spell);
+    assert!(
+        !matches!(resolved_zone, Zone::Hand | Zone::Stack),
+        "the {{W}}{{U}} spell must have resolved — the `{{1}}` is payable from the \
+         only floated unit (CR 601.2h), but it is still in {resolved_zone:?}"
+    );
+    assert!(
+        outcome.state().objects.get(&azorius).unwrap().tapped,
+        "Azorius Signet activated and tapped after paying its `{{1}}` from the float"
+    );
+    // Pool: started with 1 ({W}), paid `{1}` (-1), Azorius produced {W}{U} (+2),
+    // the spell consumed {W}{U} (-2) = 0.
+    assert_eq!(
+        outcome.state().players[0].mana_pool.total(),
+        0,
+        "the {{W}}{{U}} spell consumed all produced mana — no leftover float"
     );
 }

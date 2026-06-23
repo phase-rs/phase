@@ -1810,6 +1810,31 @@ pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
     }
 }
 
+/// Count the units of `color` in `pool` that are eligible to pay a generic pip
+/// under the spell `spell` context: never a convoke-payment stand-in, and (when
+/// a context is supplied) every restriction must allow it. This is the LIVE
+/// eligible count — recomputed per call as the pool shrinks across generic pips,
+/// never snapshotted — so a multiplicity-aware "would dip into reserve" check
+/// (`count <= demand[i]`) reflects the units actually still spendable.
+///
+/// Used by both `spend_any_eligible` (real spend) and `spend_generic_non_demanded`
+/// (planner dry-run) so the two rank colors identically (CR 118.10: a unit
+/// reserved for the outer cost's colored shard can't also fund a sub-cost pip).
+fn eligible_color_count(
+    pool: &ManaPool,
+    color: ManaType,
+    spell: Option<&PaymentContext<'_>>,
+) -> usize {
+    pool.mana
+        .iter()
+        .filter(|m| {
+            m.color == color
+                && !m.is_convoke_payment()
+                && spell.is_none_or(|ctx| m.restrictions.iter().all(|r| r.allows(ctx)))
+        })
+        .count()
+}
+
 fn spend_any_eligible(
     pool: &mut ManaPool,
     spell: Option<&PaymentContext<'_>>,
@@ -1829,34 +1854,37 @@ fn spend_any_eligible(
                 ManaType::Green,
             ];
             // CR 601.2h + CR 118.10: When a `demand` is supplied, deprioritize
-            // colors the outer cost / hand still needs — but only SOFTLY: pick a
-            // demanded color when it is the only eligible one (never return `None`
-            // while payable mana exists; CR 601.2h forbids leaving a payable cost
-            // unpaid). Sort key is `(is_demanded, count)`:
-            // non-demanded colors sort first, then least-available within each tier.
+            // colors whose every available unit the outer cost / hand still needs
+            // — but only SOFTLY. The check is multiplicity-aware: spending one unit
+            // of color `i` would dip into the outer cost's reserve iff the live
+            // eligible count is no greater than the demanded count
+            // (`count <= demand[i]`); a surplus unit (`count > demand[i]`) is free
+            // to spend (CR 118.10: a reserved unit can't also fund this pip, but a
+            // surplus one isn't reserved). Colorless / unmapped colors are never
+            // reserved. Sort key is `(would_dip_into_reserve, count)`: surplus-safe
+            // colors sort first, then least-available within each tier. When EVERY
+            // eligible color would dip (no surplus anywhere) all share `(true, count)`
+            // and `best` still selects the least-available demanded unit — never
+            // returns `None` while payable mana exists (CR 601.2h forbids leaving a
+            // payable cost unpaid). `demand == None` => predicate false for all =>
+            // byte-identical to the pre-demand least-available ordering.
             let mut best: Option<(ManaType, bool, usize)> = None;
             for &color in &colors {
-                let count = pool
-                    .mana
-                    .iter()
-                    .filter(|m| {
-                        m.color == color
-                            && !m.is_convoke_payment()
-                            && m.restrictions.iter().all(|r| r.allows(ctx))
-                    })
-                    .count();
+                let count = eligible_color_count(pool, color, Some(ctx));
                 if count > 0 {
-                    let is_demanded = demand
-                        .and_then(|d| mana_type_to_demand_index(color).map(|i| d[i] > 0))
+                    let would_dip_into_reserve = demand
+                        .and_then(|d| {
+                            mana_type_to_demand_index(color).map(|i| count <= d[i] as usize)
+                        })
                         .unwrap_or(false);
                     let better = match best {
                         None => true,
-                        Some((_, best_demanded, best_count)) => {
-                            (is_demanded, count) < (best_demanded, best_count)
+                        Some((_, best_dip, best_count)) => {
+                            (would_dip_into_reserve, count) < (best_dip, best_count)
                         }
                     };
                     if better {
-                        best = Some((color, is_demanded, count));
+                        best = Some((color, would_dip_into_reserve, count));
                     }
                 }
             }
@@ -1896,13 +1924,17 @@ fn spend_any_for_required_colors(
 /// nested sub-cost must not consume those colored units — each cost payment
 /// applies to only one ability, so a unit reserved for the outer colored shard
 /// can't also fund the sub-cost's generic pip. With `demand == Some`, this spends
-/// only a NON-demanded eligible unit (a unit whose color has WUBRG demand index
-/// `0`, or colorless / convoke); if only demanded units remain it returns `None`
-/// and the pip is left in the residual so auto-tap taps a different source. With
-/// `demand == None` it is byte-identical to `spend_generic_eligible` — it never
-/// falls through to the least-available ordering when demanded units are all that
-/// is left (WATCH-ITEM #1: the planner must leave the residual, not coincidentally
-/// pay from a demanded unit).
+/// only a SPENDABLE eligible unit: colorless / convoke, an undemanded color
+/// (`demand[i] == 0`), or a color held in SURPLUS — its live eligible count
+/// exceeds the demanded count (`count > demand[i]`), so consuming one still leaves
+/// the outer cost whole. If only reserved (demanded, non-surplus) units remain it
+/// returns `None` and the pip is left in the residual so auto-tap taps a different
+/// source. The count is multiplicity-aware and shares `eligible_color_count` with
+/// the real-spend twin `spend_any_eligible`, so the planner dry-run and real spend
+/// rank colors identically. With `demand == None` it is byte-identical to
+/// `spend_generic_eligible` — it never falls through to the least-available
+/// ordering when reserved units are all that is left (WATCH-ITEM #1: the planner
+/// must leave the residual, not coincidentally pay from a reserved unit).
 fn spend_generic_non_demanded(
     pool: &mut ManaPool,
     spell: Option<&PaymentContext<'_>>,
@@ -1924,9 +1956,17 @@ fn spend_generic_non_demanded(
     }
 
     // Among non-convoke units eligible under the spell context, pick one whose
-    // color is NOT demanded by the outer cost (colorless is never demanded).
-    // Prefer non-`Z` units within that color (mirrors `spend_color_prefer_non_z`).
-    let is_non_demanded = |unit: &ManaUnit| -> bool {
+    // color is SPENDABLE without dipping into the outer cost's colored reserve:
+    // colorless (never demanded), an undemanded color (`demand[i] == 0`), or a
+    // color held in SURPLUS — its live eligible count exceeds the demanded count
+    // (`count > demand[i]`), so spending one still leaves enough for the outer
+    // cost (CR 118.10). The count is multiplicity-aware and computed LIVE per
+    // invocation (the pool shrinks as generic pips are spent), and is independent
+    // of the two-tier `Z`-source preference below — it gates spendability, not
+    // tier. Prefer non-`Z` units within the spendable set (mirrors
+    // `spend_color_prefer_non_z`); if only demanded units remain, return `None`
+    // and the pip stays in the residual so auto-tap taps a different source.
+    let is_spendable = |unit: &ManaUnit| -> bool {
         if unit.is_convoke_payment() {
             return false;
         }
@@ -1938,20 +1978,22 @@ fn spend_generic_non_demanded(
         match mana_type_to_demand_index(unit.color) {
             // Colorless: index `None`, never demanded.
             None => true,
-            Some(i) => demand[i] == 0,
+            Some(i) => {
+                demand[i] == 0 || eligible_color_count(pool, unit.color, spell) > demand[i] as usize
+            }
         }
     };
 
     if let Some(pos) = pool
         .mana
         .iter()
-        .position(|unit| !unit.source_could_produce_two_or_more_colors && is_non_demanded(unit))
+        .position(|unit| !unit.source_could_produce_two_or_more_colors && is_spendable(unit))
     {
         return Some(pool.mana.swap_remove(pos));
     }
     pool.mana
         .iter()
-        .position(is_non_demanded)
+        .position(is_spendable)
         .map(|pos| pool.mana.swap_remove(pos))
 }
 
