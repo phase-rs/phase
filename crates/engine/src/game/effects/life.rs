@@ -453,12 +453,16 @@ pub fn resolve_set_life_total(
             &scoped_ability,
         );
 
-        let current_life = state
-            .players
-            .iter()
-            .find(|p| p.id == target_player_id)
-            .map(|p| p.life)
-            .ok_or(EffectError::PlayerNotFound)?;
+        // CR 810.9a: "If a cost or effect needs to know the value of an
+        // individual player's life total, that cost or effect uses the
+        // team's life total instead" — degenerates to `Player::life` outside
+        // team-based formats. CR 810.9c: the diff is still applied to only
+        // `target_player_id`'s own life, so the team total moves by exactly
+        // the gained/lost amount.
+        if !state.players.iter().any(|p| p.id == target_player_id) {
+            return Err(EffectError::PlayerNotFound);
+        }
+        let current_life = crate::game::players::team_life_total(state, target_player_id);
         let diff = amount - current_life;
 
         let deferred = match diff.signum() {

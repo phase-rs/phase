@@ -322,10 +322,10 @@ fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
 /// unrelated SBA choice prompts such as commander-zone or legend-rule choices.
 pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     let life_loss = state.players.iter().any(|player| {
-        // CR 704.5a: A player with 0 or less life loses the game.
+        // CR 704.5a + CR 810.8c: A player (or team) with 0 or less life loses.
         !player.is_eliminated
             && !player.is_phased_out()
-            && player.life <= 0
+            && super::players::team_life_total(state, player.id) <= 0
             && !player_has_cant_lose(state, player.id)
     });
     if life_loss {
@@ -344,9 +344,13 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c: A player with ten or more poison counters loses the game.
+        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
         !player.is_eliminated
-            && player.poison_counters >= 10
+            && if state.format_config.team_based {
+                super::players::team_poison_total(state, player.id) >= 15
+            } else {
+                player.poison_counters >= 10
+            }
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -402,9 +406,15 @@ fn static_affects_player(
     }
 }
 
-/// CR 704.5a: A player with 0 or less life loses the game. Pure collector — the
-/// SBA driver batches all loss conditions into a single simultaneous event
-/// (CR 704.3) so simultaneous deaths can resolve to a draw (CR 104.4a).
+/// CR 704.5a + CR 810.8c: A player (or, in a team-based format, a team) with 0
+/// or less life loses the game. Pure collector — the SBA driver batches all
+/// loss conditions into a single simultaneous event (CR 704.3) so simultaneous
+/// deaths can resolve to a draw (CR 104.4a).
+///
+/// CR 810.9a: "If a cost or effect needs to know the value of an individual
+/// player's life total, that cost or effect uses the team's life total
+/// instead" — the loss threshold is checked against `team_life_total`, which
+/// degenerates to `Player::life` in non-team formats.
 ///
 /// CR 104.3b: Skip players protected by CantLoseTheGame.
 ///
@@ -415,7 +425,8 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
     state
         .players
         .iter()
-        .filter(|p| !p.is_eliminated && !p.is_phased_out() && p.life <= 0)
+        .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
         .collect()
@@ -433,13 +444,23 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c: A player with ten or more poison counters loses the game. Pure
-/// collector (see `collect_life_losers`).
+/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
+/// game; in a team-based format, a team with fifteen or more shared poison
+/// counters loses instead (CR 810.10/810.10a: poison counters are shared by
+/// the team and checked via `team_poison_total`). Pure collector (see
+/// `collect_life_losers`).
 fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
     state
         .players
         .iter()
-        .filter(|p| !p.is_eliminated && p.poison_counters >= 10)
+        .filter(|p| !p.is_eliminated)
+        .filter(|p| {
+            if state.format_config.team_based {
+                super::players::team_poison_total(state, p.id) >= 15
+            } else {
+                p.poison_counters >= 10
+            }
+        })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
         .collect()
@@ -3205,8 +3226,14 @@ mod tests {
 
     #[test]
     fn sba_2hg_team_dies_together() {
+        // CR 810.4 + CR 810.8c + CR 810.9a: a team's life total is shared, so
+        // the loss check is against the TEAM's combined total, not either
+        // member's individual `life` field. Team A's combined total here is
+        // -10 + 5 = -5 <= 0, so the team loses even though player 1 (the
+        // teammate) individually still has positive life.
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        state.players[0].life = 0; // Team A player dies
+        state.players[0].life = -10;
+        state.players[1].life = 5;
         let mut events = Vec::new();
 
         check_state_based_actions(&mut state, &mut events);
@@ -3219,6 +3246,23 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
         ));
+    }
+
+    #[test]
+    fn sba_2hg_team_survives_if_combined_life_positive() {
+        // CR 810.9a: one teammate at 0 individual life does NOT lose the
+        // team the game if the team's combined life total is still positive
+        // — only the shared total matters, never an individual member's.
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.players[0].life = 0;
+        state.players[1].life = 30;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
     }
 
     // --- Saga SBA tests ---
