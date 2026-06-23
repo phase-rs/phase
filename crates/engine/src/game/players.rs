@@ -307,6 +307,56 @@ fn team_index(player: PlayerId) -> u8 {
     player.0 / 2
 }
 
+/// CR 810.4 + CR 810.9a: A player's team's shared life total. In non-team
+/// formats this is just the player's own life total — `teammates` returns
+/// empty, so the sum degenerates to the single value. CR 810.9a: "If a cost
+/// or effect needs to know the value of an individual player's life total,
+/// that cost or effect uses the team's life total instead" — callers that
+/// read an individual life total for a comparison, cost, or SBA check in a
+/// team-based format must go through this accessor rather than `Player::life`
+/// directly. The underlying per-player `life` fields remain the single
+/// source of truth (CR 810.9: life loss/gain still happens to "each player
+/// individually") — this is a pure derived sum, not a separate stored pool.
+pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
+    let mut total = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.life)
+        .unwrap_or(0);
+    for teammate in teammates(state, player) {
+        total += state
+            .players
+            .iter()
+            .find(|p| p.id == teammate)
+            .map(|p| p.life)
+            .unwrap_or(0);
+    }
+    total
+}
+
+/// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
+/// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
+/// for the player and their (living) teammates. Non-team formats degenerate
+/// to the player's own count.
+pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
+    let mut total = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.poison_counters)
+        .unwrap_or(0);
+    for teammate in teammates(state, player) {
+        total += state
+            .players
+            .iter()
+            .find(|p| p.id == teammate)
+            .map(|p| p.poison_counters)
+            .unwrap_or(0);
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

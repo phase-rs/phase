@@ -400,9 +400,16 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
             return Err(format!("{:?} is phased out", id));
         }
 
-        // Must be controlled by active player
-        if obj.controller != active {
-            return Err(format!("{:?} is not controlled by active player", id));
+        // CR 508.1 + CR 805.10a: Must be controlled by the active player or,
+        // under the shared team turns option, by a teammate — "each team's
+        // creatures attack the other team as a group... each player on the
+        // active team is an attacking player."
+        if obj.controller != active && !players::teammates(state, active).contains(&obj.controller)
+        {
+            return Err(format!(
+                "{:?} is not controlled by the active player or their team",
+                id
+            ));
         }
 
         // Must not be tapped
@@ -867,13 +874,24 @@ pub fn validate_blockers_for_player(
 
         // CR 802.4a: In multiplayer, blocker must block a creature attacking
         // this player, a planeswalker they control, or a battle they protect.
+        //
+        // CR 805.10d: Under the shared team turns option this is widened to
+        // the whole defending team — "Creatures controlled by the defending
+        // players can block creatures attacking any player on the defending
+        // team, attacking a planeswalker controlled by one of those players,
+        // or a battle protected by one of those players." So a blocker may
+        // also defend an attack whose `defending_player` is its controller's
+        // teammate, not just its own controller.
         if let Some(combat) = &state.combat {
             if let Some(attacker_info) =
                 combat.attackers.iter().find(|a| a.object_id == attacker_id)
             {
-                if attacker_info.defending_player != player {
+                let defending_player = attacker_info.defending_player;
+                let blocks_for_team = defending_player == player
+                    || players::teammates(state, player).contains(&defending_player);
+                if !blocks_for_team {
                     return Err(format!(
-                        "{:?} cannot block {:?} (not attacking this player)",
+                        "{:?} cannot block {:?} (not attacking this player or their team)",
                         blocker_id, attacker_id
                     ));
                 }
@@ -2101,13 +2119,20 @@ pub fn declare_attackers_with_bands(
         ));
     }
 
-    // Validate attack targets
+    // Validate attack targets. CR 805.10a: under the shared team turns
+    // option the active team's creatures attack the OTHER team as a group,
+    // so a target controlled by/protected by either active-team member
+    // (active player or teammate) is ineligible — not just the literal
+    // active player.
+    let active_team: Vec<PlayerId> = std::iter::once(state.active_player)
+        .chain(players::teammates(state, state.active_player))
+        .collect();
     for (attacker_id, target) in attacks {
         match target {
             AttackTarget::Player(pid) => {
                 if !state.players.iter().any(|p| p.id == *pid)
                     || state.eliminated_players.contains(pid)
-                    || *pid == state.active_player
+                    || active_team.contains(pid)
                 {
                     return Err(format!("{:?} cannot attack player {:?}", attacker_id, pid));
                 }
@@ -2128,8 +2153,8 @@ pub fn declare_attackers_with_bands(
                         pw_id
                     ));
                 }
-                // Can't attack your own planeswalker
-                if pw.controller == state.active_player {
+                // Can't attack your own (or, under team turns, your team's) planeswalker
+                if active_team.contains(&pw.controller) {
                     return Err(format!("Cannot attack your own planeswalker {:?}", pw_id));
                 }
             }
@@ -2152,7 +2177,11 @@ pub fn declare_attackers_with_bands(
                 }
                 // CR 310.8b: A battle's protector can never attack it. Notably a
                 // Siege's controller CAN attack it if they are not the protector.
-                if battle.protector() == Some(state.active_player) {
+                // Under team turns this extends to a teammate's protected battle.
+                if battle
+                    .protector()
+                    .is_some_and(|protector| active_team.contains(&protector))
+                {
                     return Err(format!("Protector cannot attack battle {:?}", battle_id));
                 }
             }
@@ -4616,6 +4645,87 @@ mod tests {
         let combat = state.combat.as_ref().unwrap();
         assert_eq!(combat.blocker_assignments[&attacker], vec![blocker]);
         assert_eq!(combat.blocker_to_attacker[&blocker], vec![attacker]);
+    }
+
+    /// CR 805.10a/b: "Each team's creatures attack the other team as a
+    /// group... The active team has one combined attack." A creature
+    /// controlled by the active player's teammate must be declarable as an
+    /// attacker in the SAME declaration as the active player's own
+    /// creatures, and neither may target the attacking team's own players.
+    #[test]
+    fn declare_attackers_two_headed_giant_combines_teammates_creatures() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+        let active_bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let teammate_wolf = create_creature(&mut state, PlayerId(1), "Wolf", 3, 3);
+
+        let mut events = Vec::new();
+        declare_attackers_with_bands(
+            &mut state,
+            &[
+                (active_bear, AttackTarget::Player(PlayerId(2))),
+                (teammate_wolf, AttackTarget::Player(PlayerId(3))),
+            ],
+            &[],
+            &mut events,
+        )
+        .unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert_eq!(combat.attackers.len(), 2);
+
+        // CR 805.10a: can't attack your own team (teammate as the target).
+        let mut blocked_state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        blocked_state.turn_number = 2;
+        blocked_state.active_player = PlayerId(0);
+        blocked_state.combat = Some(CombatState::default());
+        let bear2 = create_creature(&mut blocked_state, PlayerId(0), "Bear", 2, 2);
+        let mut events2 = Vec::new();
+        let err = declare_attackers_with_bands(
+            &mut blocked_state,
+            &[(bear2, AttackTarget::Player(PlayerId(1)))],
+            &[],
+            &mut events2,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot attack player"), "err={err}");
+    }
+
+    /// CR 805.10d: "Creatures controlled by the defending players can block
+    /// creatures attacking any player on the defending team." A creature
+    /// controlled by one defending teammate may block an attacker that is
+    /// attacking the OTHER defending teammate.
+    #[test]
+    fn declare_blockers_two_headed_giant_teammate_blocks_attack_on_other_teammate() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(2);
+        // Attacker controlled by the active team (P2) is attacking P0; the
+        // defending team is P0 + P1.
+        let attacker = create_creature(&mut state, PlayerId(2), "Bear", 2, 2);
+        let teammate_blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+
+        let mut events = Vec::new();
+        // P1 (not the player being attacked, but P0's teammate) declares the block.
+        declare_blockers_for_player(
+            &mut state,
+            PlayerId(1),
+            &[(teammate_blocker, attacker)],
+            &mut events,
+        )
+        .unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert_eq!(
+            combat.blocker_assignments[&attacker],
+            vec![teammate_blocker]
+        );
     }
 
     /// CR 506.5: the sole declared attacker is "attacking alone"; a co-attacker

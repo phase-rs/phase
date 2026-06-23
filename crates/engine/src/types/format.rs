@@ -268,9 +268,7 @@ impl GameFormat {
 
     /// Authoritative list of user-selectable formats. The frontend consumes
     /// this (via the `get_format_registry` WASM export) to render format
-    /// pickers, default configs, and badges. `TwoHeadedGiant` is intentionally
-    /// omitted — the enum variant exists but the engine does not yet support
-    /// teamed play, so it is not exposed to end users.
+    /// pickers, default configs, and badges.
     pub fn registry() -> Vec<FormatMetadata> {
         vec![
             FormatMetadata {
@@ -424,6 +422,14 @@ impl GameFormat {
                 description: "60 snow basic lands, random creature tokens",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::momir(),
+            },
+            FormatMetadata {
+                format: GameFormat::TwoHeadedGiant,
+                label: "Two-Headed Giant",
+                short_label: "2HG",
+                description: "Teams of 2 share a turn, life, and poison",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::two_headed_giant(),
             },
         ]
     }

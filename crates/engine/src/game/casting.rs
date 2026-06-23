@@ -3460,18 +3460,24 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Prowl);
     }
 
-    // CR 702.117a: Surge — a hand alternative cost legal when the caster has cast
-    // another spell this turn (in non–Two-Headed-Giant games there are no
-    // teammates). The surge spell isn't recorded in `spells_cast_this_turn_by_player`
-    // yet at offer time, so any prior entry for the caster satisfies "another spell".
+    // CR 702.117a: Surge — a hand alternative cost legal when the caster OR
+    // one of their teammates (CR 810.5 doesn't share hand/casting resources,
+    // but Surge's own text explicitly extends to teammates) has cast another
+    // spell this turn. The surge spell isn't recorded in
+    // `spells_cast_this_turn_by_player` yet at offer time, so any prior entry
+    // for the caster or a teammate satisfies "another spell".
     if obj.zone == Zone::Hand
         && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, Keyword::Surge(_)))
-        && state
-            .spells_cast_this_turn_by_player
-            .get(&player)
-            .is_some_and(|spells| !spells.is_empty())
+        && std::iter::once(player)
+            .chain(super::players::teammates(state, player))
+            .any(|p| {
+                state
+                    .spells_cast_this_turn_by_player
+                    .get(&p)
+                    .is_some_and(|spells| !spells.is_empty())
+            })
     {
         candidates.push(CastingVariant::Surge);
     }
@@ -14919,8 +14925,8 @@ mod tests {
         );
     }
 
-    /// CR 702.117a: surge keys on the caster's own spells — an opponent casting a
-    /// spell this turn must not enable your surge (no teammates outside 2HG).
+    /// CR 702.117a: surge keys on the caster's own (or a teammate's) spells —
+    /// an opponent casting a spell this turn must not enable your surge.
     #[test]
     fn surge_unavailable_when_only_opponent_cast_a_spell() {
         let mut state = setup_game_at_main_phase();
@@ -14930,6 +14936,26 @@ mod tests {
         assert!(
             !candidates.contains(&CastingVariant::Surge),
             "an opponent's spell must not enable your surge; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.117a + CR 810: "You may pay [cost] ... if you or one of your
+    /// teammates has cast another spell this turn." Under a team-based
+    /// format, a teammate's spell (not just the caster's own) must enable
+    /// Surge.
+    #[test]
+    fn surge_available_when_teammate_cast_a_spell() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.team_based = true;
+        let object_id = add_surge_card_in_hand(&mut state);
+        // PlayerId(1) is PlayerId(0)'s teammate under the team-based override
+        // (`players::teammates`'s positional pairing: seats 0+1).
+        record_one_spell_cast_this_turn(&mut state, PlayerId(1));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            candidates.contains(&CastingVariant::Surge),
+            "a teammate's spell must enable your surge; got {candidates:?}",
         );
     }
 

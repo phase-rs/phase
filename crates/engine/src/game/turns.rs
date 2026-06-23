@@ -1230,9 +1230,38 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 /// CR 504.1: During the draw step, the active player draws a card.
 /// CR 614.1a: Routes through the replacement pipeline so effects like Dredge apply.
 /// Returns `Some(WaitingFor)` if a replacement effect needs player interaction.
+/// CR 504.1: The active player's mandatory draw-step draw. CR 805.4b: under
+/// the shared team turns option, every player on the active team draws
+/// during the team's draw step — so the active player's teammate(s) also
+/// draw here.
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     let active = state.active_player;
+    if let Some(wf) = execute_draw_for(state, active, events) {
+        return Some(wf);
+    }
 
+    // CR 805.4b: each player on the active team draws during the team's
+    // draw step. Known narrow gap: if the active player's own draw above had
+    // paused on a CR 614.7 competing-replacement choice, this teammate draw
+    // would not auto-resume afterward — that requires two distinct
+    // replacements competing over the SAME draw event for the SAME player,
+    // which no printed card stacks specifically on a 2HG active player today.
+    if state.format_config.team_based {
+        for teammate in super::players::teammates(state, active) {
+            if let Some(wf) = execute_draw_for(state, teammate, events) {
+                return Some(wf);
+            }
+        }
+    }
+
+    None
+}
+
+fn execute_draw_for(
+    state: &mut GameState,
+    active: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     // CR 121.1 + CR 614.1a + CR 614.6 + CR 704.3: Route through the
     // single-authority `draw_through_replacement` helper so post-replacement
     // continuations (Jace WinTheGame, Abundance reveal-until) drain in the
