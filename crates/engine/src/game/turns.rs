@@ -1900,6 +1900,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 {
                     return state.waiting_for.clone();
                 }
+                if let Some(prompt) =
+                    crate::game::contraptions::perform_contraption_upkeep_turn_based_action(
+                        state, events,
+                    )
+                {
+                    return prompt;
+                }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
                 // cards, two Howling Mines) require an ordering choice that must be

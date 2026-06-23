@@ -630,7 +630,10 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::SchemeSetInMotion { .. } | GameEvent::SchemeAbandoned { .. } => {}
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
-        GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
+        GameEvent::AttractionOpened { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::ContraptionCranked { .. } => {}
         GameEvent::AttractionVisited { .. } => push(TriggerEventKey::VisitAttraction),
         GameEvent::Specialized { .. } => push(TriggerEventKey::Specializes),
         // CR 702.140c-d: `TriggerMode::Mutates` is routed to the always-checked
@@ -898,7 +901,13 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Heist
         | EffectKind::HeistExile
         | EffectKind::CombineHost
-        | EffectKind::ChooseAugmentAndCombineWithHost => {}
+        | EffectKind::ChooseAugmentAndCombineWithHost
+        | EffectKind::AssembleContraptions
+        | EffectKind::AssembleContraptionsFromRollDifference
+        | EffectKind::CrankContraptions
+        | EffectKind::ReassembleContraption
+        | EffectKind::AssembleContraptionOnSprocket
+        | EffectKind::ReassembleContraptionOnSprocket => {}
     }
 }
 

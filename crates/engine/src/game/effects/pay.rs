@@ -124,17 +124,17 @@ pub fn resolve(
         // `life_costs::pay_life_as_cost` and stamps `last_effect_count` so the
         // downstream "draw/look at that many" step reads the chosen amount.
         AbilityCost::PayLife { amount } if is_pay_any_amount(amount) => {
-            let life = state
-                .players
-                .iter()
-                .find(|p| p.id == payer)
-                .map(|p| p.life)
-                .unwrap_or(0);
-            let max = if life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
-                u32::try_from(life).unwrap_or(0)
-            } else {
-                0
-            };
+            // CR 119.4a + CR 810.9a: max payable for "pay any amount of life" is
+            // the TEAM total; guard on team_life (a member may be individually
+            // <= 0 while the team is positive, CR 810.9 — life loss lands on
+            // each Player::life individually).
+            let team_life = crate::game::players::team_life_total(state, payer);
+            let max =
+                if team_life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
+                    u32::try_from(team_life).unwrap_or(0)
+                } else {
+                    0
+                };
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: payer,
                 resource: PayableResource::Life,
@@ -404,6 +404,73 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
+    }
+
+    /// CR 119.4a + CR 810.9a: "pay any amount of life" surfaces a
+    /// `PayAmountChoice` whose `max` is the payer's TEAM total in 2HG. Payer P0
+    /// individually at -2, teammate P1 at 9 → team total 7, so `max == 7` even
+    /// though the payer's individual life is negative (a member may be below 0
+    /// while the team is positive, CR 810.9). Reverting Site 9 to the
+    /// individual `p.life` read (-2, not > 0) would set `max == 0`.
+    #[test]
+    fn pay_any_amount_life_max_is_team_total_in_2hg() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = -2;
+        state.players[1].life = 9; // team total 7
+
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                max,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert!(matches!(resource, PayableResource::Life));
+                assert_eq!(*max, 7, "max payable is the team total (7), not 0");
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
+    /// Off-team degeneracy sibling for Site 9: in a 1v1 the max is the payer's
+    /// own life (5).
+    #[test]
+    fn pay_any_amount_life_max_off_team_is_individual() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 5;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        assert!(resolve(&mut state, &ability, &mut events).is_ok());
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => assert_eq!(*max, 5),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
     }
 
     #[test]

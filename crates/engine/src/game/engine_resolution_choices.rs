@@ -4107,6 +4107,26 @@ pub(crate) fn run_batch_completion(
                     crate::game::attractions::open_attractions(state, player, remaining, events);
             }
         }
+        BatchCompletion::ContraptionAssembleRemainder {
+            player,
+            source_id,
+            object_id,
+            sprocket,
+            remaining_after,
+        } => {
+            crate::game::contraptions::finish_contraption_assembly(
+                state, player, object_id, sprocket, events,
+            );
+            if remaining_after > 0 {
+                crate::game::contraptions::continue_assemble_batch(
+                    state,
+                    player,
+                    source_id,
+                    remaining_after,
+                    events,
+                );
+            }
+        }
     }
 }
 

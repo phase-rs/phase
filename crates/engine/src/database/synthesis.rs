@@ -8980,6 +8980,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);
     crate::database::augment::synthesize_augment(face);
+    crate::database::contraptions::synthesize_contraptions(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);

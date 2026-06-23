@@ -1042,6 +1042,18 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
                     .expect("owner exists")
                     .attraction_deck
                     .retain(|id| *id != object_id);
+            } else if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_contraption_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .contraption_deck
+                    .retain(|id| *id != object_id);
             } else {
                 state.command_zone.retain(|id| *id != object_id);
             }
@@ -1081,6 +1093,18 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                     .find(|p| p.id == owner)
                     .expect("owner exists")
                     .attraction_deck
+                    .push_back(object_id);
+            } else if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_contraption_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .contraption_deck
                     .push_back(object_id);
             } else {
                 state.command_zone.push_back(object_id);

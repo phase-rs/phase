@@ -1471,9 +1471,15 @@ fn resolve_ref(
                 usize_to_i32_saturating(p.hand.len())
             })
         }
-        // CR 119: life total for the scoped player(s).
+        // CR 119 + CR 810.9a: a single player's life total reads the team's
+        // shared total in a team format; aggregate scopes fold over team
+        // totals (deduped). Off-team this is byte-identical (singleton teams,
+        // team_life_total == p.life). CR 810.9d confirms the per-team extremum.
         QuantityRef::LifeTotal { player: scope } => {
-            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| p.life)
+            match resolve_single_player_scope(state, scope, controller, ctx, targets, ability) {
+                Some(pid) => crate::game::players::team_life_total(state, pid),
+                None => resolve_per_team_life(state, scope, controller, ctx, targets, ability),
+            }
         }
         // CR 106.4: floating mana of `color` (or any color) in the controller's
         // mana pool. Controller-scoped — `player` is the controller. Omnath,
@@ -1504,9 +1510,11 @@ fn resolve_ref(
                 usize_to_i32_saturating(p.graveyard.len())
             })
         }
-        QuantityRef::LifeAboveStarting => {
-            player.map_or(0, |p| p.life - state.format_config.starting_life)
-        }
+        // CR 810.9a + CR 810.4: team total minus the (already team-correct, 30)
+        // starting life. Single controller bind — no double-count.
+        QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
+            crate::game::players::team_life_total(state, p.id) - state.format_config.starting_life
+        }),
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
@@ -4184,6 +4192,52 @@ fn defending_player_from_event(
         .or(Some(*defending_player))
 }
 
+/// CR 810.9a + CR 810.9d: Resolve an aggregate (multi-player) `LifeTotal`
+/// scope by folding over each DISTINCT team's shared life total. Mirrors the
+/// population semantics of the aggregate arms in `resolve_per_player_scalar`
+/// (Opponent / AllPlayers); single-player scopes never reach here (they are
+/// handled by the `Some(pid)` branch of the LifeTotal arm). A non-aggregate
+/// scope that failed to resolve a single player returns 0, preserving the
+/// pre-fix `map_or(0)` fallback.
+fn resolve_per_team_life(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+) -> i32 {
+    match scope {
+        // CR 102.2: aggregate over all opponents' teams.
+        PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
+            state,
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != controller)
+                .map(|p| p.id),
+            *aggregate,
+        ),
+        // CR 102.1: aggregate over all players' teams, optionally excluding
+        // the `exclude` anchor ("each OTHER player").
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            crate::game::players::aggregate_over_teams(
+                state,
+                state
+                    .players
+                    .iter()
+                    .filter(|p| Some(p.id) != excluded_id)
+                    .map(|p| p.id),
+                *aggregate,
+            )
+        }
+        _ => 0,
+    }
+}
+
 /// CR 107.3e: Reduce a player iterator to a single i32 by aggregate function.
 /// Returns 0 for an empty iterator (mirrors the prior `OpponentLifeTotal`
 /// `.unwrap_or(0)` semantics — there is always at least one opponent in a
@@ -5346,6 +5400,115 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
             8
+        );
+    }
+
+    /// CR 119 + CR 810.9a + CR 810.9d: in a 2HG game, `LifeTotal { Opponent }`
+    /// (Malignus "highest life total among your opponents") folds over each
+    /// DISTINCT team's shared total exactly once, rather than over individual
+    /// `Player::life` values. The `Opponent` population is `p.id != controller`
+    /// (mirroring the pre-fix aggregate arm — see NOTE below on teammate
+    /// inclusion), so it spans the controller's teammate AND the opposing team;
+    /// the team dedup collapses each to its shared total.
+    ///
+    /// Setup: controller P0 on team A {0,1} at 2 + 3 = 5; opposing team B {2,3}
+    /// at 9 + 5 = 14. The deduped team totals are {A=5, B=14}. Max = 14
+    /// post-fix (pre-fix individual Max{P1=3, P2=9, P3=5} = 9); Min = 5 post-fix
+    /// (pre-fix individual Min{P1=3, P2=9, P3=5} = 3). Both assertions flip if
+    /// Site 1 is reverted to a per-individual fold.
+    ///
+    /// NOTE: `PlayerScope::Opponent` here still includes the controller's
+    /// 2HG teammate (population `p.id != controller`), a PRE-EXISTING population
+    /// quirk this change deliberately preserves (the plan mirrors the existing
+    /// aggregate semantics; CR 102.2 teammate-exclusion is out of scope). With
+    /// team A (5) below team B (14), Max coincides with the opposing-team total,
+    /// which is the Malignus-intended read.
+    #[test]
+    fn life_total_opponent_max_reads_team_total_in_2hg() {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 2;
+        state.players[1].life = 3; // team A total 5
+        state.players[2].life = 9;
+        state.players[3].life = 5; // team B total 14
+
+        let max_expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &max_expr, PlayerId(0), ObjectId(0)),
+            14,
+            "deduped team fold Max{{A=5, B=14}} = 14, not the individual max (9)"
+        );
+
+        // Sibling: Min over the deduped team totals {A=5, B=14} = 5, not the
+        // individual minimum (3).
+        let min_expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &min_expr, PlayerId(0), ObjectId(0)),
+            5,
+            "deduped team fold Min{{A=5, B=14}} = 5, not the individual min (3)"
+        );
+
+        // Negative: an unresolved single-player Target scope (no player target)
+        // returns 0, preserving the pre-fix map_or(0) fallback.
+        let target_expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &target_expr, PlayerId(0), ObjectId(0)),
+            0
+        );
+    }
+
+    /// Off-team degeneracy sibling for Site 1: in a 1v1 (non-team) game the
+    /// single opponent's life reads through unchanged (no team fold).
+    #[test]
+    fn life_total_opponent_max_off_team_is_individual_life() {
+        let mut state = GameState::new_two_player(0);
+        state.players[1].life = 7;
+        let max_expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &max_expr, PlayerId(0), ObjectId(0)),
+            7
+        );
+    }
+
+    /// CR 810.9a + CR 810.4: `LifeAboveStarting` reads the controller's TEAM
+    /// total minus the (team-correct) starting life (30 in 2HG). Team at 55 →
+    /// 25 above starting. Reverting Site 7 to `p.life` reads only the
+    /// controller's individual share.
+    #[test]
+    fn life_above_starting_reads_team_total_in_2hg() {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 30;
+        state.players[1].life = 25;
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeAboveStarting,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            25,
+            "team total (55) minus starting life (30) = 25"
         );
     }
 

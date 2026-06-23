@@ -2423,6 +2423,51 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("filter".into(), fmt_target(filter)));
             d.push(("host".into(), fmt_target(host)));
         }
+        Effect::AssembleContraptions { count } => {
+            d.push(("count".into(), fmt_quantity(count)));
+        }
+        Effect::AssembleContraptionsFromRollDifference => {
+            d.push(("count".into(), "roll difference".into()));
+        }
+        Effect::CrankContraptions { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ReassembleContraption {
+            target,
+            control_mode,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if !matches!(
+                control_mode,
+                crate::types::ability::ReassembleControlMode::KeepController
+            ) {
+                d.push(("control_mode".into(), format!("{control_mode:?}")));
+            }
+        }
+        Effect::AssembleContraptionOnSprocket {
+            sprocket,
+            remaining,
+            ..
+        } => {
+            d.push(("sprocket".into(), sprocket.to_string()));
+            if *remaining != 0 {
+                d.push(("remaining".into(), remaining.to_string()));
+            }
+        }
+        Effect::ReassembleContraptionOnSprocket {
+            target,
+            sprocket,
+            control_mode,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("sprocket".into(), sprocket.to_string()));
+            if !matches!(
+                control_mode,
+                crate::types::ability::ReassembleControlMode::KeepController
+            ) {
+                d.push(("control_mode".into(), format!("{control_mode:?}")));
+            }
+        }
         Effect::RevealTop { player, count } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), count.to_string()));

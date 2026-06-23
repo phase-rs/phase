@@ -601,6 +601,14 @@ fn redundancy_delta(
         // CR 701.51 + CR 701.52: Attraction open/visit — deck state dependent.
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
+        // Unstable Contraptions: assembly/crank/reassembly value depends on deck
+        // contents, sprocket state, and board state; no static redundancy signal.
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
         // CR 701.34a + CR 122.1: targeted proliferate adds one counter of each
         // kind already present — adding counters is virtually always beneficial,
         // so there is no "does nothing" static-redundancy signal here.
