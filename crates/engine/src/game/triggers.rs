@@ -11879,6 +11879,155 @@ pub mod tests {
         ));
     }
 
+    /// Builds the `EventTarget`-bound excess-damage intervening-`if` condition
+    /// (Maarika, Brutal Gladiator class) and checks it against `DamageDealt`
+    /// trigger events. Verifies the building block, not one card: the condition
+    /// must consult only the *specific* damaged object carried by the trigger
+    /// event, not any creature dealt excess damage this turn.
+    fn maarika_excess_condition() -> TriggerCondition {
+        // CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "if that creature was dealt
+        // excess damage this turn" — DamageDealtThisTurn{excess_only,target=EventTarget} >= 1.
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::EventTarget),
+                    aggregate: AggregateFunction::Sum,
+                    group_by: None,
+                    damage_kind: DamageKindFilter::Any,
+                    excess_only: true,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 603.2 + CR 120.1 + CR 120.10: regression for the Maarika false-positive.
+    /// "if that creature was dealt excess damage this turn" must bind "that
+    /// creature" to the trigger event's damaged object — NOT scan every excess
+    /// record this turn. When an UNRELATED creature took excess damage earlier
+    /// and this trigger's damage to its own creature was non-excess, the
+    /// condition must be FALSE.
+    #[test]
+    fn excess_damage_intervening_if_binds_to_event_target_not_unrelated_creature() {
+        let mut state = setup();
+        let maarika = ObjectId(10); // the trigger source (the damager)
+                                    // Real battlefield objects: `matches_target_filter` looks each candidate
+                                    // up in `state.objects`, so the damaged creatures must actually exist.
+        let creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [creature_a, creature_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.toughness = Some(4);
+            obj.base_toughness = Some(4);
+        }
+
+        // Earlier this turn: creature B was dealt EXCESS damage by someone.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(creature_b),
+            target_controller: PlayerId(1),
+            amount: 5,
+            is_combat: true,
+            excess: 3,
+            ..Default::default()
+        });
+        // This trigger: Maarika dealt NON-excess damage to creature A.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: maarika,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(creature_a),
+            target_controller: PlayerId(1),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+            ..Default::default()
+        });
+
+        let condition = maarika_excess_condition();
+
+        // Trigger event: Maarika dealt damage to creature A (the event target).
+        let event_a = GameEvent::DamageDealt {
+            source_id: maarika,
+            target: TargetRef::Object(creature_a),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+
+        // BUG REGRESSION: must be FALSE — creature A took no excess damage even
+        // though the unrelated creature B did. A generic creature filter would
+        // wrongly return true here.
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(maarika),
+                Some(&event_a)
+            ),
+            "excess intervening-if must not fire off an unrelated creature's earlier excess damage"
+        );
+
+        // POSITIVE: when this trigger's own creature (A) DID take excess damage,
+        // the condition must be TRUE.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: maarika,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(creature_a),
+            target_controller: PlayerId(1),
+            amount: 7,
+            is_combat: true,
+            excess: 4,
+            ..Default::default()
+        });
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(maarika),
+                Some(&event_a)
+            ),
+            "excess intervening-if must be true when the event-target creature took excess damage"
+        );
+
+        // And the event-target binding is per-event: with the trigger event
+        // pointing at creature B (which took excess), the same condition is TRUE.
+        let event_b = GameEvent::DamageDealt {
+            source_id: maarika,
+            target: TargetRef::Object(creature_b),
+            amount: 5,
+            is_combat: true,
+            excess: 3,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(maarika),
+                Some(&event_b)
+            ),
+            "event-target binding must follow the trigger event's damaged object"
+        );
+    }
+
     #[test]
     fn shelob_spider_damage_death_trigger_end_to_end() {
         use crate::game::sba;

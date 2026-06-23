@@ -219,11 +219,15 @@ fn parse_type_phrase_nonempty(input: &str) -> OracleResult<'_, TargetFilter> {
 /// intervening-if predicate used by Maarika-class triggers.
 ///
 /// Parses a broad class of subjects:
-///   - "that creature" / "that permanent" — trigger-target pronominal
-///     references; the subject is a generic Creature/Permanent filter since at
-///     condition-check time the specific object has already been recorded in
-///     `damage_dealt_this_turn` with `excess > 0`.
-///   - "a creature", "a permanent", etc. — bare indefinite references.
+///   - "that creature" / "that permanent" — CR 603.2 + CR 120.1 demonstrative
+///     references bound to the *specific* object that received the triggering
+///     event's damage (`TargetFilter::EventTarget`). This must NOT be a generic
+///     type filter: otherwise the intervening-`if` would scan every excess-damage
+///     record this turn and fire off an unrelated creature's earlier overkill
+///     (Maarika false-positive). Binding to the event target restricts the query
+///     to the one creature/permanent this trigger's damage went to.
+///   - "a creature", "a permanent", etc. — bare indefinite references that stay
+///     a generic type-phrase filter (the demonstrative binding does not apply).
 ///   - Any `parse_type_phrase` result (e.g. "a creature or planeswalker an
 ///     opponent controlled" from Rith, Liberated Primeval).
 ///
@@ -235,17 +239,18 @@ fn parse_subject_was_dealt_excess_damage_this_turn(
 ) -> OracleResult<'_, StaticCondition> {
     // Subject: a pronominal "that creature/permanent" or a type-phrase noun.
     let (rest, target) = alt((
-        // "that creature" / "that permanent" — refers to the trigger's target
-        // creature. Resolve as a generic typed filter; the `excess_only` flag
-        // ensures only overkill records match.
+        // CR 603.2 + CR 120.1 + CR 603.4: "that creature" / "that permanent" is
+        // the *specific* object that received this trigger's damage, not any
+        // creature/permanent of that type. Bind to `TargetFilter::EventTarget`
+        // so the intervening-`if` only checks the damaged object — Maarika's
+        // "if that creature was dealt excess damage this turn" must not fire off
+        // an unrelated creature's earlier excess hit. The event target is itself
+        // the damaged creature/permanent, so no separate type guard is needed.
         value(
-            TargetFilter::Typed(TypedFilter::creature()),
+            TargetFilter::EventTarget,
             tag::<_, _, OracleError<'_>>("that creature"),
         ),
-        value(
-            TargetFilter::Typed(TypedFilter::permanent()),
-            tag("that permanent"),
-        ),
+        value(TargetFilter::EventTarget, tag("that permanent")),
         // Bare article form: "a creature or planeswalker an opponent controlled"
         // (Rith), "a creature", "a permanent", etc. Delegate to parse_type_phrase
         // which handles "a/an <type>", "a/an <type> <controller-suffix>",
@@ -13352,31 +13357,59 @@ mod tests {
         assert_eq!(cond, expected);
     }
 
-    /// CR 120.10 + CR 603.4: "that creature was dealt excess damage this turn"
-    /// is the Maarika-class intervening-if. It must map to a
-    /// `DamageDealtThisTurn` check with `excess_only: true` and a creature
-    /// target filter, not fall through to the `SourceWasDealtDamage` branch.
+    /// CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "that creature was dealt
+    /// excess damage this turn" is the Maarika-class intervening-if. It must map
+    /// to a `DamageDealtThisTurn` check with `excess_only: true` whose target is
+    /// bound to `TargetFilter::EventTarget` — the *specific* damaged object of
+    /// the trigger — not a generic creature filter. A generic filter would let
+    /// the condition fire off an unrelated creature's earlier excess hit.
     #[test]
     fn parse_inner_condition_that_creature_was_dealt_excess_damage_this_turn() {
         let (rest, cond) = parse_inner_condition("that creature was dealt excess damage this turn")
             .expect("should parse");
         assert_eq!(rest, "");
-        assert!(
-            matches!(
-                cond,
-                StaticCondition::QuantityComparison {
-                    lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::DamageDealtThisTurn {
-                            excess_only: true,
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
                             ..
                         },
-                    },
-                    comparator: Comparator::GE,
-                    rhs: QuantityExpr::Fixed { value: 1 },
-                }
-            ),
-            "expected DamageDealtThisTurn{{excess_only:true}} >= 1, got: {cond:?}"
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert!(excess_only, "excess_only must be true");
+        assert_eq!(
+            target.as_ref(),
+            &TargetFilter::EventTarget,
+            "\"that creature\" must bind to the triggering event's damaged object"
         );
+    }
+
+    /// CR 603.2 + CR 120.1: "that permanent" binds to the event target too.
+    #[test]
+    fn parse_inner_condition_that_permanent_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) =
+            parse_inner_condition("that permanent was dealt excess damage this turn")
+                .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { ref target, .. },
+                },
+            ..
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert_eq!(target.as_ref(), &TargetFilter::EventTarget);
     }
 
     /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's "a creature or

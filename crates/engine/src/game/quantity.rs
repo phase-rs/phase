@@ -1075,6 +1075,23 @@ pub(crate) fn triggering_event_player(state: &GameState) -> Option<PlayerId> {
         .and_then(|e| crate::game::targeting::extract_player_from_event(&e, state))
 }
 
+/// CR 603.2 + CR 120.1: Resolve the *object that received the damage* referenced
+/// by the current triggering event, preferring the resolution-time
+/// `current_trigger_event` and falling back to the detection-time thread-local
+/// override (the same dual-path `triggering_event_player` uses).
+///
+/// Single authority for `TargetFilter::EventTarget` resolution — `filter.rs`
+/// calls this rather than duplicating the detection/resolution dual-path. Lives
+/// here because this module owns the `DETECTION_TRIGGER_EVENT` thread-local.
+pub(crate) fn triggering_event_target_object(state: &GameState) -> Option<ObjectId> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .cloned()
+        .or_else(detection_trigger_event)
+        .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
+}
+
 /// CR 603.4 + CR 109.3: Recursively check whether a `TargetFilter` carries
 /// `FilterProp::OtherThanTriggerObject` anywhere in its property tree. Used
 /// by the `ObjectCount` resolver to decide whether to subtract the triggering

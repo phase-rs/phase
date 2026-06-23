@@ -463,6 +463,8 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                     aggregate: AggregateFunction::Sum,
                     group_by: None,
                     damage_kind: DamageKindFilter::NoncombatOnly,
+                    // CR 120.10: non-overkill query — count all matching records.
+                    excess_only: false,
                 },
             }
         }

@@ -736,6 +736,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTarget

@@ -3323,6 +3323,17 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
+    /// CR 603.2 + CR 120.1: Resolves to the object that *received* the damage
+    /// referenced by the current trigger event — the recipient counterpart to
+    /// [`TargetFilter::TriggeringSource`] and the `TargetFilter`-side analogue of
+    /// [`ObjectScope::EventTarget`]. This binds "that creature" / "that
+    /// permanent" in an intervening-`if` (CR 603.4) to the *specific* damaged
+    /// object carried by the `DamageDealt` event, not a generic type filter, so
+    /// "if that creature was dealt excess damage this turn" (Maarika, Brutal
+    /// Gladiator) checks only the creature this trigger's damage went to.
+    /// Resolved via `extract_target_object_from_event` against
+    /// `state.current_trigger_event`; matches no object outside a trigger.
+    EventTarget,
     /// CR 603.7c + CR 109.4 + CR 110.2: Resolves to the *controller* of the
     /// triggering event's source object — the player-level counterpart of
     /// `TriggeringSource`, mirroring how `TriggeringSpellController` is the
