@@ -126,6 +126,8 @@
     "pastePlaceholder": "Deckliste einfügen (MTGA- oder .dck-Format)...",
     "fromFile": "Aus Datei",
     "parse": "Einlesen",
+    "parsing": "Wird eingelesen…",
+    "parseError": "Keine Karten gefunden. Füge ein Deck im MTGA- oder .dck-Format ein.",
     "exportModalTitle": "Deck exportieren",
     "saveToFile": "In Datei speichern",
     "copied": "Kopiert!",

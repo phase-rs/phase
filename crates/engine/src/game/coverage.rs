@@ -492,6 +492,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::EventTarget => "damaged object of the triggering event".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -1403,6 +1404,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
+            excess_only,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1413,10 +1415,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
+            let excess_tag = if *excess_only { " excess" } else { "" };
             format!(
-                "{}{} damage dealt this turn ({} -> {}) [{group}]",
+                "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
                 kind,
+                excess_tag,
                 fmt_target(source),
                 fmt_target(target)
             )

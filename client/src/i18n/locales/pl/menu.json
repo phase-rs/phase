@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
     "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
     "errorGeneric": "Nie udało się zaimportować talii.",
+    "errorNoCards": "Nie znaleziono kart. Wklej talię w formacie MTGA lub .dck.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
     "chooseFile": "Wybierz plik",
     "importedSuccessTitle": "Talia zaimportowana",

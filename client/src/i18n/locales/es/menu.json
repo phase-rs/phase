@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Introduce una URL válida de Moxfield o Archidekt.",
     "errorNetworkFailure": "No se pudo contactar con el servicio de importación. Comprueba tu conexión e inténtalo de nuevo.",
     "errorGeneric": "No se pudo importar el mazo.",
+    "errorNoCards": "No se encontraron cartas. Pega un mazo en formato MTGA o .dck.",
     "fileSupports": "Admite formatos .dck, .dec, .txt y MTGA",
     "chooseFile": "Elegir archivo",
     "importedSuccessTitle": "Mazo importado",

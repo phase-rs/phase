@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DeckList } from "../DeckList";
@@ -45,5 +45,33 @@ describe("DeckList commander section", () => {
       />,
     );
     expect(screen.queryByText(/as commander/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("DeckList import modal", () => {
+  it("shows an error and keeps the modal open when pasted text has no cards", async () => {
+    const onImport = vi.fn();
+    render(
+      <DeckList
+        deck={emptyDeck}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onImport={onImport}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^import$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/paste deck list/i), {
+      target: { value: "asdasd" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^parse$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't find any cards/i)).toBeInTheDocument();
+    });
+    expect(onImport).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^parse$/i })).toBeInTheDocument();
   });
 });

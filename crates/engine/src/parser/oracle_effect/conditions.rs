@@ -786,6 +786,34 @@ fn try_nom_condition_as_unless(
 
 pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    // CR 603.4 + CR 601.2: Negated form — "if you didn't cast it from your
+    // hand/graveyard/exile" (Epochrasite, Phage the Untouchable on effect-level
+    // paths). MUST precede the positive form to avoid partial prefix matching.
+    if let Some((zone, rest)) = nom_on_lower(text, &lower, |input| {
+        // Decompose into prefix + zone: the prefix accepts both the ASCII
+        // (`didn't`) and curly (`didn’t`, U+2019) apostrophe used by Scryfall
+        // printings; the zone is the shared owner-specific/exile alternation.
+        let (input, _) = alt((
+            tag("if you didn't cast it from "),
+            tag("if you didn’t cast it from "),
+        ))
+        .parse(input)?;
+        alt((
+            value(Zone::Hand, tag("your hand")),
+            value(Zone::Graveyard, tag("your graveyard")),
+            value(Zone::Exile, tag("exile")),
+        ))
+        .parse(input)
+    }) {
+        let rest = remainder_after_optional_comma(rest);
+        return (
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::CastFromZone { zone }),
+            }),
+            rest.to_string(),
+        );
+    }
+    // CR 603.4 + CR 601.2: Positive form — "if you cast it from your hand/exile/graveyard".
     if let Some((zone, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(Zone::Hand, tag("if you cast it from your hand")),
@@ -794,7 +822,7 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
         ))
         .parse(input)
     }) {
-        let rest = rest.strip_prefix(", ").unwrap_or(rest);
+        let rest = remainder_after_optional_comma(rest);
         return (
             Some(AbilityCondition::CastFromZone { zone }),
             rest.to_string(),

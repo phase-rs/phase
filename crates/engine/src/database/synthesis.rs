@@ -8078,6 +8078,8 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         },
     }
