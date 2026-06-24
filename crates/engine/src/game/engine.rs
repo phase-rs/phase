@@ -5270,17 +5270,24 @@ pub(super) fn begin_pending_trigger_target_selection(
             .map(|selection| Some((target_slots, selection)))
     });
     super::triggers::restore_trigger_event_context(state, context_snapshot);
-    let Some((target_slots, selection)) = selection_result? else {
-        // CR 603.3d: No target prompt is required (empty target slots, or
-        // `build_target_slots`/`begin_target_selection_for_ability` reported
-        // no legal completion). Symmetric to the modal `all-modes-unavailable`
-        // branch above: if the "push first" dispatcher already pushed an
-        // in-construction entry for this trigger, pop it before clearing the
-        // cursor. The new flow filters this case BEFORE pushing in the
-        // non-modal branches (Err(_) drops the trigger; Ok(Some(targets))
-        // auto-pushes a complete entry), so this is normally a dead branch —
-        // kept for symmetry with the modal cleanup and for any
-        // delayed-revalidation paths.
+    // CR 603.3d: "If a choice is required when the triggered ability goes on the
+    // stack but no legal choices can be made for it ... the ability is simply
+    // removed from the stack." `build_target_slots` /
+    // `begin_target_selection_for_ability` return `Err` only to report exactly
+    // that — no legal target can be chosen. A targeted trigger's targets can be
+    // legal at "push first" dispatch yet become illegal here at "choose second"
+    // when an effect earlier in the SAME simultaneous cascade removed the only
+    // legal target (e.g. the artifact a Schema Thief token would copy was
+    // destroyed by a damage trigger that resolved first). Remove the trigger
+    // from the stack — never propagate the error and abort the in-flight action,
+    // which would leave the game unable to pass priority (a soft-lock freeze).
+    let Some((target_slots, selection)) = selection_result.ok().flatten() else {
+        // CR 603.3d: No target prompt is required — empty target slots, or
+        // `build_target_slots`/`begin_target_selection_for_ability` reported no
+        // legal completion (no legal targets at choose-time). Symmetric to the
+        // modal `all-modes-unavailable` branch above: if the "push first"
+        // dispatcher already pushed an in-construction entry for this trigger,
+        // pop it before clearing the cursor.
         if let Some(entry_id) = state.pending_trigger_entry.take() {
             if state.stack.back().map(|e| e.id) == Some(entry_id) {
                 state.stack.pop_back();
@@ -7053,6 +7060,107 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
+    /// One + Red Hulk + Schema Thief board). A targeted trigger whose only legal
+    /// target vanished between "push first" dispatch and "choose second"
+    /// selection-setup (an effect earlier in the same simultaneous cascade
+    /// removed it) must be REMOVED FROM THE STACK here — not abort the in-flight
+    /// action with `Err`, which silently dropped `PassPriority` from the legal
+    /// action set and soft-locked the game. Schema Thief ("create a token that's
+    /// a copy of target artifact that player controls") triggered against a
+    /// player who controlled no artifact; this models that with a damage trigger
+    /// that has no opponent-creature target.
+    #[test]
+    fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
+        let mut state = GameState::new_two_player(7);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Source permanent (player 0). No opponent creatures exist, so a
+        // "deal 1 damage to target creature an opponent controls" trigger has
+        // no legal target when selection is set up.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+                damage_source: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        // Reconstruct the post-"push first" state: the trigger entry is on the
+        // stack (in construction) and recorded as the pending trigger awaiting
+        // manual target selection.
+        let pending = crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ability.clone(),
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Pinger".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        state.pending_trigger = Some(pending);
+        state.pending_trigger_entry = Some(entry_id);
+        let stack_len_before = state.stack.len();
+
+        let result = begin_pending_trigger_target_selection(&mut state);
+
+        assert!(
+            matches!(result, Ok(None)),
+            "CR 603.3d: a no-legal-target trigger must be dropped, not error: {result:?}",
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_len_before - 1,
+            "the in-construction trigger entry must be popped from the stack",
+        );
+        assert!(
+            state.pending_trigger.is_none(),
+            "the pending_trigger cursor must be cleared",
+        );
+        assert!(
+            state.pending_trigger_entry.is_none(),
+            "the pending_trigger_entry cursor must be cleared",
+        );
     }
 
     #[test]
