@@ -423,7 +423,9 @@
     "resourceEnergy": "energía",
     "resourceMana": "maná",
     "resourceCounters": "contadores",
-    "resourceSpeed": "velocidad"
+    "resourceSpeed": "velocidad",
+    "manualMana": "Manual",
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay."
   },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
