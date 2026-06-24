@@ -20,7 +20,7 @@ export function ManualManaToggle() {
       type="button"
       onClick={toggleManualMana}
       aria-pressed={manualManaOverride}
-      className={`group relative inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+      className={`group relative inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors before:absolute before:-inset-2 before:content-[''] ${
         manualManaOverride
           ? "bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-400/40"
           : "bg-gray-800/80 text-gray-400 hover:bg-gray-700/80 hover:text-gray-200"

@@ -6514,6 +6514,13 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
+            // pool — injecting library card IDs from a look-only Dig (e.g.
+            // Birthing Ritual) would route through effect_object_targets and
+            // silently skip every card (Zone::Library ≠ Zone::Battlefield),
+            // producing no PermanentSacrificed event and leaving
+            // effect_context_object = None for the downstream PriorLook Dig.
+            && !matches!(sub.effect, Effect::Sacrifice { .. })
         {
             // Inject revealed card IDs as targets for sub_abilities following
             // effects that write last_revealed_ids. Parallel to how
