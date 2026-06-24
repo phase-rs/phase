@@ -9145,6 +9145,110 @@ mod tests {
         );
     }
 
+    /// CR 613.1f + CR 603.3: Runtime zone-filter regression for battlefield
+    /// source-set grants ("all creatures your opponents control"). The parser
+    /// encodes `InZone { Battlefield }` in the source filter; this test
+    /// proves `expand_granted_activated_abilities` honours it at runtime by
+    /// building `provider_ids` from ALL objects in `state.objects` and
+    /// relying on `matches_target_filter` to exclude off-battlefield objects.
+    ///
+    /// Discriminating: an identical provider creature in HAND must not donate
+    /// its activated abilities even though it appears in `state.objects`, while
+    /// the same creature ON THE BATTLEFIELD still does.
+    ///
+    /// Reverting `InZone { Battlefield }` from the parser arm (or removing it
+    /// from the source filter here) causes the hand-provider assertion to fail,
+    /// flipping the non-donation assertion. Replacing `state.objects.keys()` in
+    /// `expand_granted_activated_abilities` with a battlefield-only scan would
+    /// trivially make this green without the filter — but that would break the
+    /// graveyard provider arms (Necrotic Ooze / "all creature cards in all
+    /// graveyards") which scan off-battlefield zones deliberately.
+    #[test]
+    fn off_battlefield_provider_does_not_donate_activated_abilities() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        };
+
+        let mut state = setup();
+
+        // Host: a creature on the battlefield (player 0) carrying the
+        // "has all activated abilities of all creatures your opponents
+        // control" static, parsed end-to-end.
+        let host = make_creature(&mut state, "Drana and Linvala", 3, 4, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Drana and Linvala have all activated abilities of all creatures \
+             your opponents control.",
+            "Drana and Linvala",
+            &[],
+            &["Creature".into(), "Legendary".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "grant-opponents-control clause parses to one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // Activated ability template: {T}: gain 3 life.
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+
+        // BATTLEFIELD provider: opponent creature on the battlefield —
+        // InZone { Battlefield } must match → ability IS donated to host.
+        let bf_provider = make_creature(&mut state, "Battlefield Beast", 2, 2, PlayerId(1));
+        Arc::make_mut(&mut state.objects.get_mut(&bf_provider).unwrap().abilities)
+            .push(ability.clone());
+
+        // HAND provider: identical opponent creature in hand —
+        // InZone { Battlefield } must NOT match → ability is NOT donated.
+        let hand_provider = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(1),
+            "Hand Beast".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&hand_provider).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&hand_provider).unwrap().abilities)
+            .push(ability.clone());
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let host_obj = state.objects.get(&host).unwrap();
+        assert!(
+            host_obj.abilities.iter().any(|a| a == &ability),
+            "host must gain the battlefield opponent creature's activated \
+             ability (InZone{{Battlefield}} matches); got {:?}",
+            host_obj.abilities
+        );
+        // The hand provider has the same ability; if InZone{Battlefield} is not
+        // enforced at runtime, the ability would appear twice in host_obj.abilities
+        // (once per provider). We assert exactly ONE grant was applied.
+        let grant_count = host_obj.abilities.iter().filter(|a| *a == &ability).count();
+        assert_eq!(
+            grant_count, 1,
+            "hand provider must NOT donate: expected 1 grant (from bf_provider), \
+             got {grant_count} (hand_provider donated a duplicate)"
+        );
+    }
+
     #[test]
     fn emblem_static_applies_to_matching_creatures() {
         let mut state = setup();
