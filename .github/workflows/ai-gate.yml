@@ -53,7 +53,12 @@ jobs:
     name: Nightly AI gate drift monitor
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # `--full-suite --games 100` consistently exceeded the prior 90m ceiling
+    # (never completed since at least 2026-06-13). Raised to 300m — generous
+    # headroom under GitHub's 360m hosted-runner cap — to get a first completion
+    # and a real-duration baseline to right-size from. The ceiling only bills the
+    # failure case; a job that finishes in 2h stops at 2h.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
