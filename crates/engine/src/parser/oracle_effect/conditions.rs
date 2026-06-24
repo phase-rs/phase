@@ -2706,13 +2706,8 @@ pub(super) fn try_parse_dig_instead_alternative(
     let Effect::Dig {
         player: prev_player,
         count: prev_count,
-        destination: _,
-        keep_count: _,
-        up_to: _,
-        filter: _,
         rest_destination: prev_rest,
         reveal: prev_reveal,
-        enter_tapped: _,
         ..
     } = &*prev.effect
     else {

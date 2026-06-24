@@ -523,6 +523,7 @@ mod tests {
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                from_prior_look: false,
             },
         ));
         let deck = vec![entry(face, 4)];
@@ -549,6 +550,7 @@ mod tests {
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                from_prior_look: false,
             },
         ));
         let deck = vec![entry(face, 4)];
