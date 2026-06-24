@@ -14,7 +14,8 @@ import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckp
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
+import { pressureMultiplier, stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
+import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -209,6 +210,20 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   const { gameId } = useGameStore.getState();
   if (gameId) saveGame(gameId, newState);
 
+  // 3c. Feed the throughput tracker: count stack entries that left the stack
+  //     this action (resolved, countered, or otherwise removed), id-diffed so a
+  //     resolution that spawns replacement triggers still counts even when net
+  //     stack length is unchanged. Drives rate-based pacing for the
+  //     low-depth-high-churn loops the depth signal can't see (Exquisite Blood +
+  //     Sanguine Bond and friends). Single-dispatch resolves one item per pass;
+  //     the batch path feeds its own gross count below.
+  const nextStackIds = new Set(newState.stack.map((e) => e.id));
+  const resolvedCount = gameState.stack.reduce(
+    (n, e) => (nextStackIds.has(e.id) ? n : n + 1),
+    0,
+  );
+  if (resolvedCount > 0) recordStackResolutions(resolvedCount);
+
   // 4. Checkpoint: save pre-action state on turn boundaries for debug restore
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent) {
@@ -244,8 +259,13 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
   const steps = normalizeEvents(events, { pacingMultipliers });
 
-  // 7. Play animations (unless instant — multiplier === 0)
-  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+  // 7. Play animations (unless instant — multiplier === 0). Fold in stack
+  //    pressure so per-resolution timing collapses under depth OR recent churn —
+  //    without this the single-dispatch path animated every oscillation cycle at
+  //    full speed (it previously read only the user speed preference).
+  const multiplier =
+    usePreferencesStore.getState().animationSpeedMultiplier *
+    pressureMultiplier(effectiveStackPressure(newState.stack.length));
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(newState);
@@ -653,6 +673,12 @@ export async function dispatchResolveAll(
 
       if (latchedTotal === 0) latchedTotal = batchResult.total;
       resolvedSoFar += batchResult.itemsResolved;
+      // Keep the throughput tracker warm so a storm draining below Instant keeps
+      // its animated tail fast instead of snapping back to full pacing.
+      // `itemsResolved` is a net-shrink count (can lag the true gross when a
+      // resolution spawns triggers) — an acceptable under-count here since the
+      // batch path is already depth-gated, where the depth axis dominates pacing.
+      if (batchResult.itemsResolved > 0) recordStackResolutions(batchResult.itemsResolved);
       // Surface progress only for a genuine storm (trivial multi-item resolves
       // drain too fast to render). Clamp to the latched total: `itemsResolved`
       // is a net-shrink count that can lag the true gross when a resolution
