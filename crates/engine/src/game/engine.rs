@@ -5262,32 +5262,36 @@ pub(super) fn begin_pending_trigger_target_selection(
         &trigger_events,
         subject_match_count,
     );
-    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
-        if target_slots.is_empty() {
-            return Ok(None);
-        }
-        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
-            .map(|selection| Some((target_slots, selection)))
-    });
-    super::triggers::restore_trigger_event_context(state, context_snapshot);
     // CR 603.3d: "If a choice is required when the triggered ability goes on the
     // stack but no legal choices can be made for it ... the ability is simply
-    // removed from the stack." `build_target_slots` /
-    // `begin_target_selection_for_ability` return `Err` only to report exactly
-    // that — no legal target can be chosen. A targeted trigger's targets can be
-    // legal at "push first" dispatch yet become illegal here at "choose second"
-    // when an effect earlier in the SAME simultaneous cascade removed the only
-    // legal target (e.g. the artifact a Schema Thief token would copy was
-    // destroyed by a damage trigger that resolved first). Remove the trigger
-    // from the stack — never propagate the error and abort the in-flight action,
-    // which would leave the game unable to pass priority (a soft-lock freeze).
-    let Some((target_slots, selection)) = selection_result.ok().flatten() else {
+    // removed from the stack." `build_target_slots` returns `Err` ONLY to report
+    // exactly that — every error site in `collect_target_slots` is a
+    // `No legal targets available` `ActionNotAllowed`. A targeted trigger's
+    // targets can be legal at "push first" dispatch yet become illegal here at
+    // "choose second" when an effect earlier in the SAME simultaneous cascade
+    // removed the only legal target (e.g. the artifact a Schema Thief token would
+    // copy was destroyed by a damage trigger that resolved first). Map that to
+    // the no-prompt drop path below — never propagate it and abort the in-flight
+    // action, which would leave the game unable to pass priority (a soft-lock
+    // freeze). Errors from `begin_target_selection_for_ability` are genuine
+    // selection-invariant violations and MUST still propagate (via `?` below).
+    let selection_result = match build_target_slots(state, &ability) {
+        Ok(target_slots) if !target_slots.is_empty() => {
+            begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+                .map(|selection| Some((target_slots, selection)))
+        }
+        // Empty target slots (no targeting), or CR 603.3d no-legal-target: no
+        // prompt is needed/possible — fall through to the removal branch.
+        Ok(_) | Err(_) => Ok(None),
+    };
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    let Some((target_slots, selection)) = selection_result? else {
         // CR 603.3d: No target prompt is required — empty target slots, or
-        // `build_target_slots`/`begin_target_selection_for_ability` reported no
-        // legal completion (no legal targets at choose-time). Symmetric to the
-        // modal `all-modes-unavailable` branch above: if the "push first"
-        // dispatcher already pushed an in-construction entry for this trigger,
-        // pop it before clearing the cursor.
+        // `build_target_slots` reported no legal target at choose-time (mapped to
+        // `Ok(None)` above). Symmetric to the modal `all-modes-unavailable`
+        // branch above: if the "push first" dispatcher already pushed an
+        // in-construction entry for this trigger, pop it before clearing the
+        // cursor.
         if let Some(entry_id) = state.pending_trigger_entry.take() {
             if state.stack.back().map(|e| e.id) == Some(entry_id) {
                 state.stack.pop_back();
