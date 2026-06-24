@@ -50,7 +50,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
-use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
+use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
     try_parse_temporal_delayed_trigger_ability,
@@ -3904,20 +3904,19 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 14a: Nom dispatch — try effect, trigger, static, and replacement
-        // sub-parsers. If any succeeds, use the result directly.
-        let nom_effect = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
-        if !matches!(nom_effect, Effect::Unimplemented { .. }) {
-            result
-                .abilities
-                .push(AbilityDefinition::new(AbilityKind::Spell, nom_effect));
+        // sub-parsers. Returns the full AbilityDefinition so that fields beyond
+        // `effect` (e.g. `distribute`, `multi_target`) are preserved.
+        let nom_def = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
+        if !matches!(*nom_def.effect, Effect::Unimplemented { .. }) {
+            result.abilities.push(nom_def);
             i += 1;
             continue;
         }
 
-        // Priority 15: Final fallback — wrap as Unimplemented with diagnostic trace.
-        result
-            .abilities
-            .push(make_unimplemented_with_effect(&line, nom_effect));
+        // Priority 15: Final fallback — the unimplemented def already carries
+        // diagnostic info from dispatch_line_nom; push it as-is.
+        tracing::debug!(oracle_text = line, "unimplemented ability line");
+        result.abilities.push(nom_def);
         i += 1;
     }
 
