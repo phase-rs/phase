@@ -6555,7 +6555,7 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
         .parse(input)
     }
 
-    // CR 310.1 + CR 120.1: "or battle" disjunction — extends player/opponent
+    // CR 120.1 + CR 120.1a: "or battle" disjunction — extends player/opponent
     // damage recipients to include battles (March of the Machine onward).
     fn parse_opponent_or_battle_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
         value(
@@ -6574,7 +6574,7 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
     }
 
     alt((
-        // CR 310.1: Three-way disjunction — longest match first.
+        // CR 120.1 + CR 120.1a: Three-way disjunction — longest match first.
         value(
             TargetFilter::Or {
                 filters: vec![
@@ -6600,7 +6600,7 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
                 tag("a player or a planeswalker"),
             )),
         ),
-        // CR 310.1: Two-way player-or-battle disjunction.
+        // CR 120.1 + CR 120.1a: Two-way player-or-battle disjunction.
         value(
             TargetFilter::Or {
                 filters: vec![
@@ -9745,7 +9745,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
-        // CR 310.1: Try battle-inclusive suffixes first (longer match wins).
+        // CR 120.1a: Try battle-inclusive suffixes first (longer match wins).
         // Covers "deal(s) combat damage to a player or (a )battle".
         let (subject_text, recipient_filter) = if let Ok(("", t)) = terminated(
             take_until::<_, _, OracleError<'_>>(" deal"),
@@ -13427,11 +13427,11 @@ mod tests {
         }
     }
 
-    // --- CR 310.1: "or battle" damage-recipient qualifier ---
+    // --- CR 120.1 + CR 120.1a: "or battle" damage-recipient qualifier ---
 
     #[test]
     fn parse_damage_to_qualifier_player_or_battle() {
-        // CR 310.1: "to a player or battle" must produce an Or filter
+        // CR 120.1a: "to a player or battle" must produce an Or filter
         // containing both Player and Battle (Archpriest of Shadows class).
         match parse_damage_to_qualifier("to a player or battle") {
             Some(TargetFilter::Or { filters }) => {
@@ -13448,7 +13448,7 @@ mod tests {
 
     #[test]
     fn parse_damage_to_qualifier_opponent_or_battle() {
-        // CR 310.1: "to an opponent or battle" — Bloodfeather Phoenix class.
+        // CR 120.1a: "to an opponent or battle" — Bloodfeather Phoenix class.
         match parse_damage_to_qualifier("to an opponent or battle") {
             Some(TargetFilter::Or { filters }) => {
                 assert_eq!(filters.len(), 2);
@@ -13471,7 +13471,7 @@ mod tests {
 
     #[test]
     fn parse_damage_to_qualifier_player_planeswalker_or_battle() {
-        // CR 310.1: Three-way disjunction — Farseeing Flockmate class.
+        // CR 120.1a: Three-way disjunction — Farseeing Flockmate class.
         match parse_damage_to_qualifier("to a player, planeswalker, or battle") {
             Some(TargetFilter::Or { filters }) => {
                 assert_eq!(filters.len(), 3);
@@ -14919,11 +14919,11 @@ mod tests {
         );
     }
 
-    // --- CR 310.1: "or battle" damage-recipient triggers ---
+    // --- CR 120.1 + CR 120.1a: "or battle" damage-recipient triggers ---
 
     #[test]
     fn archpriest_of_shadows_player_or_battle_trigger() {
-        // CR 310.1: "deals combat damage to a player or battle" must include
+        // CR 120.1a: "deals combat damage to a player or battle" must include
         // Battle in the trigger's valid_target (Archpriest of Shadows class).
         let def = parse_trigger_line(
             "Whenever Archpriest of Shadows deals combat damage to a player or battle, return target creature card from your graveyard to the battlefield.",
@@ -14946,7 +14946,7 @@ mod tests {
 
     #[test]
     fn bloodfeather_phoenix_opponent_or_battle_trigger() {
-        // CR 310.1: "deals damage to an opponent or battle" — opponent disjunction.
+        // CR 120.1a: "deals damage to an opponent or battle" — opponent disjunction.
         let def = parse_trigger_line(
             "Whenever an instant or sorcery spell you control deals damage to an opponent or battle, you may pay {R}. If you do, return Bloodfeather Phoenix from your graveyard to the battlefield.",
             "Bloodfeather Phoenix",
@@ -14973,7 +14973,7 @@ mod tests {
 
     #[test]
     fn farseeing_flockmate_player_planeswalker_or_battle_trigger() {
-        // CR 310.1: Three-way "a player, planeswalker, or battle" disjunction.
+        // CR 120.1a: Three-way "a player, planeswalker, or battle" disjunction.
         let def = parse_trigger_line(
             "Whenever Farseeing Flockmate deals combat damage to a player, planeswalker, or battle, surveil 1.",
             "Farseeing Flockmate",
@@ -15001,7 +15001,7 @@ mod tests {
 
     #[test]
     fn zurgo_and_ojutai_one_or_more_player_or_battle_trigger() {
-        // CR 310.1 + CR 603.10a: "one or more dragons you control deal combat
+        // CR 120.1a + CR 603.10a: "one or more dragons you control deal combat
         // damage to a player or battle" — batched damage with battle recipient.
         let def = parse_trigger_line(
             "Whenever one or more Dragons you control deal combat damage to a player or battle, look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.",
