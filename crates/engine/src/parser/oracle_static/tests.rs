@@ -5414,9 +5414,16 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
 /// CR 613.1f: "all creatures your opponents control" (Drana and Linvala)
 #[test]
 fn parse_grant_all_activated_abilities_opponents_creatures() {
-    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
-        source: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        source: TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        ),
     };
     for predicate in [
         "all activated abilities of all creatures your opponents control",
@@ -5455,9 +5462,12 @@ fn parse_grant_all_activated_abilities_creature_cards_in_graveyards() {
 /// CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
 #[test]
 fn parse_grant_all_activated_abilities_all_lands() {
-    use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
-        source: TargetFilter::Typed(TypedFilter::land()),
+        source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }])),
     };
     for predicate in [
         "all activated abilities of all lands on the battlefield",
@@ -5476,13 +5486,19 @@ fn parse_grant_all_activated_abilities_all_lands() {
 fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
     use crate::types::card_type::Supertype;
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::HasSupertype {
-                    value: Supertype::Legendary,
-                }]),
+                .properties(vec![
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ]),
         ),
     };
     for predicate in [
