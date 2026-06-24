@@ -107,7 +107,19 @@ pub(crate) fn resolve_connive_effect(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.50a: The conniving permanent's controller draws and discards.
+    // CR 701.50e: If a permanent would connive 0, no connive event occurs and
+    // abilities that trigger whenever a permanent connives won't trigger. Return
+    // before any draw/discard/counter, before parking a ConniveDiscard, and
+    // without emitting EffectResolved{Connive} (the event match_connives keys on).
+    // Reachable via the dynamic count path (Spymaster's Vault X = creatures that
+    // died this turn) and via replacement count-modifiers reducing the count to 0
+    // (engine_replacement.rs Execute survivor). Printed "Connive N" (CR 701.50d)
+    // is always N>=1, so this never regresses the normal count>=1 flow.
+    if count == 0 {
+        return Ok(());
+    }
+
+    // CR 701.50a: The conviving permanent's controller draws and discards.
     let controller = state
         .objects
         .get(&conniver_id)
@@ -1721,6 +1733,97 @@ mod tests {
                 .count(),
             1,
             "the connive must complete exactly once even though the leading draw was prevented"
+        );
+    }
+
+    /// CR 701.50e: a connive whose resolved count is 0 is a complete no-op. Driven
+    /// through the top-level `resolve()` entry (the production path the combat
+    /// trigger / activated ability use): `resolve` resolves the `QuantityExpr` to
+    /// 0, `propose_connive` finds no connive replacement and returns the
+    /// `Execute(Connive { count: 0 })` survivor, which funnels into
+    /// `resolve_connive_effect(.., 0, ..)`. That must perform no
+    /// draw/discard/counter, park no `ConniveDiscard`, and emit no
+    /// `EffectResolved{Connive}` — so "whenever a permanent connives" abilities do
+    /// not trigger.
+    ///
+    /// Revert probe (the revert-failing assertion is `!ConniveDiscard`): without
+    /// the `count == 0` guard, the draw-of-0 is a no-op, but the discard step then
+    /// runs with `discard_count == 0`. The single hand card makes
+    /// `hand_cards.len() (1) <= discard_count (0)` false, so the else arm parks
+    /// `WaitingFor::ConniveDiscard { count: 0 }` and returns — the `!ConniveDiscard`
+    /// assertion flips. (With an empty hand the revert would instead reach the tail
+    /// and emit `EffectResolved{Connive}`; the one hand card pins the discard-park
+    /// arm, the discriminating no-op the guard prevents.)
+    #[test]
+    fn connive_count_zero_no_ops() {
+        let mut state = GameState::new_two_player(42);
+        let conniver = make_battlefield_creature(&mut state, PlayerId(0));
+
+        // A distinguishable card on library top and a card in hand. Neither must
+        // move if the connive is a complete no-op.
+        let top = add_card_to_library(&mut state, PlayerId(0), "Top", false);
+        let hand_card = add_card_to_hand(&mut state, PlayerId(0), "HandCard", false);
+
+        // Drive the entry point with a count that resolves to 0 (e.g. a dynamic
+        // "connive X" where X = 0). `resolve` -> `propose_connive(.., 0, ..)` ->
+        // `Execute(Connive { count: 0 })` survivor -> `resolve_connive_effect`.
+        let ability = ResolvedAbility::new(
+            Effect::Connive {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+            },
+            vec![TargetRef::Object(conniver)],
+            conniver,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 701.50e: the connive is a complete no-op.
+        // No draw: the library-top card is untouched.
+        assert!(
+            state.players[0].library.contains(&top),
+            "connive 0 must not draw: library top must stay in library"
+        );
+        // No discard: the hand card is untouched and not in the graveyard.
+        assert!(
+            state.players[0].hand.contains(&hand_card),
+            "connive 0 must not discard: hand card must stay in hand"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&hand_card),
+            "connive 0 must not discard: hand card must not reach the graveyard"
+        );
+        // No counter.
+        assert_eq!(
+            state.objects[&conniver]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "connive 0 must place no +1/+1 counter"
+        );
+        // No ConniveDiscard pause.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ConniveDiscard { .. }),
+            "connive 0 must not park a ConniveDiscard, got {:?}",
+            state.waiting_for
+        );
+        // No connive completion event — "whenever a permanent connives" never fires.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Connive,
+                        ..
+                    }
+                ))
+                .count(),
+            0,
+            "connive 0 must emit no EffectResolved{{Connive}} (no connive event occurs)"
         );
     }
 }
