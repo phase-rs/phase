@@ -364,7 +364,13 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         || manaTappableObjectIds.has(id)
         || boardChoiceObjectIds.has(id)
         || selectableSacrificeObjectIds.has(id)
-        || selectableManaCostCreatureIds.has(id),
+        || selectableManaCostCreatureIds.has(id)
+        // An attachment tapped for mana that can still be untapped (undo) is
+        // itself actionable — keep it expanded so the undo affordance stays
+        // clickable. `undoableTapObjectIds` is already gated upstream
+        // (GameBoard `undoLegal`) to the states whose engine match arms accept
+        // the untap, so no extra state check is needed here.
+        || undoableTapObjectIds.has(id),
     );
   const attachmentsLifted =
     obj.attachments.length > 0

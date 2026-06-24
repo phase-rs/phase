@@ -123,6 +123,7 @@ function renderPermanent(
   selectableSacrificeObjectIds = new Set<number>(),
   boardChoiceObjectIds = new Set<number>(),
   activatableObjectIds = new Set<number>(),
+  undoableTapObjectIds = new Set<number>(),
 ) {
   return render(
     <BoardInteractionContext.Provider
@@ -134,7 +135,7 @@ function renderPermanent(
         manaTappableObjectIds: new Set(),
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds: new Set(),
-        undoableTapObjectIds: new Set(),
+        undoableTapObjectIds,
         validAttackerIds: new Set(),
         validTargetObjectIds,
       }}
@@ -312,6 +313,41 @@ describe("PermanentCard attachments", () => {
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     const { container } = renderPermanent(
+      new Set(),
+      new Set(),
+      new Set(),
+      new Set([4]),
+    );
+
+    expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
+    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("auto-expands collapsed attachments when one has an undoable mana tap", () => {
+    // Regression: an attachment tapped for mana that can still be untapped
+    // (undo) is actionable. Collapsed behind its host the undo affordance is
+    // unclickable, stranding the tapped mana source.
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(
+      new Set(),
       new Set(),
       new Set(),
       new Set(),
