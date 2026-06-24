@@ -2725,10 +2725,10 @@ fn parse_chroma_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
-/// CR 700.5: Graveyard-scope Chroma — "the number of \<color\> mana symbols in
+/// CR 202.1 + CR 404.2: Graveyard-scope Chroma — "the number of \<color\> mana symbols in
 /// the mana costs of cards in your graveyard" counts colored mana symbols among
-/// cards in the controller's graveyard. Distinct from the permanents-scope
-/// Chroma (devotion).
+/// cards in the owner's graveyard. Distinct from the permanents-scope
+/// Chroma (devotion, CR 700.5).
 fn parse_graveyard_chroma_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the number of ").parse(input)?;
     let (rest, color) = super::primitives::parse_color(rest)?;
@@ -7283,7 +7283,7 @@ mod tests {
         assert_eq!(rest, "");
     }
 
-    /// CR 700.5: graveyard-scope Chroma — "the number of <color> mana symbols in
+    /// CR 202.1 + CR 404.2: graveyard-scope Chroma — "the number of <color> mana symbols in
     /// the mana costs of cards in your graveyard" (Umbra Stalker).
     #[test]
     fn test_parse_graveyard_chroma() {

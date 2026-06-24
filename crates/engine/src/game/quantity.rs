@@ -1897,8 +1897,6 @@ fn resolve_ref(
                 })
                 .unwrap_or(0),
         },
-        // CR 700.5: Graveyard-scope Chroma — count colored mana symbols among
-        // mana costs of cards in the scoped player's graveyard.
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {
