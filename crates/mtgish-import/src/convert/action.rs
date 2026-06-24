@@ -2785,6 +2785,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            from_prior_look: false,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -4406,6 +4407,7 @@ fn convert_look_at_top(
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            from_prior_look: false,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4424,6 +4426,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: false,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
 
@@ -4441,6 +4444,7 @@ fn convert_look_at_top(
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
 
@@ -4461,6 +4465,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
 
@@ -4477,6 +4482,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
 
@@ -4536,6 +4542,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4549,6 +4556,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4562,6 +4570,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4576,6 +4585,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4590,6 +4600,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                from_prior_look: false,
             })
         }
         _ => Err(prereq(format!(
