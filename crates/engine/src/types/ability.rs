@@ -8091,6 +8091,15 @@ pub enum Effect {
         /// tapped when true (Planar Genesis — "onto the battlefield tapped").
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 701.20e + CR 608.2c: When true, the resolver reads the card set
+        /// from `state.private_look_ids` (populated by a preceding look-only
+        /// Dig) instead of the top of the library. Used for the Birthing
+        /// Ritual pattern where an interactive sacrifice action separates the
+        /// look step from the choice step; the sacrifice snapshot is then
+        /// available in `effect_context_object` when `selectable_cards` is
+        /// computed, making the CMC filter evaluate correctly.
+        #[serde(default)]
+        from_prior_look: bool,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]

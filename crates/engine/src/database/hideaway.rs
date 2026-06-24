@@ -86,6 +86,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            from_prior_look: false,
         },
     )
     // CR 608.2c: continuation — conceal the just-exiled card (ParentTarget).

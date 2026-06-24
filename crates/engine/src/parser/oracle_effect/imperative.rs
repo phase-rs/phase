@@ -2583,6 +2583,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             rest_destination: None,
             reveal,
             enter_tapped: false,
+            from_prior_look: false,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {
             player,
