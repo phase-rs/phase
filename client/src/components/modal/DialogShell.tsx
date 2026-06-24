@@ -1,5 +1,5 @@
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useEffect, type ReactNode } from "react";
+import { AnimatePresence, motion, useDragControls, useReducedMotion } from "framer-motion";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
@@ -47,6 +47,15 @@ export function DialogShell({
   const cardHoverProps =
     previewObjectId != null ? inspectHoverProps(previewObjectId) : undefined;
 
+  // Drag-to-reposition: the dialog can sit over board content the player needs
+  // to see (targets, the mana they're paying with). `dragListener={false}` +
+  // `dragControls` mean a drag only begins from the header handle, so clicks on
+  // body controls never start a drag. Constrained to the overlay so the card
+  // can't be flung off-screen. Position resets on each open (fresh mount).
+  const dragControls = useDragControls();
+  const constraintsRef = useRef<HTMLDivElement>(null);
+  const startHeaderDrag = (event: ReactPointerEvent) => dragControls.start(event);
+
   // Esc-to-close: standard modal contract. Only attach when the dialog is
   // dismissable (consumers like ChoiceOverlay that omit `onClose` have a
   // different dismissal model and shouldn't intercept Escape).
@@ -76,6 +85,7 @@ export function DialogShell({
   return (
     <AnimatePresence>
       <motion.div
+        ref={constraintsRef}
         className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -94,6 +104,12 @@ export function DialogShell({
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
+          drag
+          dragListener={false}
+          dragControls={dragControls}
+          dragMomentum={false}
+          dragElastic={0.05}
+          dragConstraints={constraintsRef}
         >
           <div {...cardHoverProps} className={cardClass}>
             <DialogHeader
@@ -101,6 +117,7 @@ export function DialogShell({
               eyebrowClassName={eyebrowClassName}
               title={title}
               subtitle={subtitle}
+              onHandlePointerDown={startHeaderDrag}
             />
             {onClose ? <CloseButton onClose={onClose} /> : null}
             {children}
@@ -122,6 +139,9 @@ interface DialogHeaderProps {
   eyebrowClassName?: string;
   title: ReactNode;
   subtitle?: ReactNode;
+  /** When provided, the header acts as the dialog's drag handle: pointer-down
+   * starts a drag via the shell's `dragControls`. Absent → static header. */
+  onHandlePointerDown?: (event: ReactPointerEvent) => void;
 }
 
 export function DialogHeader({
@@ -129,14 +149,24 @@ export function DialogHeader({
   eyebrowClassName,
   title,
   subtitle,
+  onHandlePointerDown,
 }: DialogHeaderProps) {
   const eyebrowClass = [
     "text-[0.68rem] uppercase tracking-[0.22em]",
     eyebrowClassName ?? "text-slate-500",
   ].join(" ");
 
+  // `touch-none` keeps a touch-drag on the handle from scrolling the page;
+  // `cursor-grab` signals the affordance. Only applied when draggable.
+  const handleClass = onHandlePointerDown
+    ? "cursor-grab touch-none select-none active:cursor-grabbing"
+    : "";
+
   return (
-    <div className="relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
+    <div
+      onPointerDown={onHandlePointerDown}
+      className={`relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5 ${handleClass}`}
+    >
       <div className={eyebrowClass}>{eyebrow}</div>
       <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
         {title}
