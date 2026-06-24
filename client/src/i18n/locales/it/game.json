@@ -416,6 +416,8 @@
     "paymentPending": "Il pagamento è ancora in sospeso. TAPpa i permanenti o annulla questa azione.",
     "poolLabel": "Riserva:",
     "poolEmpty": "Vuota",
+    "pinUnit": "Fissa questo mana per pagare per primo",
+    "unpinUnit": "Rimuovi fissaggio di questo mana",
     "pay": "Paga",
     "chooseAmountTitle": "Scegli quanto pagare",
     "chooseAmountAria": "Scegli quanto pagare",

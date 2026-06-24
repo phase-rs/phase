@@ -421,6 +421,9 @@ export type ManaSpellGrant =
 export interface ManaUnit {
   color: ManaType;
   source_id: ObjectId;
+  // CR 118.3a: stable per-unit id used to pin which pool unit pays a cost.
+  // `0` is the unstamped sentinel (convoke markers / detached preview pools).
+  pip_id: number;
   snow: boolean;
   restrictions: ManaRestriction[];
   // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when empty.
@@ -1017,6 +1020,9 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
+  // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
+  // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
+  pinned_pool_units?: number[];
 }
 
 export interface TargetSelectionSlot {
@@ -1558,6 +1564,9 @@ export type GameAction =
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
+  // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
+  | { type: "SpendPoolMana"; data: { pip_id: number } }
+  | { type: "UnspendPoolMana"; data: { pip_id: number } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectCoinFlips"; data: { keep_indices: number[] } }

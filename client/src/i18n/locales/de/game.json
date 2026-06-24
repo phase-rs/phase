@@ -416,6 +416,8 @@
     "paymentPending": "Die Bezahlung steht noch aus. Tappe bleibende Karten oder brich diese Aktion ab.",
     "poolLabel": "Vorrat:",
     "poolEmpty": "Leer",
+    "pinUnit": "Dieses Mana zum Bezahlen vormerken",
+    "unpinUnit": "Mana-Vormerkung aufheben",
     "pay": "Bezahlen",
     "chooseAmountTitle": "Wähle die zu zahlende Menge",
     "chooseAmountAria": "Wähle die zu zahlende Menge",

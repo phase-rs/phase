@@ -445,6 +445,8 @@
     "paymentPending": "Payment is still pending. Tap permanents or cancel this action.",
     "poolLabel": "Pool:",
     "poolEmpty": "Empty",
+    "pinUnit": "Pin this mana to pay first",
+    "unpinUnit": "Unpin this mana",
     "pay": "Pay",
     "chooseAmountTitle": "Choose amount to pay",
     "chooseAmountAria": "Choose amount to pay",

@@ -416,6 +416,8 @@
     "paymentPending": "Płatność wciąż oczekuje. Obróć trwałe lub anuluj tę akcję.",
     "poolLabel": "Pula:",
     "poolEmpty": "Pusta",
+    "pinUnit": "Przypnij tę manę, aby zapłacić najpierw",
+    "unpinUnit": "Odepnij tę manę",
     "pay": "Zapłać",
     "chooseAmountTitle": "Wybierz kwotę do zapłaty",
     "chooseAmountAria": "Wybierz kwotę do zapłaty",

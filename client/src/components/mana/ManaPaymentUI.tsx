@@ -159,6 +159,35 @@ export function ManaPaymentUI() {
     return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
   }, [player]);
 
+  // CR 118.3a: the engine records player-directed pins on `pending_cast`.
+  // The frontend is a pure mirror — it renders the engine's pin set and the
+  // individual pool units, and dispatches Spend/UnspendPoolMana on click. It
+  // computes no eligibility (the engine accepts or rejects each pin).
+  const pinnedPipIds = useMemo(
+    () => new Set(gameState?.pending_cast?.pinned_pool_units ?? []),
+    [gameState],
+  );
+
+  // One entry per individual (non-convoke) pool unit, keyed by its stable
+  // `pip_id`. Convoke markers are excluded for the same reason as the summary.
+  const pinnableUnits = useMemo(() => {
+    if (!player) return [];
+    return player.mana_pool.mana.filter(
+      (unit) => !unit.restrictions.includes("ConvokePayment"),
+    );
+  }, [player]);
+
+  const togglePin = useCallback(
+    (pipId: number) => {
+      if (pinnedPipIds.has(pipId)) {
+        dispatch({ type: "UnspendPoolMana", data: { pip_id: pipId } });
+      } else {
+        dispatch({ type: "SpendPoolMana", data: { pip_id: pipId } });
+      }
+    },
+    [dispatch, pinnedPipIds],
+  );
+
   // CR 702.51a / CR 702.126a: each creature/artifact tapped for convoke/improvise
   // adds a `ConvokePayment`-restricted marker to the pool (engine
   // `ManaUnit::convoke_payment`). These are deliberately excluded from
@@ -436,7 +465,7 @@ export function ManaPaymentUI() {
             </p>
           )}
 
-          {/* Current mana pool */}
+          {/* Current mana pool — non-interactive color-grouped overview. */}
           <div className="mb-3 flex items-center justify-center gap-2">
             <span className="text-xs text-gray-500">{t("mana.poolLabel")}</span>
             {manaPoolSummary.length > 0 ? (
@@ -447,6 +476,35 @@ export function ManaPaymentUI() {
               <span className="text-xs text-gray-600">{t("mana.poolEmpty")}</span>
             )}
           </div>
+
+          {/* CR 118.3a: interactive per-unit pin row. Clicking a pip pins it so
+              the engine prefers it when paying the cost; clicking a pinned pip
+              unpins it. The unit is never removed by pinning — the engine owns
+              the pin set and eligibility, so an ineligible pin is simply not
+              recorded (no client-side filtering). Shown only for manual mana
+              payment with a pending cast. */}
+          {isManaPayment && pinnableUnits.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-center gap-1.5">
+              {pinnableUnits.map((unit, idx) => {
+                const pinned = pinnedPipIds.has(unit.pip_id);
+                return (
+                  <button
+                    key={unit.pip_id || `unstamped-${idx}`}
+                    onClick={() => togglePin(unit.pip_id)}
+                    aria-pressed={pinned}
+                    title={
+                      pinned ? t("mana.unpinUnit") : t("mana.pinUnit")
+                    }
+                    className={`rounded-full transition ${
+                      pinned ? "ring-2 ring-cyan-400" : "ring-1 ring-transparent hover:ring-gray-500"
+                    }`}
+                  >
+                    <ManaBadge color={unit.color} amount={1} />
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {/* Confirm / Cancel buttons */}
           <div className="flex justify-center gap-3">

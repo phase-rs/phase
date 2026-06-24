@@ -8,7 +8,7 @@ use super::game_state::{
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::ManaType;
+use super::mana::{ManaPipId, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -204,6 +204,17 @@ pub enum GameAction {
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
     UntapLandForMana {
         object_id: ObjectId,
+    },
+    /// CR 118.3a: Pin a specific pool `ManaUnit` (by id) so the finalize spend
+    /// prefers it. The unit stays in the pool — this records a priority hint on
+    /// `PendingCast.pinned_pool_units`, it does not remove mana.
+    SpendPoolMana {
+        pip_id: ManaPipId,
+    },
+    /// CR 118.3a: Remove a previously-recorded pin. Always legal (no-op if the
+    /// pin is absent).
+    UnspendPoolMana {
+        pip_id: ManaPipId,
     },
     SelectCards {
         cards: Vec<ObjectId>,
@@ -1204,7 +1215,13 @@ impl GameAction {
     pub fn is_mana_ability(&self) -> bool {
         matches!(
             self,
-            GameAction::TapLandForMana { .. } | GameAction::UntapLandForMana { .. }
+            GameAction::TapLandForMana { .. }
+                | GameAction::UntapLandForMana { .. }
+                // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
+                // action; classifying it here grants MP skip_legality acceptance and
+                // AI-exclusion via the single !is_mana_ability authority.
+                | GameAction::SpendPoolMana { .. }
+                | GameAction::UnspendPoolMana { .. }
         )
     }
 
@@ -1238,6 +1255,8 @@ impl GameAction {
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
+            // CR 118.3a: act on a pool pip, not a battlefield object.
+            GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
             GameAction::Equip { equipment_id, .. } => Some(*equipment_id),
             GameAction::CrewVehicle { vehicle_id, .. } => Some(*vehicle_id),
             GameAction::ActivateStation { spacecraft_id, .. } => Some(*spacecraft_id),

@@ -416,6 +416,8 @@
     "paymentPending": "El pago sigue pendiente. Gira permanentes o cancela esta acción.",
     "poolLabel": "Reserva:",
     "poolEmpty": "Vacía",
+    "pinUnit": "Fijar este maná para pagar primero",
+    "unpinUnit": "Quitar fijación de este maná",
     "pay": "Pagar",
     "chooseAmountTitle": "Elige la cantidad a pagar",
     "chooseAmountAria": "Elige la cantidad a pagar",

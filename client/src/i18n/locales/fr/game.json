@@ -416,6 +416,8 @@
     "paymentPending": "Le paiement est toujours en attente. Engagez des permanents ou annulez cette action.",
     "poolLabel": "Réserve :",
     "poolEmpty": "Vide",
+    "pinUnit": "Épingler ce mana pour payer en premier",
+    "unpinUnit": "Désépingler ce mana",
     "pay": "Payer",
     "chooseAmountTitle": "Choisissez la quantité à payer",
     "chooseAmountAria": "Choisir la quantité à payer",
