@@ -188,6 +188,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    let all_contraption_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|p| p.contraption_deck.iter().copied())
+        .collect();
+    for obj_id in all_contraption_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
     // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
     // supplementary decks whose face-down cards live in the command zone. Redact
     // every unrevealed card identity for all viewers, matching the library and

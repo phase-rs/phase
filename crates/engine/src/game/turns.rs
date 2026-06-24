@@ -632,6 +632,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_sacrificed_artifact_this_turn.clear();
     state.sacrificed_permanents_this_turn.clear();
     state.zone_changes_this_turn.clear();
+    state.batched_zone_change_trigger_fired.clear();
     state.battlefield_entries_this_turn.clear();
     // CR 701.26 + CR 603.4: reset per-object tap counts so "first time it became
     // tapped this turn" intervening-ifs start fresh each turn.
@@ -1899,6 +1900,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     && !matches!(state.waiting_for, WaitingFor::Priority { .. })
                 {
                     return state.waiting_for.clone();
+                }
+                if let Some(prompt) =
+                    crate::game::contraptions::perform_contraption_upkeep_turn_based_action(
+                        state, events,
+                    )
+                {
+                    return prompt;
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended

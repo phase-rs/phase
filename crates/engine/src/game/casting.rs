@@ -35,8 +35,8 @@ use super::ability_utils::{
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
     build_resolved_from_def, build_target_slots, compute_unavailable_modes,
     filter_references_target_player, flatten_targets_in_chain,
-    has_legal_target_assignment_for_ability, modal_choice_for_player,
-    target_constraints_from_modal,
+    has_legal_target_assignment_for_ability, kicker_instead_spell_has_legal_targets,
+    modal_choice_for_player, target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
@@ -9460,6 +9460,34 @@ fn continue_with_prepared(
         }
     }
 
+    // CR 601.2b + CR 702.33d: Kicker "instead" spells — prompt for kicker before
+    // building unkicked target slots (Bloodchief's Thirst on Pyrogoyf, #3989).
+    let has_kicker_cost = state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|obj| obj.additional_cost.as_ref())
+        .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
+    if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
+        return casting_costs::begin_target_dependent_additional_cost_declaration(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost,
+            Some(prepared.base_mana_cost.clone()),
+            prepared.casting_variant,
+            prepared.cast_timing_permission,
+            prepared
+                .ability_def
+                .as_ref()
+                .and_then(|a| a.distribute.clone()),
+            prepared.origin_zone,
+            prepared.payment_mode,
+            events,
+        );
+    }
+
     let mut target_slots = build_target_slots(state, &resolved)?;
     // CR 601.2c + CR 601.2d: A fixed-amount divided spell (no X to announce, e.g.
     // "2 damage divided among up to three targets") must likewise offer at most
@@ -9476,31 +9504,6 @@ fn continue_with_prepared(
             .as_ref()
             .map(|ability| ability.target_constraints.clone())
             .unwrap_or_default();
-        let has_kicker_cost = state
-            .objects
-            .get(&prepared.object_id)
-            .and_then(|obj| obj.additional_cost.as_ref())
-            .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
-        if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
-            return casting_costs::begin_target_dependent_additional_cost_declaration(
-                state,
-                player,
-                prepared.object_id,
-                prepared.card_id,
-                resolved,
-                prepared.mana_cost,
-                Some(prepared.base_mana_cost.clone()),
-                prepared.casting_variant,
-                prepared.cast_timing_permission,
-                prepared
-                    .ability_def
-                    .as_ref()
-                    .and_then(|a| a.distribute.clone()),
-                prepared.origin_zone,
-                prepared.payment_mode,
-                events,
-            );
-        }
 
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
@@ -9864,28 +9867,26 @@ pub fn spell_has_legal_targets(
     };
 
     let resolved = build_resolved_from_def(&ability_def, obj.id, player);
-    match build_target_slots(&simulated, &resolved) {
-        Ok(target_slots) => {
-            if target_slots.is_empty() {
-                true
-            } else {
-                has_legal_target_assignment_for_ability(
-                    &simulated,
-                    &resolved,
-                    &target_slots,
-                    &ability_def.target_constraints,
-                )
-            }
-        }
-        Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
-                && (casting_costs::required_additional_cost_can_declare_x(
-                    &simulated, player, obj.id,
-                )
-                .is_some()
-                    || casting_costs::cost_has_x(&obj.mana_cost))
-        }
+    let base_ok = match build_target_slots(&simulated, &resolved) {
+        Ok(target_slots) if target_slots.is_empty() => true,
+        Ok(target_slots) => has_legal_target_assignment_for_ability(
+            &simulated,
+            &resolved,
+            &target_slots,
+            &ability_def.target_constraints,
+        ),
+        Err(_) => false,
+    };
+    if base_ok {
+        return true;
     }
+    if kicker_instead_spell_has_legal_targets(&simulated, &ability_def, obj.id, player) {
+        return true;
+    }
+    ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
+        && (casting_costs::required_additional_cost_can_declare_x(&simulated, player, obj.id)
+            .is_some()
+            || casting_costs::cost_has_x(&obj.mana_cost))
 }
 
 /// CR 601.2b + CR 118.9a: Check whether `object_id` can legally be cast for
@@ -9992,6 +9993,22 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return false;
     }
     let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
+        // CR 715.3a / CR 720.3a: An Adventure instant/sorcery face may be
+        // castable even when `prepare_spell_cast` fails on the creature face —
+        // most commonly the sorcery-speed timing gate outside main phases.
+        if let Some(obj) = state.objects.get(&object_id) {
+            if alternative_spell_layout(obj).is_some()
+                && cast_face_choice_offered_from_zone(state, obj)
+            {
+                let mut sim = state.clone();
+                if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
+                    swap_to_alternative_spell_face(sim_obj);
+                }
+                if let Ok(prepared) = prepare_spell_cast(&sim, player, object_id) {
+                    return can_cast_prepared_now(&sim, player, &prepared);
+                }
+            }
+        }
         let choices = casting_variant_choice_set(state, player, object_id);
         return !choices.options.is_empty();
     };
@@ -10316,7 +10333,7 @@ fn can_cast_prepared_now(
     // alternative spell face. The creature face may be unaffordable while the
     // spell face is castable; in that case the card is still legally castable
     // and will prompt AdventureCastChoice.
-    if alternative_spell_layout(obj).is_some() {
+    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
@@ -31943,6 +31960,39 @@ mod tests {
         });
 
         obj_id
+    }
+
+    /// CR 715.3a + CR 304.1: Adventure instant faces (Blow Off Steam, Stomp)
+    /// must be castable at instant speed even when the creature face fails
+    /// sorcery-speed timing outside main phases (issue #4001).
+    #[test]
+    fn issue_4001_adventure_instant_castable_outside_main_phase() {
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::DeclareAttackers;
+        let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+        // Enough mana for Stomp ({1}{R}) but not Bonecrusher Giant ({2}{R}).
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Adventure instant face must be castable outside main phases"
+        );
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(70), &mut events).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                WaitingFor::CastOffer {
+                    player,
+                    kind: CastOfferKind::Adventure { .. }
+                } if player == PlayerId(0)
+            ),
+            "Expected Adventure cast offer outside main phase, got {:?}",
+            result
+        );
     }
 
     /// Enchantment adventure (Virtue of Courage // Embereth Blaze class).

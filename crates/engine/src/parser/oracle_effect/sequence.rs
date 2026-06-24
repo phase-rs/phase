@@ -1404,6 +1404,20 @@ fn starts_clause_text_lower(s: &str) -> bool {
         return true;
     }
 
+    if alt((
+        value((), tag::<_, _, OracleError<'_>>("assemble ")),
+        value((), tag("reassemble ")),
+        value((), tag("it assemble ")),
+        value((), tag("it assembles ")),
+        value((), tag("it reassemble ")),
+        value((), tag("it reassembles ")),
+    ))
+    .parse(s)
+    .is_ok()
+    {
+        return true;
+    }
+
     // Table-driven prefix check via nom tag() — try all imperative verbs and
     // pronoun/determiner clause starters.  Split into multiple alt() groups
     // chained with .or() to stay within nom's 21-tuple limit.
@@ -4432,6 +4446,12 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::ProcessRadCounters

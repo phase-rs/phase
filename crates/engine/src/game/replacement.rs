@@ -3681,9 +3681,14 @@ fn evaluate_replacement_condition(
             });
             !controls_any
         }
-        // CR 614.1d: Bond lands — "unless a player has N or less life"
+        // CR 614.1d + CR 810.9a: Bond lands — "unless a player has N or less
+        // life". Each player's life reads the team total in a team format, so
+        // the OR over players is "any team total <= N".
         ReplacementCondition::UnlessPlayerLifeAtMost { amount } => {
-            let any_player_low = state.players.iter().any(|p| p.life <= *amount as i32);
+            let any_player_low = state
+                .players
+                .iter()
+                .any(|p| crate::game::players::team_life_total(state, p.id) <= *amount as i32);
             !any_player_low
         }
         // CR 614.1d: Battlebond lands — "unless you have two or more opponents"
@@ -8893,6 +8898,62 @@ mod tests {
             ),
             "two other lands satisfy `minimum: 2` with Another excluding source"
         );
+    }
+
+    /// CR 614.1d + CR 810.9a: Bond-land "unless a player has N or less life"
+    /// reads each player's TEAM total in 2HG. Both teams at 20 (10+10) → no
+    /// team is at or below 15, so the condition is true (not suppressed) even
+    /// though every individual is at 10. Reverting Site 5 to `p.life` would see
+    /// individuals at 10 (<= 15) and wrongly suppress (return false).
+    #[test]
+    fn unless_player_life_at_most_reads_team_total_in_2hg() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        for p in &mut state.players {
+            p.life = 10; // each team total = 20
+        }
+        let cond = ReplacementCondition::UnlessPlayerLifeAtMost { amount: 15 };
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                ObjectId(0),
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "no team total (20) is <= 15, so the replacement is not suppressed"
+        );
+
+        // A single low individual on an otherwise-healthy team must NOT trip the
+        // condition: player 0 at 8 + teammate at 20 → team 28 > 15.
+        state.players[0].life = 8;
+        state.players[1].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                ObjectId(0),
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "an individual at 8 must not trip the condition when its team is at 28"
+        );
+
+        // When a TEAM total drops to <= 15, the condition is satisfied (false).
+        state.players[0].life = 5;
+        state.players[1].life = 5; // team 10 <= 15
+        assert!(!evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(0),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
     }
 
     #[test]

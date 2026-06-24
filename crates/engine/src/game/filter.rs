@@ -1265,6 +1265,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         is_token: false,
         combat_status: Default::default(),
         co_departed: Vec::new(),
+        turn_zone_change_index: 0,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -9284,6 +9285,7 @@ mod tests {
             is_token: false,
             combat_status: Default::default(),
             co_departed: Vec::new(),
+            turn_zone_change_index: 0,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");

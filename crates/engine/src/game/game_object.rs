@@ -426,6 +426,14 @@ pub struct GameObject {
     /// tracked via `Player::attraction_deck` rather than `command_zone`.
     #[serde(default)]
     pub in_attraction_deck: bool,
+    /// Unstable Contraptions: object is in the supplementary Contraption deck
+    /// (command zone), tracked via `Player::contraption_deck`.
+    #[serde(default)]
+    pub in_contraption_deck: bool,
+    /// Unstable Contraptions: the sprocket this Contraption occupies on the
+    /// battlefield. `None` when it is not assembled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contraption_sprocket: Option<u8>,
     /// CR 123.1 + CR 123.5: Stickers are object state, distinct from counters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stickers: Vec<AppliedSticker>,
@@ -1110,6 +1118,7 @@ impl GameObject {
             is_token: self.is_token,
             combat_status: Default::default(),
             co_departed: Vec::new(),
+            turn_zone_change_index: 0,
         }
     }
 
@@ -1197,6 +1206,8 @@ impl GameObject {
             card_types: CardType::default(),
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
+            in_contraption_deck: false,
+            contraption_sprocket: None,
             stickers: Vec::new(),
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),

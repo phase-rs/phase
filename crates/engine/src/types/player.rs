@@ -99,6 +99,14 @@ pub struct Player {
     /// CR 717.2: Supplementary Attraction deck (command zone), top at front.
     #[serde(default)]
     pub attraction_deck: im::Vector<ObjectId>,
+    /// Unstable Contraptions: supplementary Contraption deck (command zone),
+    /// top at front.
+    #[serde(default)]
+    pub contraption_deck: im::Vector<ObjectId>,
+    /// Unstable Contraptions: the sprocket currently holding the CRANK!
+    /// counter for this player. Starts on sprocket 3.
+    #[serde(default = "default_contraption_crank_sprocket")]
+    pub contraption_crank_sprocket: u8,
     /// CR 123.2c: Revealed sticker sheets this player has access to this game.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sticker_sheets: Vec<String>,
@@ -198,6 +206,8 @@ impl Default for Player {
             hand: im::Vector::new(),
             graveyard: im::Vector::new(),
             attraction_deck: im::Vector::new(),
+            contraption_deck: im::Vector::new(),
+            contraption_crank_sprocket: default_contraption_crank_sprocket(),
             sticker_sheets: Vec::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
@@ -223,6 +233,10 @@ impl Default for Player {
             status: PlayerStatus::Active,
         }
     }
+}
+
+fn default_contraption_crank_sprocket() -> u8 {
+    3
 }
 
 impl Player {

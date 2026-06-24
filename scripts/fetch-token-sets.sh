@@ -23,7 +23,7 @@ fi
 mapfile -t CODES < <(
   # tokenSetCode can name a legacy token pseudo-set that MTGJSON no longer
   # publishes as its own file; the parent set file already carries data.tokens.
-  jq -r 'reduce .data[].code as $code ({}; .[$code] = true) as $known_codes
+  jq -r '(reduce .data[].code as $code ({}; .[$code] = true)) as $known_codes
     | .data[]
     | select(.tokenSetCode != null and .tokenSetCode != "")
     | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | sort -u

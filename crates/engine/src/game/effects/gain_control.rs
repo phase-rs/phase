@@ -56,6 +56,32 @@ pub fn resolve(
     Ok(())
 }
 
+pub(crate) fn apply_permanent_control_change(
+    state: &mut GameState,
+    source_id: ObjectId,
+    object_id: ObjectId,
+    new_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let old_controller = state.objects.get(&object_id).map(|obj| obj.controller);
+    state.add_transient_continuous_effect(
+        source_id,
+        new_controller,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: object_id },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
+    mark_echo_due_for_new_controller(state, object_id);
+    if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+        events.push(GameEvent::ControllerChanged {
+            object_id,
+            old_controller,
+            new_controller,
+        });
+    }
+}
+
 /// CR 613.1b: Mass control-change (Layer 2 — control-changing effects) — gain
 /// control of EVERY battlefield permanent matching the effect's `target` filter
 /// (the untargeted "all" counterpart of [`resolve`], mirroring

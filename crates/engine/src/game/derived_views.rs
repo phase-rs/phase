@@ -1086,6 +1086,7 @@ mod tests {
                 is_token: false,
                 combat_status: Default::default(),
                 co_departed: Vec::new(),
+                turn_zone_change_index: 0,
             }),
         };
         let ability = ResolvedAbility::new(

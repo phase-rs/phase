@@ -7680,18 +7680,9 @@ mod tests {
     /// "loaded from card-data.json" shows up as a test failure here.
     #[test]
     fn walking_ballista_db_load_path_enters_with_x_counters() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            // Card-data export missing in this build context (e.g. fresh
-            // clone before `gen-card-data.sh` runs). Skip rather than fail.
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let face = db
             .get_face_by_name("Walking Ballista")
             .expect("Walking Ballista must be in the export")
@@ -7982,16 +7973,9 @@ mod tests {
     /// triggering entry.
     #[test]
     fn cathars_crusade_db_load_path_puts_counter_on_each_creature_you_control() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let crusade_face = db
             .get_face_by_name("Cathars' Crusade")
             .expect("Cathars' Crusade must be in the export")

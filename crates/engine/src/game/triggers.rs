@@ -417,6 +417,85 @@ fn partition_lki_trigger_definitions(
     (printed, granted_keywords)
 }
 
+fn batched_zone_change_batch(events: &[GameEvent]) -> bool {
+    !events.is_empty()
+        && events
+            .iter()
+            .all(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+}
+
+// CR 603.2c: An ability triggers only once each time its trigger event occurs.
+// This helper checks if the replay guard applies to a batched zone-change trigger.
+fn batched_zone_change_replay_guard_applies(
+    trig_def: &TriggerDefinition,
+    trigger_events: &[GameEvent],
+) -> bool {
+    trig_def.batched
+        && matches!(
+            trig_def.mode,
+            TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll | TriggerMode::Evolve
+        )
+        && batched_zone_change_batch(trigger_events)
+}
+
+fn batched_zone_change_already_collected(
+    state: &GameState,
+    source_id: ObjectId,
+    trig_idx: usize,
+    trigger_events: &[GameEvent],
+) -> bool {
+    let mut zone_changes = trigger_events
+        .iter()
+        .filter_map(|event| {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                Some(record.turn_zone_change_index)
+            } else {
+                None
+            }
+        })
+        .peekable();
+    zone_changes.peek().is_some()
+        && zone_changes.all(|turn_zone_change_index| {
+            state.batched_zone_change_trigger_fired.contains(&(
+                source_id,
+                trig_idx,
+                turn_zone_change_index,
+            ))
+        })
+}
+
+fn record_batched_zone_change_collected(
+    state: &mut GameState,
+    source_id: ObjectId,
+    trig_idx: usize,
+    trigger_events: &[GameEvent],
+) {
+    for event in trigger_events {
+        if let GameEvent::ZoneChanged { record, .. } = event {
+            state.batched_zone_change_trigger_fired.insert((
+                source_id,
+                trig_idx,
+                record.turn_zone_change_index,
+            ));
+        }
+    }
+}
+
+fn record_matched_batched_zone_change_replay(
+    state: &mut GameState,
+    source_id: ObjectId,
+    matched: &MatchedTrigger,
+) {
+    if matched.batched && batched_zone_change_batch(&matched.trigger_events) {
+        record_batched_zone_change_collected(
+            state,
+            source_id,
+            matched.trig_idx,
+            &matched.trigger_events,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -690,6 +769,16 @@ fn collect_matching_triggers_inner(
                 vec![vec![event.clone()]]
             };
             for trigger_events in trigger_event_batches {
+                if batched_zone_change_replay_guard_applies(trig_def, &trigger_events)
+                    && batched_zone_change_already_collected(
+                        state,
+                        obj_id,
+                        trig_idx,
+                        &trigger_events,
+                    )
+                {
+                    continue;
+                }
                 let trigger_event = trigger_events
                     .first()
                     .cloned()
@@ -1301,6 +1390,7 @@ fn collect_pending_triggers(
                     matched.trig_idx,
                     event,
                 );
+                record_matched_batched_zone_change_replay(state, obj_id, &matched);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -1701,6 +1791,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, *moved_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
@@ -1750,6 +1841,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, *exploiter, &matched);
                     if matched.batched {
                         batched_this_pass.insert((*exploiter, matched.trig_idx));
                     }
@@ -1819,6 +1911,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, observer_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -1935,6 +2028,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, obj_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
@@ -5576,9 +5670,12 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::TwoOrMoreSpellsCastLastTurn => {
             state.spells_cast_last_turn.unwrap_or(0) >= 2
         }
-        // CR 603.4: "if you have N or more life" — compare controller's life total.
+        // CR 603.4 + CR 810.9a: "if you have N or more life" reads the
+        // controller's TEAM total in a team format (own life off-team). Note:
+        // `minimum == 0` would flip a missing-player false→true vs. the prior
+        // `player_field` wrapper, but no real card has a 0 minimum.
         TriggerCondition::LifeTotalGE { minimum } => {
-            player_field(state, controller, |p| p.life >= *minimum)
+            super::players::team_life_total(state, controller) >= *minimum
         }
         // CR 603.4 + CR 102.1: "if it's <player>'s turn" — true when the named
         // player is currently the active player. Negation ("if it isn't <player>'s
@@ -12185,6 +12282,56 @@ pub mod tests {
             &condition,
             PlayerId(0),
             Some(source),
+            None,
+        ));
+    }
+
+    /// CR 603.4 + CR 810.9a: "if you have N or more life" reads the
+    /// controller's TEAM total in a 2HG game. Team A = 30 + 25 = 55 satisfies a
+    /// minimum of 50, even though neither individual reaches 50. Reverting Site
+    /// 2 to the individual `p.life` read (30) flips the assertion to false.
+    #[test]
+    fn life_total_ge_reads_team_total_in_2hg() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 30;
+        state.players[1].life = 25;
+        let condition = TriggerCondition::LifeTotalGE { minimum: 50 };
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(ObjectId(10)), None),
+            "team total (55) >= 50 even though no individual reaches 50"
+        );
+        // Sibling: a minimum above the team total fails.
+        let high = TriggerCondition::LifeTotalGE { minimum: 56 };
+        assert!(!check_trigger_condition(
+            &state,
+            &high,
+            PlayerId(0),
+            Some(ObjectId(10)),
+            None,
+        ));
+    }
+
+    /// Off-team degeneracy sibling for Site 2: in a 1v1 the controller's own
+    /// life governs the threshold (no team fold).
+    #[test]
+    fn life_total_ge_off_team_is_individual_life() {
+        let mut state = setup();
+        state.players[0].life = 12;
+        let condition = TriggerCondition::LifeTotalGE { minimum: 12 };
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(ObjectId(10)),
+            None,
+        ));
+        let condition = TriggerCondition::LifeTotalGE { minimum: 13 };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(ObjectId(10)),
             None,
         ));
     }

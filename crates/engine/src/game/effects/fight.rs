@@ -69,23 +69,47 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.14a: Resolve the fighting creature from the effect's subject.
-    // For "enchanted creature fights", subject is AttachedTo → look up attached_to.
-    // For "~ fights", subject is SelfRef → use ability.source_id directly.
-    let source_id = resolve_fight_subject(state, ability)?;
-
-    // Target creature from ability.targets
-    let target_id = ability
+    // CR 701.14a: Resolve the two fighters.
+    // - "~ fights target creature" / "it fights target …": one chosen object target;
+    //   the subject (~ / enchanted creature) is the other fighter.
+    // - "Target creature you control fights another target creature": two chosen
+    //   object targets are the fighters; the ability's source (e.g. Ulvenwald
+    //   Tracker) is not a participant.
+    let object_targets: Vec<ObjectId> = ability
         .targets
         .iter()
-        .find_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
         })
-        .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+        .collect();
+
+    let (source_id, target_id) = if object_targets.len() >= 2 {
+        (object_targets[0], object_targets[1])
+    } else if let Effect::Fight { subject, .. } = &ability.effect {
+        if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
+            // CR 701.14a: Dual-target fights require both chosen fighters; do
+            // not reinterpret a lone survivor as "~ fights target creature".
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Fight,
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+        let source_id = resolve_fight_subject(state, ability)?;
+        let target_id = object_targets
+            .first()
+            .copied()
+            .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+        (source_id, target_id)
+    } else {
+        let source_id = resolve_fight_subject(state, ability)?;
+        let target_id = object_targets
+            .first()
+            .copied()
+            .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+        (source_id, target_id)
+    };
 
     // CR 701.14b: If either fighter left the battlefield or is no longer a creature, no damage.
     if !fight_eligible(state, source_id) || !fight_eligible(state, target_id) {
@@ -306,6 +330,33 @@ mod tests {
         assert_eq!(state.objects[&wolf].damage_marked, 3);
         // Wolf (2/2) deals 2 damage to Bear -> Bear has 2 damage
         assert_eq!(state.objects[&bear].damage_marked, 2);
+    }
+
+    #[test]
+    fn dual_target_fight_uses_both_chosen_creatures_not_ability_source() {
+        // CR 701.14a: "Target creature you control fights another target creature"
+        // — both chosen creatures fight; the activated source is not a fighter.
+        let mut state = GameState::new_two_player(42);
+        let tracker = make_creature(&mut state, PlayerId(0), "Ulvenwald Tracker", 1, 1);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(bear), TargetRef::Object(wolf)],
+            tracker,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 3);
+        assert_eq!(state.objects[&bear].damage_marked, 2);
+        assert_eq!(state.objects[&tracker].damage_marked, 0);
     }
 
     #[test]

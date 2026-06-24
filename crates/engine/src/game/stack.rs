@@ -2063,6 +2063,7 @@ fn zone_change_record_from_spec(
         is_token: true,
         combat_status: Default::default(),
         co_departed: Vec::new(),
+        turn_zone_change_index: 0,
     }
 }
 
