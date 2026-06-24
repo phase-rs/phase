@@ -7619,6 +7619,19 @@ pub enum PerpetualModification {
     SetBasePowerToughness { power: i32, toughness: i32 },
 }
 
+/// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
+/// card set from. `Library` (the default) reads from the top of the library;
+/// `PriorLook` reads from `GameState::private_look_ids`, which was populated
+/// by a preceding look-only Dig (e.g. the Birthing Ritual pattern: look →
+/// sacrifice → choose from among those cards).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigSource {
+    #[default]
+    Library,
+    PriorLook,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -8091,15 +8104,9 @@ pub enum Effect {
         /// tapped when true (Planar Genesis — "onto the battlefield tapped").
         #[serde(default)]
         enter_tapped: bool,
-        /// CR 701.20e + CR 608.2c: When true, the resolver reads the card set
-        /// from `state.private_look_ids` (populated by a preceding look-only
-        /// Dig) instead of the top of the library. Used for the Birthing
-        /// Ritual pattern where an interactive sacrifice action separates the
-        /// look step from the choice step; the sacrifice snapshot is then
-        /// available in `effect_context_object` when `selectable_cards` is
-        /// computed, making the CMC filter evaluate correctly.
+        /// Determines where the resolver reads the card set from. See [`DigSource`].
         #[serde(default)]
-        from_prior_look: bool,
+        source: DigSource,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]

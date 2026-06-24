@@ -18,10 +18,10 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    CounteredSpellDestination, Duration, Effect, EffectScope, FaceDownBody, FaceDownProfile,
-    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
-    RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter,
-    TypedFilter,
+    CounteredSpellDestination, DigSource, Duration, Effect, EffectScope, FaceDownBody,
+    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2845,7 +2845,7 @@ pub(super) fn apply_clause_continuation(
                                 rest_destination: Some(Zone::Library),
                                 reveal: false,
                                 enter_tapped: false,
-                                from_prior_look: true,
+                                source: DigSource::PriorLook,
                             },
                         );
 
@@ -2865,7 +2865,7 @@ pub(super) fn apply_clause_continuation(
                                 rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
                                 reveal: false,
                                 enter_tapped,
-                                from_prior_look: true,
+                                source: DigSource::PriorLook,
                             },
                         );
                         // Gate on sacrifice having been performed.
@@ -6822,7 +6822,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
-            from_prior_look: false,
+            source: DigSource::Library,
         }
     }
 
@@ -8086,7 +8086,7 @@ mod tests {
             keep_count,
             filter,
             rest_destination,
-            from_prior_look,
+            source,
             ..
         } = effects[0]
         else {
@@ -8119,7 +8119,11 @@ mod tests {
             matches!(filter, TargetFilter::Any),
             "look-only Dig: no filter on the peek"
         );
-        assert!(!from_prior_look, "look-only Dig reads from library");
+        assert_eq!(
+            *source,
+            DigSource::Library,
+            "look-only Dig reads from library"
+        );
 
         // Step 2: optional Sacrifice.
         let Effect::Sacrifice { .. } = effects[1] else {
@@ -8130,20 +8134,20 @@ mod tests {
             "Sacrifice must be optional (\"you may sacrifice\")"
         );
 
-        // The from_prior_look choice Dig is wired as Sacrifice.sub_ability.
+        // The PriorLook choice Dig is wired as Sacrifice.sub_ability.
         let sac_sub = chain_nodes[1]
             .sub_ability
             .as_deref()
-            .expect("Sacrifice must have a sub_ability (the from_prior_look choice Dig)");
+            .expect("Sacrifice must have a sub_ability (the PriorLook choice Dig)");
 
-        // Step 3: from_prior_look choice Dig, gated on sacrifice performed.
+        // Step 3: PriorLook choice Dig, gated on sacrifice performed.
         let Effect::Dig {
             destination: choice_dest,
             keep_count: choice_keep,
             up_to: choice_up_to,
             filter: choice_filter,
             rest_destination: choice_rest,
-            from_prior_look: choice_fpl,
+            source: choice_src,
             reveal: choice_reveal,
             ..
         } = sac_sub.effect.as_ref()
@@ -8153,7 +8157,11 @@ mod tests {
                 sac_sub.effect
             );
         };
-        assert!(*choice_fpl, "choice Dig must be from_prior_look=true");
+        assert_eq!(
+            *choice_src,
+            DigSource::PriorLook,
+            "choice Dig must be PriorLook"
+        );
         assert_eq!(
             *choice_dest,
             Some(Zone::Battlefield),
@@ -8211,7 +8219,7 @@ mod tests {
         let Effect::Dig {
             keep_count: else_keep,
             rest_destination: else_rest,
-            from_prior_look: else_fpl,
+            source: else_src,
             ..
         } = else_ab.effect.as_ref()
         else {
@@ -8220,7 +8228,11 @@ mod tests {
                 else_ab.effect
             );
         };
-        assert!(*else_fpl, "else_ability Dig must be from_prior_look=true");
+        assert_eq!(
+            *else_src,
+            DigSource::PriorLook,
+            "else_ability Dig must be PriorLook"
+        );
         assert_eq!(*else_keep, Some(0), "else_ability Dig keeps no cards");
         assert_eq!(
             *else_rest,
@@ -9304,7 +9316,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
-            from_prior_look: false,
+            source: DigSource::Library,
         }
     }
 

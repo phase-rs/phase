@@ -21,9 +21,9 @@ use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, Duration, Effect,
-    FilterProp, ObjectScope, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DigSource,
+    Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, QuantityExpr,
+    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2805,7 +2805,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         rest_destination: alt_rest.or(*prev_rest),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
-        from_prior_look: false,
+        source: DigSource::Library,
     };
 
     let mut result = AbilityDefinition::new(kind, alt_effect);

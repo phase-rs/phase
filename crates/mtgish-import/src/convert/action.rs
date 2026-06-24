@@ -8,11 +8,11 @@
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -2785,7 +2785,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
-            from_prior_look: false,
+            source: DigSource::Library,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -4407,7 +4407,7 @@ fn convert_look_at_top(
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
-            from_prior_look: false,
+            source: DigSource::Library,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4426,7 +4426,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: false,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4444,7 +4444,7 @@ fn convert_look_at_top(
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4465,7 +4465,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4482,7 +4482,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4542,7 +4542,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4556,7 +4556,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4570,7 +4570,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4585,7 +4585,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4600,7 +4600,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
-                from_prior_look: false,
+                source: DigSource::Library,
             })
         }
         _ => Err(prereq(format!(
