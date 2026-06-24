@@ -3262,8 +3262,7 @@ mod tests {
 
     // ── Wild Growth / Fertile Ground autotap (#4265) ────────────────────────
 
-    use crate::types::ability::{ManaContribution, TriggerDefinition};
-    use crate::types::triggers::TriggerMode;
+    use crate::types::ability::TriggerDefinition;
 
     /// Build a Wild-Growth–style aura attached to `land_id`: a TapsForMana
     /// trigger on a separate Enchantment object that adds `bonus_color` when
