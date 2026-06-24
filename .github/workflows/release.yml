@@ -155,7 +155,11 @@ jobs:
     name: Build WASM + Frontend
     needs: [resolve-release-ref, tauri-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Card-data generation grows with the card/deck corpus: this job hit 28m for
+    # v0.4.0 and crossed the prior 30m ceiling for v0.5.0 (killed mid-frontend
+    # build, stranding the release). Raised to 60m for headroom — the ceiling
+    # only bills the failure case, so a normal ~30m run still ends at ~30m.
+    timeout-minutes: 60
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
