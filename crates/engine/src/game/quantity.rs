@@ -4981,13 +4981,14 @@ mod tests {
             qty: QuantityRef::Aggregate {
                 function: AggregateFunction::Sum,
                 property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
-                filter: TargetFilter::Typed(
-                    TypedFilter::card()
-                        .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::InZone {
-                            zone: Zone::Graveyard,
-                        }]),
-                ),
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
             },
         };
 
@@ -4995,6 +4996,77 @@ mod tests {
         // graveyard excluded); P1 sees only their own 2.
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bf), 3);
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), opp), 2);
+    }
+
+    /// CR 404.2 + CR 109.4: graveyard-scope chroma must scope its population by
+    /// OWNER, not by the at-departure (LKI) controller. A card in YOUR graveyard
+    /// is one you own; the controller it had before leaving the battlefield is
+    /// irrelevant. Regression for the review on #4075: the prior `controller(You)`
+    /// filter read `effective_controller`, which falls back to the at-departure
+    /// controller for off-battlefield objects, so a card you own but an opponent
+    /// last controlled would be miscounted (dropped for the owner, double-counted
+    /// for the opponent). `Owned { You }` reads ownership and is LKI-independent.
+    #[test]
+    fn resolve_aggregate_mana_symbol_count_scopes_by_owner_not_lki_controller() {
+        use crate::types::ability::{AggregateFunction, ControllerRef, FilterProp, ObjectProperty};
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        let mut state = GameState::new_two_player(42);
+        // A {B}{B} card in P0's graveyard that P0 OWNS but whose last controller
+        // was the opponent P1 (e.g. it died after being stolen, or was milled
+        // from P0's library while under P1's control). Off the battlefield it has
+        // no live controller; the at-departure controller is what an LKI-reading
+        // filter would see — here, P1.
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reclaimed".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&stolen).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            };
+            // Diverge the controller from the owner: P1 last controlled it.
+            obj.controller = PlayerId(1);
+        }
+        // A reference object on the battlefield to anchor each player's resolve.
+        let p0_ref = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Ref0".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_ref = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Ref1".to_string(),
+            Zone::Battlefield,
+        );
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        };
+
+        // The card is counted for its OWNER (P0), not for the player who last
+        // controlled it (P1) — owner scoping is independent of LKI controller.
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), p0_ref), 2);
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), p1_ref), 0);
     }
 
     /// CR 202.2 + CR 601.2h: GitHub #307 — Painful Truths bug regression.

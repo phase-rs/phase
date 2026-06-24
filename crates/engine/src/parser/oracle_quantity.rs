@@ -3722,13 +3722,14 @@ mod tests {
                 qty: QuantityRef::Aggregate {
                     function: AggregateFunction::Sum,
                     property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
-                    filter: TargetFilter::Typed(
-                        TypedFilter::card()
-                            .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::InZone {
-                                zone: Zone::Graveyard,
-                            }]),
-                    ),
+                    filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ])),
                 },
             }
         );

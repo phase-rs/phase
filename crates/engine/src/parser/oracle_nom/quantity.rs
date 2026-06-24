@@ -2735,22 +2735,32 @@ fn parse_graveyard_chroma_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) =
         tag(" mana symbols in the mana costs of cards in your graveyard").parse(rest)?;
     // CR 107.4a + CR 202.1: graveyard-scope chroma is the SUM of per-card
-    // colored-mana-symbol counts over cards in the controller's graveyard —
-    // expressed via the zone-general `Aggregate` / `ObjectProperty::ManaSymbolCount`
-    // building block rather than a graveyard-specific `QuantityRef` leaf. The
-    // `InZone { Graveyard }` filter makes `Aggregate` scan the graveyard.
+    // colored-mana-symbol counts over cards in your graveyard — expressed via the
+    // zone-general `Aggregate` / `ObjectProperty::ManaSymbolCount` building block
+    // rather than a graveyard-specific `QuantityRef` leaf. The `InZone { Graveyard }`
+    // filter makes `Aggregate` scan the graveyard.
+    //
+    // CR 404.2: a graveyard is a zone owned by a single player; "your graveyard" is
+    // the graveyard you own. Scope the population with `Owned { You }` (matches by
+    // owner) rather than `.controller(You)`: a card in a graveyard is neither on the
+    // stack nor the battlefield, so the controller filter reads the at-departure
+    // controller via LKI (CR 109.4), which can diverge from ownership (e.g. a card
+    // you owned but an opponent controlled before it died into your graveyard, or
+    // one you controlled before it left for theirs). Ownership is the correct,
+    // LKI-independent axis here.
     Ok((
         rest,
         QuantityRef::Aggregate {
             function: AggregateFunction::Sum,
             property: ObjectProperty::ManaSymbolCount(color),
-            filter: TargetFilter::Typed(
-                TypedFilter::card()
-                    .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::InZone {
-                        zone: Zone::Graveyard,
-                    }]),
-            ),
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
         },
     ))
 }
@@ -7286,13 +7296,14 @@ mod tests {
             QuantityRef::Aggregate {
                 function: AggregateFunction::Sum,
                 property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
-                filter: TargetFilter::Typed(
-                    TypedFilter::card()
-                        .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::InZone {
-                            zone: Zone::Graveyard,
-                        }]),
-                ),
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
             }
         );
         assert_eq!(rest, "");
