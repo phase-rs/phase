@@ -9,10 +9,12 @@ use engine::types::ability::{
     ChoiceType, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
     SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterMatch;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::ManaColor;
 
+use crate::convert::condition::card_type_to_core;
 use crate::convert::quantity::convert as convert_quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
@@ -700,6 +702,37 @@ pub(crate) fn choice_type_for_choosable_color(choice: &ChoosableColor) -> Choice
         | ChoosableColor::ColorAmoungPermanents(_)
         | ChoosableColor::NotColorAmoungPermanents(_) => ChoiceType::color(),
     }
+}
+
+/// CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+/// artifact, enchantment, instant, sorcery, or planeswalker" — Archon of
+/// Valor's Reach; "choose creature or land" — Winding Way) is a narrowed
+/// `ChoiceType::CardType`, not a free-form `Labeled` choice — it must
+/// persist as `ChosenAttribute::CardType` so `FilterProp::IsChosenCardType`
+/// (read by both the "can't cast spells of the chosen type" prohibition and
+/// `Permanents::IsCardtypeVariable(TheChosenCardtype)` consumers) can bind.
+/// The `excluded` set is the complement of the listed types within the
+/// engine's seven choosable types (`CoreType::CHOOSABLE_TYPES`). Shared by
+/// both `ReplacementActionWouldEnter::ChooseACardtypeFromList` (the ETB
+/// axis, in `replacement.rs`) and `Action::ChooseACardtypeFromList` (the
+/// spell-action axis, in `action.rs`) since mtgish duplicates this shape
+/// across both schema locations.
+pub(crate) fn restricted_card_type_choice(opts: &[CardType]) -> ConvResult<ChoiceType> {
+    if opts.is_empty() {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ChoiceType::CardType",
+            needed_variant: "ChooseACardtypeFromList with empty option list".into(),
+        });
+    }
+    let mut allowed = Vec::with_capacity(opts.len());
+    for opt in opts {
+        allowed.push(card_type_to_core(opt)?);
+    }
+    let excluded = CoreType::CHOOSABLE_TYPES
+        .into_iter()
+        .filter(|core_type| !allowed.contains(core_type))
+        .collect();
+    Ok(ChoiceType::card_type_excluding(excluded))
 }
 
 pub(crate) fn supertype_name(s: &SuperType) -> String {

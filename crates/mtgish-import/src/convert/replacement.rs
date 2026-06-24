@@ -12,7 +12,7 @@ use engine::types::ability::{
     ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
     TapStateChange, TargetFilter, TypedFilter,
 };
-use engine::types::card_type::{CoreType, Supertype};
+use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
@@ -1893,32 +1893,13 @@ fn build_replacement_exec(
         // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
         // artifact, enchantment, instant, sorcery, or planeswalker", Archon
         // of Valor's Reach) is a narrowed `ChoiceType::CardType`, not a
-        // free-form `Labeled` choice — it must persist as
-        // `ChosenAttribute::CardType` so `FilterProp::IsChosenCardType`
-        // (the "can't cast spells of the chosen type" prohibition) binds.
-        // The `excluded` set is the complement of the listed types within
-        // the engine's seven choosable types (`CoreType::CHOOSABLE_TYPES`).
-        A::ChooseACardtypeFromList(opts) => {
-            if opts.is_empty() {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "ChoiceType::CardType",
-                    needed_variant: "ChooseACardtypeFromList with empty option list".into(),
-                });
-            }
-            let mut allowed = Vec::with_capacity(opts.len());
-            for opt in opts {
-                allowed.push(crate::convert::condition::card_type_to_core(opt)?);
-            }
-            let excluded = CoreType::CHOOSABLE_TYPES
-                .into_iter()
-                .filter(|core_type| !allowed.contains(core_type))
-                .collect();
-            Effect::Choose {
-                choice_type: ChoiceType::card_type_excluding(excluded),
-                persist: true,
-                selection: engine::types::ability::TargetSelectionMode::Chosen,
-            }
-        }
+        // free-form `Labeled` choice — see `filter::restricted_card_type_choice`
+        // (shared with the spell-action sibling in `action.rs`) for why.
+        A::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: crate::convert::filter::restricted_card_type_choice(opts)?,
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
         A::ChooseWord(opts) => {
             if opts.is_empty() {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
