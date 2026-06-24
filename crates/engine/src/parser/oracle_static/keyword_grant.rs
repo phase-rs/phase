@@ -800,8 +800,16 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
         ),
         // CR 613.1f: "all creatures your opponents control" (Drana and Linvala)
+        // — battlefield permanents; scope to InZone { Battlefield } so dead
+        // or exiled creatures of theirs do not donate abilities.
         value(
-            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
             tag("all creatures your opponents control"),
         ),
         // CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
@@ -819,18 +827,29 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             tag("all land cards in all graveyards"),
         ),
         // CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
+        // — zone is explicit in the phrase; encode it so graveyard/hand land
+        // cards are excluded from the runtime provider scan.
         value(
-            TargetFilter::Typed(TypedFilter::land()),
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
             tag("all lands on the battlefield"),
         ),
         // CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
+        // — battlefield permanents; scope to InZone { Battlefield } so
+        // legendary creature cards in hand/graveyard do not donate abilities.
         value(
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::HasSupertype {
-                        value: Supertype::Legendary,
-                    }]),
+                    .properties(vec![
+                        FilterProp::HasSupertype {
+                            value: Supertype::Legendary,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             ),
             tag("all legendary creatures you control"),
         ),
