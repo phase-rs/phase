@@ -7218,6 +7218,103 @@ mod tests {
         assert!(!match_damage_done(&to_player, &trigger, source, &state));
     }
 
+    /// CR 120.3 + CR 102.2: A "deals damage to a player or battle" trigger uses
+    /// `TargetFilter::Or { filters: [Player, Typed(Battle)] }` as emitted by
+    /// `parse_damage_to_qualifier`. The `TargetRef::Object` arm of
+    /// `match_damage_done` must NOT treat the disjunction as a player-scope filter
+    /// (it's an `Or`, not a controller-only `Typed`), and must delegate to
+    /// `target_filter_matches_object` so the `Typed(Battle)` leg resolves.
+    ///
+    /// Regression: fires for a battle object recipient, does NOT fire for a
+    /// non-battle object recipient, and still fires for a player recipient.
+    #[test]
+    fn battle_object_recipient_fires_for_player_or_battle_trigger() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        let battle = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Invaded Farmland".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Battle);
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Noncombatant Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Exact shape `parse_damage_to_qualifier` emits for "a player or battle".
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_target = Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+            ],
+        });
+
+        // Damage to a battle object fires (TargetRef::Object arm, Or's Battle leg).
+        let to_battle = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(battle),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            match_damage_done(&to_battle, &trigger, source, &state),
+            "battle object recipient must fire a 'player or battle' trigger"
+        );
+
+        // Damage to a non-battle object must NOT fire (creature matches neither leg).
+        let to_creature = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(creature),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&to_creature, &trigger, source, &state),
+            "non-battle object recipient must not fire a 'player or battle' trigger"
+        );
+
+        // Damage to a player still fires via the Or's Player leg.
+        let to_player = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            match_damage_done(&to_player, &trigger, source, &state),
+            "player recipient must fire a 'player or battle' trigger via its Player leg"
+        );
+    }
+
     /// CR 120.3 + CR 102.2: Step 0a must NOT over-reject the legitimate
     /// player-scope recipient case ("to an opponent" → controller-only Typed).
     /// Player recipient still fires; an object an opponent controls does not
