@@ -7252,6 +7252,10 @@ pub fn enter_payment_step(
     convoke_mode: Option<ConvokeMode>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 118.3a: normalize pool pip ids before any payment so each unit is
+    // individually pinnable in manual mode — self-heals the `ManaPipId(0)`
+    // sentinel left by debug tooling / pre-stamping saves / any bypassing path.
+    state.restamp_pool_pip_ids(player);
     if let Some(pending) = state.pending_cast.as_ref() {
         let activation_counter_x_max = pending.activation_cost.as_ref().and_then(|cost| {
             activation_counter_cost_x_max(state, player, pending.object_id, &pending.ability, cost)
@@ -7522,140 +7526,155 @@ pub fn finalize_mana_payment(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
 
-    // CR 702.132a: commit point reached — apply any committed Assist contribution
-    // (tap the helper's sources) now that the cast can no longer be cancelled.
-    apply_committed_assist(state, &pending, events)?;
+    // CR 118.3a: `pending_cast` is now gone, but the caster's pin hints must
+    // still reach the spend. Carry them on the transient `active_payment_pins`
+    // for the duration of this finalize; the spend reads them. The spend body
+    // runs in an inner closure so the transient is cleared on EVERY exit —
+    // including the `Err` path — keeping the invariant "active_payment_pins is
+    // empty outside an in-progress finalize spend". (Without this, an `Err` from
+    // the spend propagates before any caller clear runs, leaking stale pins onto
+    // a later spend.)
+    state.active_payment_pins = pending.pinned_pool_units.clone();
+    let finalize_result = (|| -> Result<WaitingFor, EngineError> {
+        // CR 702.132a: commit point reached — apply any committed Assist contribution
+        // (tap the helper's sources) now that the cast can no longer be cancelled.
+        apply_committed_assist(state, &pending, events)?;
 
-    if let Some(ability_index) = pending.activation_ability_index {
-        let excluded_sources = pending
-            .activation_cost
-            .as_ref()
-            .map(|cost| {
-                super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
-            })
-            .unwrap_or_default();
-        super::casting::pay_ability_mana_cost_excluding(
-            state,
-            player,
-            pending.object_id,
-            &pending.cost,
-            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
-            events,
-            &excluded_sources,
-            // Interactive activation resume: top-level, no outer cost on the stack.
-            None,
-        )?;
-        return push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            pending.x_residual_activation,
-            events,
-        );
-    }
-
-    if let Some(unit) = pending.distribute {
-        // CR 601.2d: X-spell distribution — pay mana first to determine X, then
-        // trigger DistributeAmong with total = X.
-        let pool_before = state
-            .players
-            .iter()
-            .find(|pl| pl.id == player)
-            .map(|pl| pl.mana_pool.total())
-            .unwrap_or(0);
-
-        super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
-
-        let pool_after = state
-            .players
-            .iter()
-            .find(|pl| pl.id == player)
-            .map(|pl| pl.mana_pool.total())
-            .unwrap_or(0);
-        // CR 107.1b + CR 601.2f: Prefer the explicit `chosen_x` set during
-        // `WaitingFor::ChooseXValue`. Fallback to inference (total paid minus
-        // non-X colored/generic costs) preserves behavior for any legacy paths
-        // that bypass ChooseX. ManaCost::mana_value() excludes X (CR 202.3e).
-        let non_x_cost = pending.cost.mana_value();
-        let total_paid = pool_before.saturating_sub(pool_after) as u32;
-        let x_value = pending
-            .ability
-            .chosen_x
-            .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
-
-        let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
-        // Store pending cast for post-distribution resumption. Use `ManaCost::NoCost`
-        // since mana was already paid above — `finalize_cast` must not re-deduct.
-        let mut pending_resumed = PendingCast::new(
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            crate::types::mana::ManaCost::NoCost,
-        );
-        pending_resumed.casting_variant = pending.casting_variant;
-        pending_resumed.origin_zone = pending.origin_zone;
-        pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
-
-        // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
-        // interactive distribution. Remainder is intentionally lost per Oracle text.
-        if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
-            let num = targets.len() as u32;
-            let per_target = x_value / num;
-            let distribution: Vec<_> = targets.iter().map(|t| (t.clone(), per_target)).collect();
-            pending_resumed.ability.distribution = Some(distribution);
-            state.pending_cast = Some(Box::new(pending_resumed));
-
-            let pending = state.pending_cast.take().unwrap();
-            stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-            let waiting_for = finalize_cast(
+        if let Some(ability_index) = pending.activation_ability_index {
+            let excluded_sources = pending
+                .activation_cost
+                .as_ref()
+                .map(|cost| {
+                    super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+                })
+                .unwrap_or_default();
+            super::casting::pay_ability_mana_cost_excluding(
                 state,
                 player,
                 pending.object_id,
-                pending.card_id,
-                pending.ability,
                 &pending.cost,
-                pending.casting_variant,
-                pending.cast_timing_permission,
-                pending.origin_zone,
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index),
                 events,
+                &excluded_sources,
+                // Interactive activation resume: top-level, no outer cost on the stack.
+                None,
             )?;
-            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            return push_activated_ability_to_stack(
                 state,
+                player,
+                pending.object_id,
+                ability_index,
+                pending.ability,
+                pending.activation_cost.as_ref(),
+                pending.x_residual_activation,
                 events,
-                waiting_for,
-            ));
+            );
         }
 
-        state.pending_cast = Some(Box::new(pending_resumed));
-        return Ok(WaitingFor::DistributeAmong {
-            player,
-            total: x_value,
-            targets,
-            unit,
-        });
-    }
+        if let Some(unit) = pending.distribute {
+            // CR 601.2d: X-spell distribution — pay mana first to determine X, then
+            // trigger DistributeAmong with total = X.
+            let pool_before = state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0);
 
-    stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-    let waiting_for = finalize_cast(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.cast_timing_permission,
-        pending.origin_zone,
-        events,
-    )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+            super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
+
+            let pool_after = state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0);
+            // CR 107.1b + CR 601.2f: Prefer the explicit `chosen_x` set during
+            // `WaitingFor::ChooseXValue`. Fallback to inference (total paid minus
+            // non-X colored/generic costs) preserves behavior for any legacy paths
+            // that bypass ChooseX. ManaCost::mana_value() excludes X (CR 202.3e).
+            let non_x_cost = pending.cost.mana_value();
+            let total_paid = pool_before.saturating_sub(pool_after) as u32;
+            let x_value = pending
+                .ability
+                .chosen_x
+                .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
+
+            let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
+            // Store pending cast for post-distribution resumption. Use `ManaCost::NoCost`
+            // since mana was already paid above — `finalize_cast` must not re-deduct.
+            let mut pending_resumed = PendingCast::new(
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                crate::types::mana::ManaCost::NoCost,
+            );
+            pending_resumed.casting_variant = pending.casting_variant;
+            pending_resumed.origin_zone = pending.origin_zone;
+            pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
+
+            // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
+            // interactive distribution. Remainder is intentionally lost per Oracle text.
+            if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
+                let num = targets.len() as u32;
+                let per_target = x_value / num;
+                let distribution: Vec<_> =
+                    targets.iter().map(|t| (t.clone(), per_target)).collect();
+                pending_resumed.ability.distribution = Some(distribution);
+                state.pending_cast = Some(Box::new(pending_resumed));
+
+                let pending = state.pending_cast.take().unwrap();
+                stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
+                let waiting_for = finalize_cast(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.card_id,
+                    pending.ability,
+                    &pending.cost,
+                    pending.casting_variant,
+                    pending.cast_timing_permission,
+                    pending.origin_zone,
+                    events,
+                )?;
+                return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                    state,
+                    events,
+                    waiting_for,
+                ));
+            }
+
+            state.pending_cast = Some(Box::new(pending_resumed));
+            return Ok(WaitingFor::DistributeAmong {
+                player,
+                total: x_value,
+                targets,
+                unit,
+            });
+        }
+
+        stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
+        let waiting_for = finalize_cast(
+            state,
+            player,
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            &pending.cost,
+            pending.casting_variant,
+            pending.cast_timing_permission,
+            pending.origin_zone,
+            events,
+        )?;
+        Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ))
+    })();
+    // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
+    state.active_payment_pins.clear();
+    finalize_result
 }
 
 fn stamp_convoked_creatures(
@@ -7689,143 +7708,156 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
 
-    // CR 702.132a: commit point reached — apply any committed Assist contribution
-    // (tap the helper's sources) now that the cast can no longer be cancelled.
-    apply_committed_assist(state, &pending, events)?;
+    // CR 118.3a: `pending_cast` is now gone, but the caster's pin hints must
+    // still reach the spend. Carry them on the transient `active_payment_pins`
+    // for the duration of this finalize; the spend reads them. The spend body
+    // runs in an inner closure so the transient is cleared on EVERY exit —
+    // including the `Err` path — keeping the invariant "active_payment_pins is
+    // empty outside an in-progress finalize spend".
+    state.active_payment_pins = pending.pinned_pool_units.clone();
+    let finalize_result = (|| -> Result<WaitingFor, EngineError> {
+        // CR 702.132a: commit point reached — apply any committed Assist contribution
+        // (tap the helper's sources) now that the cast can no longer be cancelled.
+        apply_committed_assist(state, &pending, events)?;
 
-    if let Some(ability_index) = pending.activation_ability_index {
-        let excluded_sources = pending
-            .activation_cost
-            .as_ref()
-            .map(|cost| {
-                super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
-            })
-            .unwrap_or_default();
-        super::casting::pay_ability_mana_cost_with_choices_excluding(
-            state,
-            player,
-            pending.object_id,
-            &pending.cost,
-            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
-            Some(phyrexian_choices),
-            events,
-            &excluded_sources,
-            // Interactive Phyrexian-choice resume: top-level activation, no outer cost.
-            None,
-        )?;
-        return push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            pending.x_residual_activation,
-            events,
-        );
-    }
-
-    if let Some(unit) = pending.distribute {
-        // CR 601.2d: X + distribution + Phyrexian is extremely rare (no known current cards).
-        // Fall through to the auto-decision distribution path for safety — the Phyrexian
-        // choices were already consumed via pay_mana_cost_with_choices above (the X-spell
-        // distribution path is orthogonal).
-        let pool_before = state
-            .players
-            .iter()
-            .find(|pl| pl.id == player)
-            .map(|pl| pl.mana_pool.total())
-            .unwrap_or(0);
-
-        super::casting::pay_mana_cost_with_choices(
-            state,
-            player,
-            pending.object_id,
-            &pending.cost,
-            Some(phyrexian_choices),
-            events,
-        )?;
-
-        let pool_after = state
-            .players
-            .iter()
-            .find(|pl| pl.id == player)
-            .map(|pl| pl.mana_pool.total())
-            .unwrap_or(0);
-        let non_x_cost = pending.cost.mana_value();
-        let total_paid = pool_before.saturating_sub(pool_after) as u32;
-        let x_value = pending
-            .ability
-            .chosen_x
-            .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
-
-        let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
-        let mut pending_resumed = PendingCast::new(
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            crate::types::mana::ManaCost::NoCost,
-        );
-        pending_resumed.casting_variant = pending.casting_variant;
-        pending_resumed.origin_zone = pending.origin_zone;
-        pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
-
-        if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
-            let num = targets.len() as u32;
-            let per_target = x_value / num;
-            let distribution: Vec<_> = targets.iter().map(|t| (t.clone(), per_target)).collect();
-            pending_resumed.ability.distribution = Some(distribution);
-            state.pending_cast = Some(Box::new(pending_resumed));
-
-            let pending = state.pending_cast.take().unwrap();
-            stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-            let waiting_for = finalize_cast(
+        if let Some(ability_index) = pending.activation_ability_index {
+            let excluded_sources = pending
+                .activation_cost
+                .as_ref()
+                .map(|cost| {
+                    super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+                })
+                .unwrap_or_default();
+            super::casting::pay_ability_mana_cost_with_choices_excluding(
                 state,
                 player,
                 pending.object_id,
-                pending.card_id,
-                pending.ability,
                 &pending.cost,
-                pending.casting_variant,
-                pending.cast_timing_permission,
-                pending.origin_zone,
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+                Some(phyrexian_choices),
                 events,
+                &excluded_sources,
+                // Interactive Phyrexian-choice resume: top-level activation, no outer cost.
+                None,
             )?;
-            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            return push_activated_ability_to_stack(
                 state,
+                player,
+                pending.object_id,
+                ability_index,
+                pending.ability,
+                pending.activation_cost.as_ref(),
+                pending.x_residual_activation,
                 events,
-                waiting_for,
-            ));
+            );
         }
 
-        state.pending_cast = Some(Box::new(pending_resumed));
-        return Ok(WaitingFor::DistributeAmong {
-            player,
-            total: x_value,
-            targets,
-            unit,
-        });
-    }
+        if let Some(unit) = pending.distribute {
+            // CR 601.2d: X + distribution + Phyrexian is extremely rare (no known current cards).
+            // Fall through to the auto-decision distribution path for safety — the Phyrexian
+            // choices were already consumed via pay_mana_cost_with_choices above (the X-spell
+            // distribution path is orthogonal).
+            let pool_before = state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0);
 
-    stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-    let waiting_for = finalize_cast_with_phyrexian_choices(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.cast_timing_permission,
-        pending.origin_zone,
-        Some(phyrexian_choices),
-        events,
-    )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+            super::casting::pay_mana_cost_with_choices(
+                state,
+                player,
+                pending.object_id,
+                &pending.cost,
+                Some(phyrexian_choices),
+                events,
+            )?;
+
+            let pool_after = state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0);
+            let non_x_cost = pending.cost.mana_value();
+            let total_paid = pool_before.saturating_sub(pool_after) as u32;
+            let x_value = pending
+                .ability
+                .chosen_x
+                .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
+
+            let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
+            let mut pending_resumed = PendingCast::new(
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                crate::types::mana::ManaCost::NoCost,
+            );
+            pending_resumed.casting_variant = pending.casting_variant;
+            pending_resumed.origin_zone = pending.origin_zone;
+            pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
+
+            if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
+                let num = targets.len() as u32;
+                let per_target = x_value / num;
+                let distribution: Vec<_> =
+                    targets.iter().map(|t| (t.clone(), per_target)).collect();
+                pending_resumed.ability.distribution = Some(distribution);
+                state.pending_cast = Some(Box::new(pending_resumed));
+
+                let pending = state.pending_cast.take().unwrap();
+                stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
+                let waiting_for = finalize_cast(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.card_id,
+                    pending.ability,
+                    &pending.cost,
+                    pending.casting_variant,
+                    pending.cast_timing_permission,
+                    pending.origin_zone,
+                    events,
+                )?;
+                return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                    state,
+                    events,
+                    waiting_for,
+                ));
+            }
+
+            state.pending_cast = Some(Box::new(pending_resumed));
+            return Ok(WaitingFor::DistributeAmong {
+                player,
+                total: x_value,
+                targets,
+                unit,
+            });
+        }
+
+        stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
+        let waiting_for = finalize_cast_with_phyrexian_choices(
+            state,
+            player,
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            &pending.cost,
+            pending.casting_variant,
+            pending.cast_timing_permission,
+            pending.origin_zone,
+            Some(phyrexian_choices),
+            events,
+        )?;
+        Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ))
+    })();
+    // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
+    state.active_payment_pins.clear();
+    finalize_result
 }
 
 /// CR 107.4f + CR 601.2f: Determine whether this cast needs to pause for per-shard
@@ -8396,6 +8428,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -10207,6 +10240,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color,
                 source_id: floated_source,
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10274,6 +10308,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(99),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -12134,6 +12169,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(99),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -12528,6 +12564,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12654,6 +12691,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12749,6 +12787,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12833,6 +12872,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12950,6 +12990,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -13679,6 +13720,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -13700,6 +13742,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::White,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -13877,6 +13920,7 @@ library in a random order.";
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),

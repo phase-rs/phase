@@ -168,6 +168,12 @@ interface UiStoreState {
    *  transient "the user is currently rearranging the board" toggle that gates
    *  the edit overlay, widget dragging, and resize grabbers. */
   flexEditMode: boolean;
+  /** Per-game override that forces Manual mana payment for the current game
+   *  only, without touching the persisted `spellPaymentMode` preference.
+   *  Ephemeral (never persisted) and reset on every game-session boundary
+   *  (see `clearPromptOverlayState`) so it can't leak across games. Manual
+   *  payment wins if EITHER this override or the durable preference is on. */
+  manualManaOverride: boolean;
 }
 
 interface UiStoreActions {
@@ -230,6 +236,8 @@ interface UiStoreActions {
   toggleLogPanel: () => void;
   setFlexEditMode: (active: boolean) => void;
   toggleFlexEditMode: () => void;
+  setManualManaOverride: (on: boolean) => void;
+  toggleManualManaOverride: () => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -270,6 +278,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugHighlightedPlayerId: null,
   logPanelOpen: false,
   flexEditMode: false,
+  manualManaOverride: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -524,4 +533,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
   setFlexEditMode: (active) => set({ flexEditMode: active }),
   toggleFlexEditMode: () => set((state) => ({ flexEditMode: !state.flexEditMode })),
+  setManualManaOverride: (on) => set({ manualManaOverride: on }),
+  toggleManualManaOverride: () =>
+    set((s) => ({ manualManaOverride: !s.manualManaOverride })),
 }));

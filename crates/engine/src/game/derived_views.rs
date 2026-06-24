@@ -187,6 +187,16 @@ pub struct DerivedViews {
     /// Empty (and omitted) in the dominant case where no player is afflicted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_status: Vec<PlayerStatusView>,
+
+    /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
+    /// spell, the portion of the locked cost still UNPAID by the pool units they
+    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
+    /// those pinned units. Lets the payment UI show the cost shrinking as the
+    /// player picks mana, and "covered" (`NoCost`) when their selection alone
+    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_payment_remaining: Option<ManaCost>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -231,6 +241,70 @@ pub struct ClientGameState {
 /// unconditionally for every Commander-format game regardless of who is
 /// viewing. Partner commanders under the same controller each get their
 /// own `CommanderDamageView` entry, not a summed total.
+/// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
+/// during their own manual mana payment for a spell. Reduces the locked spell
+/// cost against a pool containing ONLY the pinned units (so the residual is
+/// exactly what the player has chosen to spend), under the same spend-restriction
+/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
+/// cast — activated-ability mana payment keeps its full-cost display, and
+/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+///
+/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
+/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
+/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
+/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
+/// This is deliberately consistent with the pin-eligibility gate
+/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
+/// reject such a pin — both layers agree on the stricter behavior, and the
+/// common cases (generic + plain colored costs) are exact. Threading the real
+/// permission bundle through both sites is the follow-up to lift this.
+fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{ManaPool, PaymentContext};
+
+    let WaitingFor::ManaPayment {
+        player,
+        convoke_mode,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    if *player != viewer || convoke_mode.is_some() {
+        return None;
+    }
+
+    let pending = state.pending_cast.as_ref()?;
+    // The mana portion the spend funnel reduces is `pending.cost` for both spells
+    // and activations; live-shrink is scoped to spell casts, where that cost is
+    // exactly what the payment panel displays (no activated-ability cost mismatch).
+    if pending.activation_ability_index.is_some() {
+        return None;
+    }
+    let cost = pending.cost.clone();
+
+    // Scratch pool of ONLY the pinned units = the player's current selection.
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let mut selected = ManaPool::default();
+    for unit in &player_obj.mana_pool.mana {
+        if pending.pinned_pool_units.contains(&unit.pip_id) {
+            selected.add(unit.clone());
+        }
+    }
+
+    // CR 106.6: reduce under the SAME spend-restriction context the finalize
+    // spend uses, so restricted mana the spell can't accept stays in the residual.
+    let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
+    let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    Some(crate::game::mana_payment::reduce_cost_by_pool(
+        &selected,
+        &cost,
+        ctx.as_ref(),
+        false,
+        None,
+    ))
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews::default();
 
@@ -287,6 +361,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 }
             }
         }
+    }
+
+    // CR 118.3a + CR 601.2g: viewer-scoped remaining cost after the caster's
+    // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
+    if let Some(viewer) = viewer {
+        views.pending_payment_remaining = pending_payment_remaining(state, viewer);
     }
 
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
@@ -972,6 +1052,93 @@ mod tests {
         assert!(
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
+        );
+    }
+
+    /// SHAPE test (constructs `pending_cast`/pool directly, not via the cast
+    /// pipeline): `pending_payment_remaining` is the locked cost reduced by ONLY
+    /// the units the caster has pinned, so the payment UI's cost visibly shrinks
+    /// as mana is selected and reads covered (`NoCost`) once the selection alone
+    /// pays the whole cost. Also pins the viewer-scoping: an opponent never sees
+    /// the caster's in-progress private selection.
+    #[test]
+    fn pending_payment_remaining_reflects_pinned_selection() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{PendingCast, WaitingFor};
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let spell = create_object(&mut state, CardId(1), p0, "Test Spell".into(), Zone::Stack);
+
+        // Three colorless pool units, each stamped with a distinct pip id.
+        for _ in 0..3 {
+            state.add_mana_to_pool(
+                p0,
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            );
+        }
+        let pip_ids: Vec<_> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id)
+            .collect();
+
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".into(),
+                description: None,
+            },
+            vec![],
+            spell,
+            p0,
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            spell,
+            CardId(1),
+            ability,
+            ManaCost::generic(2),
+        )));
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: p0,
+            convoke_mode: None,
+        };
+
+        // No selection → the whole {2} still has to be paid.
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::generic(2)),
+        );
+
+        // Pin one unit → {1} remains.
+        state
+            .pending_cast
+            .as_mut()
+            .unwrap()
+            .pinned_pool_units
+            .push(pip_ids[0]);
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::generic(1)),
+        );
+
+        // Pin a second → the selection alone covers the cost (NoCost).
+        state
+            .pending_cast
+            .as_mut()
+            .unwrap()
+            .pinned_pool_units
+            .push(pip_ids[1]);
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::NoCost),
+        );
+
+        // Viewer scoping: the opponent never sees the caster's private selection.
+        assert_eq!(
+            derive_views(&state, Some(PlayerId(1))).pending_payment_remaining,
+            None,
         );
     }
 

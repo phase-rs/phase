@@ -387,15 +387,16 @@ pub fn apply_debug_action(
 
         DebugAction::AddMana { player_id, mana } => {
             validate_player(state, player_id)?;
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                for mana_type in mana {
-                    player.mana_pool.add(crate::types::mana::ManaUnit::new(
-                        mana_type,
-                        ObjectId(0),
-                        false,
-                        vec![],
-                    ));
-                }
+            for mana_type in mana {
+                // CR 118.3a: route through the stamping authority so each
+                // debug-added unit gets a distinct `pip_id`, exactly like
+                // produced mana. A bare `mana_pool.add` leaves the unstamped
+                // sentinel (`ManaPipId(0)`) on every unit, which makes all of
+                // them pin/unpin together in the manual-payment UI.
+                state.add_mana_to_pool(
+                    player_id,
+                    crate::types::mana::ManaUnit::new(mana_type, ObjectId(0), false, vec![]),
+                );
             }
         }
 
@@ -757,6 +758,50 @@ mod tests {
         let mut state = GameState::new(FormatConfig::standard().with_sandbox(), 2, 42);
         state.debug_mode = true;
         state
+    }
+
+    /// CR 118.3a regression: debug-added mana must route through the stamping
+    /// authority so each unit gets a DISTINCT, nonzero `pip_id`. A bare
+    /// `mana_pool.add` leaves every unit at the unstamped sentinel (0), which
+    /// makes all same-color pips in the manual-payment UI pin/unpin together.
+    #[test]
+    fn debug_add_mana_stamps_distinct_pip_ids() {
+        let mut state = sandbox_state();
+        let mut events = Vec::new();
+        apply_debug_action(
+            &mut state,
+            PlayerId(0),
+            DebugAction::AddMana {
+                player_id: PlayerId(0),
+                mana: vec![
+                    crate::types::mana::ManaType::Green,
+                    crate::types::mana::ManaType::Green,
+                    crate::types::mana::ManaType::Green,
+                ],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three AddMana entries → three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "debug-added units must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "debug-added pip ids must be distinct, got {ids:?}"
+        );
     }
 
     fn zero_zero_creature() -> TokenCharacteristics {

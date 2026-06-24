@@ -11345,6 +11345,8 @@ fn pay_non_cast_mana_cost(
         permissions.any_color,
         None,
         permissions.life_colors,
+        // CR 118.3a: non-cast mana costs (effects/special actions) are not pinnable.
+        &[],
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
@@ -11460,6 +11462,12 @@ fn auto_tap_and_pay_cost_excluding(
         }
         None => hand_demand,
     };
+    // CR 118.3a: read the caster's player-directed pin hints for THIS spell.
+    // `finalize_mana_payment` moves them onto the transient `active_payment_pins`
+    // (it `take()`s `pending_cast` before the spend, so they can't be read from
+    // there). The funnel early-outs to legacy ordering when this slice is empty,
+    // so non-manual casts and activated-ability / sub-cost payments are unaffected.
+    let pins: Vec<crate::types::mana::ManaPipId> = state.active_payment_pins.clone();
     let player_data = state
         .players
         .iter_mut()
@@ -11473,6 +11481,7 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.any_color,
         phyrexian_choices,
         permissions.life_colors,
+        &pins,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
@@ -14026,6 +14035,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -14066,6 +14076,7 @@ mod tests {
         player_data.mana_pool.add(ManaUnit {
             color,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions,
@@ -15457,6 +15468,7 @@ mod tests {
         let unit = ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(1),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
@@ -15541,6 +15553,7 @@ mod tests {
         let unit = ManaUnit {
             color: ManaType::Blue,
             source_id: orb,
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
@@ -15662,6 +15675,7 @@ mod tests {
         let unit = ManaUnit {
             color: ManaType::Green,
             source_id: path,
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
@@ -15749,6 +15763,7 @@ mod tests {
             .add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: orb,
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
@@ -19548,6 +19563,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: Some(crate::types::mana::ManaSupertype::Snow),
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -47947,6 +47963,614 @@ mod tests {
                 .iter()
                 .any(|k| matches!(k, Keyword::Convoke)),
             "second historic spell (a historic spell already recorded) must NOT receive Convoke"
+        );
+    }
+
+    // --- CR 118.3a: pin a pool pip to direct mana payment ---------------------
+
+    use crate::types::mana::ManaPipId;
+
+    /// Seed one mana unit and return its freshly-minted pip id. Routes through
+    /// `add_mana_to_pool` so every seeded unit is stamped distinctly (a direct
+    /// `pool.add` would leave the sentinel `ManaPipId(0)` and pins would collide).
+    fn seed_unit(state: &mut GameState, player: PlayerId, unit: ManaUnit) -> ManaPipId {
+        state.add_mana_to_pool(player, unit);
+        state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .unwrap()
+            .mana_pool
+            .mana
+            .last()
+            .unwrap()
+            .pip_id
+    }
+
+    fn plain_unit(color: ManaType, source: ObjectId) -> ManaUnit {
+        ManaUnit::new(color, source, false, Vec::new())
+    }
+
+    /// Begin a real manual cast of a `{3}{R}` creature (Hill Giant) and pause at
+    /// `WaitingFor::ManaPayment` with `pending_cast` populated.
+    fn begin_manual_cast(state: &mut GameState, caster: PlayerId, obj: ObjectId) {
+        let result = handle_cast_spell_with_payment_mode(
+            state,
+            caster,
+            obj,
+            CardId(22),
+            crate::types::game_state::CastPaymentMode::Manual,
+            &mut Vec::new(),
+        )
+        .expect("manual cast should begin");
+        state.waiting_for = result;
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "manual {{3}}{{R}} cast must pause at ManaPayment, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// TEST 1 (the #1 case): generic-cost pin honored. With four same-color
+    /// floated units and a `{3}` generic shard, the legacy spend leaves the
+    /// FIRST-seeded colorless surviving (proven by `empty_pins_baseline_unchanged`).
+    /// Here we PIN that exact unit (`legacy_survivor`); the pin funnel must spend
+    /// it FIRST, so it is consumed and a DIFFERENT colorless survives. Reverting
+    /// the generic-path pin scan makes `legacy_survivor` survive again, flipping
+    /// the `!pool.contains(&legacy_survivor)` assertion.
+    #[test]
+    fn generic_cost_pin_honored() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        // {3}{R}: one red for the {R} shard, four colorless for {3} (one survives).
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(0)),
+        );
+        // The first colorless seeded is the unit legacy ordering leaves surviving.
+        let legacy_survivor = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(1)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(2)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(3)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(4)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+
+        // Pin the unit legacy would have preserved, for the generic spend.
+        apply_as_current(
+            &mut state,
+            GameAction::SpendPoolMana {
+                pip_id: legacy_survivor,
+            },
+        )
+        .expect("pinning an eligible unit is legal");
+
+        // Finalize.
+        apply_as_current(&mut state, GameAction::PassPriority).expect("finalize the cast");
+
+        let pool: Vec<ManaPipId> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id)
+            .collect();
+        // Exactly one colorless survives, and it is NOT the pinned unit — the pin
+        // forced the engine to spend the unit legacy would otherwise have kept.
+        assert_eq!(
+            pool.len(),
+            1,
+            "{{3}}{{R}} over 1R+4C leaves one survivor; {pool:?}"
+        );
+        assert!(
+            !pool.contains(&legacy_survivor),
+            "the pinned generic-paying unit must be spent (legacy would have kept it); pool {pool:?}"
+        );
+    }
+
+    /// TEST 2: colored-shard pin + grant preservation. Pin a grant-carrying unit
+    /// onto the {R} shard; assert the resolving spell received the grant — proving
+    /// staged pinned units flow through the normal grant-application accounting.
+    #[test]
+    fn colored_shard_pin_preserves_grant() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        // Red unit carrying a CantBeCountered grant + three colorless for {3}.
+        let mut red_grant = plain_unit(ManaType::Red, ObjectId(5));
+        red_grant.grants.push(ManaSpellGrant::CantBeCountered);
+        let red_pip = seed_unit(&mut state, PlayerId(0), red_grant);
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(6)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(7)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(8)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: red_pip })
+            .expect("pinning the red grant unit onto {R} is legal");
+        apply_as_current(&mut state, GameAction::PassPriority).expect("finalize");
+
+        // CR 106.6: the grant must have been applied to the spell object as a
+        // CantBeCountered static (`apply_mana_spell_grants`).
+        let obj_data = state.objects.get(&obj).expect("spell object exists");
+        assert!(
+            obj_data
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd.mode == StaticMode::CantBeCountered),
+            "pinned grant-carrying red unit must apply CantBeCountered to the spell"
+        );
+    }
+
+    /// TEST 3: omitted-axis. Two units identical except one is {Z}-eligible
+    /// (`source_could_produce_two_or_more_colors`). Pin the non-{Z} one for a
+    /// generic shard; the {Z}-eligible one is preserved for a later use.
+    #[test]
+    fn pin_preserves_z_eligible_unit() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(9)),
+        );
+        // Non-{Z} colorless (pinned) and a {Z}-eligible colorless (preserved).
+        let non_z = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(10)),
+        );
+        let mut z_unit = plain_unit(ManaType::Colorless, ObjectId(11));
+        z_unit.source_could_produce_two_or_more_colors = true;
+        let z_pip = seed_unit(&mut state, PlayerId(0), z_unit);
+        // Two more colorless so {3} is payable leaving one survivor.
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(12)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(13)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: non_z })
+            .expect("pinning the non-Z unit is legal");
+        apply_as_current(&mut state, GameAction::PassPriority).expect("finalize");
+
+        let pool: Vec<ManaPipId> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id)
+            .collect();
+        assert!(
+            !pool.contains(&non_z),
+            "pinned non-Z unit must be consumed; pool {pool:?}"
+        );
+        assert!(
+            pool.contains(&z_pip),
+            "the {{Z}}-eligible unit must be preserved when the non-Z one is pinned; pool {pool:?}"
+        );
+    }
+
+    /// TEST 4 (M2): ineligible pin rejected. Pin a unit that can pay no shard of
+    /// the locked cost; engine returns ActionNotAllowed; pins unchanged.
+    #[test]
+    fn ineligible_pin_rejected() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        // {3}{R}: the {R} is colored, {3} is generic (any color pays). To make a
+        // unit pay NOTHING, give the cost a pure single-color shard with no
+        // generic. Override Hill Giant's cost to {W} only.
+        state.objects.get_mut(&obj).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        // A white unit (eligible) and a red unit (ineligible: wrong color, no generic).
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::White, ObjectId(14)),
+        );
+        let red = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(15)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        let res = apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: red });
+        assert!(
+            res.is_err(),
+            "pinning a red unit for a {{W}}-only cost must be rejected"
+        );
+        let pins = &state.pending_cast.as_ref().unwrap().pinned_pool_units;
+        assert!(
+            pins.is_empty(),
+            "a rejected pin must not be recorded; pins = {pins:?}"
+        );
+    }
+
+    /// TEST 5 (M1): stale pin pruned. Pin a unit, then drain it via
+    /// UntapLandForMana during ManaPayment; the dangling pin is pruned and
+    /// finalize succeeds without panic.
+    #[test]
+    fn stale_pin_pruned_on_untap() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        // A Mountain that will be tapped for {R}; record it as manually tapped so
+        // UntapLandForMana can drain its produced mana.
+        let mountain = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let m = state.objects.get_mut(&mountain).unwrap();
+            m.card_types.core_types.push(CoreType::Land);
+            m.card_types.subtypes.push("Mountain".to_string());
+            m.tapped = true;
+        }
+        // The {R} produced by the mountain, stamped and tracked for untap.
+        let red_pip = seed_unit(&mut state, PlayerId(0), plain_unit(ManaType::Red, mountain));
+        // Colorless for {3}.
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(16)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(17)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(18)),
+        );
+        state
+            .lands_tapped_for_mana
+            .entry(PlayerId(0))
+            .or_default()
+            .push(mountain);
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: red_pip })
+            .expect("pinning the red unit is legal");
+        // Drain the pinned unit by untapping the mountain.
+        apply_as_current(
+            &mut state,
+            GameAction::UntapLandForMana {
+                object_id: mountain,
+            },
+        )
+        .expect("untap drains the produced red mana");
+
+        let pins = &state.pending_cast.as_ref().unwrap().pinned_pool_units;
+        assert!(
+            !pins.contains(&red_pip),
+            "the drained unit's pin must be pruned; pins = {pins:?}"
+        );
+    }
+
+    /// TEST 6: cancel clears pins. Pin units, CancelCast, assert pending_cast is
+    /// gone (so pins drop with it) and the pool is intact.
+    #[test]
+    fn cancel_clears_pins() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(19)),
+        );
+        let c = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(20)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(21)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(22)),
+        );
+        let pool_before = state.players[0].mana_pool.mana.len();
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: c })
+            .expect("pinning is legal");
+        apply_as_current(&mut state, GameAction::CancelCast).expect("manual cast is cancellable");
+
+        assert!(
+            state.pending_cast.is_none(),
+            "CancelCast must tear down pending_cast (and its pins)"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            pool_before,
+            "cancelling must leave the pool intact (pin is a hint, not a removal)"
+        );
+    }
+
+    /// TEST 7: MP-accepts — SpendPoolMana is classified as a mana ability so it
+    /// rides session skip_legality.
+    #[test]
+    fn spend_pool_mana_is_mana_ability() {
+        assert!(
+            GameAction::SpendPoolMana {
+                pip_id: ManaPipId(1)
+            }
+            .is_mana_ability(),
+            "SpendPoolMana must be a mana ability (MP skip_legality)"
+        );
+        assert!(
+            GameAction::UnspendPoolMana {
+                pip_id: ManaPipId(1)
+            }
+            .is_mana_ability(),
+            "UnspendPoolMana must be a mana ability (MP skip_legality)"
+        );
+    }
+
+    /// TEST 9 (C1): save/load counter round-trips. Produce N units, serialize +
+    /// deserialize, produce one more, assert its pip_id differs from all prior —
+    /// the counter is not reset by a reload.
+    #[test]
+    fn pip_id_counter_survives_save_load() {
+        let mut state = setup_game_at_main_phase();
+        let mut prior: Vec<ManaPipId> = Vec::new();
+        for i in 0..4 {
+            prior.push(seed_unit(
+                &mut state,
+                PlayerId(0),
+                plain_unit(ManaType::Red, ObjectId(i)),
+            ));
+        }
+        let json = serde_json::to_string(&state).expect("serialize");
+        let mut reloaded: GameState = serde_json::from_str(&json).expect("deserialize");
+        let after = seed_unit(
+            &mut reloaded,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(99)),
+        );
+        assert!(
+            !prior.contains(&after),
+            "a unit minted after reload must not collide with pre-save ids ({after:?} in {prior:?})"
+        );
+    }
+
+    /// TEST 10: non-pinned baseline. With no pins, the spend is byte-identical to
+    /// the pre-feature ordering (colorless-first / first-available). Asserts the
+    /// funnel early-out leaves the legacy result.
+    #[test]
+    fn empty_pins_baseline_unchanged() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(23)),
+        );
+        let first_cl = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(24)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(25)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(26)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(27)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        // No pin recorded.
+        apply_as_current(&mut state, GameAction::PassPriority).expect("finalize");
+
+        // With NO pin recorded the spend must be byte-identical to the
+        // pre-feature ordering: the pin-scan early-outs and `swap_remove`-based
+        // selection leaves the same single survivor it always did (the first
+        // colorless seeded, `first_cl`). If the empty-pins funnel reordered the
+        // spend, this survivor identity would change.
+        assert!(state.pending_cast.is_none(), "cast must finalize");
+        let survivors: Vec<ManaPipId> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id)
+            .collect();
+        assert_eq!(
+            survivors,
+            vec![first_cl],
+            "empty-pins spend must match legacy ordering exactly (one colorless survivor)"
+        );
+    }
+
+    /// TEST 11: Phyrexian not corrupted. Manual-cast a Phyrexian-cost spell, pin
+    /// an unrelated unit; pinning removes nothing, so the pool the engine pauses
+    /// against is unchanged and the cast still pauses for the Phyrexian choice.
+    #[test]
+    fn phyrexian_shards_uncorrupted_by_pin() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        // {R/P}{2}: a Phyrexian red shard plus generic. Mana is present to pay it,
+        // so the engine pauses at PhyrexianPayment (mana-or-life choice).
+        state.objects.get_mut(&obj).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianRed],
+            generic: 1,
+        };
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Red, ObjectId(28)),
+        );
+        let extra = seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(29)),
+        );
+        seed_unit(
+            &mut state,
+            PlayerId(0),
+            plain_unit(ManaType::Colorless, ObjectId(30)),
+        );
+
+        begin_manual_cast(&mut state, PlayerId(0), obj);
+        let pool_len_before = state.players[0].mana_pool.mana.len();
+        // Pin an unrelated colorless unit (eligible for the {1} generic).
+        apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: extra })
+            .expect("pin is legal");
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            pool_len_before,
+            "pinning must not remove any unit — compute_phyrexian_shards must see the true pool"
+        );
+    }
+
+    /// TEST 12 (CR 602 / CR 106.6): pinning for an ACTIVATED ability uses the
+    /// activation payment context, not the spell context. A unit restricted
+    /// `OnlyForActivation` (allows_spell == false, allows_activation == true) can
+    /// legally pay an activation, so it must be pinnable when `pending_cast` is an
+    /// activated ability. `handle_spend_pool_mana` branches on
+    /// `activation_ability_index`: with the fix it builds a
+    /// `PaymentContext::Activation` and the pin is accepted; reverting the branch
+    /// (always `PaymentContext::Spell`) makes `mana_unit_eligible_for_cost` consult
+    /// `allows_spell` → false → the pin is REJECTED, flipping the `.is_ok()`
+    /// assertion below. The spell-context sibling proves the discriminator: the
+    /// same restricted unit is correctly REJECTED for a spell `pending_cast`.
+    #[test]
+    fn activation_pin_uses_activation_context() {
+        // Shared fixture: a battlefield source with one activated ability and a
+        // single floated unit restricted to activations only.
+        fn setup(activation: bool) -> (GameState, ManaPipId) {
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(700),
+                PlayerId(0),
+                "Activated Source".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Unimplemented {
+                        name: "Activated".to_string(),
+                        description: None,
+                    },
+                ));
+            }
+            // The ability's mana cost is {R}: a colored shard the activation-only
+            // unit can pay.
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+            let resolved = ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "Activated".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            let mut pending = PendingCast::new(source, CardId(700), resolved, cost);
+            // The discriminator: activation vs spell pending_cast.
+            pending.activation_ability_index = if activation { Some(0) } else { None };
+            state.pending_cast = Some(Box::new(pending));
+            state.waiting_for = WaitingFor::ManaPayment {
+                player: PlayerId(0),
+                convoke_mode: None,
+            };
+
+            // A red unit usable only for activations (CR 106.6).
+            let restricted = ManaUnit::new(
+                ManaType::Red,
+                source,
+                false,
+                vec![ManaRestriction::OnlyForActivation],
+            );
+            let pip = seed_unit(&mut state, PlayerId(0), restricted);
+            (state, pip)
+        }
+
+        // Activation pending_cast: the activation-only unit IS pinnable.
+        let (mut state, pip) = setup(true);
+        let res = apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: pip });
+        assert!(
+            res.is_ok(),
+            "an OnlyForActivation unit must be pinnable for an activated ability \
+             (PaymentContext::Activation); got {res:?}"
+        );
+        assert!(
+            state
+                .pending_cast
+                .as_ref()
+                .unwrap()
+                .pinned_pool_units
+                .contains(&pip),
+            "the accepted pin must be recorded on the activation's pending_cast"
+        );
+
+        // Spell pending_cast (sibling discriminator): the SAME unit is NOT pinnable,
+        // because `allows_spell` rejects OnlyForActivation mana.
+        let (mut spell_state, spell_pip) = setup(false);
+        let spell_res = apply_as_current(
+            &mut spell_state,
+            GameAction::SpendPoolMana { pip_id: spell_pip },
+        );
+        assert!(
+            spell_res.is_err(),
+            "an OnlyForActivation unit must NOT be pinnable for a spell cast \
+             (PaymentContext::Spell); got {spell_res:?}"
         );
     }
 }

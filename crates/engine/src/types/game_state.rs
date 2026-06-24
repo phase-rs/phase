@@ -23,7 +23,7 @@ use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
+use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
@@ -1751,6 +1751,12 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 118.3a: Player-directed pin hints recorded during
+    /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
+    /// prefers to spend first; pins are priority hints, not removals — the unit
+    /// stays in the pool and is consumed by the normal finalize spend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_pool_units: Vec<ManaPipId>,
     /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
     /// prepared if this cast is cancelled and rolled back. Used by the
     /// prepared-copy special action to restore pre-cast state.
@@ -1823,6 +1829,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -5483,6 +5490,18 @@ pub struct GameState {
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
     pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
+    /// CR 118.3a: monotonic counter minting `ManaPipId`s for pool units so they
+    /// can be pinned. Serialized plainly (mirrors `next_object_id`) so reloaded
+    /// games don't re-mint colliding ids.
+    #[serde(default)]
+    pub next_pip_id: u64,
+    /// CR 118.3a: transient carrier for the caster's pin hints during a single
+    /// finalize spend. `finalize_mana_payment` takes `pending_cast` (removing the
+    /// pins) BEFORE the spend runs, so the pins are moved here for the duration of
+    /// the spend and cleared immediately after. Never serialized and never part of
+    /// state equality — it is empty outside the synchronous finalize window.
+    #[serde(skip)]
+    pub active_payment_pins: Vec<ManaPipId>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -7076,6 +7095,52 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,
+    /// never returns the `ManaPipId(0)` unstamped sentinel (counter starts at 1).
+    fn next_pip_id(&mut self) -> ManaPipId {
+        let id = self.next_pip_id;
+        self.next_pip_id += 1;
+        ManaPipId(id)
+    }
+
+    /// CR 118.3a: Stamp a stable pip id on `unit` and add it to `player`'s mana
+    /// pool. This is the single authority for mana entering a *real* pool: every
+    /// production/refill/convoke/delve injection routes here so that each pooled
+    /// unit has a unique id the player can pin to direct payment. Detached
+    /// preview pools (with no `GameState`) keep calling `ManaPool::add` directly.
+    pub fn add_mana_to_pool(&mut self, player: PlayerId, mut unit: ManaUnit) {
+        unit.pip_id = self.next_pip_id();
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == player) {
+            p.mana_pool.add(unit);
+        }
+    }
+
+    /// CR 118.3a: defensively guarantee every unit in `player`'s mana pool carries
+    /// a unique, nonzero `pip_id`, re-stamping the `ManaPipId(0)` sentinel and any
+    /// duplicate. Production mana is stamped on entry via [`Self::add_mana_to_pool`],
+    /// but mana from debug tooling, restored pre-stamping saves, or any path that
+    /// reached `ManaPool::add` directly can carry the sentinel — which would make
+    /// every such unit pin/unpin together in manual payment. Run at payment entry
+    /// so each unit is individually pinnable regardless of how it was produced.
+    /// Safe for loop detection: `pip_id` is excluded from `ManaUnit` equality and
+    /// `next_pip_id` is zeroed by `normalize_for_loop`.
+    pub(crate) fn restamp_pool_pip_ids(&mut self, player: PlayerId) {
+        let Some(idx) = self.players.iter().position(|p| p.id == player) else {
+            return;
+        };
+        let len = self.players[idx].mana_pool.mana.len();
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for i in 0..len {
+            let pid = self.players[idx].mana_pool.mana[i].pip_id.0;
+            if pid != 0 && seen.insert(pid) {
+                continue; // already unique and stamped — leave it
+            }
+            let fresh = self.next_pip_id();
+            seen.insert(fresh.0);
+            self.players[idx].mana_pool.mana[i].pip_id = fresh;
+        }
+    }
+
     /// CR 702.26b: Returns battlefield object ids filtered to only phased-in
     /// permanents. Use this instead of `state.battlefield.iter()` anywhere a
     /// rule would otherwise treat a phased-out permanent as existing
@@ -7234,6 +7299,10 @@ impl GameState {
             turn_decision_controller: None,
             objects: im::HashMap::default(),
             next_object_id: 1,
+            // CR 118.3a: start at 1 so minted pip ids never collide with the
+            // `ManaPipId(0)` unstamped sentinel.
+            next_pip_id: 1,
+            active_payment_pins: Vec::new(),
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -7636,6 +7705,9 @@ impl GameState {
         clone.state_revision = 0;
         clone.next_timestamp = 0;
         clone.next_object_id = 0;
+        // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
+        // next_object_id) so two otherwise-identical loop states compare equal.
+        clone.next_pip_id = 0;
         clone.layers_dirty = LayersDirty::full();
         clone.public_state_dirty = PublicStateDirty::all_dirty();
         clone
@@ -7706,6 +7778,7 @@ impl PartialEq for GameState {
             && self.turn_decision_controller == other.turn_decision_controller
             && self.objects.len() == other.objects.len()
             && self.next_object_id == other.next_object_id
+            && self.next_pip_id == other.next_pip_id
             && self.battlefield == other.battlefield
             && self.stack == other.stack
             && self.stack_paid_facts == other.stack_paid_facts
@@ -7992,6 +8065,90 @@ mod tests {
         );
     }
 
+    /// CR 104.4b: pool-unit `pip_id` is a runtime/UI identity tag stamped with a
+    /// unique monotonic value each time mana enters a pool. It must NOT affect
+    /// game-state equality, otherwise a mandatory loop that floats mana every
+    /// iteration would compare its iterations unequal (each pooled unit has a
+    /// fresh pip_id) and the CR 104.4b draw would never fire — burning the
+    /// auto-pass iteration cap before downgrading to a wrong CR 732.2 halt.
+    /// Revert-failing: if `pip_id` is restored to `ManaUnit`'s derived
+    /// `PartialEq`, the two pools differ and this assertion fails.
+    #[test]
+    fn loop_states_equal_ignores_pool_pip_ids() {
+        let mut a = GameState::new_two_player(7);
+        let player = a.players[0].id;
+        // One floated unit, stamped with a distinct pip_id on pool entry.
+        a.add_mana_to_pool(
+            player,
+            ManaUnit::new(ManaType::Red, ObjectId(900), false, vec![]),
+        );
+        // `b` is identical EXCEPT its pool unit carries a different pip_id — the
+        // shape a mandatory mana-floating loop produces (each iteration mints a
+        // fresh monotonic id on the same logical unit). Pool length and every
+        // other field are identical.
+        let mut b = a.clone();
+        let pip_a = b.players[0].mana_pool.mana[0].pip_id;
+        b.players[0].mana_pool.mana[0].pip_id = ManaPipId(pip_a.0 + 1);
+        let pip_b = b.players[0].mana_pool.mana[0].pip_id;
+        assert_ne!(
+            pip_a, pip_b,
+            "the two pool units must differ only in pip_id"
+        );
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in pool-unit pip_ids must confirm as a repeat"
+        );
+    }
+
+    /// CR 118.3a: the self-heal that fixes the reported "tap one mana → all
+    /// select" bug. Mana that bypassed `add_mana_to_pool` (debug tooling, restored
+    /// pre-stamping saves) carries the sentinel `pip_id 0`; `restamp_pool_pip_ids`
+    /// must give every unit a unique, nonzero id so each is individually pinnable.
+    #[test]
+    fn restamp_pool_pip_ids_heals_sentinel_and_duplicate_ids() {
+        let mut state = GameState::new_two_player(7);
+        let player = state.players[0].id;
+        // Bypass the stamping authority: three units all at the unstamped sentinel.
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Green,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        assert!(
+            state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .all(|u| u.pip_id.0 == 0),
+            "precondition: all three units are unstamped (pip_id 0)"
+        );
+
+        state.restamp_pool_pip_ids(player);
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every unit must be stamped (no sentinel remains), got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            ids.len(),
+            "all pip ids must be unique after restamp, got {ids:?}"
+        );
+    }
+
     #[test]
     fn default_creates_two_player_game() {
         let state = GameState::default();
@@ -8202,6 +8359,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
@@ -8540,6 +8698,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,

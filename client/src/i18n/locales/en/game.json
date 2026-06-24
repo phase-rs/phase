@@ -388,7 +388,8 @@
     "onlyForActivation": "Spend only to activate abilities",
     "onlyForXCosts": "Spend only on costs that include {X}",
     "convokePayment": "Convoke payment",
-    "grantsProperty": "Grants a property to the spell"
+    "grantsProperty": "Grants a property to the spell",
+    "grantCantBeCountered": "Spend on this spell to make it uncounterable"
   },
   "zone": {
     "commandZone": "Command Zone",
@@ -445,6 +446,8 @@
     "paymentPending": "Payment is still pending. Tap permanents or cancel this action.",
     "poolLabel": "Pool:",
     "poolEmpty": "Empty",
+    "pinUnit": "Pin this mana to pay first",
+    "unpinUnit": "Unpin this mana",
     "pay": "Pay",
     "chooseAmountTitle": "Choose amount to pay",
     "chooseAmountAria": "Choose amount to pay",
@@ -452,7 +455,13 @@
     "resourceEnergy": "energy",
     "resourceMana": "mana",
     "resourceCounters": "counters",
-    "resourceSpeed": "speed"
+    "resourceSpeed": "speed",
+    "manualMana": "Manual",
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
+    "spendHint": "Click your mana to spend it on this cost",
+    "covered": "✓ Covered",
+    "spending": "Spending",
+    "fillHint": "(shift-click to add all of one source)"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",

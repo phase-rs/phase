@@ -359,7 +359,8 @@
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
-    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
+    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
+    "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"
   },
   "zone": {
     "commandZone": "Kommandozone",
@@ -416,6 +417,8 @@
     "paymentPending": "Die Bezahlung steht noch aus. Tappe bleibende Karten oder brich diese Aktion ab.",
     "poolLabel": "Vorrat:",
     "poolEmpty": "Leer",
+    "pinUnit": "Dieses Mana zum Bezahlen vormerken",
+    "unpinUnit": "Mana-Vormerkung aufheben",
     "pay": "Bezahlen",
     "chooseAmountTitle": "Wähle die zu zahlende Menge",
     "chooseAmountAria": "Wähle die zu zahlende Menge",
@@ -423,7 +426,13 @@
     "resourceEnergy": "Energie",
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
-    "resourceSpeed": "Tempo"
+    "resourceSpeed": "Tempo",
+    "manualMana": "Manual",
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
+    "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
+    "covered": "✓ Gedeckt",
+    "spending": "Wird ausgegeben",
+    "fillHint": "(Umschalt+Klick fügt alle einer Quelle hinzu)"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",

@@ -5364,6 +5364,57 @@ mod tests {
     }
 
     #[test]
+    fn ai_does_not_pin_pool_mana_during_mana_payment() {
+        // CR 118.3a: pinning a pool unit is a human-only manual-payment affordance.
+        // The AI candidate generator must never emit SpendPoolMana/UnspendPoolMana
+        // (they are excluded by the `!is_mana_ability` flat-list filter / by
+        // `mana_payment_actions` not generating them).
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Some Spell".to_string(),
+            Zone::Stack,
+        );
+        state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast::new(
+            spell,
+            CardId(500),
+            crate::types::ability::ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+        )));
+        // Floated mana that a pin could target — must still not surface a pin action.
+        state.add_mana_to_pool(
+            PlayerId(0),
+            crate::types::mana::ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()),
+        );
+
+        let actions = candidate_actions(&state);
+        assert!(
+            !actions.iter().any(|c| matches!(
+                c.action,
+                GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. }
+            )),
+            "AI candidate generation must never offer pool-mana pinning"
+        );
+    }
+
+    #[test]
     fn convoke_offers_only_cost_relevant_colored_taps() {
         // CR 702.51a: a Convoke tap reduces the cost by {1} (Colorless marker) or by one
         // mana of the creature's color (a colored marker that pays ONLY a matching colored
@@ -5939,6 +5990,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -6080,6 +6132,7 @@ mod tests {
         state.players[player].mana_pool.add(ManaUnit {
             color,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),

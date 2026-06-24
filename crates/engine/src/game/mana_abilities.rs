@@ -2587,6 +2587,8 @@ fn debit_cost_with_plan(
         false,
         None,
         crate::types::mana::LifePaymentColors::EMPTY,
+        // CR 118.3a: mana-ability activation sub-costs are not pinnable.
+        &[],
     )
     .map(|_| ())
 }
@@ -2681,6 +2683,8 @@ fn pay_mana_sub_cost(
             None,
             // CR 107.4f: same K'rrik-not-applicable rationale as above.
             crate::types::mana::LifePaymentColors::EMPTY,
+            // CR 118.3a: mana-ability activation sub-costs are not pinnable.
+            &[],
         )
         .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
@@ -3207,6 +3211,7 @@ mod tests {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),

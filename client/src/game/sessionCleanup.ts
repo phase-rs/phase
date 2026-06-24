@@ -19,4 +19,6 @@ export function clearPromptOverlayState(): void {
   });
   useUiStore.getState().setPendingAbilityChoice(null);
   useUiStore.getState().setEnchantmentsDialogPlayer(null);
+  // The per-game "Manual mana" toggle must never leak into the next game.
+  useUiStore.getState().setManualManaOverride(false);
 }

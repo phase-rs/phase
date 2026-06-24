@@ -359,7 +359,8 @@
     "onlyForActivation": "Gaste apenas para ativar habilidades",
     "onlyForXCosts": "Gaste apenas em custos que incluam {X}",
     "convokePayment": "Pagamento de convocação",
-    "grantsProperty": "Concede uma propriedade à mágica"
+    "grantsProperty": "Concede uma propriedade à mágica",
+    "grantCantBeCountered": "Gaste nesta mágica para que ela não possa ser anulada"
   },
   "zone": {
     "commandZone": "Zona de comando",
@@ -416,6 +417,8 @@
     "paymentPending": "O pagamento ainda está pendente. Vire permanentes ou cancele esta ação.",
     "poolLabel": "Reserva:",
     "poolEmpty": "Vazia",
+    "pinUnit": "Fixar este mana para pagar primeiro",
+    "unpinUnit": "Desafixar este mana",
     "pay": "Pagar",
     "chooseAmountTitle": "Escolha a quantia a pagar",
     "chooseAmountAria": "Escolher a quantia a pagar",
@@ -423,7 +426,13 @@
     "resourceEnergy": "energia",
     "resourceMana": "mana",
     "resourceCounters": "marcadores",
-    "resourceSpeed": "velocidade"
+    "resourceSpeed": "velocidade",
+    "manualMana": "Manual",
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
+    "spendHint": "Clique no seu mana para gastá-lo neste custo",
+    "covered": "✓ Coberto",
+    "spending": "Gastando",
+    "fillHint": "(shift+clique para adicionar todos de uma fonte)"
   },
   "hand": {
     "viewFullHand_one": "Ver mão completa ({{count}} carta)",

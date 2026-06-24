@@ -3072,6 +3072,8 @@ fn apply_action(
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
+            // CR 118.3a: `finalize_mana_payment` clears `active_payment_pins`
+            // itself on every Ok/Err path, so no caller clear is needed.
             casting_costs::finalize_mana_payment(state, *player, &mut events)?
         }
         // CR 107.4f + CR 601.2f + CR 601.2h: Caster submitted per-shard Phyrexian
@@ -3184,6 +3186,8 @@ fn apply_action(
                     }
                 }
             }
+            // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
+            // `active_payment_pins` itself on every Ok/Err path; no caller clear.
             casting_costs::finalize_mana_payment_with_phyrexian_choices(
                 state,
                 player,
@@ -3308,6 +3312,37 @@ fn apply_action(
                 convoke_mode: *convoke_mode,
             }
         }
+        // CR 118.3a: Pin a specific pool unit so the finalize spend prefers it.
+        // Immediate-stage: records the hint on `pending_cast`, no stack push.
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_spend_pool_mana(state, player, pip_id)?;
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            }
+        }
+        // CR 118.3a: Remove a previously-recorded pin (always legal).
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_unspend_pool_mana(state, pip_id);
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            }
+        }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
@@ -3398,9 +3433,10 @@ fn apply_action(
                 }
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
-                p.mana_pool.add(unit);
-            }
+            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
+            // are consumed by the shared algorithm and never pinned (the frontend
+            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            state.add_mana_to_pool(*player, unit);
             if mode == ConvokeMode::Waterbend {
                 events.push(GameEvent::ManaAdded {
                     player_id: *player,
@@ -3460,12 +3496,15 @@ fn apply_action(
             if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
                 crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
             }
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+            // CR 118.3a: route through the stamping authority (delve marker is a
+            // generic-only convoke marker, never pinned).
+            state.add_mana_to_pool(
+                player,
+                crate::types::mana::ManaUnit::convoke_payment(
                     crate::types::mana::ManaType::Colorless,
                     object_id,
-                ));
-            }
+                ),
+            );
             WaitingFor::ManaPayment {
                 player,
                 convoke_mode: Some(ConvokeMode::Delve),
@@ -5961,6 +6000,23 @@ pub(super) fn handle_untap_land_for_mana(
         player_data.mana_pool.remove_from_source(*aura_id);
     }
 
+    // CR 118.3a: an UntapLandForMana during ManaPayment can drain a pinned unit
+    // out of the pool. Prune any dangling pins so the finalize spend never tries
+    // to honor a pip that no longer exists. Done AFTER the `player_data` borrow
+    // above ends so the immutable pool read and the `pending_cast` mutation don't
+    // overlap a live `&mut`.
+    if state.pending_cast.is_some() {
+        let surviving: std::collections::HashSet<crate::types::mana::ManaPipId> = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.mana.iter().map(|u| u.pip_id).collect())
+            .unwrap_or_default();
+        if let Some(pc) = state.pending_cast.as_mut() {
+            pc.pinned_pool_units.retain(|id| surviving.contains(id));
+        }
+    }
+
     // Untap the land
     let obj = state
         .objects
@@ -5978,6 +6034,145 @@ pub(super) fn handle_untap_land_for_mana(
     }
 
     Ok(())
+}
+
+/// CR 118.3a: Record a player-directed pin on a specific pool unit so the
+/// finalize spend prefers it. The unit stays in the pool — this is a priority
+/// hint, not a removal. A pin is accepted only when the unit is eligible to pay
+/// at least one shard (or a generic pip) of the full locked cost; otherwise the
+/// pin could never be honored, so it is rejected (`ActionNotAllowed`).
+pub(super) fn handle_spend_pool_mana(
+    state: &mut GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.mana.iter().find(|u| u.pip_id == pip_id))
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+
+    let pending = state.pending_cast.as_ref().ok_or_else(|| {
+        EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
+    })?;
+    let object_id = pending.object_id;
+    let cost = pending.cost.clone();
+    let activation_ability_index = pending.activation_ability_index;
+
+    // CR 118.3a: eligibility against the full LOCKED cost. Nothing is paid at pin
+    // time, so there is no "currently-unpaid" subset — the unit qualifies if it
+    // could pay any shard (or generic pip) of the whole cost under the SAME
+    // spend-restriction context the finalize spend will use. A `pending_cast`
+    // can be an activated ability, not just a spell (CR 602): mirror
+    // `finalize_mana_payment` and build a `PaymentContext::Activation` so an
+    // activation-restricted unit (`OnlyForActivation`, `allows_spell == false`)
+    // is correctly eligible to pin when it can legally pay the activation.
+    // Owned holders so the context's borrowed slices outlive the eligibility check.
+    let spell_meta;
+    let source_types;
+    let source_subtypes;
+    let ability_tag;
+    let ctx = if let Some(ability_index) = activation_ability_index {
+        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
+        source_types = types;
+        source_subtypes = subtypes;
+        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
+        Some(crate::types::mana::PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag,
+        })
+    } else {
+        spell_meta = super::casting::build_spell_meta(state, player, object_id);
+        spell_meta
+            .as_ref()
+            .map(crate::types::mana::PaymentContext::Spell)
+    };
+
+    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref()) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+
+    if let Some(pc) = state.pending_cast.as_mut() {
+        if !pc.pinned_pool_units.contains(&pip_id) {
+            pc.pinned_pool_units.push(pip_id);
+        }
+    }
+    Ok(())
+}
+
+/// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the
+/// pin is absent or there is no pending cast.
+pub(super) fn handle_unspend_pool_mana(
+    state: &mut GameState,
+    pip_id: crate::types::mana::ManaPipId,
+) {
+    if let Some(pc) = state.pending_cast.as_mut() {
+        pc.pinned_pool_units.retain(|id| *id != pip_id);
+    }
+}
+
+/// CR 118.3a: True when `unit` could legally pay at least one shard or generic
+/// pip of `cost` under the spell's spend-restriction context. Combines
+/// restriction gating (`ManaRestriction::allows`) with shard color/attribute
+/// matching (`shard_to_mana_type`) — the same predicates the spend funnel uses.
+fn mana_unit_eligible_for_cost(
+    unit: &crate::types::mana::ManaUnit,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> bool {
+    use crate::types::mana::{ManaCost, ManaType};
+    use mana_payment::ShardRequirement;
+
+    // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
+    if let Some(ctx) = ctx {
+        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+            return false;
+        }
+    }
+    // Convoke/improvise/delve markers are creature-tap stand-ins, never pinned.
+    if unit.is_convoke_payment() {
+        return false;
+    }
+
+    let (shards, generic) = match cost {
+        ManaCost::Cost { shards, generic } => (shards, *generic),
+        // No-cost / self-referential costs have no payable pip.
+        _ => return false,
+    };
+
+    // CR 107.4b: any unit can pay a generic pip ({N} or {X}).
+    if generic > 0 {
+        return true;
+    }
+
+    shards.iter().any(|&shard| {
+        // CR 107.4: a unit pays a shard if its color (or attribute, for {S}/{Z})
+        // is among those the shard accepts.
+        let accepts = |c: ManaType| unit.color == c;
+        match mana_payment::shard_to_mana_type(shard) {
+            ShardRequirement::Single(mt) => accepts(mt),
+            ShardRequirement::Hybrid(a, b) => accepts(a) || accepts(b),
+            ShardRequirement::Phyrexian(c) => accepts(c),
+            ShardRequirement::HybridPhyrexian(a, b) => accepts(a) || accepts(b),
+            // {2/C} and {C/color}: payable with the color, or (for {2/C}) generic.
+            ShardRequirement::TwoGenericHybrid(c) => accepts(c),
+            ShardRequirement::ColorlessHybrid(c) => accepts(ManaType::Colorless) || accepts(c),
+            ShardRequirement::Snow => unit.is_snow(),
+            ShardRequirement::TwoOrMoreColorSource => unit.source_could_produce_two_or_more_colors,
+            // {X} contributes nothing off the stack (CR 107.3); generic-payable
+            // when X > 0 is already covered by the `generic` check above.
+            ShardRequirement::X => false,
+            ShardRequirement::TwoGenericHybridPhyrexian(c) => accepts(c),
+        }
+    })
 }
 
 fn handle_equip_activation(
@@ -9714,6 +9909,56 @@ mod tests {
         ));
     }
 
+    /// CR 118.3a regression: each land tapped for mana must yield a pool unit
+    /// with a DISTINCT, nonzero `pip_id`. A shared/zero id makes every same-color
+    /// pip in the manual-payment UI select and deselect together (the reported
+    /// "tap one → all select, tap again → all deselect" bug), because pinning a
+    /// `pip_id` then matches every unit carrying that same id.
+    #[test]
+    fn tapped_lands_produce_distinct_pip_ids() {
+        let mut state = setup_game_at_main_phase();
+
+        let mut land_ids = Vec::new();
+        for _ in 0..3 {
+            let land_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&land_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+                obj.entered_battlefield_turn = Some(1);
+            }
+            land_ids.push(land_id);
+        }
+
+        for land_id in land_ids {
+            apply_as_current(
+                &mut state,
+                GameAction::TapLandForMana { object_id: land_id },
+            )
+            .unwrap();
+        }
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three taps must float three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every pooled unit must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "pip ids must be distinct, got {ids:?}");
+    }
+
     /// Build a Wild Growth–style aura attached to `land_id` for tests in this
     /// module. Single-color "{G}" `TapsForMana` trigger via
     /// `valid_card: AttachedTo`. Returns the aura's `ObjectId`.
@@ -10662,6 +10907,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10736,6 +10982,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10834,6 +11081,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11664,6 +11912,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11722,6 +11971,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -12243,6 +12493,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12629,6 +12880,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -13681,6 +13933,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -16871,6 +17124,7 @@ mod phase_trigger_regression_tests {
                 .add(ManaUnit {
                     color: ManaType::Colorless,
                     source_id: ObjectId(0),
+                    pip_id: crate::types::mana::ManaPipId(0),
                     supertype: None,
                     source_could_produce_two_or_more_colors: false,
                     restrictions: Vec::new(),
@@ -24111,6 +24365,7 @@ mod mdfc_land_tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),

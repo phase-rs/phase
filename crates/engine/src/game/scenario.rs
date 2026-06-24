@@ -287,9 +287,15 @@ impl GameScenario {
     }
 
     /// Replace a player's mana pool for deterministic payment tests.
+    ///
+    /// CR 118.3a: routes each unit through `add_mana_to_pool` so every seeded
+    /// unit receives a distinct `ManaPipId` (a direct `mana_pool.mana = mana`
+    /// would leave all units at the `ManaPipId(0)` sentinel, so pins would
+    /// collide). All callers seed a fresh pool exactly once per player, so
+    /// appending is equivalent to replacing.
     pub fn with_mana_pool(&mut self, player: PlayerId, mana: Vec<ManaUnit>) -> &mut Self {
-        if let Some(p) = self.state.players.iter_mut().find(|p| p.id == player) {
-            p.mana_pool.mana = mana;
+        for unit in mana {
+            self.state.add_mana_to_pool(player, unit);
         }
         self
     }
