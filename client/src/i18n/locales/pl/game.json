@@ -359,7 +359,8 @@
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
     "convokePayment": "Płatność Convoke",
-    "grantsProperty": "Nadaje czarowi właściwość"
+    "grantsProperty": "Nadaje czarowi właściwość",
+    "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
@@ -427,7 +428,11 @@
     "resourceCounters": "znaczników",
     "resourceSpeed": "prędkości",
     "manualMana": "Manual",
-    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay."
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
+    "spendHint": "Kliknij swoją manę, aby wydać ją na ten koszt",
+    "covered": "✓ Pokryte",
+    "spending": "Wydawane",
+    "fillHint": "(shift+klik dodaje wszystkie z jednego źródła)"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",

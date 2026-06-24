@@ -1878,6 +1878,16 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::player_status`.
    */
   player_status?: PlayerStatusView[];
+  /**
+   * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
+   * for a spell, the portion of the locked cost still UNPAID by the pool units
+   * they have pinned (selected). The payment UI renders this as the cost shrinks
+   * while the player picks mana; an empty/`NoCost` value means their selection
+   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
+   * viewer controls. Mirrors
+   * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
+   */
+  pending_payment_remaining?: ManaCost;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

@@ -359,7 +359,8 @@
     "onlyForActivation": "À dépenser uniquement pour activer des capacités",
     "onlyForXCosts": "À dépenser uniquement pour des coûts incluant {X}",
     "convokePayment": "Paiement de la convocation",
-    "grantsProperty": "Accorde une propriété au sort"
+    "grantsProperty": "Accorde une propriété au sort",
+    "grantCantBeCountered": "À dépenser pour ce sort afin qu'il ne puisse pas être contrecarré"
   },
   "zone": {
     "commandZone": "Zone de commandement",
@@ -427,7 +428,11 @@
     "resourceCounters": "marqueurs",
     "resourceSpeed": "vitesse",
     "manualMana": "Manual",
-    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay."
+    "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
+    "spendHint": "Cliquez sur votre mana pour le dépenser pour ce coût",
+    "covered": "✓ Couvert",
+    "spending": "Dépense",
+    "fillHint": "(maj+clic pour ajouter toute une source)"
   },
   "hand": {
     "viewFullHand_one": "Voir la main complète ({{count}} carte)",

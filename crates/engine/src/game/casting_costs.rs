@@ -7252,6 +7252,10 @@ pub fn enter_payment_step(
     convoke_mode: Option<ConvokeMode>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 118.3a: normalize pool pip ids before any payment so each unit is
+    // individually pinnable in manual mode — self-heals the `ManaPipId(0)`
+    // sentinel left by debug tooling / pre-stamping saves / any bypassing path.
+    state.restamp_pool_pip_ids(player);
     if let Some(pending) = state.pending_cast.as_ref() {
         let activation_counter_x_max = pending.activation_cost.as_ref().and_then(|cost| {
             activation_counter_cost_x_max(state, player, pending.object_id, &pending.ability, cost)

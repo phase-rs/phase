@@ -7115,6 +7115,32 @@ impl GameState {
         }
     }
 
+    /// CR 118.3a: defensively guarantee every unit in `player`'s mana pool carries
+    /// a unique, nonzero `pip_id`, re-stamping the `ManaPipId(0)` sentinel and any
+    /// duplicate. Production mana is stamped on entry via [`Self::add_mana_to_pool`],
+    /// but mana from debug tooling, restored pre-stamping saves, or any path that
+    /// reached `ManaPool::add` directly can carry the sentinel — which would make
+    /// every such unit pin/unpin together in manual payment. Run at payment entry
+    /// so each unit is individually pinnable regardless of how it was produced.
+    /// Safe for loop detection: `pip_id` is excluded from `ManaUnit` equality and
+    /// `next_pip_id` is zeroed by `normalize_for_loop`.
+    pub(crate) fn restamp_pool_pip_ids(&mut self, player: PlayerId) {
+        let Some(idx) = self.players.iter().position(|p| p.id == player) else {
+            return;
+        };
+        let len = self.players[idx].mana_pool.mana.len();
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for i in 0..len {
+            let pid = self.players[idx].mana_pool.mana[i].pip_id.0;
+            if pid != 0 && seen.insert(pid) {
+                continue; // already unique and stamped — leave it
+            }
+            let fresh = self.next_pip_id();
+            seen.insert(fresh.0);
+            self.players[idx].mana_pool.mana[i].pip_id = fresh;
+        }
+    }
+
     /// CR 702.26b: Returns battlefield object ids filtered to only phased-in
     /// permanents. Use this instead of `state.battlefield.iter()` anywhere a
     /// rule would otherwise treat a phased-out permanent as existing
@@ -8072,6 +8098,54 @@ mod tests {
         assert!(
             loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "states differing only in pool-unit pip_ids must confirm as a repeat"
+        );
+    }
+
+    /// CR 118.3a: the self-heal that fixes the reported "tap one mana → all
+    /// select" bug. Mana that bypassed `add_mana_to_pool` (debug tooling, restored
+    /// pre-stamping saves) carries the sentinel `pip_id 0`; `restamp_pool_pip_ids`
+    /// must give every unit a unique, nonzero id so each is individually pinnable.
+    #[test]
+    fn restamp_pool_pip_ids_heals_sentinel_and_duplicate_ids() {
+        let mut state = GameState::new_two_player(7);
+        let player = state.players[0].id;
+        // Bypass the stamping authority: three units all at the unstamped sentinel.
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Green,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        assert!(
+            state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .all(|u| u.pip_id.0 == 0),
+            "precondition: all three units are unstamped (pip_id 0)"
+        );
+
+        state.restamp_pool_pip_ids(player);
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every unit must be stamped (no sentinel remains), got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            ids.len(),
+            "all pip ids must be unique after restamp, got {ids:?}"
         );
     }
 

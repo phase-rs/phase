@@ -9909,6 +9909,56 @@ mod tests {
         ));
     }
 
+    /// CR 118.3a regression: each land tapped for mana must yield a pool unit
+    /// with a DISTINCT, nonzero `pip_id`. A shared/zero id makes every same-color
+    /// pip in the manual-payment UI select and deselect together (the reported
+    /// "tap one → all select, tap again → all deselect" bug), because pinning a
+    /// `pip_id` then matches every unit carrying that same id.
+    #[test]
+    fn tapped_lands_produce_distinct_pip_ids() {
+        let mut state = setup_game_at_main_phase();
+
+        let mut land_ids = Vec::new();
+        for _ in 0..3 {
+            let land_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&land_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+                obj.entered_battlefield_turn = Some(1);
+            }
+            land_ids.push(land_id);
+        }
+
+        for land_id in land_ids {
+            apply_as_current(
+                &mut state,
+                GameAction::TapLandForMana { object_id: land_id },
+            )
+            .unwrap();
+        }
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three taps must float three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every pooled unit must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "pip ids must be distinct, got {ids:?}");
+    }
+
     /// Build a Wild Growth–style aura attached to `land_id` for tests in this
     /// module. Single-color "{G}" `TapsForMana` trigger via
     /// `valid_card: AttachedTo`. Returns the aura's `ObjectId`.
