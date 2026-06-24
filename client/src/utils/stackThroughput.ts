@@ -26,16 +26,25 @@ export const THROUGHPUT_WINDOW_MS = 1500;
 export const RATE_PRESSURE_ELEVATED = 8;
 export const RATE_PRESSURE_RAPID = 24;
 
-// Monotonic non-decreasing ring of resolution timestamps (performance.now()).
-// Bounded by RATE_PRESSURE_RAPID-ish counts within the window in practice; a
-// pathological burst is pruned to the window on every record/read.
-const resolutionTimes: number[] = [];
+// Recent resolutions stored as {timestamp, count} batches — one entry per
+// record() call (one action / one batch chunk), NOT one per resolution. A storm
+// chunk that resolves thousands of items is a single push instead of thousands,
+// keeping the array O(record-calls-in-window) rather than O(resolutions). The
+// rate only needs to clear RATE_PRESSURE_RAPID, so storing exact per-item
+// timestamps buys nothing. Timestamps are monotonic non-decreasing, so stale
+// entries are always a prunable prefix.
+interface ResolutionBatch {
+  timestamp: number;
+  count: number;
+}
+
+const resolutionBatches: ResolutionBatch[] = [];
 
 function prune(now: number): void {
   const cutoff = now - THROUGHPUT_WINDOW_MS;
   let drop = 0;
-  while (drop < resolutionTimes.length && resolutionTimes[drop] < cutoff) drop++;
-  if (drop > 0) resolutionTimes.splice(0, drop);
+  while (drop < resolutionBatches.length && resolutionBatches[drop].timestamp < cutoff) drop++;
+  if (drop > 0) resolutionBatches.splice(0, drop);
 }
 
 /** Record `count` stack items that just left the stack (resolved/countered). */
@@ -43,13 +52,14 @@ export function recordStackResolutions(
   count: number,
   now: number = performance.now(),
 ): void {
-  for (let i = 0; i < count; i++) resolutionTimes.push(now);
+  if (count <= 0) return;
+  resolutionBatches.push({ timestamp: now, count });
   prune(now);
 }
 
 /** Clear throughput history — for new-game boundaries and tests. */
 export function resetStackThroughput(): void {
-  resolutionTimes.length = 0;
+  resolutionBatches.length = 0;
 }
 
 /**
@@ -60,10 +70,12 @@ export function resetStackThroughput(): void {
  */
 export function stackPressureFromRate(now: number = performance.now()): StackPressure {
   prune(now);
-  const n = resolutionTimes.length;
-  if (n >= RATE_PRESSURE_RAPID) return "Rapid";
-  if (n >= RATE_PRESSURE_ELEVATED) return "Elevated";
-  return "Normal";
+  let total = 0;
+  for (const batch of resolutionBatches) {
+    total += batch.count;
+    if (total >= RATE_PRESSURE_RAPID) return "Rapid";
+  }
+  return total >= RATE_PRESSURE_ELEVATED ? "Elevated" : "Normal";
 }
 
 const PRESSURE_RANK: Record<StackPressure, number> = {
