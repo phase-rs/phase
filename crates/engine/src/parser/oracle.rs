@@ -2635,7 +2635,7 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Priority 3e2: Power-up — "Power-up — {cost}: {effect}" (CR 602.5b).
+        // Priority 3e2: Power-up — "Power-up — {cost}: {effect}" (CR 702.193a, CR 602.5b).
         // Power-up is a keyword-labeled activated ability (like Exhaust): it can
         // be activated only once per game, and its cost is reduced by the source's
         // mana value if it entered the battlefield this turn. The cost reduction is
@@ -2656,12 +2656,12 @@ pub(crate) fn parse_oracle_ir(
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
                 def.activation_restrictions.extend(constraints.restrictions);
-                // CR 602.5b: power-up may be activated only once per game.
+                // CR 702.193a: power-up may be activated only once.
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnce);
                 def.ability_tag = Some(AbilityTag::PowerUp);
-                // CR 602.2b + CR 601.2f + CR 302.6: the activation cost's generic
-                // mana is reduced by the source's mana value if it entered this turn.
+                // CR 702.193b + CR 602.2b + CR 601.2f + CR 302.6: the activation cost's
+                // generic mana is reduced by the source's mana value if it entered this turn.
                 def.cost_reduction = Some(CostReduction {
                     amount_per: 1,
                     count: QuantityExpr::Ref {

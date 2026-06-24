@@ -12898,7 +12898,8 @@ pub enum AbilityTag {
     Cycling,
     /// CR 702.165a: ability originated from a Backup keyword definition.
     Backup,
-    /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
+    /// CR 702.193a: This ability originated from a Power-up keyword definition (a
+    /// keyword-labeled activated ability, like Exhaust, per CR 602.5b + CR 602.1).
     PowerUp,
     /// CR 702.6a: This ability originated from an Equip keyword definition.
     Equip,
