@@ -909,9 +909,10 @@ pub(super) fn handle_unless_payment(
             // through the replacement pipeline so Rest-in-Peace class
             // redirects fire correctly. Partial mill (library has fewer than
             // N cards) is an unpayable cost per CR 118.3 — effect fires.
-            // A replacement-effect pause (BatchMoveResult::Incomplete) also
-            // counts as payment failure so the unless-effect is not
-            // double-triggered; the paused replacement state is cleared.
+            // A CR 616.1 replacement ordering choice parks the batch in
+            // state.waiting_for + state.pending_batch_deliveries; callers
+            // must early-return so they do not clobber the parked prompt
+            // (mirrors apply_etb_counters early-return in handle_replacement_choice).
             AbilityCost::Mill { count } => {
                 let player_library_len = state
                     .players
@@ -934,9 +935,11 @@ pub(super) fn handle_unless_payment(
                         .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?
                     {
                         true => {}
+                        // CR 616.1: replacement ordering choice parked — the
+                        // mill batch is in progress. Early-return to preserve
+                        // state.waiting_for + state.pending_batch_deliveries.
                         false => {
-                            state.pending_replacement = None;
-                            payment_failed = true;
+                            return Ok(action_result(events, state.waiting_for.clone()));
                         }
                     }
                 }
@@ -2764,6 +2767,122 @@ mod tests {
         assert!(
             state.players[0].graveyard.is_empty(),
             "nothing milled from empty library"
+        );
+    }
+
+    /// CR 701.17a + CR 616.1: Unless-mill payment with two competing Moved
+    /// replacements must park the game at WaitingFor::ReplacementChoice, not
+    /// mark payment failed and fire the unless effect (regression for the
+    /// apply_mill_after_replacement false-return early-exit path).
+    #[test]
+    fn unless_mill_cost_pauses_on_replacement_ordering_choice() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Two competing Moved replacements — one sends the milled card to Exile,
+        // one sends it back to Library. No valid_card / destination_zone filter so
+        // both apply to any Moved event. When two such replacements compete on the
+        // same per-card mill move, CR 616.1 ordering is material and the engine
+        // must surface a ReplacementChoice prompt rather than completing the mill.
+        let exile_repl =
+            ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            ));
+        let library_repl =
+            ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            ));
+
+        // Two battlefield permanents each hosting one of the competing redirects.
+        let obj_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "RedirectToExile".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_a)
+            .unwrap()
+            .replacement_definitions = vec![exile_repl].into();
+
+        let obj_b = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "RedirectToLibrary".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_b)
+            .unwrap()
+            .replacement_definitions = vec![library_repl].into();
+
+        // One card in P0's library to be milled.
+        create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(state.players[0].library.len(), 1);
+
+        let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(999), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Mill { count: 1 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        let result = handle_unless_payment(&mut state, wf, true, &mut events)
+            .expect("mill unless-cost with competing replacements must not error");
+
+        // CR 616.1: two competing Moved replacements must surface a prompt.
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected WaitingFor::ReplacementChoice, got {:?}",
+            result.waiting_for
+        );
+        // The unless gain-life must not have fired.
+        assert_eq!(
+            state.players[0].life, 20,
+            "unless gain-life must not fire while replacement ordering choice is pending"
         );
     }
 
