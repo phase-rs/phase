@@ -16406,7 +16406,10 @@ mod tests {
 
     /// CR 601.2a + CR 603.4: "if you didn't cast it from your hand" —
     /// negated cast-origin intervening-if (Chainer, Nightmare Adept; Phage
-    /// the Untouchable). Must produce `Not(WasCast { zone: Hand })`.
+    /// the Untouchable). Must produce `Not(WasCast { zone: Hand, controller:
+    /// You, owner: You })` — all three axes must be pinned so that an opponent
+    /// casting the card from their own hand, or you casting it from an
+    /// opponent's hand, do not satisfy the inner condition.
     #[test]
     fn extract_if_condition_didnt_cast_from_hand() {
         let (cleaned, cond) = extract_if_condition(
@@ -16418,10 +16421,14 @@ mod tests {
                 Some(TriggerCondition::Not { ref condition })
                     if matches!(
                         **condition,
-                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Hand),
+                            controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
+                        }
                     )
             ),
-            "expected Not(WasCast {{ zone: Hand }}), got {cond:?}",
+            "expected Not(WasCast {{ zone: Hand, controller: You, owner: You }}), got {cond:?}",
         );
         assert!(
             !cleaned.contains("didn't cast"), // allow-noncombinator: test assertion, not parsing dispatch
@@ -16430,7 +16437,29 @@ mod tests {
     }
 
     /// CR 601.2a + CR 603.4: "if you cast it from your hand" — positive
-    /// zone-specific cast-origin intervening-if.
+    /// zone-specific cast-origin intervening-if. All three axes (zone, caster,
+    /// zone-owner) must be pinned: zone=Hand, controller=You, owner=You.
+    #[test]
+    fn extract_if_condition_cast_from_hand() {
+        let (_, cond) = extract_if_condition(
+            "if you cast it from your hand, it enters with a +1/+1 counter on it.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::WasCast {
+                    zone: Some(Zone::Hand),
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
+                })
+            ),
+            "expected WasCast {{ zone: Hand, controller: You, owner: You }}, got {cond:?}",
+        );
+    }
+
+    /// CR 601.2a + CR 603.4: "if you cast it from your graveyard" — positive
+    /// zone-specific cast-origin. Graveyard is owner-scoped (CR 404.1), so
+    /// owner must be You; controller must also be You ("you cast it").
     #[test]
     fn extract_if_condition_cast_from_zone() {
         let (_, cond) = extract_if_condition(
@@ -16441,16 +16470,18 @@ mod tests {
                 cond,
                 Some(TriggerCondition::WasCast {
                     zone: Some(Zone::Graveyard),
-                    ..
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
                 })
             ),
-            "expected WasCast {{ zone: Graveyard }}, got {cond:?}",
+            "expected WasCast {{ zone: Graveyard, controller: You, owner: You }}, got {cond:?}",
         );
     }
 
     /// CR 601.2a + CR 603.4: Full Chainer, Nightmare Adept trigger parse —
-    /// the trigger condition must be `Not(WasCast { zone: Hand })` and the
-    /// effect target must be the entering creature (not the source).
+    /// the trigger condition must be `Not(WasCast { zone: Hand, controller:
+    /// You, owner: You })` and the effect target must be the entering creature
+    /// (not the source). All three axes must be pinned to prevent false matches.
     #[test]
     fn chainer_nightmare_adept_trigger_condition() {
         let def = parse_trigger_line(
@@ -16463,16 +16494,21 @@ mod tests {
                 Some(TriggerCondition::Not { ref condition })
                     if matches!(
                         **condition,
-                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Hand),
+                            controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
+                        }
                     )
             ),
-            "expected Not(WasCast {{ zone: Hand }}), got {:?}",
+            "expected Not(WasCast {{ zone: Hand, controller: You, owner: You }}), got {:?}",
             def.condition,
         );
     }
 
     /// CR 603.4: Phage the Untouchable trigger parse — "if you didn't cast it
-    /// from your hand, you lose the game" must attach `Not(WasCast { zone: Hand })`.
+    /// from your hand, you lose the game" must attach `Not(WasCast { zone:
+    /// Hand, controller: You, owner: You })`. All three axes pinned.
     #[test]
     fn phage_the_untouchable_trigger_condition() {
         let def = parse_trigger_line(
@@ -16485,10 +16521,14 @@ mod tests {
                 Some(TriggerCondition::Not { ref condition })
                     if matches!(
                         **condition,
-                        TriggerCondition::WasCast { zone: Some(Zone::Hand), .. }
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Hand),
+                            controller: Some(ControllerRef::You),
+                            owner: Some(ControllerRef::You),
+                        }
                     )
             ),
-            "expected Not(WasCast {{ zone: Hand }}), got {:?}",
+            "expected Not(WasCast {{ zone: Hand, controller: You, owner: You }}), got {:?}",
             def.condition,
         );
     }
