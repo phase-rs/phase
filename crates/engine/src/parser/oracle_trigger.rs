@@ -3209,6 +3209,23 @@ fn parse_first_time_tapped_intervening_if(input: &str) -> OracleResult<'_, Trigg
     Ok((rest, TriggerCondition::FirstTimeObjectTappedThisTurn))
 }
 
+/// CR 601.2 + CR 404.1: Build a caster/owner-scoped `WasCast` for "you cast
+/// it from <zone>" intervening-if arms. The caster axis is always you ("you
+/// cast it"). For owner-specific zones (hand, graveyard, library — CR 404.1
+/// each player has their own such zone) the origin-zone-owner is also you.
+/// Exile and the command zone are shared and carry no per-player ownership.
+fn scoped_you_cast_from_zone(zone: Option<Zone>) -> TriggerCondition {
+    let owner = zone.and_then(|z| match z {
+        Zone::Hand | Zone::Graveyard | Zone::Library => Some(ControllerRef::You),
+        _ => None,
+    });
+    TriggerCondition::WasCast {
+        zone,
+        controller: Some(ControllerRef::You),
+        owner,
+    }
+}
+
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
@@ -3265,11 +3282,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, before.len(), clause_len),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast {
-                    zone,
-                    controller: None,
-                    owner: None,
-                }),
+                condition: Box::new(scoped_you_cast_from_zone(zone)),
             }),
         );
     }
@@ -3285,11 +3298,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         let clause_len = lower.len() - before.len() - rest.len();
         return (
             strip_condition_clause(text, before.len(), clause_len),
-            Some(TriggerCondition::WasCast {
-                zone,
-                controller: None,
-                owner: None,
-            }),
+            Some(scoped_you_cast_from_zone(zone)),
         );
     }
 
