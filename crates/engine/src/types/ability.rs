@@ -7632,6 +7632,12 @@ pub enum DigSource {
     PriorLook,
 }
 
+impl DigSource {
+    pub fn is_library(&self) -> bool {
+        matches!(self, DigSource::Library)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -8105,7 +8111,7 @@ pub enum Effect {
         #[serde(default)]
         enter_tapped: bool,
         /// Determines where the resolver reads the card set from. See [`DigSource`].
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "DigSource::is_library")]
         source: DigSource,
     },
     GainControl {

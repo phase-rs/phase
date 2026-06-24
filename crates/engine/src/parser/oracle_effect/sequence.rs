@@ -8111,9 +8111,16 @@ mod tests {
             "look-only Dig: no cards kept (pure peek)"
         );
         assert_eq!(*destination, None, "look-only Dig: no destination");
+        // The PutRest continuation ("put the rest on the bottom …") is a
+        // separate clause that patches this field after the DigFromAmong
+        // restructuring. The resolver ignores rest_destination on a look-only
+        // Dig (keep_count=0, reveal=false) because it takes an early return
+        // after populating private_look_ids (dig.rs:123). Some(Library) here
+        // is correct and harmless.
         assert_eq!(
-            *rest_destination, None,
-            "look-only Dig: no rest routing yet"
+            *rest_destination,
+            Some(Zone::Library),
+            "look-only Dig: PutRest patches rest_destination (unused at runtime)"
         );
         assert!(
             matches!(filter, TargetFilter::Any),
