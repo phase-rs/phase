@@ -1218,6 +1218,22 @@
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"
     },
+    "bulk": {
+      "selectAll": "Tutti",
+      "invert": "Inverti",
+      "clear": "Cancella",
+      "sortLabel": "Ordina",
+      "groupLabel": "Raggruppa",
+      "optNone": "Nessuno",
+      "optName": "Nome",
+      "optCmc": "Valore di mana",
+      "optType": "Tipo",
+      "optColor": "Colore",
+      "counterDiscard": "Scarta {{selected}} di {{cap}}",
+      "counterKeep": "Tieni {{selected}} di {{cap}}",
+      "keepInstead": "Tieni invece",
+      "discardInstead": "Scarta invece"
+    },
     "discard": {
       "title": "Scarta",
       "titleAdditionalCost": "Scarta come costo aggiuntivo",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Scegli fino a {{count}} carte da scartare",
       "subtitleUnless": "Scegli {{count}} carte o 1 carta corrispondente da scartare",
       "subtitleExact_one": "Scegli {{count}} carta da scartare",
-      "subtitleExact_other": "Scegli {{count}} carte da scartare"
+      "subtitleExact_other": "Scegli {{count}} carte da scartare",
+      "subtitleKeep_one": "Scegli 1 carta da tenere — il resto viene scartato",
+      "subtitleKeep_other": "Scegli {{count}} carte da tenere — il resto viene scartato"
     },
     "harmonize": {
       "title": "Armonizzare",

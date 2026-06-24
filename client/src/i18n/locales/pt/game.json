@@ -1218,6 +1218,22 @@
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
     },
+    "bulk": {
+      "selectAll": "Selecionar tudo",
+      "invert": "Inverter",
+      "clear": "Limpar",
+      "sortLabel": "Ordenar",
+      "groupLabel": "Agrupar",
+      "optNone": "Nenhum",
+      "optName": "Nome",
+      "optCmc": "Valor de mana",
+      "optType": "Tipo",
+      "optColor": "Cor",
+      "counterDiscard": "Descartar {{selected}} de {{cap}}",
+      "counterKeep": "Manter {{selected}} de {{cap}}",
+      "keepInstead": "Manter em vez disso",
+      "discardInstead": "Descartar em vez disso"
+    },
     "discard": {
       "title": "Descartar",
       "titleAdditionalCost": "Descartar como custo adicional",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Escolha até {{count}} cartas para descartar",
       "subtitleUnless": "Escolha {{count}} cartas ou 1 carta correspondente para descartar",
       "subtitleExact_one": "Escolha {{count}} carta para descartar",
-      "subtitleExact_other": "Escolha {{count}} cartas para descartar"
+      "subtitleExact_other": "Escolha {{count}} cartas para descartar",
+      "subtitleKeep_one": "Escolha 1 carta para manter — as demais são descartadas",
+      "subtitleKeep_other": "Escolha {{count}} cartas para manter — as demais são descartadas"
     },
     "harmonize": {
       "title": "Harmonizar",

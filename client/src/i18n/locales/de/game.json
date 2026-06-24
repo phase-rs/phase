@@ -1218,6 +1218,22 @@
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
     },
+    "bulk": {
+      "selectAll": "Alle auswählen",
+      "invert": "Umkehren",
+      "clear": "Leeren",
+      "sortLabel": "Sortieren",
+      "groupLabel": "Gruppieren",
+      "optNone": "Keine",
+      "optName": "Name",
+      "optCmc": "Manawert",
+      "optType": "Typ",
+      "optColor": "Farbe",
+      "counterDiscard": "{{selected}} von {{cap}} abwerfen",
+      "counterKeep": "{{selected}} von {{cap}} behalten",
+      "keepInstead": "Stattdessen behalten",
+      "discardInstead": "Stattdessen abwerfen"
+    },
     "discard": {
       "title": "Abwerfen",
       "titleAdditionalCost": "Als zusätzliche Kosten abwerfen",
@@ -1232,7 +1248,9 @@
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",
       "subtitleExact_one": "Wähle {{count}} Karte zum Abwerfen",
-      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen"
+      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen",
+      "subtitleKeep_one": "Wähle 1 Karte zum Behalten — der Rest wird abgeworfen",
+      "subtitleKeep_other": "Wähle {{count}} Karten zum Behalten — der Rest wird abgeworfen"
     },
     "harmonize": {
       "title": "Harmonisieren",

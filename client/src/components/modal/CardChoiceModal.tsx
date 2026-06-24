@@ -13,7 +13,6 @@ import type {
   CounterType,
   ExileCostSourceZone,
   GameObject,
-  ManaCost,
   ManaType,
   ObjectId,
   OutsideGameChoiceEntry,
@@ -69,6 +68,8 @@ import {
   searchChoiceSubtitle,
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
+import { manaValueOfObject } from "./cardChoice/manaValue.ts";
+import SelectableCardGrid from "./cardChoice/SelectableCardGrid.tsx";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -175,7 +176,7 @@ export function CardChoiceModal() {
       return <SeparatePilesChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} />;
+      return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       if (!canActForWaitingState) return null;
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
@@ -227,6 +228,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
@@ -237,6 +239,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={
             waitingFor.data.up_to
@@ -253,6 +256,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
         />
@@ -2140,6 +2144,7 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
     case "Discard":
       return (
         <DiscardModal
+          key={choicesKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
@@ -2228,39 +2233,6 @@ function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
       confirmLabel={t("cardChoice.badges.exile")}
     />
   );
-}
-
-function manaValueOfShard(shard: string): number {
-  switch (shard) {
-    case "TwoWhite":
-    case "TwoBlue":
-    case "TwoBlack":
-    case "TwoRed":
-    case "TwoGreen":
-      return 2;
-    case "X":
-      return 0;
-    default:
-      return 1;
-  }
-}
-
-function manaValueOfCost(cost: ManaCost): number {
-  switch (cost.type) {
-    case "NoCost":
-    case "SelfManaCost":
-    case "SelfManaValue":
-      return 0;
-    case "Cost":
-      return (
-        cost.generic +
-        cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0)
-      );
-  }
-}
-
-function manaValueOfObject(obj: { mana_cost: ManaCost }): number {
-  return manaValueOfCost(obj.mana_cost);
 }
 
 function CollectEvidenceModal({
@@ -2390,27 +2362,27 @@ function DiscardModal({
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
 
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.count],
-  );
+  // Keep-mode is offered only for fixed-count exact discards with room to keep
+  // (covers DiscardToHandSize + exact DiscardChoice/ConniveDiscard; hidden for
+  // WardDiscardChoice count=1 and up-to/unless modes).
+  const keepEligible =
+    !isUpTo && !hasUnlessOption && data.count > 1 && data.count < data.cards.length;
+  const [keepMode, setKeepMode] = useState(false);
+  const active = keepMode && keepEligible;
+  const keepCap = data.cards.length - data.count;
+  const cap = active ? keepCap : data.count;
+
+  const onToggleKeep = useCallback(() => {
+    setKeepMode((m) => !m);
+    setSelected(new Set());
+  }, []);
 
   const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
+    const cards = active
+      ? data.cards.filter((id) => !selected.has(id))
+      : Array.from(selected);
+    dispatch({ type: "SelectCards", data: { cards } });
+  }, [active, data.cards, dispatch, selected]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -2420,15 +2392,32 @@ function DiscardModal({
 
   // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
   // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card OR count cards.
-  const isReady = isUpTo
-    ? selected.size <= data.count
-    : selected.size === data.count || (hasUnlessOption && selected.size === 1);
+  // Keep-mode: keeping exactly keepCap leaves exactly `count` to discard.
+  const isReady = active
+    ? selected.size === keepCap
+    : isUpTo
+      ? selected.size <= data.count
+      : selected.size === data.count || (hasUnlessOption && selected.size === 1);
 
-  const subtitle = isUpTo
-    ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
-    : hasUnlessOption
-      ? t("cardChoice.discard.subtitleUnless", { count: data.count })
-      : t("cardChoice.discard.subtitleExact", { count: data.count });
+  const subtitle = active
+    ? t("cardChoice.discard.subtitleKeep", { count: keepCap })
+    : isUpTo
+      ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
+      : hasUnlessOption
+        ? t("cardChoice.discard.subtitleUnless", { count: data.count })
+        : t("cardChoice.discard.subtitleExact", { count: data.count });
+
+  const tone = active
+    ? EFFECT_ZONE_VISUAL_CLASSES.Battlefield // green ring/overlay/badge = "keep"
+    : EFFECT_ZONE_VISUAL_CLASSES.Sacrifice; // red = "discard"
+  const badgeLabel = active ? t("cardChoice.badges.keep") : t("cardChoice.badges.discard");
+  const counterText = active
+    ? t("cardChoice.bulk.counterKeep", { selected: selected.size, cap: keepCap })
+    : t("cardChoice.bulk.counterDiscard", { selected: selected.size, cap: data.count });
+
+  // The confirm button always shows the discard count (even in keep-mode where
+  // `selected` tracks the keep set — invert to show how many will be discarded).
+  const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
 
   return (
     <ChoiceOverlay
@@ -2441,7 +2430,7 @@ function DiscardModal({
               onClick={handleConfirm}
               disabled={!isReady}
               label={t("cardChoice.buttons.discardCount", {
-                selected: selected.size,
+                selected: discardSelectedForLabel,
                 count: data.count,
               })}
             />
@@ -2451,49 +2440,39 @@ function DiscardModal({
             onClick={handleConfirm}
             disabled={!isReady}
             label={t("cardChoice.buttons.discardCount", {
-              selected: selected.size,
+              selected: discardSelectedForLabel,
               count: data.count,
             })}
           />
         )
       }
     >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
+      <>
+        {keepEligible && (
+          <div className="px-1 pb-1">
+            <button
+              type="button"
+              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+              onClick={onToggleKeep}
             >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.discard")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+            </button>
+          </div>
+        )}
+        <SelectableCardGrid
+          cards={data.cards}
+          objects={objects}
+          value={selected}
+          onChange={setSelected}
+          cap={cap}
+          tone={tone}
+          badgeLabel={badgeLabel}
+          counterText={counterText}
+          hoverProps={hoverProps}
+          onConfirm={handleConfirm}
+          canConfirm={isReady}
+        />
+      </>
     </ChoiceOverlay>
   );
 }
