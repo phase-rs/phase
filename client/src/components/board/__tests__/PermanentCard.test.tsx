@@ -122,11 +122,12 @@ function renderPermanent(
   validTargetObjectIds = new Set<number>(),
   selectableSacrificeObjectIds = new Set<number>(),
   boardChoiceObjectIds = new Set<number>(),
+  activatableObjectIds = new Set<number>(),
 ) {
   return render(
     <BoardInteractionContext.Provider
       value={{
-        activatableObjectIds: new Set(),
+        activatableObjectIds,
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
@@ -251,6 +252,73 @@ describe("PermanentCard attachments", () => {
     });
     fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
 
+    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("auto-expands collapsed attachments when one is a valid target", () => {
+    // Regression: Moira Brown's "put a quest counter on target nonland
+    // permanent you control" offers the host's attached Equipment/Auras as
+    // targets. Collapsed behind the host they are unclickable, so the counter
+    // lands on the host creature instead of the chosen attachment. A host with
+    // an actionable attachment must open WITHOUT requiring a hover.
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    // Attachment 4 is a valid target — both attachments must render even though
+    // the host is neither hovered nor inspected.
+    const { container } = renderPermanent(new Set([4]));
+
+    expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
+    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("auto-expands collapsed attachments when one is activatable (re-equip)", () => {
+    // Regression: an attached Equipment whose Equip ability is activatable must
+    // be reachable so it can be moved to another creature. Collapsed behind the
+    // host it cannot be clicked, so equip appears stuck once attached.
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(
+      new Set(),
+      new Set(),
+      new Set(),
+      new Set([4]),
+    );
+
+    expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
   });
 

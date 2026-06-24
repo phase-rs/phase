@@ -222,6 +222,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
+    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -346,9 +347,28 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
+  // CR 301.5 / CR 303.4: An attached Equipment/Aura is an independent permanent
+  // that can be a valid target, an activation source (re-equip), or a board
+  // choice in its own right. Collapsed behind its host it is unreachable —
+  // clicks land on the host instead, so a "put a counter on target nonland
+  // permanent you control" trigger lands on the creature rather than the chosen
+  // Equipment, and an attached Equipment can't be re-activated to move it. Open
+  // a host's attachments whenever any of them is actionable in the current
+  // waiting state so each is independently clickable without requiring a hover.
+  const attachmentsActionable =
+    obj.attachments.length > 0
+    && obj.attachments.some(
+      (id) =>
+        validTargetObjectIds.has(id)
+        || activatableObjectIds.has(id)
+        || manaTappableObjectIds.has(id)
+        || boardChoiceObjectIds.has(id)
+        || selectableSacrificeObjectIds.has(id)
+        || selectableManaCostCreatureIds.has(id),
+    );
   const attachmentsLifted =
     obj.attachments.length > 0
-    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected);
+    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected || attachmentsActionable);
   const attachmentsExpanded = obj.attachments.length <= 1 || attachmentsLifted;
   const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
   const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
