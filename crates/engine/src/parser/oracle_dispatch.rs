@@ -107,7 +107,8 @@ pub(super) fn dispatch_line_nom(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{DistributionUnit, MultiTargetSpec};
+    use crate::types::ability::MultiTargetSpec;
+    use crate::types::game_state::DistributionUnit;
 
     /// Issue #4266 regression: `dispatch_line_nom` was returning `*def.effect`,
     /// discarding `distribute` and `multi_target` from the parsed
