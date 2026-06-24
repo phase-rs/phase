@@ -429,29 +429,36 @@ pub(super) fn handle_replacement_choice(
                     tapped_for_mana,
                     ..
                 } => {
-                    for _ in 0..count {
-                        let unit = crate::types::mana::ManaUnit {
-                            color: mana_type,
-                            source_id,
-                            pip_id: crate::types::mana::ManaPipId(0),
-                            supertype: None,
-                            source_could_produce_two_or_more_colors: false,
-                            restrictions: Vec::new(),
-                            grants: Vec::new(),
-                            expiry: None,
-                        };
-                        // CR 118.3a: stamp a stable pip id on pool entry so the unit
-                        // can be pinned to direct payment.
-                        state.add_mana_to_pool(player_id, unit);
-                        events.push(GameEvent::ManaAdded {
-                            player_id,
-                            mana_type,
-                            source_id,
-                            tap_state: ManaTapState::from_tap(tapped_for_mana),
-                        });
-                    }
-                    if count > 0 {
-                        state.layers_dirty.mark_full();
+                    // CR 106.4: produced mana goes into the named player's pool. If
+                    // that player isn't present, add nothing AND emit no `ManaAdded`
+                    // (the event must mirror an actual pool addition — `add_mana_to_pool`
+                    // already no-ops on a missing player, so emitting unconditionally
+                    // would report mana that was never added).
+                    if state.players.iter().any(|p| p.id == player_id) {
+                        for _ in 0..count {
+                            let unit = crate::types::mana::ManaUnit {
+                                color: mana_type,
+                                source_id,
+                                pip_id: crate::types::mana::ManaPipId(0),
+                                supertype: None,
+                                source_could_produce_two_or_more_colors: false,
+                                restrictions: Vec::new(),
+                                grants: Vec::new(),
+                                expiry: None,
+                            };
+                            // CR 118.3a: stamp a stable pip id on pool entry so the unit
+                            // can be pinned to direct payment.
+                            state.add_mana_to_pool(player_id, unit);
+                            events.push(GameEvent::ManaAdded {
+                                player_id,
+                                mana_type,
+                                source_id,
+                                tap_state: ManaTapState::from_tap(tapped_for_mana),
+                            });
+                        }
+                        if count > 0 {
+                            state.layers_dirty.mark_full();
+                        }
                     }
                 }
                 // CR 614.1b + CR 614.10: BeginTurn / BeginPhase replacements are

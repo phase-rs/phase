@@ -7128,16 +7128,37 @@ impl GameState {
         let Some(idx) = self.players.iter().position(|p| p.id == player) else {
             return;
         };
-        let len = self.players[idx].mana_pool.mana.len();
+        // First pass (immutable): count units needing a fresh id — the sentinel 0
+        // or a duplicate of an earlier unit. `pid == 0` short-circuits so the
+        // sentinel is never inserted into `seen`; only real ids populate it.
         let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for i in 0..len {
-            let pid = self.players[idx].mana_pool.mana[i].pip_id.0;
-            if pid != 0 && seen.insert(pid) {
+        let needed = self.players[idx]
+            .mana_pool
+            .mana
+            .iter()
+            .filter(|u| u.pip_id.0 == 0 || !seen.insert(u.pip_id.0))
+            .count();
+        if needed == 0 {
+            return;
+        }
+        // Mint the fresh ids before borrowing the pool mutably (`next_pip_id` needs
+        // `&mut self`), so the assignment pass can use `iter_mut` — idiomatic and
+        // compatible with both `Vec` and `im::Vector` without relying on `IndexMut`.
+        let mut fresh = Vec::with_capacity(needed);
+        for _ in 0..needed {
+            fresh.push(self.next_pip_id());
+        }
+        let mut fresh = fresh.into_iter();
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for unit in self.players[idx].mana_pool.mana.iter_mut() {
+            if unit.pip_id.0 != 0 && seen.insert(unit.pip_id.0) {
                 continue; // already unique and stamped — leave it
             }
-            let fresh = self.next_pip_id();
-            seen.insert(fresh.0);
-            self.players[idx].mana_pool.mana[i].pip_id = fresh;
+            let id = fresh
+                .next()
+                .expect("minted exactly one fresh id per unit needing one");
+            seen.insert(id.0);
+            unit.pip_id = id;
         }
     }
 
@@ -8146,6 +8167,59 @@ mod tests {
                 .len(),
             ids.len(),
             "all pip ids must be unique after restamp, got {ids:?}"
+        );
+    }
+
+    /// Covers the duplicate-NONZERO arm of `restamp_pool_pip_ids` (the all-zero
+    /// sentinel arm is covered above). Two units share a nonzero id; only the
+    /// duplicate is re-stamped — the first occurrence and the unique unit survive.
+    #[test]
+    fn restamp_pool_pip_ids_heals_duplicate_nonzero_ids() {
+        let mut state = GameState::new_two_player(7);
+        let player = state.players[0].id;
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Blue,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        // Inject a duplicate nonzero id: [100, 100, 200]. Ids are chosen well above
+        // a fresh game's `next_pip_id` so the minted replacement cannot collide.
+        let mana = &mut state.players[0].mana_pool.mana;
+        mana[0].pip_id = ManaPipId(100);
+        mana[1].pip_id = ManaPipId(100);
+        mana[2].pip_id = ManaPipId(200);
+
+        state.restamp_pool_pip_ids(player);
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "no sentinel introduced, got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "the duplicate nonzero id must be made unique, got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter().filter(|&&id| id == 100).count(),
+            1,
+            "exactly one of the shared id is kept; the duplicate is re-stamped, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&200),
+            "the already-unique id is preserved, got {ids:?}"
         );
     }
 

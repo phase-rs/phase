@@ -665,7 +665,12 @@ interface ManaChipProps {
  */
 function ManaChip({ group, count, selected = false, onActivate }: ManaChipProps) {
   const { t } = useTranslation("game");
-  const tooltip = manaGroupTooltip((k) => t(k), group) ?? group.sourceName ?? undefined;
+  // Combine the restriction/grant detail with the source name so neither is
+  // hidden when both exist (the inline source label may be truncated).
+  const tooltip =
+    [manaGroupTooltip((k) => t(k), group), group.sourceName]
+      .filter(Boolean)
+      .join(" — ") || undefined;
 
   const ring = selected
     ? "bg-cyan-400/15 ring-1 ring-cyan-400/60"
