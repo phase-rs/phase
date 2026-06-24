@@ -77,17 +77,18 @@ function isClickThroughDialog(
 ): boolean {
   if (!waitingFor) return false;
   if (isClickThroughWaitingFor(waitingFor, objects)) return true;
-  // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
-  // these tap-payment modes let the caster tap creatures/artifacts on the
-  // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel
-  // is open. The host still anchors the panel at `fixed inset-0 z-40` (so it
-  // can't be trapped beneath the board), but click-through marks it
-  // `pointer-events: none` so those board taps reach the cards — the panel's
-  // own controls re-enable events. Plain/hybrid/Phyrexian payment needs no
-  // board interaction (the panel's Pay button passes priority), so it keeps
-  // pointer events — `convoke_mode` is the engine's signal that board taps are
-  // live.
-  return waitingFor.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
+  // Any `ManaPayment` panel is click-through. The host still anchors the panel
+  // at `fixed inset-0 z-40` (so it can't be trapped beneath the board), but
+  // click-through marks it `pointer-events: none` so board taps reach the
+  // battlefield — the panel's own controls re-enable events.
+  //
+  // Manual payment of plain/hybrid mana DOES need board interaction: the player
+  // taps their own lands and clicks mana-pool pips behind the panel to pay. (In
+  // auto mode an unambiguous cast finalizes before any panel is shown, so a
+  // `ManaPayment` WaitingFor only ever reaches the UI when board taps are live.)
+  // Convoke/improvise (CR 702.51a / CR 702.126a), which additionally tap
+  // creatures/artifacts, are a subset of this same click-through behavior.
+  return waitingFor.type === "ManaPayment";
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {
@@ -142,15 +143,15 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // Click-through is achieved with `pointer-events: none` (below), NOT by
   // un-anchoring, so board taps still reach the battlefield.
   const anchored = dialogVisible;
-  // The convoke/improvise payment panel is bottom-anchored and can overlap the
-  // very creatures the player must tap to pay. Unlike the translucent full-screen
-  // target overlays, it benefits from the peek/slide affordance so the player can
-  // collapse it off an overlapped creature — so it stays peekable even while
-  // click-through. Other click-through overlays (target picking) are translucent
-  // and full-screen, so they stay put and pass taps straight through.
-  const isConvokePayment =
-    waitingFor?.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
-  const peekable = anchored && (!clickThrough || isConvokePayment);
+  // Any mana-payment panel is bottom-anchored and can overlap the very lands /
+  // creatures the player must tap to pay (manual mana, convoke, improvise). Unlike
+  // the translucent full-screen target overlays, it benefits from the peek/slide
+  // affordance so the player can collapse it off an overlapped permanent — so it
+  // stays peekable even while click-through. Other click-through overlays (target
+  // picking) are translucent and full-screen, so they stay put and pass taps
+  // straight through.
+  const isManaPayment = waitingFor?.type === "ManaPayment";
+  const peekable = anchored && (!clickThrough || isManaPayment);
   const showPeekTab = peeked && peekable;
 
   const ctxValue = useMemo<DialogPeekContext>(
