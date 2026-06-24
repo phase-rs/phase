@@ -45,12 +45,10 @@ pub(super) fn dispatch_line_nom(
     if has_trigger_prefix(lower_trimmed) {
         return AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "trigger_structure".into(),
-                description: Some(format!(
-                    "Trigger prefix matched but line failed trigger parser: {line}"
-                )),
-            },
+            Effect::unimplemented(
+                "trigger_structure",
+                format!("Trigger prefix matched but line failed trigger parser: {line}"),
+            ),
         )
         .description(line.to_string());
     }
@@ -58,12 +56,10 @@ pub(super) fn dispatch_line_nom(
     if is_static_pattern(&lower) {
         return AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "static_structure".into(),
-                description: Some(format!(
-                    "Static pattern matched but line failed static parser: {line}"
-                )),
-            },
+            Effect::unimplemented(
+                "static_structure",
+                format!("Static pattern matched but line failed static parser: {line}"),
+            ),
         )
         .description(line.to_string());
     }
@@ -71,12 +67,10 @@ pub(super) fn dispatch_line_nom(
     if is_replacement_pattern(&lower) {
         return AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "replacement_structure".into(),
-                description: Some(format!(
-                    "Replacement pattern matched but line failed replacement parser: {line}"
-                )),
-            },
+            Effect::unimplemented(
+                "replacement_structure",
+                format!("Replacement pattern matched but line failed replacement parser: {line}"),
+            ),
         )
         .description(line.to_string());
     }
@@ -84,24 +78,16 @@ pub(super) fn dispatch_line_nom(
     if is_effect_sentence_candidate(&lower) {
         return AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "effect_structure".into(),
-                description: Some(format!(
-                    "Effect sentence candidate but line failed effect parser: {line}"
-                )),
-            },
+            Effect::unimplemented(
+                "effect_structure",
+                format!("Effect sentence candidate but line failed effect parser: {line}"),
+            ),
         )
         .description(line.to_string());
     }
 
-    AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Unimplemented {
-            name: "unknown".into(),
-            description: Some(line.to_string()),
-        },
-    )
-    .description(line.to_string())
+    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
+        .description(line.to_string())
 }
 
 #[cfg(test)]
