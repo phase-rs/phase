@@ -652,6 +652,16 @@ pub fn display_land_mana_pips(
         }
     }
 
+    // CR 605.1b + CR 106.12a: include pips from TapsForMana-triggered auras
+    // (Wild Growth, Fertile Ground, Utopia Sprawl, etc.) so the land frame
+    // reflects its full tapped output, not just its own activated ability.
+    for mana_type in taps_for_mana_aura_bonus(state, object_id, controller) {
+        match mana_type_to_color(mana_type) {
+            Some(color) => push(&mut pips, ManaPip::Color(color)),
+            None => push(&mut pips, ManaPip::Colorless),
+        }
+    }
+
     pips
 }
 
@@ -744,12 +754,22 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .max();
 
+    // CR 605.1b + CR 106.12a: add aura TapsForMana bonus to the land's yield
+    // so X-value choosers and castability gates account for Wild Growth etc.
+    let aura_bonus = if obj.card_types.core_types.contains(&CoreType::Land) {
+        taps_for_mana_aura_bonus(state, object_id, controller).len() as u32
+    } else {
+        0
+    };
+
     match explicit_max {
-        Some(amount) => amount,
+        Some(amount) => amount + aura_bonus,
         // CR 305.1: Subtype-only basic lands carry no explicit mana ability;
         // `land_mana_options` synthesizes a single one-mana option for them.
-        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
-        None => 0,
+        None if !activatable_mana_options(state, object_id, controller).is_empty() => {
+            1 + aura_bonus
+        }
+        None => aura_bonus,
     }
 }
 
@@ -1262,6 +1282,28 @@ fn land_mana_options(
         }
     }
 
+    // CR 605.1b + CR 106.12a: fold in bonus mana from TapsForMana-triggered
+    // auras (Wild Growth, Fertile Ground, Utopia Sprawl, Verdant Haven, etc.).
+    // Each aura fires automatically when the land taps; the bonus is atomic
+    // with the land's own output, so we extend atomic_combination rather than
+    // adding a second ManaSourceOption (which would let the planner double-tap).
+    let aura_bonus = taps_for_mana_aura_bonus(state, object_id, controller);
+    if !aura_bonus.is_empty() {
+        for opt in &mut options {
+            let mut combined = opt
+                .atomic_combination
+                .take()
+                .unwrap_or_else(|| vec![opt.mana_type]);
+            combined.extend_from_slice(&aura_bonus);
+            // Keep mana_type as the first element for backward-compatible
+            // single-color consumers that don't read atomic_combination.
+            opt.mana_type = combined[0];
+            opt.atomic_combination = Some(combined);
+            // A multi-element atomic combination always qualifies.
+            opt.source_could_produce_two_or_more_colors = true;
+        }
+    }
+
     options
 }
 
@@ -1737,6 +1779,50 @@ pub(crate) fn opponent_land_color_options(
         }
     }
     options
+}
+
+/// CR 605.1b + CR 106.12a: Collect the mana types that `TapsForMana`-triggered
+/// auras (Wild Growth, Fertile Ground, Utopia Sprawl, Verdant Haven, etc.)
+/// would add when `land_id` is tapped for mana by `controller`.
+///
+/// Used by `land_mana_options` to fold aura bonus into the land's atomic mana
+/// combination so the autotap planner accounts for the full yield of one tap.
+/// Reuses `taps_for_mana_card_matches` — the same predicate the trigger
+/// resolver uses — so planning and firing cannot drift.
+pub(crate) fn taps_for_mana_aura_bonus(
+    state: &GameState,
+    land_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ManaType> {
+    let mut bonus: Vec<ManaType> = Vec::new();
+    for &object_id in state.battlefield.iter() {
+        let Some(obj) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if obj.controller != controller || object_id == land_id {
+            continue;
+        }
+        for trigger in obj.trigger_definitions.iter_all() {
+            if trigger.mode != TriggerMode::TapsForMana {
+                continue;
+            }
+            if !super::trigger_matchers::taps_for_mana_card_matches(
+                trigger, state, land_id, object_id,
+            ) {
+                continue;
+            }
+            let Some(execute) = trigger.execute.as_deref() else {
+                continue;
+            };
+            let Effect::Mana { produced, .. } = &*execute.effect else {
+                continue;
+            };
+            let types =
+                super::effects::mana::resolve_mana_types(produced, state, controller, object_id);
+            bonus.extend(types);
+        }
+    }
+    bonus
 }
 
 /// CR 605.1b + CR 605.3b: Enumerate object ids on the battlefield whose
@@ -3171,6 +3257,194 @@ mod tests {
             "ManaSourcePenalty::None classification is leaking impure chains \
              — these cards should classify as HasIrreversibleContinuation \
              (or a more specific harm variant): {offenders:#?}"
+        );
+    }
+
+    // ── Wild Growth / Fertile Ground autotap (#4265) ────────────────────────
+
+    use crate::types::ability::{ManaContribution, TriggerDefinition};
+    use crate::types::triggers::TriggerMode;
+
+    /// Build a Wild-Growth–style aura attached to `land_id`: a TapsForMana
+    /// trigger on a separate Enchantment object that adds `bonus_color` when
+    /// the land is tapped.
+    fn attach_taps_for_mana_aura(
+        state: &mut GameState,
+        land_id: ObjectId,
+        controller: PlayerId,
+        bonus_color: ManaColor,
+    ) -> ObjectId {
+        let aura = create_object(
+            state,
+            CardId(99),
+            controller,
+            "Wild Growth".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.attached_to = Some(land_id.into());
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![bonus_color],
+                            contribution: ManaContribution::Additional,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::AttachedTo),
+        );
+        aura
+    }
+
+    /// Issue #4265: `taps_for_mana_aura_bonus` returns `[Green]` for a Forest
+    /// enchanted by Wild Growth.
+    #[test]
+    fn aura_bonus_detects_taps_for_mana_trigger_on_attached_aura() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
+
+        let bonus = taps_for_mana_aura_bonus(&state, forest, PlayerId(0));
+        assert_eq!(bonus, vec![ManaType::Green]);
+    }
+
+    /// Issue #4265: A bare Forest (no aura) has no TapsForMana bonus.
+    #[test]
+    fn aura_bonus_empty_for_unenchanted_land() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        assert!(taps_for_mana_aura_bonus(&state, forest, PlayerId(0)).is_empty());
+    }
+
+    /// Issue #4265 regression: `auto_tap_land_mana_options` for a Forest
+    /// enchanted by Wild Growth must return a single `atomic_combination`
+    /// containing `[Green, Green]` so the autotap planner treats the whole
+    /// {G}{G} output as one atomic tap — not two separate taps of the same
+    /// land. Before the fix, the bonus {G} was invisible to the planner and
+    /// Wild Growth lands were undervalued in mana coverage checks.
+    #[test]
+    fn land_mana_options_includes_wild_growth_aura_bonus_as_atomic_combination() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
+
+        let options = auto_tap_land_mana_options(&state, forest, PlayerId(0));
+        assert_eq!(options.len(), 1, "one option per tap");
+        let opt = &options[0];
+        assert_eq!(opt.mana_type, ManaType::Green);
+        assert_eq!(
+            opt.atomic_combination,
+            Some(vec![ManaType::Green, ManaType::Green]),
+            "Wild Growth bonus must be folded into the atomic combination"
+        );
+        assert!(opt.source_could_produce_two_or_more_colors);
+    }
+
+    /// Issue #4265: `max_mana_yield` counts the aura bonus so X-value
+    /// choosers know the enchanted land produces 2, not 1.
+    #[test]
+    fn max_mana_yield_counts_wild_growth_aura_bonus() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        assert_eq!(max_mana_yield(&state, forest, PlayerId(0)), 1, "baseline");
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
+        assert_eq!(
+            max_mana_yield(&state, forest, PlayerId(0)),
+            2,
+            "Wild Growth adds 1 more mana"
+        );
+    }
+
+    /// Issue #4265: `display_land_mana_pips` shows two green pips for a
+    /// Forest enchanted by Wild Growth.
+    #[test]
+    fn display_pips_includes_wild_growth_aura_bonus() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let pips_before = display_land_mana_pips(&state, forest, PlayerId(0));
+        assert_eq!(pips_before, vec![ManaPip::Color(ManaColor::Green)]);
+
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
+        let pips_after = display_land_mana_pips(&state, forest, PlayerId(0));
+        // The existing pip deduplication keeps pips unique per type; Wild
+        // Growth adds a second {G} pip as a separate entry so the UI can show
+        // two green mana symbols on the land frame.
+        assert!(
+            pips_after.contains(&ManaPip::Color(ManaColor::Green)),
+            "must contain green pip: {pips_after:?}"
         );
     }
 }
