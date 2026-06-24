@@ -484,7 +484,7 @@ pub enum GameEvent {
         target: TargetRef,
         source_id: ObjectId,
     },
-    /// CR 702.122d: A Vehicle's crew ability resolved.
+    /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
     VehicleCrewed {
         vehicle_id: ObjectId,

@@ -497,7 +497,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // evolve ability's resolution actually put one or more +1/+1 counters on it.
     r.insert(TriggerMode::Evolved, match_evolved);
 
-    // CR 702.122d: Crew trigger matchers
+    // CR 702.122e: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
     r.insert(TriggerMode::BecomesCrewed, match_vehicle_crewed);
 
@@ -2929,7 +2929,7 @@ pub(super) fn match_adapt(
     }
 }
 
-/// CR 701.50b: Connives — fires when a permanent connives.
+/// CR 701.50f: Connives — fires when a permanent connives.
 /// `valid_card` scopes the CONNIVER (the permanent that connived). With no
 /// filter, this is "this creature connives" — match the source by identity
 /// (Ultron's self-connive).
@@ -4086,10 +4086,10 @@ pub(super) fn match_unimplemented(
 }
 
 // ---------------------------------------------------------------------------
-// CR 702.122d: Crew trigger matchers
+// CR 702.122e: Crew trigger matchers
 // ---------------------------------------------------------------------------
 
-/// CR 702.122d: Matches when a Vehicle's crew ability resolves.
+/// CR 702.122e: Matches when a Vehicle's crew ability resolves.
 /// Both `Crewed` and `BecomesCrewed` are semantically identical — different Oracle text
 /// phrasings for the same trigger condition.
 pub(super) fn match_vehicle_crewed(

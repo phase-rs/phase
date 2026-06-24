@@ -6499,7 +6499,7 @@ fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
 /// dynamic count. When the suffix is missing or the inner phrase fails to
 /// parse to a known quantity, the original count (typically `Variable { "X" }`
 /// or `Fixed { value: N }`) is returned unchanged.
-/// CR 701.50e + CR 107.3i: Parse connive count from text after "connive"/"connives".
+/// CR 701.50d + CR 107.3i: Parse connive count from text after "connive"/"connives".
 /// Handles literal N, bare `X` (spell-cost path), and ", where X is <quantity>"
 /// bindings (Spymaster's Vault class).
 fn parse_connive_count_expr<'a>(rest_orig: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
@@ -7536,7 +7536,7 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a + CR 701.50e: "connive" / "connives" — extract optional
+        // CR 702.162a + CR 701.50d: "connive" / "connives" — extract optional
         // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
             let after_verb_lower = &lower[first_word.len()..];

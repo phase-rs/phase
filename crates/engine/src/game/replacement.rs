@@ -1831,7 +1831,7 @@ fn connive_applier(
     let mut current = Some(execute.as_ref());
     while let Some(def) = current {
         match &*def.effect {
-            // CR 701.50a + CR 701.50e: "then that creature connives" runs the
+            // CR 701.50a + CR 701.50d: "then that creature connives" runs the
             // chain's OWN connive at its parsed count (plain connive = Fixed(1);
             // connive N = Fixed(N) / dynamic), NOT the replaced event's count.
             // Resolve the def's QuantityExpr against the conniving permanent as

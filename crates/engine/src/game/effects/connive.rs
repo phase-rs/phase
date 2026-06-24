@@ -23,7 +23,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.50e + CR 107.3i: Dynamic connive counts (e.g. creatures that died
+    // CR 701.50d + CR 107.3i: Dynamic connive counts (e.g. creatures that died
     // this turn) resolve at ability resolution via the shared quantity pipeline.
     let count = match &ability.effect {
         Effect::Connive { count, .. } => {
@@ -84,7 +84,7 @@ pub(crate) fn propose_connive(
             resolve_connive_effect(state, conniver_id, count, events)
         }
         ReplacementResult::Prevented => {
-            // CR 701.50b + CR 701.50c: A replacement fully replaced the connive
+            // CR 701.50f + CR 701.50b: A replacement fully replaced the connive
             // action (Leader's applier already ran the modified action and its
             // own `EffectResolved`). Nothing more to do here.
             Ok(())
@@ -188,7 +188,7 @@ pub(crate) fn resolve_connive_effect(
         ReplacementResult::Execute(_) => {}
         ReplacementResult::Prevented => {
             // Draw was prevented — skip the discard step
-            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
             // id (LKI if it left the battlefield) so "whenever a creature you
             // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
@@ -228,7 +228,7 @@ pub(crate) fn resolve_connive_effect(
         state.waiting_for = WaitingFor::ConniveDiscard {
             player: controller,
             conniver_id,
-            // CR 701.50c: metadata only (the discard handler ignores this field);
+            // CR 701.50b: metadata only (the discard handler ignores this field);
             // the conniving permanent is the natural source reference here.
             source_id: conniver_id,
             cards: hand_cards,
@@ -238,7 +238,7 @@ pub(crate) fn resolve_connive_effect(
         return Ok(());
     }
 
-    // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's id (LKI
+    // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's id (LKI
     // if it left the battlefield) so "whenever a creature you control connives"
     // matches the conniving permanent, not the causing source.
     events.push(GameEvent::EffectResolved {
@@ -286,7 +286,7 @@ fn is_nonland_card(state: &GameState, object_id: ObjectId) -> bool {
 }
 
 /// Add +1/+1 counters to the conniving creature via the replacement pipeline.
-/// CR 701.50c: If the creature left the battlefield, skip the counter.
+/// CR 701.50b: If the creature left the battlefield, skip the counter.
 pub(crate) fn add_connive_counters(
     state: &mut GameState,
     conniver_id: ObjectId,
@@ -296,7 +296,7 @@ pub(crate) fn add_connive_counters(
     if count == 0 {
         return;
     }
-    // CR 701.50c: Skip if the conniver has left the battlefield
+    // CR 701.50b: Skip if the conniver has left the battlefield
     let on_battlefield = state
         .objects
         .get(&conniver_id)
@@ -831,7 +831,7 @@ mod tests {
         );
     }
 
-    /// CR 701.50a + CR 701.50e + CR 614.5 (Leader, Super-Genius): the replacement
+    /// CR 701.50a + CR 701.50d + CR 614.5 (Leader, Super-Genius): the replacement
     /// chain's "then that creature connives" is a PLAIN connive (draw 1, discard
     /// 1), independent of the count of the connive event that was replaced. When a
     /// creature connives with N=2 (e.g. a "connive 2" source), the replacement
@@ -876,7 +876,7 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // CR 701.50a + CR 701.50e: plain connive draws 1 → discard 1 (count=1),
+        // CR 701.50a + CR 701.50d: plain connive draws 1 → discard 1 (count=1),
         // NOT 2. Pre-fix (inheriting N=2) this is count=2.
         assert!(
             matches!(
@@ -1616,7 +1616,7 @@ mod tests {
     /// there (Step 3) runs the deferred connive: its OWN draw (a fresh Draw 1
     /// event) is the lone surviving Prevent's only candidate, so it auto-applies
     /// and the connive's draw is prevented too. Per `resolve_connive_effect`'s
-    /// Prevented arm (CR 701.50b/c) the connive still emits its `EffectResolved`
+    /// Prevented arm (CR 701.50f/b) the connive still emits its `EffectResolved`
     /// and completes. A second Prevent (rather than a count-modifier survivor)
     /// keeps the connive's own draw deterministic — no leftover count-modifier
     /// can non-deterministically scale the connive's draw or re-park it.
@@ -1704,7 +1704,7 @@ mod tests {
         // CRUX (the flip): the leading draw was PREVENTED, but the deferred connive
         // STILL RAN. The dedicated slot is drained to None (NOT stranded) and the
         // connive completed (its own draw was prevented by the surviving Prevent,
-        // so per CR 701.50b/c it emits EffectResolved and finishes). Both
+        // so per CR 701.50f/b it emits EffectResolved and finishes). Both
         // assertions are FALSE pre-fix (Step 3 reverted: the slot stays Some and no
         // EffectResolved { Connive } is emitted).
         assert!(
@@ -1717,7 +1717,7 @@ mod tests {
             "the connive completed (its own draw prevented), returning to Priority, got {:?}",
             state.waiting_for
         );
-        // CR 614.5 + CR 701.50b/c: the connive completes EXACTLY once even though
+        // CR 614.5 + CR 701.50f/b: the connive completes EXACTLY once even though
         // both its leading (Leader-replacement) draw and its own draw were
         // prevented — the connive step itself is independent of the draws.
         assert_eq!(

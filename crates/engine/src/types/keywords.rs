@@ -807,16 +807,16 @@ pub enum Keyword {
     Toxic(u32),
     /// CR 702.171a: Saddle N — tap creatures with total power N+ to saddle this Mount.
     Saddle(u32),
-    /// Teamwork N — "As an additional cost to cast this spell, you may tap any
-    /// number of creatures you control with total power N or more." The spell's
-    /// body then references whether this optional cost was paid ("if this spell
-    /// was cast using teamwork, ...").
+    /// CR 702.194a: Teamwork N — "As an additional cost to cast this spell, you
+    /// may tap any number of creatures you control with total power N or more."
+    /// The spell's body then references whether this optional cost was paid —
+    /// "if this spell was cast using teamwork, ..." (CR 702.194b).
     ///
-    /// Teamwork is not yet in the printed Comprehensive Rules (Marvel Super
-    /// Heroes set keyword). Its tap-any-number-with-total-power-N cost is
-    /// structurally identical to Crew (CR 702.122a) and Saddle (CR 702.171a); it
-    /// is an optional additional cast cost per CR 601.2b/f, and is a keyword
-    /// ability per CR 702.
+    /// Added to the printed Comprehensive Rules in the June 19, 2026 update
+    /// (Marvel Super Heroes set keyword). Its tap-any-number-with-total-power-N
+    /// cost is structurally identical to Crew (CR 702.122a) and Saddle
+    /// (CR 702.171a); paying it follows the additional-cost rules CR 601.2b and
+    /// CR 601.2f–h (CR 702.194a).
     ///
     /// Runtime: `database::synthesis::synthesize_teamwork` builds an
     /// `AdditionalCost::Optional { cost: TapCreatures { requirement:

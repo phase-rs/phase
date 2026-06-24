@@ -192,7 +192,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         },
         handle_rule_mod,
     );
-    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    // CR 702.122d: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
@@ -1341,7 +1341,7 @@ fn static_condition_matches_context(
     })
 }
 
-/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+/// CR 702.122d: Returns true when the creature has an active "can't crew Vehicles" static.
 pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     state.objects.get(&object_id).is_some_and(|obj| {
         super::functioning_abilities::active_static_definitions(state, obj)
@@ -1349,7 +1349,7 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
-/// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
+/// CR 702.122a / 702.171a / 702.184c: The power a creature contributes toward a
 /// crew / saddle / station cost, after applying any active `CrewContribution`
 /// static whose action list contains `action`. "Using its toughness rather than
 /// its power" substitutes the creature's toughness for its base power; "as

@@ -36995,7 +36995,7 @@ mod tests {
         );
     }
 
-    /// CR 701.50e + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
+    /// CR 701.50d + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
     /// bind X to creatures that died this turn, not hardcode 1.
     #[test]
     fn connive_where_x_is_creatures_died_this_turn() {

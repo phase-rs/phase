@@ -18688,7 +18688,7 @@ fn eriette_charmed_apple_static_and_trigger_parse() {
     }
 }
 
-/// CR 702.122c / 702.171a / 702.184a: crew/saddle/station power-contribution
+/// CR 702.122a / 702.171a / 702.184c: crew/saddle/station power-contribution
 /// modifiers (Reckoner Bankbuster, the "Roads" cycle, Giant Ox, Stoic
 /// Star-Captain) parse into a `CrewContribution` static carrying the kind and
 /// the named action list.

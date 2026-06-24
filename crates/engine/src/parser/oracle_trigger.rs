@@ -8059,7 +8059,7 @@ fn try_parse_event(
         Exploits,
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
-        /// CR 701.50b: A permanent "connives" after the connive process completes.
+        /// CR 701.50f: A permanent "connives" after the connive process completes.
         Connives,
         /// CR 702.100b: A creature "evolves" when +1/+1 counters are put on it
         /// as a result of its evolve ability resolving.
@@ -8103,7 +8103,7 @@ fn try_parse_event(
             value(SimpleEvent::BecomesBlocked, tag("become blocked")),
             // CR 702.171b: Mount becomes saddled (saddled designation acquired).
             value(SimpleEvent::BecomesSaddled, tag("becomes saddled")),
-            // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — trigger fires
+            // CR 702.122e: "Whenever [this Vehicle] becomes crewed" — trigger fires
             // when a crew ability of this Vehicle resolves. Needed for Mighty Servant
             // of Leuk-O, Mindlink Mech, etc.
             value(SimpleEvent::BecomesCrewed, tag("becomes crewed")),
@@ -8215,7 +8215,7 @@ fn try_parse_event(
             // CR 701.44b: "explores" / "explore" — explore trigger
             value(SimpleEvent::Explores, tag("explores")),
             value(SimpleEvent::Explores, tag("explore")),
-            // CR 701.50b: "connives" — connive trigger (fires after the connive
+            // CR 701.50f: "connives" — connive trigger (fires after the connive
             // process completes).
             value(SimpleEvent::Connives, tag("connives")),
             // CR 702.100b: "evolves" / "evolve" — evolve trigger
@@ -8381,7 +8381,7 @@ fn try_parse_event(
                 if !remaining.trim().is_empty() {
                     return None;
                 }
-                // CR 701.50b: "connives" fires after the connive process completes.
+                // CR 701.50f: "connives" fires after the connive process completes.
                 // `subject` ("a creature you control" / "~") scopes the conniver.
                 def.mode = TriggerMode::Connives;
                 def.valid_card = Some(subject.clone());
@@ -8412,7 +8412,7 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesCrewed => {
-                // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — fires when
+                // CR 702.122e: "Whenever [this Vehicle] becomes crewed" — fires when
                 // a crew ability of this Vehicle resolves. Runtime matcher
                 // (match_vehicle_crewed) already handles TriggerMode::BecomesCrewed.
                 def.mode = TriggerMode::BecomesCrewed;
