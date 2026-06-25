@@ -220,12 +220,15 @@ jobs:
         # Unlike the regression check above (supported flips only), this diffs
         # the full parse_details tree.
         #
-        # Baseline = the PR's base.sha published coverage, fetched by its
-        # engine-source hash; head = the coverage built above from the merge
-        # commit (base.sha + PR). So head - baseline isolates EXACTLY this PR's
-        # parse changes, with no second coverage build and no cross-PR
-        # contamination — even when the PR is behind main (both sides move in
-        # lockstep). Path filter: identical engine-source hash => no parse
+        # Baseline = the published coverage of the EXACT main commit this CI
+        # merge commit was built on (the merge commit's non-head parent),
+        # fetched by its engine-source hash; head = the coverage built above
+        # from that same merge commit. So head - baseline isolates EXACTLY this
+        # PR's parse changes, with no second coverage build and no cross-PR
+        # contamination — even when the PR is behind main, or has main merged
+        # into it (both sides move in lockstep because the base is read off the
+        # merge commit, not the frozen webhook base.sha). Path filter: identical
+        # engine-source hash => no parse
         # change is possible => skip before the bin build. --features cli keeps
         # the same [tool, cli] engine fingerprint as the steps above (lib cache
         # hit; only the new bin links).
@@ -233,10 +236,33 @@ jobs:
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PAYLOAD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # Derive the baseline from the ACTUAL main commit this CI merge commit
+          # was built on — its non-head parent — NOT the webhook payload's
+          # base.sha. The payload value freezes at event-creation time, but the
+          # checked-out refs/pull/N/merge floats: GitHub recomputes it against
+          # main's tip whenever main advances or the contributor merges main into
+          # the branch. When the two diverge, head carries the newer main while a
+          # payload-base.sha baseline does not, so head - baseline leaks every
+          # intervening main parse change into this PR's diff (this contaminated
+          # #4303: a one-card autotap fix whose comment listed 25 unrelated
+          # cards). Reading the base off the merge commit's parent keeps both
+          # sides in lockstep no matter how stale (or main-merged) the PR is.
+          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            P1="$(git rev-parse HEAD^1)"
+            P2="$(git rev-parse HEAD^2)"
+            # Parent order is not contractual across GitHub's merge-ref build, so
+            # pick whichever parent is NOT the PR head as the base (main) side.
+            if [ "$P1" = "$HEAD_SHA" ]; then BASE_SHA="$P2"; else BASE_SHA="$P1"; fi
+          else
+            # Unmergeable PR (no synthetic merge commit) — nothing to pin to;
+            # fall back to the payload base.sha.
+            BASE_SHA="$PAYLOAD_BASE_SHA"
+          fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
           HEAD_HASH="$(./scripts/engine-source-hash.sh HEAD)"
@@ -315,9 +341,10 @@ jobs:
         # Content-addressed sibling of the mutable preview/coverage-data.json
         # write above: an immutable copy keyed by THIS commit's engine-source
         # hash. The PR-side "Parse-detail diff" step fetches the copy matching
-        # its base.sha's hash, so its baseline is the exact main it forked onto
-        # — never the lagging preview/ snapshot (which mixes in other PRs'
-        # changes). Identical-source commits dedupe to one object, so storage is
+        # its CI merge commit's base parent's hash, so its baseline is the exact
+        # main that merge commit was built on — never the lagging preview/
+        # snapshot (which mixes in other PRs' changes). Identical-source commits
+        # dedupe to one object, so storage is
         # bounded by distinct parser states, not commit count. best-effort
         # (continue-on-error): a missed publish just defers a PR's comment to
         # "baseline pending" until the next main push, never wedges main.

@@ -6,11 +6,13 @@
 # is computed on BOTH sides of the coverage-parse-diff flow:
 #
 #   - publish (main-push CI): hash HEAD, upload coverage-data-<hash>.json to R2.
-#   - fetch (PR CI): hash the PR's base.sha, fetch coverage-data-<hash>.json.
+#   - fetch (PR CI): hash the merge commit's base (main) parent, fetch
+#     coverage-data-<hash>.json.
 #
-# Because the head coverage is built from the merge commit (base.sha + PR), a
-# baseline keyed by base.sha's hash makes `head - baseline` cancel to exactly
-# the PR's parse changes (see .github/workflows/ci.yml "Parse-detail diff").
+# Because the head coverage is built from the merge commit and the baseline is
+# keyed by that merge commit's own base parent's hash, `head - baseline` cancels
+# to exactly the PR's parse changes — even if the PR is stale or has main merged
+# into it (see .github/workflows/ci.yml "Parse-detail diff").
 #
 # The fingerprint covers exactly the inputs that determine parse output and
 # mirrors the cardgen-cache key (ci.yml): the engine source tree, the engine
@@ -18,7 +20,7 @@
 #
 # Implemented with `git ls-tree -r` rather than `hashFiles`/working-tree hashing
 # so it is computable for ANY commit straight from history — no checkout — which
-# is what lets the PR side hash base.sha without disturbing its checked-out tree.
+# is what lets the PR side hash the base commit without disturbing its tree.
 #
 # Usage: scripts/engine-source-hash.sh <commit-ish>
 set -euo pipefail
