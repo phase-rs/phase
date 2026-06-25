@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine::game::combat::{can_block_pair, AttackTarget};
 use engine::game::commander::commander_lethal_headroom;
@@ -618,7 +618,13 @@ pub fn choose_blockers_with_profile(
     valid_block_targets: Option<&HashMap<ObjectId, Vec<ObjectId>>>,
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
-    let mut used_blockers = Vec::new();
+    // CR 509.1a: `used_blockers` / `blocked_attackers` are membership indices over
+    // the assignment set, hot on large boards (token swarms) where the per-pass
+    // `Vec::contains` / `iter().any()` scans were O(blockers²) / O(attackers ·
+    // assignments). HashSet lookups make them O(1); the produced assignments are
+    // identical because neither set is ever iterated, only membership-tested.
+    let mut used_blockers: HashSet<ObjectId> = HashSet::new();
+    let mut blocked_attackers: HashSet<ObjectId> = HashSet::new();
     let objective = determine_block_objective(state, player, attacker_ids, profile);
 
     // Collect available blockers and their pre-computed values in one pass.
@@ -691,14 +697,15 @@ pub fn choose_blockers_with_profile(
         }) {
             let blocker_id = available_blockers[pos];
             assignments.push((blocker_id, attacker_id));
-            used_blockers.push(blocker_id);
+            used_blockers.insert(blocker_id);
+            blocked_attackers.insert(attacker_id);
         }
     }
 
     // Second pass: assign remaining blockers where they'd survive.
     // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
     for &(attacker_id, attacker_value) in &sorted_attackers {
-        if assignments.iter().any(|&(_, a)| a == attacker_id) {
+        if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
         }
 
@@ -799,7 +806,8 @@ pub fn choose_blockers_with_profile(
                     || should_chump_race)
             {
                 assignments.push((blocker_id, attacker_id));
-                used_blockers.push(blocker_id);
+                used_blockers.insert(blocker_id);
+                blocked_attackers.insert(attacker_id);
             }
         }
     }
@@ -808,7 +816,7 @@ pub fn choose_blockers_with_profile(
     // when no single blocker can kill it but combined power can.
     // Only gang-block when the combined blocker value is less than the attacker value.
     for &(attacker_id, attacker_value) in &sorted_attackers {
-        if assignments.iter().any(|&(_, a)| a == attacker_id) {
+        if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
         }
         let attacker = match state.objects.get(&attacker_id) {
@@ -917,8 +925,9 @@ pub fn choose_blockers_with_profile(
         {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
-                used_blockers.push(bid);
+                used_blockers.insert(bid);
             }
+            blocked_attackers.insert(attacker_id);
         }
     }
 
@@ -928,7 +937,7 @@ pub fn choose_blockers_with_profile(
         let p_life = state.players[player.0 as usize].life;
         let unblocked_damage: i32 = sorted_attackers
             .iter()
-            .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+            .filter(|&&(aid, _)| !blocked_attackers.contains(&aid))
             .filter_map(|&(aid, _)| state.objects.get(&aid))
             .map(|obj| obj.power.unwrap_or(0))
             .sum();
@@ -940,7 +949,7 @@ pub fn choose_blockers_with_profile(
             // estimate 1 here (minimum toughness) and refine at assignment time.
             let mut unblocked: Vec<(ObjectId, i32, i32)> = sorted_attackers
                 .iter()
-                .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+                .filter(|&&(aid, _)| !blocked_attackers.contains(&aid))
                 .filter_map(|&(aid, _)| {
                     let obj = state.objects.get(&aid)?;
                     let power = obj.power.unwrap_or(0);
@@ -980,7 +989,8 @@ pub fn choose_blockers_with_profile(
                             .unwrap_or(false)
                 }) {
                     assignments.push((blocker_id, attacker_id));
-                    used_blockers.push(blocker_id);
+                    used_blockers.insert(blocker_id);
+                    blocked_attackers.insert(attacker_id);
                     // CR 702.19b: Trample only requires lethal damage assigned to blocker;
                     // excess tramples through. A chump block only prevents blocker_toughness.
                     let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
@@ -1001,7 +1011,7 @@ pub fn choose_blockers_with_profile(
         // lethality from commander B, so iterate each unblocked commander attacker
         // independently and chump if a safe (non-trample-defeated) blocker exists.
         for &(attacker_id, _) in &sorted_attackers {
-            if assignments.iter().any(|&(_, a)| a == attacker_id) {
+            if blocked_attackers.contains(&attacker_id) {
                 continue; // Already blocked
             }
             let attacker = match state.objects.get(&attacker_id) {
@@ -1037,7 +1047,8 @@ pub fn choose_blockers_with_profile(
             });
             if let Some(&blocker_id) = safe_blocker {
                 assignments.push((blocker_id, attacker_id));
-                used_blockers.push(blocker_id);
+                used_blockers.insert(blocker_id);
+                blocked_attackers.insert(attacker_id);
             }
             // No safe chump exists — accept the loss on this commander rather than
             // wasting a creature that won't actually save the player. Continue to
