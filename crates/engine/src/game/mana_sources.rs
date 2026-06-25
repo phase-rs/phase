@@ -654,11 +654,13 @@ pub fn display_land_mana_pips(
 
     // CR 605.1b + CR 106.12a: include pips from TapsForMana-triggered auras
     // (Wild Growth, Fertile Ground, Utopia Sprawl, etc.) so the land frame
-    // reflects its full tapped output, not just its own activated ability.
+    // reflects its full tapped output. Bypass the deduplicating `push`
+    // closure: each aura adds an *additional* mana unit, not an alternative,
+    // so Forest + Wild Growth shows two {G} pips, not one.
     for mana_type in taps_for_mana_aura_bonus(state, object_id, controller) {
         match mana_type_to_color(mana_type) {
-            Some(color) => push(&mut pips, ManaPip::Color(color)),
-            None => push(&mut pips, ManaPip::Colorless),
+            Some(color) => pips.push(ManaPip::Color(color)),
+            None => pips.push(ManaPip::Colorless),
         }
     }
 
@@ -1298,9 +1300,18 @@ fn land_mana_options(
             // Keep mana_type as the first element for backward-compatible
             // single-color consumers that don't read atomic_combination.
             opt.mana_type = combined[0];
+            // Set source_could_produce_two_or_more_colors from the distinct
+            // non-colorless colors in the combined output (CR 106.1b).
+            // Forest + Wild Growth = {G}{G}: same color, flag stays false.
+            // Breeding Pool + Wild Growth = {U}/{G} + {G}: already true.
+            let distinct_color_count = combined
+                .iter()
+                .filter_map(|&mt| mana_type_to_color(mt))
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            opt.source_could_produce_two_or_more_colors =
+                opt.source_could_produce_two_or_more_colors || distinct_color_count >= 2;
             opt.atomic_combination = Some(combined);
-            // A multi-element atomic combination always qualifies.
-            opt.source_could_produce_two_or_more_colors = true;
         }
     }
 
@@ -1796,12 +1807,18 @@ pub(crate) fn taps_for_mana_aura_bonus(
 ) -> Vec<ManaType> {
     let mut bonus: Vec<ManaType> = Vec::new();
     for &object_id in state.battlefield.iter() {
+        // Skip the land itself — we're looking for OTHER permanents whose
+        // TapsForMana trigger fires when `land_id` is tapped.
+        if object_id == land_id {
+            continue;
+        }
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
-        if obj.controller != controller || object_id == land_id {
-            continue;
-        }
+        // Intentionally NOT filtering by obj.controller: an opponent can
+        // control an aura attached to your land (e.g., via Aura Theft), and
+        // the trigger still fires for the tapping player when the land is
+        // tapped. `taps_for_mana_card_matches` handles the attachment check.
         for trigger in obj.trigger_definitions.iter_all() {
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
@@ -1817,6 +1834,8 @@ pub(crate) fn taps_for_mana_aura_bonus(
             let Effect::Mana { produced, .. } = &*execute.effect else {
                 continue;
             };
+            // Mana always goes to the tapping player's pool (CR 605.1b),
+            // regardless of which player controls the aura.
             let types =
                 super::effects::mana::resolve_mana_types(produced, state, controller, object_id);
             bonus.extend(types);
@@ -3383,11 +3402,19 @@ mod tests {
             Some(vec![ManaType::Green, ManaType::Green]),
             "Wild Growth bonus must be folded into the atomic combination"
         );
-        assert!(opt.source_could_produce_two_or_more_colors);
+        // Forest + Wild Growth = {G}{G}: same color, so the two-or-more-colors
+        // flag must NOT be set (CR 106.1b counts distinct colors, not quantity).
+        assert!(!opt.source_could_produce_two_or_more_colors);
     }
 
     /// Issue #4265: `max_mana_yield` counts the aura bonus so X-value
     /// choosers know the enchanted land produces 2, not 1.
+    ///
+    /// `max_mana_yield` uses `activatable_mana_options` for its subtype-only
+    /// fallback, which does NOT include the basic-subtype synthesised option
+    /// that `land_mana_options` adds. Production Forests always carry an
+    /// explicit `{T}: Add {G}` ability from the parser, so the test mirrors
+    /// that by adding `verge_ability(Green)` (a plain `{T}: Add {G}`).
     #[test]
     fn max_mana_yield_counts_wild_growth_aura_bonus() {
         let mut state = GameState::new_two_player(42);
@@ -3403,6 +3430,8 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Land);
             obj.card_types.subtypes.push("Forest".to_string());
             obj.entered_battlefield_turn = Some(1);
+            // Mirror production: real Forests carry an explicit {T}: Add {G}.
+            Arc::make_mut(&mut obj.abilities).push(verge_ability(ManaColor::Green));
         }
 
         assert_eq!(max_mana_yield(&state, forest, PlayerId(0)), 1, "baseline");
@@ -3438,12 +3467,16 @@ mod tests {
 
         attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
         let pips_after = display_land_mana_pips(&state, forest, PlayerId(0));
-        // The existing pip deduplication keeps pips unique per type; Wild
-        // Growth adds a second {G} pip as a separate entry so the UI can show
-        // two green mana symbols on the land frame.
-        assert!(
-            pips_after.contains(&ManaPip::Color(ManaColor::Green)),
-            "must contain green pip: {pips_after:?}"
+        // Aura bonus pips bypass the deduplication closure so the UI frame
+        // shows two {G} symbols: one from the land's own activated ability and
+        // one from Wild Growth's trigger.
+        assert_eq!(
+            pips_after,
+            vec![
+                ManaPip::Color(ManaColor::Green),
+                ManaPip::Color(ManaColor::Green)
+            ],
+            "Forest + Wild Growth must show two green pips: {pips_after:?}"
         );
     }
 }
