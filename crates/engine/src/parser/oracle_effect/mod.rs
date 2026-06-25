@@ -23878,13 +23878,25 @@ mod tests {
     }
 
     #[test]
-    fn counter_suffix_body_dynamic_count_rejects_partial_quantity_tail() {
-        assert!(
-            parse_counter_suffix_body_combinator(
-                "a number of time counters on it equal to its mana value plus one",
-            )
-            .is_err(),
-            "partial quantity tail must not parse as bare ObjectManaValue"
+    fn counter_suffix_body_dynamic_count_parses_its_mana_value_plus_one() {
+        // CR 107.1b: composed "equal to" tails (offset/sum/multiply) must parse
+        // through the full CDA grammar — not silently truncate at the first ref.
+        let (rest, (counter, count)) = parse_counter_suffix_body_combinator(
+            "a number of time counters on it equal to its mana value plus one",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(counter, crate::types::counter::CounterType::Time);
+        assert_eq!(
+            count,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient,
+                    },
+                }),
+                offset: 1,
+            },
         );
     }
 

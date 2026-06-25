@@ -829,6 +829,23 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // CR 208.1 / CR 107.1: General "the difference between A and B" over any
+    // two independently parsed quantity expressions. The unsigned `.abs()`
+    // resolution is an Oracle templating convention (cf. the P/T arm above).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the difference between ").parse(text) {
+        if let Ok((_, (left_text, right_text))) = nom_primitives::split_once_on(rest, " and ") {
+            if let (Some(left), Some(right)) = (
+                parse_cda_quantity_with_context(left_text.trim(), ctx),
+                parse_cda_quantity_with_context(right_text.trim(), ctx),
+            ) {
+                return Some(QuantityExpr::Difference {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                });
+            }
+        }
+    }
+
     if let Ok((rest, qty)) = nom_quantity::parse_quantity_ref.parse(text) {
         if rest.is_empty() {
             return Some(QuantityExpr::Ref {
@@ -2115,6 +2132,36 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
     parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
+/// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
+/// turn by any player, excluding the resolving spell. Composes
+/// `SpellsCastThisTurn { scope: All }` with offset −1, clamped at zero.
+/// Uses `All` (not `Controller`) because Oracle text counts every other
+/// spell, including opponents'.
+fn parse_other_spells_cast_this_turn_for_each(clause: &str) -> Option<QuantityExpr> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("other "),
+        alt((tag("spell"), tag("spells"))),
+        tag(" cast this turn"),
+    )
+        .parse(clause.trim())
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::All,
+                    filter: None,
+                },
+            }),
+            offset: -1,
+        }),
+        minimum: 0,
+    })
+}
+
 pub(crate) fn parse_for_each_clause_expr_with_context(
     clause: &str,
     ctx: &ParseContext,
@@ -2134,6 +2181,10 @@ fn parse_for_each_clause_expr_with_parser(
     use nom::multi::separated_list1;
 
     let clause = clause.trim().trim_end_matches('.');
+
+    if let Some(expr) = parse_other_spells_cast_this_turn_for_each(clause) {
+        return Some(expr);
+    }
 
     if let Ok((rest, expr)) = parse_target_hand_type_or_color_clause(clause) {
         if rest.is_empty() {
@@ -4603,6 +4654,35 @@ mod tests {
             }
             other => panic!("Expected Multiply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cda_quantity_difference_between_two_counts() {
+        let qty = parse_cda_quantity(
+            "the difference between the number of cards in your hand and the number of cards in your graveyard",
+        )
+        .unwrap();
+        assert!(matches!(qty, QuantityExpr::Difference { .. }));
+    }
+
+    #[test]
+    fn for_each_other_spells_cast_this_turn() {
+        let qty = parse_for_each_clause_expr("other spell cast this turn").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::All,
+                            filter: None,
+                        },
+                    }),
+                    offset: -1,
+                }),
+                minimum: 0,
+            },
+        );
     }
 
     #[test]

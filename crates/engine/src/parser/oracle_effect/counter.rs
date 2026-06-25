@@ -510,16 +510,19 @@ fn parse_counter_equal_to(
         return Ok((rest, qty));
     }
 
-    // CR 706.2: event-context back-reference fallback ("equal to the result").
+    // CR 107.1b: Composed dynamic quantities ("equal to twice …", "equal to
+    // the greatest … among …") live in the CDA grammar, not the nom leaf ref
+    // table. Isolate the phrase up to the first clause boundary so trailing
+    // ", then …" clauses stay in the remainder.
     let (after_equal, _) = tag("equal to ").parse(input)?;
-    // Isolate the quantity phrase from any trailing clause via a nom combinator
-    // (take everything up to the first clause separator). Event-context phrases
-    // are short and clause-final in the counter templates that reach this
-    // fallback; the tail after the separator is preserved as the remainder so a
-    // following clause (", then …") is never swallowed.
     let (_, phrase) =
         take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
     let phrase = phrase.trim_end();
+    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+        return Ok((&after_equal[phrase.len()..], expr));
+    }
+
+    // CR 706.2: event-context back-reference fallback ("equal to the result").
     match crate::parser::oracle_quantity::parse_event_context_quantity(phrase) {
         // Remainder starts immediately after the consumed phrase (before any
         // trailing whitespace), preserving the original clause boundary.

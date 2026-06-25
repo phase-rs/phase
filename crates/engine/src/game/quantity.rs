@@ -9158,6 +9158,79 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
     }
 
+    /// Storm Entity's "for each other spell cast this turn": `CountScope::All`
+    /// plus offset −1 must count opponent spells while excluding the resolving
+    /// spell.
+    #[test]
+    fn resolve_quantity_other_spells_cast_this_turn_counts_opponent_spells() {
+        fn other_spell_cast_this_turn_expr() -> QuantityExpr {
+            QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::All,
+                            filter: None,
+                        },
+                    }),
+                    offset: -1,
+                }),
+                minimum: 0,
+            }
+        }
+
+        fn dummy_spell() -> SpellCastRecord {
+            SpellCastRecord {
+                name: String::new(),
+                core_types: vec![CoreType::Instant],
+                supertypes: vec![],
+                subtypes: vec![],
+                keywords: vec![],
+                colors: vec![ManaColor::Red],
+                mana_value: 1,
+                has_x_in_cost: false,
+                from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
+            }
+        }
+
+        let mut state = GameState::new_two_player(42);
+        // Opponent cast a spell earlier this turn.
+        state
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(1), crate::im::Vector::from(vec![dummy_spell()]));
+        // Controller cast only Storm Entity (the resolving spell).
+        state
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(0), crate::im::Vector::from(vec![dummy_spell()]));
+
+        let expr = other_spell_cast_this_turn_expr();
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "opponent's spell must count; resolving Storm Entity excluded by -1"
+        );
+
+        // Controller-only scope would incorrectly yield 0 here (1 own spell − 1).
+        let controller_only = QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
+                }),
+                offset: -1,
+            }),
+            minimum: 0,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &controller_only, PlayerId(0), ObjectId(1)),
+            0,
+            "Controller scope must not count opponent spells"
+        );
+    }
+
     #[test]
     fn resolve_quantity_lands_played_this_turn_filters_origin_zone() {
         let mut state = GameState::new_two_player(42);

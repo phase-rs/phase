@@ -6878,9 +6878,10 @@ pub(crate) fn parse_counter_suffix_body_combinator(
 /// its mana value") AND for the post-token "create a … token and put[s] a
 /// number of <type> counters on it equal to <quantity>" form (Oversimplify,
 /// Fractal Anomaly class). Delegates the quantity to the shared
-/// `parse_quantity_ref` building block so any "<verb> a number of X
-/// counters … equal to …" card parses through the same combinator. CR 614.1c
-/// is the authorizing rule for "enters with counters" replacement effects.
+/// `parse_cda_quantity` building block so any "<verb> a number of X
+/// counters … equal to …" card parses composed dynamic quantities
+/// (twice/half/aggregate/difference), not just bare refs. CR 614.1c is the
+/// authorizing rule for "enters with counters" replacement effects.
 pub(crate) fn parse_dynamic_counter_suffix_body(
     input: &str,
 ) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
@@ -6890,10 +6891,16 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
     let (rest, _) = tag(" counter").parse(rest)?;
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
     let (rest, _) = tag(" on it equal to ").parse(rest)?;
-    // Quantity: delegate to the shared quantity-ref combinator. Consume the
-    // full clause (including any trailing period) so callers see it consumed.
-    let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
-    Ok(("", (counter_type, QuantityExpr::Ref { qty })))
+    // Quantity: delegate to the full CDA quantity grammar so composed forms
+    // (twice/half/aggregate/difference/sum) parse in enter-with-counters slots.
+    let qty_text = rest.trim_end_matches('.').trim();
+    let Some(qty) = parse_cda_quantity(qty_text) else {
+        return Err(nom::Err::Failure(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok(("", (counter_type, qty)))
 }
 
 #[cfg(test)]
@@ -6906,8 +6913,9 @@ mod tests {
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Duration, Effect, ObjectScope,
-        PtValue, QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
+        AbilityDefinition, AbilityKind, AggregateFunction, DelayedTriggerCondition, Duration,
+        Effect, ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+        TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
@@ -7077,6 +7085,27 @@ mod tests {
     fn plain_this_turn_not_owned_by_value_quantity() {
         assert!(!value_quantity_clause_owns_this_turn_suffix(
             "creatures you control get +1/+1 this turn"
+        ));
+    }
+
+    /// CR 614.1c: dynamic enter-with-counters suffix accepts composed quantities.
+    #[test]
+    fn dynamic_counter_suffix_parses_aggregate_equal_to() {
+        use super::parse_dynamic_counter_suffix_body;
+        let (_, (counter_type, count)) = parse_dynamic_counter_suffix_body(
+            "a number of +1/+1 counters on it equal to the greatest mana value among cards in exile",
+        )
+        .unwrap();
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::ManaValue,
+                    ..
+                }
+            }
         ));
     }
 

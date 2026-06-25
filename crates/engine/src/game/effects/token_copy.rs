@@ -2676,6 +2676,59 @@ mod tests {
         );
     }
 
+    /// CR 205.4 + CR 707.9d: Adagia, Windswept Bastion class —
+    /// `additional_modifications: [AddSupertype(Legendary)]` grants Legendary
+    /// to a token copy of a non-legendary permanent.
+    #[test]
+    fn copy_token_add_supertype_grants_legendary_to_nonlegendary_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(
+            token.card_types.supertypes.contains(&Supertype::Legendary),
+            "token must be Legendary; got {:?}",
+            token.card_types.supertypes
+        );
+    }
+
     /// CR 704.5j + CR 707.9b: Issue #685 regression. When token-copy strips
     /// the Legendary supertype via `additional_modifications`, the legend
     /// rule SBA must NOT prompt the controller to choose which copy to

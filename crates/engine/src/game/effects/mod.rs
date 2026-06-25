@@ -6577,6 +6577,27 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
+            && matches!(ability.effect, Effect::Draw { .. })
+            && matches!(sub.effect, Effect::Reveal { .. })
+        {
+            // CR 701.20a: "Draw N cards and reveal them" — the pronoun refers to
+            // the cards that just moved into the hand, not a separate library
+            // reveal. Forward the draw's ZoneChanged objects as reveal targets
+            // (Mad Wizard's Lair and the same draw-then-reveal class).
+            let mut sub_with_targets = sub.as_ref().clone();
+            sub_with_targets.targets = state
+                .last_zone_changed_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect();
+            apply_parent_chain_context(
+                &mut sub_with_targets,
+                ability,
+                effect_context_object.as_ref(),
+            );
+            resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::ExileTop { .. })
             && !effect_uses_implicit_tracked_set_targets(&sub.effect)
         {

@@ -150,10 +150,10 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, CastingPermission, ContinuousModification, ControllerRef,
-    Duration, Effect, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    ResolvedAbility, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCondition, AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission,
+    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -400,16 +400,7 @@ pub fn room_effects(
         // 8: Mad Wizard's Lair — "Draw three cards and reveal them. You may cast one of them
         //    without paying its mana cost."
         (DungeonId::DungeonOfTheMadMage, 8) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Mad Wizard's Lair".to_string(),
-                    description: Some(
-                        "Draw three cards and reveal them. You may cast one without paying its mana cost.".to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
+            mad_wizards_lair(source_id, controller),
             vec![],
         ),
 
@@ -957,6 +948,48 @@ fn throne_of_dead_three(source_id: ObjectId, controller: PlayerId) -> ResolvedAb
     const ORACLE: &str = "Reveal the top ten cards of your library. Put a creature card from among them onto the battlefield with three +1/+1 counters on it. It gains hexproof until your next turn. Then shuffle.";
     let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
     patch_throne_parsed_chain(build_resolved_from_def(&def, source_id, controller))
+}
+
+/// CR 309.4c: Dungeon of the Mad Mage room 8 (Mad Wizard's Lair) — draw three,
+/// reveal them, optionally cast one without paying its mana cost.
+fn mad_wizards_lair(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    let mut draw = simple(
+        Effect::Draw {
+            count: fixed(3),
+            target: TargetFilter::Controller,
+        },
+        source_id,
+        controller,
+    );
+
+    let reveal = simple(
+        Effect::Reveal {
+            target: TargetFilter::Any,
+        },
+        source_id,
+        controller,
+    );
+
+    let mut cast = simple(
+        Effect::CastFromZone {
+            target: TargetFilter::LastRevealed,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::DuringResolution,
+        },
+        source_id,
+        controller,
+    );
+    cast.optional = true;
+
+    let mut reveal = reveal;
+    reveal.sub_ability = Some(Box::new(cast));
+    draw.sub_ability = Some(Box::new(reveal));
+    draw
 }
 
 /// The oracle parser covers reveal / hexproof / shuffle but the dig-from-among form
@@ -1586,6 +1619,68 @@ mod tests {
     #[test]
     fn room_effects_undercity_throne_of_dead_three() {
         assert_throne_room_chain(&undercity_effect(8));
+    }
+
+    fn mad_mage_effect(room: u8) -> ResolvedAbility {
+        room_effects(
+            DungeonId::DungeonOfTheMadMage,
+            room,
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .0
+    }
+
+    #[test]
+    fn room_effects_mad_mage_deep_mines_scry() {
+        let ability = mad_mage_effect(7);
+        assert_no_unimplemented_resolved(&ability);
+        assert!(
+            matches!(
+                ability.effect,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "Deep Mines must scry 3, got {:?}",
+            ability.effect
+        );
+    }
+
+    #[test]
+    fn room_effects_mad_wizards_lair_draw_reveal_free_cast() {
+        let ability = mad_mage_effect(8);
+        assert_no_unimplemented_resolved(&ability);
+        assert!(
+            matches!(
+                ability.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "Mad Wizard's Lair must draw three, got {:?}",
+            ability.effect
+        );
+        assert!(
+            resolved_chain_contains(&ability, |effect| {
+                matches!(effect, Effect::Reveal { .. })
+            }),
+            "Mad Wizard's Lair must reveal the drawn cards, got {:?}",
+            ability
+        );
+        assert!(
+            resolved_chain_contains(&ability, |effect| matches!(
+                effect,
+                Effect::CastFromZone {
+                    without_paying_mana_cost: true,
+                    ..
+                }
+            )),
+            "Mad Wizard's Lair must offer a free cast, got {:?}",
+            ability
+        );
     }
 
     // ── Baldur's Gate Wilderness room effect tests ────────────────────
