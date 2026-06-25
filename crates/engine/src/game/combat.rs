@@ -663,6 +663,7 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
         .collect()
 }
 
+/// CR 509.1b: Block restriction — these statics make a block declaration illegal.
 /// Re-resolve a precomputed `CantBeBlocked*` static against `attacker_id`,
 /// applying the SAME `affected` + `condition` filter stack as
 /// `block_restriction_statics_against` but without re-walking the battlefield.
@@ -702,6 +703,7 @@ fn block_restriction_statics_against_from_precomputed<'a>(
     })
 }
 
+/// CR 509.1b: Blocker-side restriction ("~ can't block").
 /// Precomputed counterpart of `blocker_restriction_statics_for`.
 fn blocker_restriction_statics_for_from_precomputed<'a>(
     state: &'a GameState,
@@ -735,6 +737,7 @@ fn blocker_restriction_statics_for_from_precomputed<'a>(
     })
 }
 
+/// CR 509.1b: Block-restriction exception ("~ can't block except …").
 /// Precomputed counterpart of `blocker_block_allowed_statics_for`.
 fn blocker_allowed_statics_for_from_precomputed<'a>(
     state: &'a GameState,
@@ -768,6 +771,7 @@ fn blocker_allowed_statics_for_from_precomputed<'a>(
     })
 }
 
+/// CR 509.1c: Block requirement ("~ must be blocked if able").
 /// Precomputed counterpart of `must_be_blocked_statics_for_attacker`.
 fn must_be_blocked_statics_for_attacker_from_precomputed<'a>(
     state: &'a GameState,
@@ -2967,6 +2971,8 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     )
 }
 
+/// CR 509.1b: Pairwise block legality (restriction checks: can't-block,
+/// can't-be-blocked-by, landwalk, horsemanship).
 /// Precomputed-slice variant of [`can_block_pair`]: identical legality logic, but
 /// the three static scans read from caller-collected slices instead of re-walking
 /// the battlefield. Hoist [`collect_blocker_restriction_statics`],
@@ -3207,6 +3213,8 @@ pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
     min_blockers_required_from_precomputed(state, attacker_id, &block_restriction)
 }
 
+/// CR 702.111b + CR 509.1b: Minimum blockers required (menace floor of 2 and any
+/// `MinBlockers` restriction floor).
 /// Precomputed-slice variant of [`min_blockers_required`]. Hoist
 /// [`collect_block_restriction_statics`] once before any attacker loop.
 pub fn min_blockers_required_from_precomputed(
@@ -3246,6 +3254,7 @@ pub fn max_blockers_allowed(state: &GameState, attacker_id: ObjectId) -> Option<
     max_blockers_allowed_from_precomputed(state, attacker_id, &block_restriction)
 }
 
+/// CR 509.1b: Maximum blockers allowed (`CantBeBlockedByMoreThan` restriction).
 /// Precomputed-slice variant of [`max_blockers_allowed`]. Hoist
 /// [`collect_block_restriction_statics`] once before any attacker loop.
 pub fn max_blockers_allowed_from_precomputed(
