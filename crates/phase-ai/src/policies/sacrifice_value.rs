@@ -4,7 +4,6 @@ use engine::types::player::PlayerId;
 
 use crate::features::DeckFeatures;
 
-use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::sacrifice_cost;
@@ -52,18 +51,28 @@ impl TacticalPolicy for SacrificeValuePolicy {
 
     fn activation(
         &self,
-        features: &DeckFeatures,
-        state: &GameState,
+        _features: &DeckFeatures,
+        _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        turn_only(features, state)
+        // Sacrifice resource valuation is intrinsic to the permanent being given
+        // up — a 6/6 costs the same to sacrifice on turn 2 as on turn 9 — so it
+        // must not scale with game phase. Mirrors the sibling
+        // PaymentSelectionPolicy, which handles the same SelectCards / PayCost
+        // decision with a constant 1.0 activation. A turn-phase multiplier (>1.0)
+        // here could push a legitimate critical-band score past the registry's
+        // CRITICAL_MAX ceiling (see issue #4282).
+        // activation-constant: phase-independent sacrifice resource valuation.
+        Some(1.0)
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("sacrifice_value_score"),
-        }
+        // Route through the band contract helper rather than hand-building a
+        // raw `Score`: `self.score()` is an unbounded sum of per-card sacrifice
+        // costs, and `PolicyVerdict::score` clamps its magnitude into the
+        // declared bands (|delta| <= CRITICAL_MAX). With activation pinned to
+        // 1.0 above, the scaled delta can never exceed the critical ceiling.
+        PolicyVerdict::score(self.score(ctx), PolicyReason::new("sacrifice_value_score"))
     }
 }
 
@@ -185,6 +194,90 @@ mod tests {
             token_score > creature_score,
             "Should prefer sacrificing token ({token_score}) over creature ({creature_score})"
         );
+    }
+
+    /// Regression for #4282: sacrificing a high-value creature must not produce
+    /// a scaled delta beyond the critical band ceiling. Before the fix, `verdict`
+    /// returned the raw unbounded `-evaluate_creature` score and `activation`
+    /// scaled it by `turn_phase_mult` (up to 1.3), so a single large creature
+    /// tripped the registry's `debug_assert!(scaled_delta.abs() <= CRITICAL_MAX)`.
+    #[test]
+    fn large_sacrifice_stays_within_critical_band() {
+        use super::super::registry::CRITICAL_MAX;
+
+        let mut state = GameState::new_two_player(42);
+
+        // 8/8 => evaluate_creature = 8*1.5 + 8 = 20.0, comfortably over the
+        // critical ceiling of 15, so the band clamp must actually engage.
+        let big = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Colossus".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&big).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(8);
+        obj.toughness = Some(8);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::PayCost {
+                player: PlayerId(0),
+                kind: PayCostKind::Sacrifice,
+                choices: vec![big],
+                count: 1,
+                min_count: 1,
+                resume: CostResume::Spell {
+                    spell: dummy_pending(),
+                },
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards { cards: vec![big] },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Selection,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        // The raw score must exceed the ceiling, proving the clamp is exercised.
+        assert!(
+            SacrificeValuePolicy.score(&ctx).abs() > CRITICAL_MAX,
+            "test premise: raw sacrifice score should exceed the critical ceiling"
+        );
+
+        // The banded verdict must clamp magnitude into the critical band.
+        let PolicyVerdict::Score { delta, .. } = SacrificeValuePolicy.verdict(&ctx) else {
+            panic!("sacrifice value policy must return a Score verdict");
+        };
+        assert!(
+            delta.abs() <= CRITICAL_MAX,
+            "verdict delta {delta} must be clamped to the critical band ceiling {CRITICAL_MAX}"
+        );
+
+        // Activation is the constant 1.0, so the scaled delta the registry
+        // asserts on equals the (already clamped) verdict delta — never above
+        // the ceiling regardless of turn number.
+        let activation = SacrificeValuePolicy
+            .activation(&DeckFeatures::default(), &state, PlayerId(0))
+            .expect("sacrifice value policy always activates");
+        assert_eq!(
+            activation, 1.0,
+            "sacrifice valuation must not scale by phase"
+        );
+        assert!((delta * f64::from(activation)).abs() <= CRITICAL_MAX);
     }
 
     #[test]

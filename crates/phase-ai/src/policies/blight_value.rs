@@ -6,7 +6,6 @@ use engine::types::player::PlayerId;
 use crate::config::PolicyPenalties;
 use crate::features::DeckFeatures;
 
-use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::sacrifice_cost;
@@ -66,18 +65,27 @@ impl TacticalPolicy for BlightValuePolicy {
 
     fn activation(
         &self,
-        features: &DeckFeatures,
-        state: &GameState,
+        _features: &DeckFeatures,
+        _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        turn_only(features, state)
+        // The cost of placing a -1/-1 counter is intrinsic to the creature being
+        // blighted — a 12/1 dies just as dead on turn 2 as on turn 9 — so it must
+        // not scale with game phase. Mirrors SacrificeValuePolicy /
+        // PaymentSelectionPolicy. A turn-phase multiplier (>1.0) over the
+        // unbounded blight score could push a high-power, low-toughness creature
+        // past the registry's CRITICAL_MAX ceiling (see issue #4282).
+        // activation-constant: phase-independent blight resource valuation.
+        Some(1.0)
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("blight_value_score"),
-        }
+        // Route through the band contract helper rather than hand-building a raw
+        // `Score`: `self.score()` is an unbounded sum of per-creature blight
+        // costs, and `PolicyVerdict::score` clamps its magnitude into the
+        // declared bands (|delta| <= CRITICAL_MAX). With activation pinned to
+        // 1.0 above, the scaled delta can never exceed the critical ceiling.
+        PolicyVerdict::score(self.score(ctx), PolicyReason::new("blight_value_score"))
     }
 }
 
@@ -195,6 +203,83 @@ mod tests {
             "Should prefer blighting the 3/5 ({big_score}) over the 3/1 ({small_score}) — \
              the 3/1 dies to its -1/-1 counter"
         );
+    }
+
+    /// Regression for #4282 (sibling of SacrificeValuePolicy): blighting a
+    /// high-power, low-toughness creature must not produce a scaled delta beyond
+    /// the critical band ceiling. A toughness-1 creature dies to its -1/-1
+    /// counter, so `blight_cost` returns its full (unbounded) sacrifice value;
+    /// before the fix, `verdict` returned that raw score and `activation` scaled
+    /// it by `turn_phase_mult` (up to 1.3), tripping the registry's
+    /// `debug_assert!(scaled_delta.abs() <= CRITICAL_MAX)`.
+    #[test]
+    fn large_blight_stays_within_critical_band() {
+        use super::super::registry::CRITICAL_MAX;
+
+        let mut state = GameState::new_two_player(42);
+
+        // 12/1 => dies to the -1/-1 counter, so blight_cost = evaluate_creature
+        // = 12*1.5 + 1 = 19.0, comfortably over the critical ceiling of 15.
+        let glass_cannon = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Glass Cannon".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&glass_cannon).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(12);
+        obj.toughness = Some(1);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::BlightChoice {
+                player: PlayerId(0),
+                counters: 1,
+                creatures: vec![glass_cannon],
+                pending_cast: dummy_pending(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards {
+                cards: vec![glass_cannon],
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Selection,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        // The raw score must exceed the ceiling, proving the clamp is exercised.
+        assert!(
+            BlightValuePolicy.score(&ctx).abs() > CRITICAL_MAX,
+            "test premise: raw blight score should exceed the critical ceiling"
+        );
+
+        let PolicyVerdict::Score { delta, .. } = BlightValuePolicy.verdict(&ctx) else {
+            panic!("blight value policy must return a Score verdict");
+        };
+        assert!(
+            delta.abs() <= CRITICAL_MAX,
+            "verdict delta {delta} must be clamped to the critical band ceiling {CRITICAL_MAX}"
+        );
+
+        let activation = BlightValuePolicy
+            .activation(&DeckFeatures::default(), &state, PlayerId(0))
+            .expect("blight value policy always activates");
+        assert_eq!(activation, 1.0, "blight valuation must not scale by phase");
+        assert!((delta * f64::from(activation)).abs() <= CRITICAL_MAX);
     }
 
     #[test]

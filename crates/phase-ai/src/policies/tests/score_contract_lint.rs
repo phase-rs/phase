@@ -9,7 +9,6 @@ use std::fs;
 use std::path::Path;
 
 const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
-    ("blight_value.rs", 1),
     ("board_development.rs", 1),
     ("chalice_avoidance.rs", 1),
     ("combat_tax.rs", 3),
@@ -30,7 +29,6 @@ const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
     ("plus_one_counters.rs", 10),
     ("reactive_self_protection.rs", 0),
     ("recursion_awareness.rs", 1),
-    ("sacrifice_value.rs", 1),
     ("spellskite_priority.rs", 1),
     ("stack_awareness.rs", 1),
     ("x_value.rs", 1),
