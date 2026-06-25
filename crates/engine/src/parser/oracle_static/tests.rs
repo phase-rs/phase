@@ -5035,6 +5035,55 @@ fn static_unlicensed_hearse_counts_cards_exiled_with_it() {
     );
 }
 
+/// CR 107.4a + CR 202.1 + CR 404.2: Umbra Stalker's graveyard-scope chroma CDA
+/// routes through `parse_static_line` → `parse_cda_quantity` →
+/// `parse_graveyard_chroma_ref` to produce SetDynamic{Power,Toughness} backed by
+/// `QuantityRef::Aggregate { Sum, ManaSymbolCount(Black), InZone{Graveyard} }`.
+/// The `Owned { You }` scope (not controller) is correct per CR 404.2: a
+/// graveyard belongs to its owner.
+#[test]
+fn static_umbra_stalker_graveyard_chroma_cda() {
+    let def = parse_static_line(
+        "Umbra Stalker's power and toughness are each equal to the number of black mana symbols \
+         in the mana costs of cards in your graveyard.",
+    )
+    .expect("graveyard chroma CDA must parse, not fall through to Unimplemented");
+
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.characteristic_defining, "must be a CDA");
+    assert_eq!(
+        def.modifications.len(),
+        2,
+        "power + toughness modifications"
+    );
+
+    let expected_qty = QuantityExpr::Ref {
+        qty: QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
+        },
+    };
+
+    for m in &def.modifications {
+        match m {
+            ContinuousModification::SetDynamicPower { value }
+            | ContinuousModification::SetDynamicToughness { value } => {
+                assert_eq!(value, &expected_qty, "unexpected CDA quantity: {value:?}")
+            }
+            other => panic!("unexpected modification {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
     let def = parse_static_line(
