@@ -60,10 +60,13 @@ impl TacticalPolicy for SacrificeValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("sacrifice_value_score"),
-        }
+        // `score` sums every sacrificed permanent's value into one delta, which
+        // is unbounded (a costly multi-permanent sacrifice can far exceed the
+        // critical band). Route it through the shared `PolicyVerdict::score`
+        // constructor so the raw delta is clamped into the critical band like
+        // every other policy, instead of emitting an out-of-band value the
+        // registry would otherwise have to defend against (issue #4282).
+        PolicyVerdict::score(self.score(ctx), PolicyReason::new("sacrifice_value_score"))
     }
 }
 
@@ -185,6 +188,93 @@ mod tests {
             token_score > creature_score,
             "Should prefer sacrificing token ({token_score}) over creature ({creature_score})"
         );
+    }
+
+    /// Regression for #4282: a high-cost sacrifice (the summed value of many
+    /// permanents) produces a raw `score` well past the critical band, but
+    /// `verdict` must clamp it into the band so the registry never receives an
+    /// out-of-band delta — previously this surfaced as a recovered engine panic
+    /// ("policy SacrificeValue scaled delta … exceeds critical band ceiling 15").
+    #[test]
+    fn high_cost_sacrifice_verdict_stays_within_critical_band() {
+        use crate::policies::registry::CRITICAL_MAX;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Eight beefy creatures whose combined sacrifice value far exceeds the
+        // critical band ceiling, so the raw score is unambiguously out of band.
+        let mut choices = Vec::new();
+        for i in 0..8 {
+            let id = create_object(
+                &mut state,
+                CardId(1 + i),
+                PlayerId(0),
+                format!("Behemoth {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(8);
+            obj.toughness = Some(8);
+            choices.push(id);
+        }
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::PayCost {
+                player: PlayerId(0),
+                kind: PayCostKind::Sacrifice,
+                choices: choices.clone(),
+                count: choices.len(),
+                min_count: choices.len(),
+                resume: CostResume::Spell {
+                    spell: dummy_pending(),
+                },
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards {
+                cards: choices.clone(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Selection,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        // The raw score is genuinely out of band (otherwise the regression would
+        // not exercise the clamp at all).
+        let raw = SacrificeValuePolicy.score(&ctx);
+        assert!(
+            raw < -CRITICAL_MAX,
+            "scenario must drive the raw score past the critical band (got {raw})"
+        );
+
+        // The verdict clamps it into the band: a single policy never emits a
+        // delta whose magnitude exceeds the critical-band ceiling.
+        match SacrificeValuePolicy.verdict(&ctx) {
+            PolicyVerdict::Score { delta, .. } => {
+                assert!(
+                    delta.abs() <= CRITICAL_MAX,
+                    "verdict delta {delta} must be clamped into the critical band (±{CRITICAL_MAX})"
+                );
+                assert!(
+                    delta < 0.0,
+                    "sacrificing value remains a negative incentive"
+                );
+            }
+            other => panic!("expected a Score verdict, got {other:?}"),
+        }
     }
 
     #[test]

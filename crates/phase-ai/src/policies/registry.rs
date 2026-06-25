@@ -401,25 +401,40 @@ impl PolicyRegistry {
             let scaled = match verdict {
                 PolicyVerdict::Reject { reason } => PolicyVerdict::Reject { reason },
                 PolicyVerdict::Score { delta, reason } => {
-                    let scaled_delta = delta * activation as f64;
+                    // The critical band is a contract on each policy's *raw*
+                    // delta — the `PolicyVerdict::score`/`critical` constructors
+                    // clamp magnitudes to `CRITICAL_MAX`. A raw delta past the
+                    // ceiling means a policy bypassed them and emitted an
+                    // out-of-band value; assert that here (the meaningful
+                    // invariant). The prior code asserted on the *scaled* value,
+                    // which is wrong: `activation` can exceed 1.0 (turn-phase /
+                    // archetype multipliers), so an in-band raw delta can scale
+                    // past the ceiling legitimately — yet the assert panicked on
+                    // it in builds with debug-assertions enabled (issue #4282).
                     debug_assert!(
-                        scaled_delta.abs() <= CRITICAL_MAX,
-                        "policy {:?} scaled delta {} exceeds critical band ceiling {}",
+                        delta.abs() <= CRITICAL_MAX,
+                        "policy {:?} raw delta {} exceeds critical band ceiling {}",
                         policy_id,
-                        scaled_delta,
+                        delta,
                         CRITICAL_MAX
                     );
-                    if scaled_delta.abs() > CRITICAL_MAX {
+                    // A single policy must never exceed the critical-band ceiling
+                    // of influence over the aggregate, so clamp the scaled value
+                    // into the band rather than letting an activation multiplier
+                    // push it past the ceiling and dominate the sum.
+                    let scaled_delta = delta * activation as f64;
+                    let clamped = scaled_delta.clamp(-CRITICAL_MAX, CRITICAL_MAX);
+                    if scaled_delta != clamped {
                         tracing::warn!(
                             target: "phase_ai::decision_trace",
                             ?policy_id,
                             scaled_delta,
                             activation,
-                            "policy scaled delta exceeds critical band ceiling"
+                            "policy scaled delta clamped to critical band ceiling"
                         );
                     }
                     PolicyVerdict::Score {
-                        delta: scaled_delta,
+                        delta: clamped,
                         reason,
                     }
                 }
