@@ -4,7 +4,14 @@ import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
-import { ACTIVE_DECK_KEY, listSavedDeckNames, getDeckMeta, deleteDeck, type DeckFolder } from "../../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  listSavedDeckNames,
+  getDeckMeta,
+  deleteDeck,
+  MAX_FOLDER_NAME_LENGTH,
+  type DeckFolder,
+} from "../../constants/storage";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useDeckFolders } from "../../hooks/useDeckFolders";
@@ -50,6 +57,7 @@ import {
 import { BASIC_LAND_NAMES } from "../../constants/game";
 import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
+import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
@@ -62,6 +70,11 @@ const PRECON_SECTION_ID = "__precon__";
 const DECK_GRID_CLASS = "grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]";
 const DECK_SCAN_BATCH_SIZE = 1;
 const COVERAGE_SCAN_BATCH_SIZE = 6;
+
+type FolderPromptRequest =
+  | { kind: "create" }
+  | { kind: "create-and-assign"; deckName: string }
+  | { kind: "rename"; folderId: string; currentName: string };
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -634,6 +647,7 @@ export function MyDecks({
     sortMenuItems.find((item) => item.value === activeSort)?.label ?? t("myDecks.sortName");
   const [sortAsc, setSortAsc] = useState(mode !== "select");
   const [searchQuery, setSearchQuery] = useState("");
+  const [folderPrompt, setFolderPrompt] = useState<FolderPromptRequest | null>(null);
 
   // Folder/star organization (user decks only). The grouping authority +
   // mutators come from useDeckFolders; collapse state lives in preferences so
@@ -651,24 +665,41 @@ export function MyDecks({
   );
   const handleNewFolderForDeck = useCallback(
     (name: string) => {
-      const folderName = prompt(t("folder.newFolderPrompt"));
-      if (!folderName?.trim()) return;
-      const folder = createFolder(folderName);
-      if (folder) assignDeck(name, folder.id);
+      setFolderPrompt({ kind: "create-and-assign", deckName: name });
     },
-    [createFolder, assignDeck, t],
+    [],
   );
   const handleCreateFolder = useCallback(() => {
-    const folderName = prompt(t("folder.newFolderPrompt"));
-    if (folderName?.trim()) createFolder(folderName);
-  }, [createFolder, t]);
-  const handleRenameFolder = useCallback(
-    (id: string, currentName: string) => {
-      const next = prompt(t("folder.renamePrompt"), currentName);
-      if (next != null) renameFolder(id, next);
+    setFolderPrompt({ kind: "create" });
+  }, []);
+  const handleRenameFolder = useCallback((id: string, currentName: string) => {
+    setFolderPrompt({ kind: "rename", folderId: id, currentName });
+  }, []);
+  const handleFolderPromptConfirm = useCallback(
+    (folderName: string) => {
+      if (!folderPrompt) return;
+      switch (folderPrompt.kind) {
+        case "create": {
+          createFolder(folderName);
+          break;
+        }
+        case "create-and-assign": {
+          const folder = createFolder(folderName);
+          if (folder) assignDeck(folderPrompt.deckName, folder.id);
+          break;
+        }
+        case "rename": {
+          renameFolder(folderPrompt.folderId, folderName);
+          break;
+        }
+      }
+      setFolderPrompt(null);
     },
-    [renameFolder, t],
+    [folderPrompt, createFolder, assignDeck, renameFolder],
   );
+  const handleFolderPromptCancel = useCallback(() => {
+    setFolderPrompt(null);
+  }, []);
   const [folderPendingDelete, setFolderPendingDelete] = useState<{ id: string; name: string } | null>(
     null,
   );
@@ -687,6 +718,9 @@ export function MyDecks({
     setCollapsedFolderIds(collapsedFolderIds.filter((existing) => existing !== id));
     setFolderPendingDelete(null);
   }, [folderPendingDelete, deleteFolder, setCollapsedFolderIds, collapsedFolderIds]);
+  const cancelDeleteFolder = useCallback(() => {
+    setFolderPendingDelete(null);
+  }, []);
 
   useEffect(() => {
     setActiveFilter(contextualFilter ?? "all");
@@ -1737,8 +1771,32 @@ export function MyDecks({
         message={t("folder.deleteConfirm", { name: folderPendingDelete?.name ?? "" })}
         confirmLabel={t("folder.delete")}
         onConfirm={confirmDeleteFolder}
-        onCancel={() => setFolderPendingDelete(null)}
+        onCancel={cancelDeleteFolder}
         tone="danger"
+      />
+      <TextPromptDialog
+        open={folderPrompt != null}
+        title={
+          folderPrompt?.kind === "rename"
+            ? t("folder.rename")
+            : t("folder.newFolder")
+        }
+        label={
+          folderPrompt?.kind === "rename"
+            ? t("folder.renamePrompt")
+            : t("folder.newFolderPrompt")
+        }
+        initialValue={
+          folderPrompt?.kind === "rename" ? folderPrompt.currentName : ""
+        }
+        confirmLabel={
+          folderPrompt?.kind === "rename"
+            ? t("common:actions.save")
+            : t("folder.createButton")
+        }
+        maxLength={MAX_FOLDER_NAME_LENGTH}
+        onConfirm={handleFolderPromptConfirm}
+        onCancel={handleFolderPromptCancel}
       />
     </Wrapper>
   );

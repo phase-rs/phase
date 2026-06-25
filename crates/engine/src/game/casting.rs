@@ -11720,6 +11720,24 @@ fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
     }
 }
 
+/// Walk a cost tree and return the first static `AbilityCost::Mana` leg's
+/// `ManaCost`, if any. Mirrors `find_waterbend_cost` /
+/// `find_non_self_sacrifice_cost`.
+///
+/// Deliberate scope limit (CR 118.4): only `AbilityCost::Mana` (a fully static
+/// `ManaCost`) is matched. `AbilityCost::ManaDynamic` (X-cost) returns `None`,
+/// so an X-cost composite falls through to the unchanged over-approximation in
+/// `can_pay`'s supplemental witness check — no regression, intentional. For a
+/// composite with multiple `Mana` legs, `find_map` returns the first; no
+/// in-scope conditional-mana card has two independent static `Mana` legs.
+pub(super) fn composite_mana_leg(cost: &AbilityCost) -> Option<&ManaCost> {
+    match cost {
+        AbilityCost::Mana { cost } => Some(cost),
+        AbilityCost::Composite { costs } => costs.iter().find_map(composite_mana_leg),
+        _ => None,
+    }
+}
+
 /// Walk a cost tree and return the first non-SelfRef sacrifice `(count, filter)`
 /// found, if any. The `count` is honored so multi-permanent sacrifice costs
 /// ("Sacrifice two creatures:") are modeled correctly.

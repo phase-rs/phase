@@ -299,6 +299,7 @@
     "delete": "Usuń",
     "newFolder": "Nowy folder",
     "newFolderPrompt": "Nazwa folderu:",
+    "createButton": "Utwórz",
     "renamePrompt": "Zmień nazwę folderu:",
     "deleteConfirm": "Usunąć folder „{{name}}”? Talie zostaną przeniesione do „Bez folderu”.",
     "emptyHint": "Ten folder jest pusty.",

@@ -299,6 +299,7 @@
     "delete": "Löschen",
     "newFolder": "Neuer Ordner",
     "newFolderPrompt": "Ordnername:",
+    "createButton": "Erstellen",
     "renamePrompt": "Ordner umbenennen:",
     "deleteConfirm": "Ordner „{{name}}“ löschen? Decks werden zu „Nicht zugeordnet“ verschoben.",
     "emptyHint": "Dieser Ordner ist leer.",

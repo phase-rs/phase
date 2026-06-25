@@ -199,7 +199,7 @@ pub fn compute_hand_color_demand(
 /// requirement. Only the outer cost's colored shards are "reserved": spending one of
 /// those colors on a nested mana-ability sub-cost could leave the outer cost
 /// unpayable, so the nested spend deprioritizes them. Empty for NoCost / Self* costs.
-pub(crate) fn outer_cost_color_demand(cost: &ManaCost) -> ColorDemand {
+pub fn outer_cost_color_demand(cost: &ManaCost) -> ColorDemand {
     let mut demand = [0u32; 5];
     if let ManaCost::Cost { shards, .. } = cost {
         for &shard in shards {

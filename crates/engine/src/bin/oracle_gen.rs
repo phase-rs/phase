@@ -5,7 +5,7 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
+use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
@@ -333,9 +333,31 @@ fn build_export_layout(
     }
 }
 
-/// Scan all set files in `data/mtgjson/sets/` to build a map of lowercased card name
-/// to the set of all rarities that card has been printed at. If the sets directory
-/// doesn't exist, returns an empty map (graceful degradation).
+/// Write parser-authoritative creature subtypes: CardTypes.json ∪ corroborated
+/// AtomicCards harvest (token-only + newer card-printed types).
+fn write_oracle_subtypes(
+    card_types: Option<&engine::database::mtgjson::CardTypesFile>,
+    atomic: &engine::database::mtgjson::AtomicCardsFile,
+) {
+    use engine::database::subtype_vocab::build_creature_subtype_vocabulary;
+
+    let list: Vec<String> = build_creature_subtype_vocabulary(card_types, atomic)
+        .into_iter()
+        .collect();
+    let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
+    match serde_json::to_string_pretty(&list)
+        .map_err(|e| e.to_string())
+        .and_then(|json| std::fs::write(&out_path, json).map_err(|e| e.to_string()))
+    {
+        Ok(()) => eprintln!(
+            "Wrote {} creature subtypes to {}",
+            list.len(),
+            out_path.display()
+        ),
+        Err(e) => eprintln!("warning: failed to write {}: {e}", out_path.display()),
+    }
+}
+
 fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<Rarity>> {
     let sets_dir = mtgjson_path
         .parent()
@@ -625,6 +647,19 @@ fn main() {
             process::exit(1);
         }
     };
+
+    let card_types_path = mtgjson_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("CardTypes.json");
+    let card_types = load_card_types(&card_types_path).ok();
+    if card_types.is_none() {
+        eprintln!(
+            "warning: CardTypes.json not found at {} — using AtomicCards harvest only",
+            card_types_path.display()
+        );
+    }
+    write_oracle_subtypes(card_types.as_ref(), &atomic);
 
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);

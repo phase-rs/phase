@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use engine::game::combat::{can_block_pair, AttackTarget};
+use engine::game::combat::{
+    can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
+    collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+};
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
+use engine::types::ability::StaticDefinition;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -15,6 +19,43 @@ use crate::config::AiProfile;
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
 use crate::projection::{project_to, Projection, ProjectionHorizon};
+
+/// Block-legality static slices collected once per combat decision and threaded
+/// through the per-pair `can_block_pair` checks. Hoisting these out of the
+/// O(battlefield²) attacker/blocker loops avoids re-walking the battlefield's
+/// functioning statics for every candidate pair.
+pub(crate) struct BlockLegalitySlices {
+    blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
+}
+
+impl BlockLegalitySlices {
+    pub(crate) fn collect(state: &GameState) -> Self {
+        Self {
+            blocker_restriction: collect_blocker_restriction_statics(state),
+            block_restriction: collect_block_restriction_statics(state),
+            blocker_allowed: collect_blocker_allowed_statics(state),
+        }
+    }
+
+    /// CR 509.1a–b: per-pair block legality against the precomputed slices.
+    pub(crate) fn can_block_pair(
+        &self,
+        state: &GameState,
+        blocker_id: ObjectId,
+        attacker_id: ObjectId,
+    ) -> bool {
+        can_block_pair_with_precomputed(
+            state,
+            blocker_id,
+            attacker_id,
+            &self.blocker_restriction,
+            &self.block_restriction,
+            &self.blocker_allowed,
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CombatObjective {
@@ -164,6 +205,12 @@ pub fn choose_attackers_with_targets_with_profile(
         profile,
     );
 
+    // Hoist the block-legality static slices once for the whole candidate sweep —
+    // `defender_best_block` runs an O(blockers) `can_block_pair` filter per
+    // candidate, so collecting these per call would re-walk the battlefield's
+    // statics O(candidates × blockers) times.
+    let slices = BlockLegalitySlices::collect(state);
+
     // Determine which creatures should attack (same logic as before)
     let mut attacking_ids = Vec::new();
     for &id in &candidates {
@@ -190,7 +237,7 @@ pub fn choose_attackers_with_targets_with_profile(
         // the defender would never offer — it instead kills the attacker for free
         // with a first-striker or a larger body (gamestate1: a 1/1 animated land
         // sent into a 2/1 first strike).
-        match defender_best_block(state, id, my_value, &opponent_blockers) {
+        match defender_best_block(state, id, my_value, &opponent_blockers, &slices) {
             None => attacking_ids.push(id),
             Some(DefenderBlock {
                 blocker_value,
@@ -618,7 +665,13 @@ pub fn choose_blockers_with_profile(
     valid_block_targets: Option<&HashMap<ObjectId, Vec<ObjectId>>>,
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
-    let mut used_blockers = Vec::new();
+    // CR 509.1a: `used_blockers` / `blocked_attackers` are membership indices over
+    // the assignment set, hot on large boards (token swarms) where the per-pass
+    // `Vec::contains` / `iter().any()` scans were O(blockers²) / O(attackers ·
+    // assignments). HashSet lookups make them O(1); the produced assignments are
+    // identical because neither set is ever iterated, only membership-tested.
+    let mut used_blockers: HashSet<ObjectId> = HashSet::new();
+    let mut blocked_attackers: HashSet<ObjectId> = HashSet::new();
     let objective = determine_block_objective(state, player, attacker_ids, profile);
 
     // Collect available blockers and their pre-computed values in one pass.
@@ -691,14 +744,15 @@ pub fn choose_blockers_with_profile(
         }) {
             let blocker_id = available_blockers[pos];
             assignments.push((blocker_id, attacker_id));
-            used_blockers.push(blocker_id);
+            used_blockers.insert(blocker_id);
+            blocked_attackers.insert(attacker_id);
         }
     }
 
     // Second pass: assign remaining blockers where they'd survive.
     // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
     for &(attacker_id, attacker_value) in &sorted_attackers {
-        if assignments.iter().any(|&(_, a)| a == attacker_id) {
+        if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
         }
 
@@ -799,7 +853,8 @@ pub fn choose_blockers_with_profile(
                     || should_chump_race)
             {
                 assignments.push((blocker_id, attacker_id));
-                used_blockers.push(blocker_id);
+                used_blockers.insert(blocker_id);
+                blocked_attackers.insert(attacker_id);
             }
         }
     }
@@ -808,7 +863,7 @@ pub fn choose_blockers_with_profile(
     // when no single blocker can kill it but combined power can.
     // Only gang-block when the combined blocker value is less than the attacker value.
     for &(attacker_id, attacker_value) in &sorted_attackers {
-        if assignments.iter().any(|&(_, a)| a == attacker_id) {
+        if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
         }
         let attacker = match state.objects.get(&attacker_id) {
@@ -917,8 +972,9 @@ pub fn choose_blockers_with_profile(
         {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
-                used_blockers.push(bid);
+                used_blockers.insert(bid);
             }
+            blocked_attackers.insert(attacker_id);
         }
     }
 
@@ -928,7 +984,7 @@ pub fn choose_blockers_with_profile(
         let p_life = state.players[player.0 as usize].life;
         let unblocked_damage: i32 = sorted_attackers
             .iter()
-            .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+            .filter(|&&(aid, _)| !blocked_attackers.contains(&aid))
             .filter_map(|&(aid, _)| state.objects.get(&aid))
             .map(|obj| obj.power.unwrap_or(0))
             .sum();
@@ -940,7 +996,7 @@ pub fn choose_blockers_with_profile(
             // estimate 1 here (minimum toughness) and refine at assignment time.
             let mut unblocked: Vec<(ObjectId, i32, i32)> = sorted_attackers
                 .iter()
-                .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+                .filter(|&&(aid, _)| !blocked_attackers.contains(&aid))
                 .filter_map(|&(aid, _)| {
                     let obj = state.objects.get(&aid)?;
                     let power = obj.power.unwrap_or(0);
@@ -980,7 +1036,8 @@ pub fn choose_blockers_with_profile(
                             .unwrap_or(false)
                 }) {
                     assignments.push((blocker_id, attacker_id));
-                    used_blockers.push(blocker_id);
+                    used_blockers.insert(blocker_id);
+                    blocked_attackers.insert(attacker_id);
                     // CR 702.19b: Trample only requires lethal damage assigned to blocker;
                     // excess tramples through. A chump block only prevents blocker_toughness.
                     let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
@@ -1001,7 +1058,7 @@ pub fn choose_blockers_with_profile(
         // lethality from commander B, so iterate each unblocked commander attacker
         // independently and chump if a safe (non-trample-defeated) blocker exists.
         for &(attacker_id, _) in &sorted_attackers {
-            if assignments.iter().any(|&(_, a)| a == attacker_id) {
+            if blocked_attackers.contains(&attacker_id) {
                 continue; // Already blocked
             }
             let attacker = match state.objects.get(&attacker_id) {
@@ -1037,7 +1094,8 @@ pub fn choose_blockers_with_profile(
             });
             if let Some(&blocker_id) = safe_blocker {
                 assignments.push((blocker_id, attacker_id));
-                used_blockers.push(blocker_id);
+                used_blockers.insert(blocker_id);
+                blocked_attackers.insert(attacker_id);
             }
             // No safe chump exists — accept the loss on this commander rather than
             // wasting a creature that won't actually save the player. Continue to
@@ -1304,6 +1362,9 @@ fn crackback_damage(
     // Without a projection, fall back to current-state filtering.
     let projected_state = projection.map(|p| &p.state);
     let attacker_source = projected_state.unwrap_or(state);
+    // Hoist block-legality statics once for the greedy O(attackers × blockers)
+    // assignment sweep below. `attacker_source` is the only state queried.
+    let slices = BlockLegalitySlices::collect(attacker_source);
     let mut opp_attackers: Vec<(ObjectId, i32)> = opponents
         .iter()
         .flat_map(|&opp| {
@@ -1348,7 +1409,7 @@ fn crackback_damage(
             if used[i] {
                 continue;
             }
-            if !can_block_pair(attacker_source, bid, opp_id) {
+            if !slices.can_block_pair(attacker_source, bid, opp_id) {
                 continue; // skip — still available for other attackers
             }
             used[i] = true;
@@ -1627,11 +1688,12 @@ fn defender_best_block(
     attacker_id: ObjectId,
     attacker_value: f64,
     blockers: &[ObjectId],
+    slices: &BlockLegalitySlices,
 ) -> Option<DefenderBlock> {
     let attacker = state.objects.get(&attacker_id)?;
     blockers
         .iter()
-        .filter(|&&bid| can_block_pair(state, bid, attacker_id))
+        .filter(|&&bid| slices.can_block_pair(state, bid, attacker_id))
         .filter_map(|&bid| {
             let blocker = state.objects.get(&bid)?;
             let blocker_value = evaluate_creature(state, bid);
@@ -2014,6 +2076,35 @@ mod tests {
         assert!(
             !attackers.contains(&small),
             "Should skip 1/1 into 5/5 when life is equal"
+        );
+    }
+
+    /// A 1/1 that would normally NOT attack into a 5/5 blocker is still chosen
+    /// when it carries an unblockable static — the `is_unblockable` short-circuit
+    /// fires before `defender_best_block`. This guards that the hoisted
+    /// `BlockLegalitySlices` path leaves the unblockable-attacker decision
+    /// byte-for-byte identical to the pre-hoist behavior. Reverted-fix
+    /// discrimination: if the slices threading broke the unblockable detection or
+    /// the block sweep, this attacker would be (wrongly) skipped like the plain
+    /// 1/1 in `skips_unprofitable_attack`.
+    #[test]
+    fn unblockable_attacker_still_chosen_with_static_restriction() {
+        use engine::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let small = add_creature(&mut state, PlayerId(0), "Squirrel", 1, 1, vec![]);
+        state
+            .objects
+            .get_mut(&small)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlocked));
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            attackers.contains(&small),
+            "an unblockable 1/1 must still attack into a 5/5 blocker"
         );
     }
 

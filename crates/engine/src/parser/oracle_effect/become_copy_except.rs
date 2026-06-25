@@ -1212,6 +1212,27 @@ fn skip_to_next_conjunction(text: &str) -> &str {
     }
 }
 
+/// CR 702.153a: Extract casualty spell-copy rider phrases from full Oracle text.
+///
+/// Synthesis stamps these onto the intrinsic `CopySpell` trigger when a card
+/// carries the Casualty keyword. Scans at word boundaries via nom combinators
+/// rather than raw substring matching.
+pub(crate) fn parse_casualty_copy_riders_from_oracle(
+    oracle: &str,
+) -> (Vec<ContinuousModification>, bool) {
+    let lower = oracle.to_lowercase();
+    let mut modifications = Vec::new();
+    if nom_primitives::scan_contains(&lower, "the copy isn't legendary")
+        || nom_primitives::scan_contains(&lower, "the copy is not legendary")
+    {
+        modifications.push(ContinuousModification::RemoveSupertype {
+            supertype: Supertype::Legendary,
+        });
+    }
+    let starting_loyalty = nom_primitives::scan_contains(&lower, "has starting loyalty");
+    (modifications, starting_loyalty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1843,6 +1864,30 @@ mod tests {
         assert!(mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::SetName { name } if name == "Test")));
+    }
+
+    #[test]
+    fn casualty_copy_riders_detect_legendary_strip_and_starting_loyalty() {
+        use crate::types::card_type::Supertype;
+        let (mods, starting_loyalty) = parse_casualty_copy_riders_from_oracle(
+            "Casualty X. The copy isn't legendary and has starting loyalty X. \
+             (As you cast this spell, you may sacrifice a creature with power X.)",
+        );
+        assert!(
+            mods.contains(&ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }),
+            "expected RemoveSupertype(Legendary), got {mods:?}"
+        );
+        assert!(starting_loyalty);
+    }
+
+    #[test]
+    fn casualty_copy_riders_reject_unrelated_oracle_text() {
+        let (mods, starting_loyalty) =
+            parse_casualty_copy_riders_from_oracle("Copy target creature spell.");
+        assert!(mods.is_empty());
+        assert!(!starting_loyalty);
     }
 
     /// CR 205.4 + CR 707.9b: "the token isn't legendary" / "it isn't legendary"

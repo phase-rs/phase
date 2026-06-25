@@ -288,6 +288,12 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Whole-line dig continuation matcher — delegates to [`parse_put_rest_on_bottom_line`]
+/// so continuation detection cannot drift from the combinator grammar.
+fn matches_put_rest_on_bottom_line(lower: &str) -> bool {
+    parse_put_rest_on_bottom_line(lower.trim()).is_ok()
+}
+
 pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
@@ -5272,9 +5278,7 @@ pub(super) fn parse_followup_continuation_ast(
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             ..
-        } if lower == "put the rest on the bottom of your library in a random order"
-            || lower == "put the rest on the bottom of your library in any order"
-            || lower == "put the rest on the bottom of your library" =>
+        } if matches_put_rest_on_bottom_line(&lower) =>
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }

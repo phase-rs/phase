@@ -16769,6 +16769,8 @@ Artifacts you control have \"{T}: Add {U}. Spend this mana only to cast a spell 
         );
     }
 
+    /// Rosheen Meanderer / Elementalist's Palette / Nexos / Rosheen, Roaring
+    /// Prophet. Runtime spend proof: `restricted_mana_x_cost_only.rs`.
     #[test]
     fn mana_spend_restriction_x_cost_only() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;

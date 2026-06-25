@@ -104,7 +104,10 @@ fn evasion_score(
         return 0.0;
     }
 
-    let can_block = ai_can_block(ctx.state, ctx.ai_player, target_id);
+    // Hoist block-legality statics once for this scoring pass.
+    let slices = crate::combat_ai::BlockLegalitySlices::collect(ctx.state);
+
+    let can_block = ai_can_block(ctx.state, ctx.ai_player, target_id, &slices);
 
     if !can_block {
         (power * mult).min(3.0)
@@ -118,7 +121,7 @@ fn evasion_score(
                     obj.controller == ctx.ai_player
                         && !obj.tapped
                         && obj.card_types.core_types.contains(&CoreType::Creature)
-                        && engine::game::combat::can_block_pair(ctx.state, id, target_id)
+                        && slices.can_block_pair(ctx.state, id, target_id)
                 })
             })
             .count();

@@ -2190,15 +2190,7 @@ fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> 
 }
 
 fn casualty_copy_rider_from_oracle(oracle: &str) -> (Vec<ContinuousModification>, bool) {
-    let lower = oracle.to_lowercase();
-    let mut modifications = Vec::new();
-    if lower.contains("the copy isn't legendary") || lower.contains("the copy is not legendary") {
-        modifications.push(ContinuousModification::RemoveSupertype {
-            supertype: Supertype::Legendary,
-        });
-    }
-    let starting_loyalty = lower.contains("has starting loyalty");
-    (modifications, starting_loyalty)
+    crate::parser::oracle_effect::become_copy_except::parse_casualty_copy_riders_from_oracle(oracle)
 }
 
 fn casualty_copy_ability_definition_for_ordinal_with_rider(

@@ -299,6 +299,7 @@
     "delete": "Delete",
     "newFolder": "New folder",
     "newFolderPrompt": "Folder name:",
+    "createButton": "Create",
     "renamePrompt": "Rename folder:",
     "deleteConfirm": "Delete folder \"{{name}}\"? Its decks move to Unfiled.",
     "emptyHint": "This folder is empty.",

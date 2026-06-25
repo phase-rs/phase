@@ -42,6 +42,13 @@ if [ ! -f "$MTGJSON_META_FILE" ]; then
   mtgjson_download "Meta.json" "$MTGJSON_META_FILE"
 fi
 
+MTGJSON_CARD_TYPES_FILE="$DATA_DIR/mtgjson/CardTypes.json"
+if [ ! -f "$MTGJSON_CARD_TYPES_FILE" ]; then
+  echo "Downloading MTGJSON CardTypes..."
+  mkdir -p "$DATA_DIR/mtgjson"
+  mtgjson_download "CardTypes.json" "$MTGJSON_CARD_TYPES_FILE"
+fi
+
 MTGJSON_SET_LIST_FILE="$DATA_DIR/mtgjson/SetList.json"
 if [ ! -f "$MTGJSON_SET_LIST_FILE" ]; then
   echo "Downloading MTGJSON SetList..."

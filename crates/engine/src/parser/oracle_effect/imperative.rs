@@ -4470,23 +4470,33 @@ fn parse_prevent_effect(text: &str) -> Effect {
         nom_primitives::scan_preceded(rest, crate::parser::oracle_nom::duration::parse_duration)
             .map(|(_, d, _)| d);
 
-    // Determine amount: "all damage" vs "the next N damage"
-    let amount = if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-        PreventionAmount::All
-    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-        let n = nom_primitives::parse_number
-            .parse(after_next)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
-    } else {
-        // Fallback: try to extract a number
-        let n = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
-    };
+    // Determine amount: "all damage" vs "all but N" vs "the next N damage".
+    // CR 615.1a: decompose the prevention amount from the LOCAL parser stream
+    // (`rest`, positioned just past "prevent ") with nom combinators. "all but "
+    // must be tried before the bare "all " arm because it shares that prefix.
+    let amount =
+        if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
+            let n = nom_primitives::parse_number
+                .parse(after_all_but)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            PreventionAmount::AllBut(n)
+        } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
+            PreventionAmount::All
+        } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
+            let n = nom_primitives::parse_number
+                .parse(after_next)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            PreventionAmount::Next(n)
+        } else {
+            // Fallback: try to extract a number
+            let n = nom_primitives::parse_number
+                .parse(rest)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            PreventionAmount::Next(n)
+        };
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal

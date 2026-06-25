@@ -653,9 +653,8 @@ impl ManaRestriction {
             ManaRestriction::OnlyForActivation => false,
             // CR 106.6: Tag-scoped activation mana cannot be used to cast spells.
             ManaRestriction::OnlyForTaggedActivation(_) => false,
-            // CR 106.6: X-cost restriction — conservatively disallow for spells.
-            // Full X-cost detection requires ManaCost inspection at the call site.
-            ManaRestriction::OnlyForXCosts => false,
+            // CR 106.6: X-cost restriction — spell must have {X} in its mana cost.
+            ManaRestriction::OnlyForXCosts => meta.has_x_in_cost,
             ManaRestriction::OnlyForSpellWithKeywordKind(required_keyword) => {
                 meta.keyword_kinds.contains(required_keyword)
             }

@@ -6183,7 +6183,11 @@ pub(super) fn apply_where_x_effect_expression(
             // where-X binding (Arachnogenesis: token count uses where-X;
             // prevention is blanket).
             if let Some(expr) = where_x_expression {
-                if !matches!(amount, crate::types::ability::PreventionAmount::All) {
+                if !matches!(
+                    amount,
+                    crate::types::ability::PreventionAmount::All
+                        | crate::types::ability::PreventionAmount::AllBut(_)
+                ) {
                     *amount_dynamic = parse_where_x_quantity_expression(expr);
                 }
             }

@@ -299,6 +299,7 @@
     "delete": "Eliminar",
     "newFolder": "Nueva carpeta",
     "newFolderPrompt": "Nombre de la carpeta:",
+    "createButton": "Crear",
     "renamePrompt": "Renombrar carpeta:",
     "deleteConfirm": "¿Eliminar la carpeta «{{name}}»? Los mazos pasarán a Sin clasificar.",
     "emptyHint": "Esta carpeta está vacía.",

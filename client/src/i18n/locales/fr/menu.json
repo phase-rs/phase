@@ -299,6 +299,7 @@
     "delete": "Supprimer",
     "newFolder": "Nouveau dossier",
     "newFolderPrompt": "Nom du dossier :",
+    "createButton": "Créer",
     "renamePrompt": "Renommer le dossier :",
     "deleteConfirm": "Supprimer le dossier « {{name}} » ? Les decks passeront dans Non classé.",
     "emptyHint": "Ce dossier est vide.",

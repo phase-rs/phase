@@ -924,451 +924,18 @@ const SUBTYPE_PLURALS: &[(&str, &str)] = &[
 /// recognizes the "outlaw[s]" head noun.
 pub const OUTLAW_SUBTYPES: [&str; 5] = ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"];
 
-/// Comprehensive list of MTG subtypes (creature types, land types, spell types, etc.).
-/// Case-insensitive matching is done by lowercasing the input.
-/// This covers the standard MTGJSON subtype list plus common Oracle text usage.
-const SUBTYPES: &[&str] = &[
-    // ── Creature types (alphabetical) ──
-    "Advisor",
-    "Aetherborn",
-    "Alien",
-    "Ally",
-    "Angel",
-    "Antelope",
-    "Ape",
-    "Archer",
-    "Archon",
-    "Armadillo",
-    "Army",
-    "Artificer",
-    "Assassin",
-    "Assembly-Worker",
-    "Astartes",
-    "Atog",
-    "Aurochs",
-    "Autobot",
-    "Avatar",
-    "Azra",
-    "Badger",
-    "Balloon",
-    "Barbarian",
-    "Bard",
-    "Basilisk",
-    "Bat",
-    "Bear",
-    "Beast",
-    "Beeble",
-    "Beholder",
-    "Berserker",
-    "Bird",
-    "Blinkmoth",
-    "Boar",
-    "Brainiac",
-    "Bringer",
-    "Brushwagg",
-    "Bureaucrat",
-    "Camarid",
-    "Camel",
-    "Capybara",
-    "Caribou",
-    "Carrier",
-    "Cat",
-    "Centaur",
-    "Cephalid",
-    "Chimera",
-    "Citizen",
-    "Cleric",
-    "Clown",
-    "Cockatrice",
-    "Construct",
-    "Coward",
-    "Crab",
-    "Crocodile",
-    "Ctan",
-    "Custodes",
-    "Cyberman",
-    "Cyborg",
-    "Cyclops",
-    "Dalek",
-    "Dauthi",
-    "Demigod",
-    "Demon",
-    "Deserter",
-    "Detective",
-    "Devil",
-    "Dinosaur",
-    "Djinn",
-    "Doctor",
-    "Dog",
-    "Dragon",
-    "Drake",
-    "Dreadnought",
-    "Drone",
-    "Druid",
-    "Dryad",
-    "Dwarf",
-    "Efreet",
-    "Egg",
-    "Elder",
-    "Eldrazi",
-    "Elemental",
-    "Elephant",
-    "Elf",
-    "Elk",
-    "Employee",
-    "Eye",
-    "Faerie",
-    "Ferret",
-    "Fish",
-    "Flagbearer",
-    "Fox",
-    "Fractal",
-    "Frog",
-    "Fungus",
-    "Gamer",
-    "Gamma",
-    "Gargoyle",
-    "Germ",
-    "Giant",
-    "Gith",
-    "Glimmer",
-    "Gnoll",
-    "Gnome",
-    "Goat",
-    "Goblin",
-    "God",
-    "Golem",
-    "Gorgon",
-    "Graveborn",
-    "Gremlin",
-    "Griffin",
-    "Guest",
-    "Hag",
-    "Halfling",
-    "Hamster",
-    "Harpy",
-    "Head",
-    "Hellion",
-    "Hero",
-    "Hippo",
-    "Hippogriff",
-    "Homarid",
-    "Homunculus",
-    "Horror",
-    "Horse",
-    "Human",
-    "Hydra",
-    "Hyena",
-    "Illusion",
-    "Imp",
-    "Incarnation",
-    "Inhuman",
-    "Inkling",
-    "Inquisitor",
-    "Insect",
-    "Jackal",
-    "Jellyfish",
-    "Juggernaut",
-    "Kavu",
-    "Kirin",
-    "Kithkin",
-    "Knight",
-    "Kobold",
-    "Kor",
-    "Kraken",
-    "Kree",
-    "Lamia",
-    "Lammasu",
-    "Leech",
-    "Leviathan",
-    "Lhurgoyf",
-    "Licid",
-    "Lizard",
-    "Llama",
-    "Locus",
-    "Mammoth",
-    "Manticore",
-    "Masticore",
-    "Mercenary",
-    "Merfolk",
-    "Metathran",
-    "Minion",
-    "Minotaur",
-    "Mite",
-    "Mole",
-    "Monger",
-    "Mongoose",
-    "Monk",
-    "Monkey",
-    "Moogle",
-    "Moonfolk",
-    "Mount",
-    "Mouse",
-    "Mutant",
-    "Myr",
-    "Mystic",
-    "Naga",
-    "Nautilus",
-    "Necron",
-    "Nephilim",
-    "Nightmare",
-    "Nightstalker",
-    "Ninja",
-    "Noble",
-    "Noggle",
-    "Nomad",
-    "Nymph",
-    "Octopus",
-    "Ogre",
-    "Ooze",
-    "Orb",
-    "Orc",
-    "Orgg",
-    "Otter",
-    "Ouphe",
-    "Ox",
-    "Oyster",
-    "Pangolin",
-    "Peasant",
-    "Pegasus",
-    "Pentavite",
-    "Performer",
-    "Pest",
-    "Phelddagrif",
-    "Phoenix",
-    "Phyrexian",
-    "Pilot",
-    "Pincher",
-    "Pirate",
-    "Plant",
-    "Pony",
-    "Praetor",
-    "Primarch",
-    "Prism",
-    "Processor",
-    "Rabbit",
-    "Raccoon",
-    "Ranger",
-    "Rat",
-    "Rebel",
-    "Reflection",
-    "Rhino",
-    "Rigger",
-    "Robot",
-    "Rogue",
-    "Sable",
-    "Salamander",
-    "Samurai",
-    "Sand",
-    "Saproling",
-    "Satyr",
-    "Scarecrow",
-    "Scientist",
-    "Scion",
-    "Scorpion",
-    "Scout",
-    "Sculpture",
-    "Serf",
-    "Serpent",
-    "Servo",
-    "Shade",
-    "Shaman",
-    "Shapeshifter",
-    "Shark",
-    "Sheep",
-    "Siren",
-    "Skeleton",
-    "Skrull",
-    "Slith",
-    "Sliver",
-    "Slug",
-    "Snail",
-    "Snake",
-    "Soldier",
-    "Soltari",
-    "Sorcerer",
-    "Spawn",
-    "Specter",
-    "Spellshaper",
-    "Sphinx",
-    "Spider",
-    "Spike",
-    "Spirit",
-    "Splinter",
-    "Sponge",
-    "Spy",
-    "Squid",
-    "Squirrel",
-    "Starfish",
-    "Surrakar",
-    "Survivor",
-    "Suspect",
-    "Symbiote",
-    "Synth",
-    "Tentacle",
-    "Tetravite",
-    "Thalakos",
-    "Thopter",
-    "Thrull",
-    "Tiefling",
-    // CR 205.3m: "Time Lord" is the only two-word creature type. Multi-word
-    // matching is handled by `parse_subtype_entry`/`starts_with_word_ci`
-    // (full-entry match + word boundary); no SUBTYPE_PLURALS entry is needed
-    // because the regular plural "Time Lords" is covered by the +"s" branch.
-    "Time Lord",
-    "Treefolk",
-    "Trilobite",
-    "Troll",
-    "Turtle",
-    "Tyranid",
-    "Unicorn",
-    "Vampire",
-    "Vedalken",
-    "Viashino",
-    "Villain",
-    "Volver",
-    "Wall",
-    "Walrus",
-    "Warlock",
-    "Warrior",
-    "Weasel",
-    "Weird",
-    "Werewolf",
-    "Whale",
-    "Wizard",
-    "Wolf",
-    "Wolverine",
-    "Wombat",
-    "Worm",
-    "Wraith",
-    "Wurm",
-    "Yeti",
-    "Zombie",
-    "Zubera",
-    // ── Land subtypes ──
-    "Cave",
-    "Desert",
-    "Forest",
-    "Gate",
-    "Island",
-    "Lair",
-    "Mine",
-    "Mountain",
-    "Plains",
-    "Power-Plant",
-    "Swamp",
-    "Tower",
-    "Urza's",
-    // ── Artifact subtypes ──
-    "Blood",
-    "Clue",
-    "Contraption",
-    "Equipment",
-    "Food",
-    "Fortification",
-    "Gold",
-    "Incubator",
-    "Junk",
-    "Map",
-    "Powerstone",
-    "Spacecraft", // CR 205.3g: Spacecraft is an artifact subtype.
-    "Treasure",
-    "Vehicle",
-    // ── Enchantment subtypes ──
-    "Aura",
-    "Background",
-    "Cartouche",
-    "Case",
-    "Class",
-    "Curse",
-    "Role",
-    "Room",
-    "Rune",
-    "Saga",
-    "Shard",
-    "Shrine",
-    // ── Spell subtypes ──
-    "Adventure",
-    "Arcane",
-    "Lesson",
-    "Trap",
-    // ── Planeswalker subtypes ──
-    "Ajani",
-    "Aminatou",
-    "Angrath",
-    "Arlinn",
-    "Ashiok",
-    "Basri",
-    "Bolas",
-    "Calix",
-    "Chandra",
-    "Comet",
-    "Dack",
-    "Dakkon",
-    "Daretti",
-    "Davriel",
-    "Dihada",
-    "Domri",
-    "Dovin",
-    "Ellywick",
-    "Elspeth",
-    "Estrid",
-    "Freyalise",
-    "Garruk",
-    "Gideon",
-    "Grist",
-    "Guff",
-    "Huatli",
-    "Jace",
-    "Jared",
-    "Jaya",
-    "Jeska",
-    "Kaito",
-    "Karn",
-    "Kasmina",
-    "Kaya",
-    "Kiora",
-    "Koth",
-    "Liliana",
-    "Lolth",
-    "Lukka",
-    "Minsc",
-    "Mordenkainen",
-    "Nahiri",
-    "Narset",
-    "Niko",
-    "Nissa",
-    "Nixilis",
-    "Oko",
-    "Quintorius",
-    "Ral",
-    "Rowan",
-    "Saheeli",
-    "Samut",
-    "Sarkhan",
-    "Serra",
-    "Sivitri",
-    "Sorin",
-    "Szat",
-    "Tamiyo",
-    "Teferi",
-    "Teyo",
-    "Tezzeret",
-    "Tibalt",
-    "Tyvar",
-    "Ugin",
-    "Urza",
-    "Venser",
-    "Vivien",
-    "Vraska",
-    "Will",
-    "Windgrace",
-    "Wrenn",
-    "Xenagos",
-    "Yanggu",
-    "Yanling",
-    "Zariel",
-];
+/// MTGJSON CardTypes-derived **creature** subtype vocabulary (`oracle-subtypes.json`),
+/// merged at load with canonical noncreature tables from `card_type.rs`.
+static ORACLE_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let creature: Vec<String> =
+        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+            .expect("oracle-subtypes.json well-formed");
+    crate::database::subtype_vocab::build_parser_subtype_vocabulary(&creature)
+});
+
+fn oracle_subtypes() -> &'static [String] {
+    &ORACLE_SUBTYPES
+}
 
 /// Test whether a lowercased candidate word names an MTG core type.
 /// CR 205.2: Core types are artifact, battle, creature, enchantment, instant,
@@ -1415,7 +982,7 @@ pub(crate) fn is_non_subtype_subject_name(text: &str) -> bool {
 /// subtype word in their own Oracle text).
 pub(crate) fn is_subtype_word(candidate_lower: &str) -> bool {
     fixed_noncreature_subtypes().any(|s| s.eq_ignore_ascii_case(candidate_lower))
-        || SUBTYPES
+        || oracle_subtypes()
             .iter()
             .any(|s| s.eq_ignore_ascii_case(candidate_lower))
 }
@@ -1466,8 +1033,8 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
     }
 
     // Check each subtype (singular and regular plural)
-    for &subtype in SUBTYPES {
-        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+    for subtype in oracle_subtypes() {
+        if let Some(parsed) = parse_subtype_entry(text, subtype.as_str()) {
             return Some(parsed);
         }
     }
@@ -2555,17 +2122,64 @@ mod tests {
 
     #[test]
     fn is_subtype_word_recognizes_registered_subtypes() {
-        // Subtypes from the SUBTYPES registry — used by strategy-5 to guard
-        // cards whose first name-word is a subtype (e.g. "Cleric Class",
-        // "Druid Arcanist", "Coward").
+        // Valid creature + noncreature subtypes from the validated vocabulary.
         assert!(is_subtype_word("cleric"));
         assert!(is_subtype_word("druid"));
         assert!(is_subtype_word("coward"));
         assert!(is_subtype_word("sliver"));
         assert!(is_subtype_word("merfolk"));
+        assert!(is_subtype_word("jace"));
+        assert!(is_subtype_word("nahiri"));
+        assert!(is_subtype_word("plains"));
+        assert!(is_subtype_word("equipment"));
         // Not a subtype.
         assert!(!is_subtype_word("sharuum"));
         assert!(!is_subtype_word("flying")); // that's a keyword, not a subtype
+    }
+
+    #[test]
+    fn is_subtype_word_recognizes_token_only_creature_subtypes() {
+        for (lower, canonical) in [
+            ("army", "Army"),
+            ("germ", "Germ"),
+            ("servo", "Servo"),
+            ("tentacle", "Tentacle"),
+            ("camarid", "Camarid"),
+            ("tetravite", "Tetravite"),
+        ] {
+            assert!(
+                is_subtype_word(lower),
+                "{lower} must be parser-authoritative"
+            );
+            assert_eq!(
+                parse_subtype(lower),
+                Some((canonical.to_string(), lower.len())),
+                "{lower} must parse as a subtype head"
+            );
+        }
+    }
+
+    #[test]
+    fn is_subtype_word_rejects_plane_and_spell_subtypes_from_noncreature_faces() {
+        // Plane — Time and Elemental Instant — Fire must not register as parser
+        // subtypes; otherwise "time travel" lowers incorrectly and split-card
+        // half-names like "Fire // Ice" fail to normalize to ~.
+        for non_creature in ["time", "fire"] {
+            assert!(
+                !is_subtype_word(non_creature),
+                "{non_creature} must not be a parser subtype"
+            );
+        }
+    }
+
+    #[test]
+    fn is_subtype_word_rejects_oracle_function_words_and_mtgjson_garbage() {
+        for garbage in ["the", "you", "and/or", "of", "elemental?", "baddest,"] {
+            assert!(
+                !is_subtype_word(garbage),
+                "{garbage} must not register as a subtype"
+            );
+        }
     }
 
     #[test]
@@ -2587,8 +2201,8 @@ mod tests {
             parse_subtype("Time Lords"),
             Some(("Time Lord".to_string(), 10))
         );
-        // Negative: a bare single word must NOT match the two-word subtype.
-        assert_eq!(parse_subtype("time you control"), None);
+        // Negative: trailing fragment of a two-word subtype must not match.
+        assert_eq!(parse_subtype("lord creature"), None);
     }
 
     #[test]

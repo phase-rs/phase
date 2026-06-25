@@ -299,6 +299,7 @@
     "delete": "Elimina",
     "newFolder": "Nuova cartella",
     "newFolderPrompt": "Nome della cartella:",
+    "createButton": "Crea",
     "renamePrompt": "Rinomina cartella:",
     "deleteConfirm": "Eliminare la cartella «{{name}}»? I mazzi verranno spostati in Senza cartella.",
     "emptyHint": "Questa cartella è vuota.",

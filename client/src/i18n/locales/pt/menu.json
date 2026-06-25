@@ -299,6 +299,7 @@
     "delete": "Excluir",
     "newFolder": "Nova pasta",
     "newFolderPrompt": "Nome da pasta:",
+    "createButton": "Criar",
     "renamePrompt": "Renomear pasta:",
     "deleteConfirm": "Excluir a pasta \"{{name}}\"? Os baralhos irão para Sem pasta.",
     "emptyHint": "Esta pasta está vazia.",

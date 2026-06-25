@@ -500,3 +500,201 @@ fn emrakul_ai_control_runs_for_controlled_human() {
         "AI controller must act during the controlled human turn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Claws of Gix dead-end regression (CR 601.2h ordering — sacrifice paid FIRST,
+// {1} LAST). The composite "{1}, Sacrifice a permanent" was over-approved by
+// `costs::can_pay` when the only {1} source (Mox Opal Metalcraft) needed the
+// sacrificed artifact to stay countable — every `SelectCards` candidate then
+// failed `apply_as_current`, leaving an empty scored set and a `fallback_action`
+// debug_assert panic. The supplemental witness check now rejects the activation
+// when no sacrifice preserves the mana source.
+// ---------------------------------------------------------------------------
+
+/// Build a `{T}: Add {1}` mana ability gated by Metalcraft-style live-eval
+/// "control 3+ artifacts" (`ActivationRestriction::RequiresCondition`).
+fn metalcraft_mox_def() -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
+        ControllerRef, ParsedCondition, QuantityRef, TypeFilter, TypedFilter,
+    };
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: engine::types::ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap);
+    def.activation_restrictions
+        .push(ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                        ),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }),
+        });
+    def
+}
+
+/// The Claws-of-Gix activated ability: `{1}, Sacrifice a permanent: You gain 1 life.`
+fn claws_of_gix_def() -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, SacrificeCost, TypedFilter,
+    };
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: engine::types::mana::ManaCost::generic(1),
+            },
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::permanent()),
+                1,
+            )),
+        ],
+    })
+}
+
+/// V3 (∃-success): board with 4 artifacts (Mox + 3 others) so sacrificing one
+/// leaves 3 → Metalcraft holds → a witness exists. Driving the AI loop must
+/// COMPLETE without reaching the `fallback_action` panic. The original dead-end
+/// would panic here.
+#[test]
+fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Mox Opal", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(metalcraft_mox_def());
+    }
+    // Three plain artifacts so total = 4; sacrificing one leaves 3 (Metalcraft).
+    for i in 0..3 {
+        let mut a = scenario.add_creature(P0, &format!("Artifact {i}"), 0, 1);
+        a.as_artifact();
+    }
+    {
+        let mut claws = scenario.add_creature(P0, "Claws of Gix", 0, 1);
+        claws.as_artifact();
+        claws.with_ability_definition(claws_of_gix_def());
+    }
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut ai_rng = SmallRng::seed_from_u64(19024);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+    // The assertion is non-panic: a recurrence of the dead-end aborts via the
+    // `fallback_action` debug_assert before this returns.
+    let results = run_ai_actions(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+    );
+    assert!(
+        results.len() <= 200,
+        "AI loop must stay within its safety cap and never dead-end"
+    );
+}
+
+/// V3 sibling (no-witness): board with exactly 3 artifacts (Mox + one plain
+/// artifact + Claws — itself an artifact) so EVERY eligible sacrifice drops the
+/// artifact count to 2 → Metalcraft off → no witness preserves the {1}. The AI
+/// must NOT propose the Claws activation (it would dead-end), and the loop must
+/// still complete without panic. The fix makes `choose_action` never surface a
+/// Claws `ActivateAbility` candidate here.
+#[test]
+fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
+    use engine::types::actions::GameAction;
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Mox Opal", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(metalcraft_mox_def());
+    }
+    // One plain artifact; with the Mox and the (artifact) Claws this is exactly
+    // 3 artifacts. Sacrificing ANY of the three drops the count to 2 → no
+    // Metalcraft → the {1} leg is unpayable on every post-sacrifice board.
+    {
+        let mut a = scenario.add_creature(P0, "Artifact 0", 0, 1);
+        a.as_artifact();
+    }
+    let claws = {
+        let mut claws = scenario.add_creature(P0, "Claws of Gix", 0, 1);
+        claws.as_artifact();
+        claws.with_ability_definition(claws_of_gix_def());
+        claws.id()
+    };
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    // REVERT-FAILING: with the supplemental check removed, `can_pay` over-approves
+    // this no-witness board, `choose_action` surfaces the Claws activation, the AI
+    // begins it, and the pending-cost loop panics at `search.rs` "AI fallback
+    // reached during pending cast (variant PayCost, spell Claws of Gix)" — exactly
+    // the baseline seed-19057 abort. Driving the full loop is what reproduces that
+    // dead-end (a top-level `choose_action` pass does not), so the assertion is
+    // non-panic plus first-step never being the Claws activation.
+    let first_action = {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(19057);
+        choose_action(runner.state(), P0, &config, &mut rng)
+    };
+    assert!(
+        !matches!(
+            first_action,
+            Some(GameAction::ActivateAbility { source_id, .. }) if source_id == claws
+        ),
+        "AI must not propose the dead-end Claws activation on a no-witness board, got {first_action:?}"
+    );
+
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut ai_rng = SmallRng::seed_from_u64(19057);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+    let results = run_ai_actions(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+    );
+    assert!(
+        results.len() <= 200,
+        "no-witness board must not dead-end the AI loop"
+    );
+}

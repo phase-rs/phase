@@ -6905,8 +6905,21 @@ fn parse_damage_prevention_replacement(
 
     // --- 1. Extract prevention amount ---
     // CR 615.7: "prevent the next N damage" → specific shield amount
+    // CR 615.1a: "prevent all but N of that damage" → leave N through (Temple Altisaur)
     // CR 615.1a: "prevent all damage" → prevent everything
-    let amount = if nom_primitives::scan_contains(working_lower, "prevent all") {
+    //
+    // CR 615.1a: Decompose "all but <number>" from the local position
+    // immediately following the "prevent " verb rather than scanning the whole
+    // clause, so a sibling phrase elsewhere in the text can't be mis-bound as
+    // the amount. The bare "all" arm below must stay ordered after this one
+    // because it shares the "all" prefix.
+    let after_prevent = strip_after(working_lower, "prevent ");
+    let amount = if let Some((after_all_but, _)) =
+        after_prevent.and_then(|s| tag::<_, _, OracleError<'_>>("all but ").parse(s).ok())
+    {
+        let (n, _) = parse_number(after_all_but)?;
+        PreventionAmount::AllBut(n)
+    } else if nom_primitives::scan_contains(working_lower, "prevent all") {
         PreventionAmount::All
     } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
@@ -7091,8 +7104,13 @@ fn parse_damage_prevention_replacement(
 /// to the recipient phrase without consuming the comma + imperative, leaving
 /// the follow-up extractor (`extract_prevention_followup`) to claim it.
 fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
+    parse_damage_recipient_after_prefix(working_lower, "dealt to ")
+        .or_else(|| parse_damage_recipient_after_prefix(working_lower, "would deal damage to "))
+}
+
+fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-        let (after_to, _) = tag::<_, _, OracleError<'_>>("dealt to ").parse(input)?;
+        let (after_to, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
         let (filter, rest) = parse_type_phrase(after_to);
         if matches!(filter, TargetFilter::Any) {
             return Err(nom::Err::Error(OracleError::new(
@@ -8586,6 +8604,43 @@ mod tests {
                 def.damage_target_filter.is_none(),
                 "must not use broad CreatureOnly damage_target_filter: {text}"
             );
+        }
+    }
+
+    /// CR 615.1a: Temple Altisaur — "If a source would deal damage to another
+    /// Dinosaur you control, prevent all but 1 of that damage."
+    #[test]
+    fn temple_altisaur_all_but_one_prevention_and_dinosaur_recipient() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to another Dinosaur you control, prevent all but 1 of that damage.",
+            "Temple Altisaur",
+        )
+        .expect("Temple Altisaur should parse as damage prevention");
+
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::AllBut(1)
+            }
+        );
+
+        let valid_card = def
+            .valid_card
+            .as_ref()
+            .expect("recipient filter must parse from 'would deal damage to'");
+        match valid_card {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+                    "expected Dinosaur subtype filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected Typed recipient filter, got {other:?}"),
         }
     }
 

@@ -5558,11 +5558,25 @@ fn parse_single_card_type_before_zone(input: &str) -> OracleResult<'_, Vec<TypeF
 }
 
 fn parse_zone_card_type_text(type_text: &str) -> Vec<TypeFilter> {
+    fn collect_type_filters(filter: TargetFilter, out: &mut Vec<TypeFilter>) {
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => out.extend(type_filters),
+            // CR 109.2a + CR 205.2b: a multi-type card phrase ("instant and/or
+            // sorcery cards in your graveyard") parses as an `Or` of typed halves.
+            // Flatten each half so the zone count keeps every type instead of
+            // collapsing to an untyped count — e.g. Octavia, Living Thesis's
+            // "eight or more instant and/or sorcery cards in your graveyard" gate.
+            TargetFilter::Or { filters } => {
+                for inner in filters {
+                    collect_type_filters(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
     let (filter, _) = parse_type_phrase(type_text.trim());
-    let mut card_types = match filter {
-        TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
-        _ => vec![],
-    };
+    let mut card_types = Vec::new();
+    collect_type_filters(filter, &mut card_types);
     card_types.retain(|type_filter| *type_filter != TypeFilter::Card);
     card_types
 }

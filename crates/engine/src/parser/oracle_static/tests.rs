@@ -2559,6 +2559,51 @@ fn self_cost_reduction_leading_if_extracts_across_condition_forms() {
     }
 }
 
+/// Issue #4250: Octavia, Living Thesis — "This spell costs {8} less to cast if
+/// you have eight or more instant and/or sorcery cards in your graveyard." The
+/// "you have N or more <multi-type> cards in your graveyard" gate must parse so
+/// the reduction is conditional; it was previously dropped (the `and/or`
+/// multi-type collapsed to no types), making the {8} reduction unconditional.
+#[test]
+fn self_cost_reduction_you_have_multi_type_cards_in_graveyard_gate_parses() {
+    let def = parse_static_line(
+        "This spell costs {8} less to cast if you have eight or more instant and/or sorcery cards in your graveyard.",
+    )
+    .expect("Octavia cost reduction must parse");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 8, .. },
+            ..
+        }
+    ));
+    let Some(StaticCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: crate::types::ability::ZoneRef::Graveyard,
+                        ref card_types,
+                        scope: CountScope::Controller,
+                        ..
+                    },
+            },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 8 },
+    }) = def.condition
+    else {
+        panic!(
+            "expected a graveyard instant/sorcery count >= 8 gate, got {:?}",
+            def.condition
+        );
+    };
+    assert!(
+        card_types.contains(&TypeFilter::Instant) && card_types.contains(&TypeFilter::Sorcery),
+        "the gate must count both instant and sorcery cards, got {card_types:?}"
+    );
+}
+
 #[test]
 fn self_cost_reduction_if_night_uses_day_night_condition() {
     let def = parse_static_line("This spell costs {2} less to cast if it's night.").unwrap();

@@ -191,6 +191,9 @@ pub(crate) fn opponent_lethal_damage(state: &GameState, ai_player: PlayerId) -> 
         })
         .collect();
 
+    // Hoist block-legality statics once for the O(opponents × blockers) sweep.
+    let slices = crate::combat_ai::BlockLegalitySlices::collect(state);
+
     let mut total = 0i32;
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -205,7 +208,7 @@ pub(crate) fn opponent_lethal_damage(state: &GameState, ai_player: PlayerId) -> 
         let power = obj.power.unwrap_or(0);
         let can_be_blocked = ai_blocker_ids
             .iter()
-            .any(|&bid| engine::game::combat::can_block_pair(state, bid, obj_id));
+            .any(|&bid| slices.can_block_pair(state, bid, obj_id));
         if can_be_blocked {
             // Blockable creatures contribute half power (some will get through)
             total += power / 2;
@@ -217,14 +220,19 @@ pub(crate) fn opponent_lethal_damage(state: &GameState, ai_player: PlayerId) -> 
 }
 
 /// Whether any of ai_player's untapped creatures can legally block the given creature.
-/// Delegates to the engine's `can_block_pair` for full blocking restriction checks.
-pub(crate) fn ai_can_block(state: &GameState, ai_player: PlayerId, attacker_id: ObjectId) -> bool {
+/// Delegates to the precomputed `can_block_pair` for full blocking restriction checks.
+pub(crate) fn ai_can_block(
+    state: &GameState,
+    ai_player: PlayerId,
+    attacker_id: ObjectId,
+    slices: &crate::combat_ai::BlockLegalitySlices,
+) -> bool {
     state.battlefield.iter().any(|&id| {
         state.objects.get(&id).is_some_and(|obj| {
             obj.controller == ai_player
                 && !obj.tapped
                 && obj.card_types.core_types.contains(&CoreType::Creature)
-                && engine::game::combat::can_block_pair(state, id, attacker_id)
+                && slices.can_block_pair(state, id, attacker_id)
         })
     })
 }

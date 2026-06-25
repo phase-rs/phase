@@ -671,6 +671,8 @@ pub enum PreventionAmount {
     Next(u32),
     /// "Prevent all damage"
     All,
+    /// "Prevent all but N of that damage" (Temple Altisaur)
+    AllBut(u32),
 }
 
 /// CR 614.9: Recipient of a one-shot damage-redirection effect — the
@@ -1726,10 +1728,8 @@ impl ManaSpendRestriction {
     pub fn has_payable_branch(&self) -> bool {
         match self {
             // DEAD — no reachable production payment site makes the lowered gate
-            // return true today:
-            // CR 106.6: `OnlyForXCosts` is hardcoded `false` in both `allows_spell`
-            // and `allows_activation` (no {X}-in-cost data check at any call site).
-            ManaSpendRestriction::XCostOnly => false,
+            // return true today (except `XCostOnly`, live via `SpellMeta.has_x_in_cost`):
+            ManaSpendRestriction::XCostOnly => true,
             // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` never
             // sets `true` at a payment site (no production path casts a spell face
             // down *through spell payment*), so the gate is never satisfied.
@@ -17294,7 +17294,7 @@ mod tests {
         assert!(ManaSpendRestriction::ActivateOnly.has_payable_branch());
 
         // DEAD: every lowered gate is hardcoded-false or never reached today.
-        assert!(!ManaSpendRestriction::XCostOnly.has_payable_branch());
+        assert!(ManaSpendRestriction::XCostOnly.has_payable_branch());
         assert!(!ManaSpendRestriction::FaceDownSpell.has_payable_branch());
         assert!(!ManaSpendRestriction::TurnPermanentFaceUp.has_payable_branch());
 
