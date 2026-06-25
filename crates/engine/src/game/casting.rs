@@ -11761,6 +11761,69 @@ pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &
     }
 }
 
+/// Which battlefield-removing non-mana cost leg a composite carries. Each is a
+/// distinct CR keyword action / zone change but all remove a permanent from the
+/// battlefield (CR 701.21a Sacrifice / CR 701.13a Exile / plain bounce), so one
+/// MutationWitness models all three.
+pub(super) enum RemovalKind {
+    Sacrifice,
+    Exile,
+    ReturnToHand,
+}
+
+/// CR 601.2h: first non-self battlefield-removing leg of `cost`, by kind
+/// priority (Sacrifice > Exile > ReturnToHand). Composes the existing per-kind
+/// cost walkers. Returns at most ONE leg (single-leg limit documented at the
+/// `can_pay` call site).
+pub(super) fn find_non_self_battlefield_removal_cost(
+    cost: &AbilityCost,
+) -> Option<(u32, &TargetFilter, RemovalKind)> {
+    if let Some((n, f)) = find_non_self_sacrifice_cost(cost) {
+        return Some((n, f, RemovalKind::Sacrifice));
+    }
+    if let Some((n, f)) = find_battlefield_exile_cost(cost) {
+        return Some((n, f, RemovalKind::Exile));
+    }
+    if let Some((n, Some(f))) = find_return_to_hand_cost(cost) {
+        // Mirror the Sacrifice/Exile SelfRef exclusion: a self-bounce is the
+        // source's own removal, not a board-shrinking non-mana leg in the
+        // CR 601.2h ordering sense. Recognizing it would let the lone witness
+        // remove the source and false-REJECT a self-bounce whose mana leg the
+        // source itself feeds.
+        if !matches!(f, TargetFilter::SelfRef) {
+            return Some((n, f, RemovalKind::ReturnToHand));
+        }
+    }
+    None
+}
+
+/// CR 701.13a: first non-self Exile leg whose *effective* source zone is the
+/// battlefield, reusing the live zone classifier
+/// `cost_payability::exile_cost_effective_zone` (a `zone: None` + non-permanent
+/// filter resolves to Hand and MUST NOT route here — that would false-reject a
+/// payable hand-exile composite). A `None` filter is out of scope. The
+/// `SelfRef`-first arm is required: a SelfRef filter may be permanent-implying
+/// and would otherwise pass the battlefield gate.
+fn find_battlefield_exile_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+        } if super::cost_payability::exile_cost_effective_zone(*zone, filter.as_ref())
+            == Zone::Battlefield =>
+        {
+            filter.as_ref().map(|f| (*count, f))
+        }
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_battlefield_exile_cost),
+        _ => None,
+    }
+}
+
 pub(crate) fn find_non_self_discard(
     cost: &AbilityCost,
 ) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
