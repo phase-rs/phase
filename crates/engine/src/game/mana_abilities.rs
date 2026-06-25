@@ -176,11 +176,18 @@ pub fn resolve_triggered_mana_ability_inline(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
     events: &mut Vec<GameEvent>,
+    color_override: Option<ProductionOverride>,
 ) {
     let previous_trigger_event = state.current_trigger_event.clone();
+    let previous_mana_override = state.current_triggered_mana_override.take();
     state.current_trigger_event = trigger_event.cloned();
+    // Forward the planned color override so `effects::mana::resolve` can produce
+    // the correct color for `AnyOneColor` triggered mana abilities (Fertile Ground)
+    // rather than defaulting to `color_options.first()`.
+    state.current_triggered_mana_override = color_override;
     // Use the standard resolution entry so sub_ability chains resolve uniformly.
     let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+    state.current_triggered_mana_override = previous_mana_override;
     state.current_trigger_event = previous_trigger_event;
 }
 
@@ -5965,7 +5972,13 @@ mod tests {
         };
         let mut events = Vec::new();
 
-        resolve_triggered_mana_ability_inline(&mut state, &ability, Some(&event), &mut events);
+        resolve_triggered_mana_ability_inline(
+            &mut state,
+            &ability,
+            Some(&event),
+            &mut events,
+            None,
+        );
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.total(), 1);

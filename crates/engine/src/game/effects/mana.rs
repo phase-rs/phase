@@ -64,7 +64,26 @@ pub fn resolve(
     // `resolve_quantity_with_targets` threads `ability.chosen_x` through to the
     // `Variable { name: "X" }` branch of `resolve_ref`. Non-X mana production
     // (Fixed, ObjectCount, etc.) is unaffected.
-    let mana_types = resolve_mana_types_with_ability(produced, &*state, ability);
+    //
+    // CR 605.1b + CR 106.12a: For inline `TapsForMana` triggered mana abilities
+    // (Fertile Ground, Utopia Sprawl AnyOneColor), the auto-tap planner may have
+    // stored a `current_triggered_mana_override` so the resolver produces the
+    // planned color rather than defaulting to the first listed option.
+    let mana_types = if is_triggered_mana_inline {
+        match state.current_triggered_mana_override.clone() {
+            Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => {
+                // Resolve the count from the production descriptor, then produce
+                // that many units of the override color — mirrors the behavior of
+                // `resolve_single_color_override` in `mana_abilities.rs`.
+                let count = resolve_mana_types_with_ability(produced, &*state, ability).len();
+                vec![color; count]
+            }
+            Some(crate::types::game_state::ProductionOverride::Combination(types)) => types,
+            None => resolve_mana_types_with_ability(produced, &*state, ability),
+        }
+    } else {
+        resolve_mana_types_with_ability(produced, &*state, ability)
+    };
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
             state,

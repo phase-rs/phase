@@ -6816,6 +6816,24 @@ pub struct GameState {
     #[serde(skip)]
     pub cost_payment_failed_flag: bool,
 
+    /// Transient auto-tap aura overrides. Before `resolve_tap_mana_triggers_inline`,
+    /// `auto_tap_mana_sources_inner` inserts one entry per aura whose `TapsForMana`
+    /// trigger is about to fire. Keyed by aura `ObjectId`; value is the color that
+    /// the auto-tap planner chose for this aura. Consumed by
+    /// `resolve_triggered_mana_ability_inline`; cleared immediately after inline
+    /// trigger resolution. Never serialized — it is only valid within the synchronous
+    /// auto-tap call and must always be empty in any persisted snapshot.
+    #[serde(skip)]
+    pub pending_taps_for_mana_overrides: std::collections::HashMap<ObjectId, ProductionOverride>,
+
+    /// Transient color override forwarded to the currently resolving triggered mana
+    /// ability (via `resolve_triggered_mana_ability_inline`). Set from
+    /// `pending_taps_for_mana_overrides`; read by `effects::mana::resolve` when
+    /// `is_triggered_mana_inline` is true; cleared immediately after the ability chain
+    /// returns. Never serialized.
+    #[serde(skip)]
+    pub current_triggered_mana_override: Option<ProductionOverride>,
+
     /// CR 601.2h + CR 616.1: Resume state when `handle_discard_for_cost` pauses mid-loop
     /// for a replacement choice. The card at `paused_at_index` is completed by
     /// `handle_replacement_choice`; resume continues at `paused_at_index + 1`.
@@ -7526,6 +7544,8 @@ impl GameState {
             lki_cache: HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
+            pending_taps_for_mana_overrides: std::collections::HashMap::new(),
+            current_triggered_mana_override: None,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),

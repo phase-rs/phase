@@ -6680,7 +6680,17 @@ fn auto_tap_mana_sources_inner(
     // Sources with an explicit ability delegate to resolve_mana_ability (the single
     // authority for cost payment — handles tap, sacrifice, and future cost types).
     // The basic-land-subtype fallback (ability_index: None) uses inline tap + produce.
+    //
+    // For options carrying TapsForMana aura overrides, populate
+    // `state.pending_taps_for_mana_overrides` so that
+    // `resolve_triggered_mana_ability_inline` can thread the correct color into the
+    // aura's triggered mana ability when `resolve_tap_mana_triggers_inline` fires.
     for option in to_tap {
+        for (aura_id, override_val) in &option.taps_for_mana_overrides {
+            state
+                .pending_taps_for_mana_overrides
+                .insert(*aura_id, override_val.clone());
+        }
         if let Some(idx) = option.ability_index {
             let ability_def = state
                 .objects
@@ -6813,10 +6823,21 @@ fn production_override_for_option(
     ability_def: &crate::types::ability::AbilityDefinition,
     option: &ManaSourceOption,
 ) -> Option<crate::types::game_state::ProductionOverride> {
-    if let Some(combo) = option.atomic_combination.clone() {
-        return Some(crate::types::game_state::ProductionOverride::Combination(
-            combo,
-        ));
+    // When `taps_for_mana_overrides` is non-empty, `atomic_combination` includes
+    // the aura bonus types appended by `land_mana_options`. Cap to the land's own
+    // portion so the land's ability does not over-produce — the aura bonus is
+    // resolved separately via `state.pending_taps_for_mana_overrides`.
+    let aura_count = option.taps_for_mana_overrides.len();
+    if let Some(combo) = option.atomic_combination.as_ref() {
+        let land_end = combo.len().saturating_sub(aura_count);
+        let land_combo = &combo[..land_end];
+        if land_combo.len() > 1 {
+            return Some(crate::types::game_state::ProductionOverride::Combination(
+                land_combo.to_vec(),
+            ));
+        }
+        // For 1 or 0 land types, fall through to the per-ability-type check.
+        // `option.mana_type` already mirrors the land's own color.
     }
 
     let Effect::Mana { produced, .. } = &*ability_def.effect else {

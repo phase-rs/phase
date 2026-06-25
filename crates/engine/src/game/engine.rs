@@ -10135,6 +10135,113 @@ mod tests {
         );
     }
 
+    /// Build a Fertile Ground–style AnyOneColor aura. Returns the aura's `ObjectId`.
+    fn attach_fertile_ground(
+        state: &mut GameState,
+        land_id: ObjectId,
+        owner: PlayerId,
+    ) -> ObjectId {
+        let aura = create_object(
+            state,
+            CardId(98),
+            owner,
+            "Fertile Ground".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.attached_to = Some(land_id.into());
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                            contribution: ManaContribution::Additional,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::AttachedTo),
+        );
+        aura
+    }
+
+    #[test]
+    fn fertile_ground_auto_tap_threads_non_first_color_to_resolver() {
+        // Issue #4265 / round-4 reviewer regression: the planner can advertise
+        // a {G}+{U} option for Forest + Fertile Ground, but the resolver used
+        // to default to the first AnyOneColor option (White) regardless of the
+        // planner's choice. This test proves that when a {U} cost is pending,
+        // auto-tap picks the Forest (for {G}) and tells Fertile Ground's inline
+        // TapsForMana trigger to produce {U} — not White.
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = setup_game_at_main_phase();
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_fertile_ground(&mut state, forest, PlayerId(0));
+
+        // Simulate auto-tap for {G}{U}: the planner must choose Blue for the
+        // Fertile Ground bonus so both shards are covered.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+            generic: 0,
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blue-Green Spell".to_string(),
+            Zone::Hand,
+        );
+
+        // Verify the planner considers the cost payable.
+        assert!(
+            casting::can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+            "Forest + Fertile Ground must be able to pay {{G}}{{U}}"
+        );
+
+        // Run auto-tap and inline trigger resolution (always used as a pair).
+        let mut events = Vec::new();
+        let events_before = events.len();
+        casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
+        // CR 605.4a: `resolve_tap_mana_triggers_inline` fires TapsForMana
+        // triggers (including Fertile Ground's) with the planner's color choice
+        // threaded via `state.pending_taps_for_mana_overrides`.
+        super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+        let green = state.players[0]
+            .mana_pool
+            .count_color(crate::types::mana::ManaType::Green);
+        let blue = state.players[0]
+            .mana_pool
+            .count_color(crate::types::mana::ManaType::Blue);
+        assert_eq!(green, 1, "Forest must contribute {{G}} to the pool");
+        assert_eq!(
+            blue, 1,
+            "Fertile Ground's TapsForMana trigger must produce {{U}} — not the \
+             first listed color ({{W}}) — when the planner chose Blue"
+        );
+    }
+
     #[test]
     fn vorinclex_mana_doubling_trigger_fires_on_tap() {
         // Vorinclex, Voice of Hunger: "Whenever you tap a land for mana,

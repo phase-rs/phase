@@ -1114,11 +1114,20 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             }
         }
         for ability in coupled {
+            // Look up the color override the auto-tap planner chose for this aura's
+            // triggered mana ability. Only non-None for AnyOneColor bonus triggers
+            // (Fertile Ground) when called from the auto-tap path; None for manual
+            // play and Fixed bonus triggers (Wild Growth already has no choice).
+            let color_override = state
+                .pending_taps_for_mana_overrides
+                .get(&ability.source_id)
+                .cloned();
             super::mana_abilities::resolve_triggered_mana_ability_inline(
                 state,
                 &ability,
                 Some(&tap_event),
                 events,
+                color_override,
             );
         }
     }
@@ -1134,6 +1143,11 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             }
         }
     }
+
+    // The aura color overrides stored by `auto_tap_mana_sources_inner` were
+    // consumed in Pass 1. Clear them now so the map is always empty outside the
+    // synchronous auto-tap + trigger-resolution window.
+    state.pending_taps_for_mana_overrides.clear();
 }
 
 /// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
@@ -4157,6 +4171,7 @@ fn dispatch_pending_trigger_context(
                 &trigger.ability,
                 trigger.trigger_event.as_ref(),
                 events_out,
+                None,
             );
             restore_trigger_event_context(state, context_snapshot);
             return TriggerDispatchDisposition::ResolvedInline;
