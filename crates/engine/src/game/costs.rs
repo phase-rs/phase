@@ -1023,6 +1023,102 @@ fn pay_ability_cost_inner(
     Ok(PaymentOutcome::Paid)
 }
 
+/// A minimal board mutation modeled on a throwaway clone by the activation-time
+/// supplemental affordability check (`composite_sacrifice_mana_witness_exists`).
+///
+/// Each variant names a concrete way the live cost-payment path mutates the
+/// board *before* the residual mana leg is paid, so the affordability oracle can
+/// re-derive remaining-board mana on the post-mutation state instead of the
+/// (over-approximating) intact board.
+enum MutationWitness {
+    /// CR 701.21a: Sacrifice the carried permanent(s) — each is removed from the
+    /// battlefield to its owner's graveyard. The `(ObjectId, PlayerId)` pairs are
+    /// the witness object and its owner.
+    Sacrifice(Vec<(ObjectId, PlayerId)>),
+}
+
+/// Apply a [`MutationWitness`] to a throwaway clone.
+///
+/// INVARIANT (CR 613.1): any witness that removes or moves a board permanent
+/// MUST leave `layers_dirty` non-`Clean`, so the downstream payability oracle's
+/// `flush_layers` (in `can_pay_effect_mana_cost_after_auto_tap`) re-derives the
+/// continuous effects (affinity-style cost reductions, granted mana abilities,
+/// devotion) whose values depend on board population. `zones::remove_from_zone`
+/// does NOT mark layers dirty, so `layers::mark_layers_full` is mandatory here.
+fn apply_mutation_witness(sim: &mut GameState, witness: &MutationWitness) {
+    match witness {
+        MutationWitness::Sacrifice(removals) => {
+            // CR 701.21a: battlefield → graveyard. The graveyard add is
+            // intentionally omitted — the destination zone is irrelevant to the
+            // remaining-board mana the oracle re-derives below; only the
+            // battlefield removal matters.
+            for &(id, owner) in removals {
+                super::zones::remove_from_zone(sim, id, Zone::Battlefield, owner);
+            }
+            // CR 613.1: re-derive continuous effects against the post-removal
+            // board on the downstream `flush_layers`. Mandatory — see the
+            // function-level invariant above.
+            super::layers::mark_layers_full(sim);
+        }
+    }
+}
+
+/// Enumerate the single-witness mutation set for the supplemental affordability
+/// check. Gated on a non-self single-permanent sacrifice leg
+/// (`find_non_self_sacrifice_cost`): for `count == 1`, emit one singleton
+/// `Sacrifice` witness per eligible permanent (the existential candidates).
+///
+/// For `count > 1` (or no non-self sacrifice leg) this returns an empty `Vec` —
+/// the caller MUST treat an empty set as "out of scope, do not reject" rather
+/// than feeding it into `.any()` (which would wrongly yield `false`). See the
+/// wiring in [`can_pay`].
+fn mutation_witness_set(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> Vec<MutationWitness> {
+    let Some((count, filter)) = super::casting::find_non_self_sacrifice_cost(cost) else {
+        return Vec::new();
+    };
+    if count != 1 {
+        return Vec::new();
+    }
+    super::casting::find_eligible_sacrifice_targets(state, payer, source_id, filter)
+        .into_iter()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(&id)
+                .map(|obj| MutationWitness::Sacrifice(vec![(id, obj.owner)]))
+        })
+        .collect()
+}
+
+/// CR 601.2h: single-witness monotonic existential affordability check for the
+/// "conditional static mana leg + non-self single-sacrifice" composite shape.
+///
+/// The composite is genuinely payable iff THERE EXISTS one eligible sacrifice
+/// whose removal (applied on a throwaway clone) leaves the static mana leg
+/// payable. First-success early-return: `.any()` stops at the first witness that
+/// keeps the mana payable.
+fn composite_sacrifice_mana_witness_exists(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    mana: &crate::types::mana::ManaCost,
+) -> bool {
+    mutation_witness_set(state, payer, source_id, cost)
+        .iter()
+        .any(|witness| {
+            crate::game::perf_counters::record_state_clone_for_legality();
+            let mut sim = state.clone();
+            apply_mutation_witness(&mut sim, witness);
+            can_pay_effect_mana_cost_after_auto_tap(&sim, payer, source_id, mana)
+        })
+}
+
 /// CR 118.3 + CR 601.2h: The single affordability authority. Returns whether
 /// `payer` could pay `cost` right now in the active [`PaymentScope`].
 ///
@@ -1074,7 +1170,7 @@ pub(crate) fn can_pay(
             // CR 601.2h: dry-run the authority on a throwaway clone. A `Failed`
             // outcome (insufficient mana, life, …) or an engine error (e.g. a
             // tapped source for a `{T}` cost) means the cost can't be paid.
-            matches!(
+            let dry_run_ok = matches!(
                 pay_ability_cost_inner(
                     &mut simulated,
                     payer,
@@ -1084,7 +1180,35 @@ pub(crate) fn can_pay(
                     scope
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
-            )
+            );
+            if !dry_run_ok {
+                return false;
+            }
+            // CR 601.2f / CR 602.2b: an activated ability's activation cost is the
+            // analog of a spell's mana cost, so the CR 601.2h ordering applies.
+            // CR 601.2h: the live path pays the sacrifice FIRST and the mana
+            // LAST. The dry-run above pays mana first (board intact) and no-ops a
+            // non-self sacrifice, so it over-approves a "{N}, Sacrifice a
+            // permanent" cost whose only {N} source is gated on the sacrificed
+            // board (Mox Opal Metalcraft / affinity-style reductions). CR 118.3:
+            // supplement the dry run with a single-witness monotonic existence
+            // check for that exact shape — does ANY eligible sacrifice leave the
+            // mana leg payable on the post-sacrifice board?
+            if let (Some(mana), Some((count, _))) = (
+                super::casting::composite_mana_leg(cost),
+                super::casting::find_non_self_sacrifice_cost(cost),
+            ) {
+                if count == 1 {
+                    return composite_sacrifice_mana_witness_exists(
+                        state, payer, source_id, cost, mana,
+                    );
+                }
+                // AMENDMENT 1: count > 1 is OUT OF SCOPE — fall through to the
+                // unchanged `true` below (preserves today's over-approximation;
+                // a count >= 2 conditional-mana-base sacrifice is a vanishingly
+                // rare tracked follow-up). MUST NOT reject count > 1 here.
+            }
+            true
         }
         PaymentScope::Resolution { ability } => can_pay_resolution(state, payer, cost, ability),
     }
@@ -1771,6 +1895,322 @@ mod tests {
         assert!(
             !can_pay_activation(&scenario.state, src, &cost),
             "tapped source → Composite[Waterbend, {{T}}] must be unpayable"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Composite "{N}, Sacrifice a permanent" supplemental affordability check
+    // (CR 601.2h ordering: live path pays sacrifice FIRST, mana LAST). The
+    // helpers below build the Claws-of-Gix / Mox-Opal-Metalcraft minimal board.
+    // -----------------------------------------------------------------------
+
+    /// Budget for `record_state_clone_for_legality` calls on the PAYABLE witness
+    /// path. Three CONSTANT clones, none scaling with the eligible-set size K:
+    ///   1. the existing `can_pay` dry-run clone;
+    ///   2. the first (and, via first-success early-return, ONLY) witness clone in
+    ///      `composite_sacrifice_mana_witness_exists`;
+    ///   3. one mana-ability simulation clone
+    ///      (`can_activate_mana_ability_by_simulation`) when that single witness's
+    ///      `can_pay_effect_mana_cost_after_auto_tap` evaluates the Mox's tap mana
+    ///      ability — fixed per-witness overhead, examined once.
+    ///
+    /// It is intentionally NOT 1 (the dry run alone), NOT O(N) per candidate, and
+    /// NOT the full eligible-set size K. With a WIDE board (K = 7) an O(N) check
+    /// would record ~K+ clones; the bound of 3 proves the `.any()` short-circuits
+    /// at the first witness that keeps the mana payable.
+    const WITNESS_CLONE_BUDGET: u64 = 3;
+
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ActivationRestriction, Comparator, ContinuousModification,
+        ControllerRef, ParsedCondition, QuantityRef, StaticCondition, StaticDefinition, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::statics::StaticMode;
+    use crate::types::ManaProduction;
+
+    /// `QuantityExpr::Ref(ObjectCount(artifacts you control))`.
+    fn artifacts_you_control() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                ),
+            },
+        }
+    }
+
+    /// A `{T}: Add {1}` mana ability gated by Metalcraft-style *live-eval*
+    /// "control 3+ artifacts" via an `ActivationRestriction::RequiresCondition`
+    /// (`ParsedCondition::QuantityComparison`). This is the Mox-Opal model: the
+    /// gate reads the live battlefield, NOT the layer system.
+    fn metalcraft_mox(scenario: &mut GameScenario) -> ObjectId {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        def.activation_restrictions
+            .push(ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: artifacts_you_control(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+            });
+        let mut b = scenario.add_creature(P0, "Mox Opal", 0, 0);
+        b.as_artifact();
+        b.with_ability_definition(def);
+        b.id()
+    }
+
+    /// Add a plain artifact (sacrifice fodder / artifact-count filler) with no
+    /// mana ability.
+    fn plain_artifact(scenario: &mut GameScenario, name: &str) -> ObjectId {
+        let mut b = scenario.add_creature(P0, name, 0, 1);
+        b.as_artifact();
+        b.id()
+    }
+
+    /// The Claws-of-Gix cost: `{1}, Sacrifice a permanent`.
+    fn claws_cost() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    1,
+                )),
+            ],
+        }
+    }
+
+    /// V1 (dead-end gone): Metalcraft-only board — exactly 3 artifacts including
+    /// Mox Opal (the only {1} source) + Claws. Sacrificing ANY artifact drops to
+    /// 2 → Metalcraft off → residual {1} unpayable. CR 601.2h / CR 118.3.
+    /// REVERT-FAILING: without the supplemental block this asserts `true` (the
+    /// dry-run pays {1} first on the intact 3-artifact board).
+    #[test]
+    fn claws_metalcraft_only_board_is_dead_end_unpayable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Artifact A");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        // 3 artifacts on board; Mox makes {1} only while Metalcraft holds.
+        assert!(
+            !can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "every sacrifice drops to 2 artifacts → Metalcraft off → {{1}} unpayable"
+        );
+    }
+
+    /// V2 (no over-reject): Claws plus an untapped basic land (a non-conditional
+    /// `{1}` source) plus the Metalcraft Mox plus fodder. A sacrifice can leave
+    /// the `{1}` payable from the land, so `can_pay` is `true`. The full live
+    /// activation and life+1 assertion is covered through the real pipeline by
+    /// the phase-ai `choose_action` scenario
+    /// `scenario_claws_of_gix_witness_board_does_not_dead_end`; this layer asserts
+    /// only the affordability oracle's verdict.
+    #[test]
+    fn claws_with_unconditional_land_is_payable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Artifact A");
+        // A Forest produces one mana usable for the generic {1} — a
+        // non-conditional source that survives any sacrifice.
+        scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "land provides a non-conditional {{1}} → payable regardless of sacrifice"
+        );
+    }
+
+    /// V5 (unpayable): EVERY eligible sacrifice breaks the sole {1} producer →
+    /// `false`. Same as V1 but stated as the existential-failure case: 3
+    /// artifacts, the only producer is the Metalcraft Mox, no sacrifice keeps the
+    /// count at 3.
+    #[test]
+    fn claws_every_sacrifice_breaks_producer_is_unpayable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            !can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "no witness preserves Metalcraft → unpayable"
+        );
+    }
+
+    /// V6 (payable, redundant mana): with FOUR artifacts (Mox + 3 fodder), any
+    /// single sacrifice leaves 3 → Metalcraft still holds → `{1}` payable from
+    /// the Mox itself → `true`.
+    #[test]
+    fn claws_redundant_artifact_count_keeps_metalcraft_payable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        plain_artifact(&mut scenario, "Filler 2");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        // 4 artifacts: sacrificing any one leaves 3 → Metalcraft holds.
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "4 artifacts → a witness leaves Metalcraft on → payable"
+        );
+    }
+
+    /// V7 (payable, disjoint producer): dedicated NON-artifact fodder distinct
+    /// from the producer. Sacrificing the fodder doesn't change artifact count,
+    /// so Metalcraft holds. With 3 artifacts (Mox + 2 fillers) + a creature
+    /// fodder, sacrificing the creature keeps 3 artifacts → payable.
+    #[test]
+    fn claws_disjoint_fodder_preserves_producer() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        plain_artifact(&mut scenario, "Filler 2");
+        // Non-artifact creature fodder — sacrificing it leaves artifact count = 3.
+        scenario.add_creature(P0, "Bear", 2, 2);
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "sacrificing non-artifact fodder preserves Metalcraft → payable"
+        );
+    }
+
+    /// V8 (clone-bound): WIDE board (Mox + 6 plain artifacts). On the PAYABLE
+    /// path the existential check must short-circuit at the first witness that
+    /// keeps the mana payable, so the legality-clone delta stays within
+    /// `WITNESS_CLONE_BUDGET` — NOT O(eligible-set-size).
+    #[test]
+    fn claws_payable_path_is_clone_bounded() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        // 6 plain artifacts → 7 artifacts total; sacrificing any one leaves 6
+        // (>= 3) → Metalcraft holds, so the FIRST witness already succeeds.
+        for i in 0..6 {
+            plain_artifact(&mut scenario, &format!("Filler {i}"));
+        }
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        crate::game::perf_counters::reset();
+        let payable = can_pay_activation(&scenario.state, claws, &claws_cost());
+        let delta = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert!(
+            payable,
+            "wide board → first witness keeps Metalcraft → payable"
+        );
+        assert!(
+            delta <= WITNESS_CLONE_BUDGET,
+            "payable path must short-circuit: {delta} clones > budget {WITNESS_CLONE_BUDGET}"
+        );
+    }
+
+    /// V10 (no count>1 regression): a `Composite[{1}, Sacrifice TWO permanents]`
+    /// must NOT be rejected by the supplemental check (AMENDMENT 1: count > 1 is
+    /// out of scope and falls through to the unchanged `true`), even on a board
+    /// where sacrificing would break the conditional mana source. This pins the
+    /// count==1 guard: the dry-run already approves it (mana paid first), and the
+    /// witness block must leave that verdict byte-identical.
+    #[test]
+    fn claws_sacrifice_two_count_gt_one_not_rejected() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        let cost_two = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    2,
+                )),
+            ],
+        };
+        assert!(
+            can_pay_activation(&scenario.state, claws, &cost_two),
+            "count > 1 sacrifice composite falls through to today's over-approximation (true)"
+        );
+    }
+
+    /// B1 (mark_layers_full discriminator — MANDATORY): a LAYER-APPLIED mana
+    /// source. The Mox grants its own `{T}: Add {1}` mana ability via a
+    /// continuous `StaticDefinition` (`ContinuousModification::GrantAbility`)
+    /// gated by `StaticCondition::QuantityComparison(artifacts >= 3)` — the
+    /// def-index "as long as" gate re-evaluated every layer recompute. Unlike
+    /// `metalcraft_mox` (live-eval `activation_restrictions`), the granted ability
+    /// only appears in `obj.abilities` after `flush_layers` re-derives layer 6.
+    ///
+    /// Sacrificing an artifact drops the count to 2; the witness applies the
+    /// removal and `mark_layers_full`, so the downstream
+    /// `can_pay_effect_mana_cost_after_auto_tap` re-derives layers, the granted
+    /// `{T}: Add {1}` disappears, and the residual `{1}` is unpayable →
+    /// `can_pay == false`.
+    ///
+    /// This test FAILS if `mark_layers_full` is omitted from
+    /// `apply_mutation_witness`: the clone's `layers_dirty` stays `Clean`, the
+    /// downstream `flush_layers` no-ops, the stale granted ability persists, and
+    /// the check over-approves to `true`.
+    #[test]
+    fn claws_layer_granted_mana_requires_layer_reflush() {
+        let mut scenario = GameScenario::new();
+        // The mana ability the Mox GRANTS to itself while controlling 3+ artifacts.
+        let granted = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let mut grant_static = StaticDefinition::new(StaticMode::Continuous);
+        grant_static.affected = Some(TargetFilter::SelfRef);
+        grant_static.modifications = vec![ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        }];
+        grant_static.condition = Some(StaticCondition::QuantityComparison {
+            lhs: artifacts_you_control(),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        });
+
+        let mox = {
+            let mut b = scenario.add_creature(P0, "Layer Mox", 0, 0);
+            b.as_artifact();
+            b.with_static_definition(grant_static);
+            b.id()
+        };
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+
+        // Flush layers so the grant is live on the base 3-artifact board, proving
+        // the granted ability really is the sole {1} source before any sacrifice.
+        crate::game::layers::flush_layers(&mut scenario.state);
+        assert!(
+            scenario.state.objects[&mox]
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Mana { .. })),
+            "precondition: Mox has the granted mana ability at 3 artifacts"
+        );
+
+        assert!(
+            !can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "sacrifice drops to 2 artifacts → layer reflush removes granted {{1}} → unpayable"
         );
     }
 
