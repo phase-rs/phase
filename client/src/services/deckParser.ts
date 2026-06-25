@@ -167,6 +167,16 @@ function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
+/** True when a parsed deck contains at least one importable card slot. */
+export function parsedDeckHasCards(deck: ParsedDeck): boolean {
+  return (
+    totalCards(deck.main) > 0
+    || totalCards(deck.sideboard) > 0
+    || (deck.commander?.length ?? 0) > 0
+    || deck.companion !== undefined
+  );
+}
+
 function cleanDeckName(value: string): string {
   return value
     .trim()

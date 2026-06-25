@@ -492,6 +492,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::EventTarget => "damaged object of the triggering event".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -1405,6 +1406,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
+            excess_only,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1415,10 +1417,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
+            let excess_tag = if *excess_only { " excess" } else { "" };
             format!(
-                "{}{} damage dealt this turn ({} -> {}) [{group}]",
+                "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
                 kind,
+                excess_tag,
                 fmt_target(source),
                 fmt_target(target)
             )
@@ -1714,7 +1718,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         }
         ChoiceType::OddOrEven => "odd or even",
         ChoiceType::BasicLandType => "basic land type",
-        ChoiceType::CardType => "card type",
+        ChoiceType::CardType { excluded } => {
+            if excluded.is_empty() {
+                "card type"
+            } else {
+                "restricted card type"
+            }
+        }
         ChoiceType::CardName => "card name",
         ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
@@ -2133,7 +2143,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 }
                 _ => {}
             }
-            desc.push_str(&format!("{}/{} ", fmt_pt(power), fmt_pt(toughness)));
+            // CR 208.1: only creature tokens have power/toughness; suppress the
+            // P/T display for noncreature tokens (Treasure, Clue, Vibranium, …)
+            // whose `0/0` is just the `Effect::Token` field default. Mirrors the
+            // parser's own `is_creature` test in oracle_effect/token.rs.
+            if types.iter().any(|t| t == "Creature") {
+                desc.push_str(&format!("{}/{} ", fmt_pt(power), fmt_pt(toughness)));
+            }
             if !colors.is_empty() {
                 let c: Vec<_> = colors
                     .iter()
@@ -2420,6 +2436,51 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("zones".into(), zones.iter().map(fmt_zone).collect::<Vec<_>>().join("/")));
             d.push(("filter".into(), fmt_target(filter)));
             d.push(("host".into(), fmt_target(host)));
+        }
+        Effect::AssembleContraptions { count } => {
+            d.push(("count".into(), fmt_quantity(count)));
+        }
+        Effect::AssembleContraptionsFromRollDifference => {
+            d.push(("count".into(), "roll difference".into()));
+        }
+        Effect::CrankContraptions { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ReassembleContraption {
+            target,
+            control_mode,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if !matches!(
+                control_mode,
+                crate::types::ability::ReassembleControlMode::KeepController
+            ) {
+                d.push(("control_mode".into(), format!("{control_mode:?}")));
+            }
+        }
+        Effect::AssembleContraptionOnSprocket {
+            sprocket,
+            remaining,
+            ..
+        } => {
+            d.push(("sprocket".into(), sprocket.to_string()));
+            if *remaining != 0 {
+                d.push(("remaining".into(), remaining.to_string()));
+            }
+        }
+        Effect::ReassembleContraptionOnSprocket {
+            target,
+            sprocket,
+            control_mode,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("sprocket".into(), sprocket.to_string()));
+            if !matches!(
+                control_mode,
+                crate::types::ability::ReassembleControlMode::KeepController
+            ) {
+                d.push(("control_mode".into(), format!("{control_mode:?}")));
+            }
         }
         Effect::RevealTop { player, count } => {
             d.push(("player".into(), fmt_target(player)));
@@ -2855,8 +2916,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CollectEvidence { amount } => {
             d.push(("amount".into(), amount.to_string()));
         }
-        Effect::Endure { amount } => {
-            d.push(("amount".into(), amount.to_string()));
+        Effect::Endure { amount, .. } => {
+            d.push(("amount".into(), fmt_quantity(amount)));
         }
         Effect::BlightEffect { count, player } => {
             d.push(("count".into(), count.to_string()));
@@ -3013,7 +3074,7 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         ));
     }
     if let Some(cond) = &def.condition {
-        d.push(("conditional".into(), format!("{cond:?}")));
+        d.push(("conditional".into(), fmt_ability_condition(cond)));
     }
     if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
@@ -3068,12 +3129,398 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
         d.push(("valid source".into(), fmt_target(vs)));
     }
     if let Some(constraint) = &trig.constraint {
-        d.push(("constraint".into(), format!("{constraint:?}")));
+        d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
     }
     if let Some(cond) = &trig.condition {
-        d.push(("condition".into(), format!("{cond:?}")));
+        d.push(("condition".into(), fmt_trigger_condition(cond)));
     }
     d
+}
+
+/// Format a `Comparator` as a compact math symbol.
+fn fmt_comparator(c: &Comparator) -> &'static str {
+    match c {
+        Comparator::GT => ">",
+        Comparator::LT => "<",
+        Comparator::GE => "≥",
+        Comparator::LE => "≤",
+        Comparator::EQ => "=",
+        Comparator::NE => "≠",
+    }
+}
+
+/// Format an `AbilityCondition` as a human-readable string for the parse-details overlay.
+fn fmt_ability_condition(cond: &AbilityCondition) -> String {
+    match cond {
+        AbilityCondition::AdditionalCostPaid { .. } => "additional cost was paid".into(),
+        AbilityCondition::AdditionalCostPaidInstead => "additional cost was paid (instead)".into(),
+        AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
+        AbilityCondition::EffectOutcome { .. } => "previous effect outcome".into(),
+        AbilityCondition::EventOutcomeWon => "you won the event".into(),
+        AbilityCondition::WhenYouDo => "when you do".into(),
+        AbilityCondition::CastFromZone { zone } => format!("cast from {}", fmt_zone(zone)),
+        AbilityCondition::CastDuringPhase { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("cast during {}", parts.join(" or "))
+        }
+        AbilityCondition::CastTimingPermission { .. } => "cast with timing permission".into(),
+        AbilityCondition::ManaColorSpent { color, minimum } => {
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+        }
+        AbilityCondition::RevealedHasCardType { card_types, .. } => {
+            let parts: Vec<&str> = card_types.iter().map(fmt_core_type).collect();
+            format!("revealed is {}", parts.join(" or "))
+        }
+        AbilityCondition::ObjectsShareQuality { .. } => "objects share a quality".into(),
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
+            "target shares a name with another exiled this way".into()
+        }
+        AbilityCondition::SourceEnteredThisTurn => "source entered this turn".into(),
+        AbilityCondition::CastVariantPaid { .. } => "cast variant was paid".into(),
+        AbilityCondition::CastVariantPaidInstead { .. } => "cast variant was paid (instead)".into(),
+        AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } => format!(
+            "{} {} {}",
+            fmt_quantity(lhs),
+            fmt_comparator(comparator),
+            fmt_quantity(rhs)
+        ),
+        AbilityCondition::PreviousEffectAmount { comparator, rhs } => format!(
+            "previous amount {} {}",
+            fmt_comparator(comparator),
+            fmt_quantity(rhs)
+        ),
+        AbilityCondition::HasMaxSpeed => "has max speed".into(),
+        AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::IsInitiative => "has the initiative".into(),
+        AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
+        AbilityCondition::TargetHasKeywordInstead { keyword } => {
+            format!("target has {} (instead)", keyword_label(keyword))
+        }
+        AbilityCondition::TargetMatchesFilter { filter, .. } => {
+            format!("target is {}", fmt_target(filter))
+        }
+        AbilityCondition::TriggeringSpellTargetsFilter { filter } => {
+            format!("triggering spell targets {}", fmt_target(filter))
+        }
+        AbilityCondition::SourceMatchesFilter { filter } => {
+            format!("source is {}", fmt_target(filter))
+        }
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            destination,
+            filter,
+            ..
+        } => format!(
+            "object entering {} is {}",
+            fmt_zone(destination),
+            fmt_target(filter)
+        ),
+        AbilityCondition::ControllerControlsMatching { filter } => {
+            format!("you control {}", fmt_target(filter))
+        }
+        AbilityCondition::ControllerControlledMatchingAsCast { filter } => {
+            format!("you controlled {} as cast", fmt_target(filter))
+        }
+        AbilityCondition::IsYourTurn => "is your turn".into(),
+        AbilityCondition::WasStartingPlayer { .. } => "was the starting player".into(),
+        AbilityCondition::SpellCastWithVariantThisTurn { .. } => {
+            "a spell was cast with this variant this turn".into()
+        }
+        AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
+        AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
+        AbilityCondition::ZoneChangedThisWay { filter } => {
+            format!("{} changed zones this way", fmt_target(filter))
+        }
+        AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            format!("cost-paid object is {}", fmt_target(filter))
+        }
+        AbilityCondition::SourceIsTapped => "source is tapped".into(),
+        AbilityCondition::SourceAttachedToCreature => "source is attached to a creature".into(),
+        AbilityCondition::ConditionInstead { inner } => {
+            format!("instead if ({})", fmt_ability_condition(inner))
+        }
+        AbilityCondition::And { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_ability_condition).collect();
+            parts.join(" and ")
+        }
+        AbilityCondition::Or { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_ability_condition).collect();
+            parts.join(" or ")
+        }
+        AbilityCondition::Not { condition } => {
+            format!("not ({})", fmt_ability_condition(condition))
+        }
+        AbilityCondition::DayNightIsNeither => "neither day nor night".into(),
+        AbilityCondition::DayNightIs { state } => format!("it is {state:?}"),
+        AbilityCondition::NthResolutionThisTurn { n } => {
+            format!("{n} resolution this turn")
+        }
+        AbilityCondition::SourceLacksKeyword { keyword } => {
+            format!("source lacks {}", keyword_label(keyword))
+        }
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            format!("scoped player is {}", fmt_player_filter(filter))
+        }
+    }
+}
+
+/// Format a `TriggerCondition` as a human-readable string for the parse-details overlay.
+fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> String {
+    use crate::types::ability::TriggerCondition as TC;
+    match cond {
+        TC::GainedLife { minimum } => format!("gained {minimum}+ life this turn"),
+        TC::LostLife => "lost life this turn".into(),
+        TC::Descended => "descended this turn".into(),
+        TC::ControlsType { filter } => format!("you control {}", fmt_target(filter)),
+        TC::NoSpellsCastLastTurn => "no spells cast last turn".into(),
+        TC::TwoOrMoreSpellsCastLastTurn => "two or more spells cast last turn".into(),
+        TC::DuringPlayersTurn { player } => {
+            format!("during {}'s turn", fmt_player_filter(player))
+        }
+        TC::SourceEnteredThisTurn => "source entered this turn".into(),
+        TC::EchoDue => "echo due".into(),
+        TC::MinCoAttackers { minimum, .. } => format!("with {minimum}+ other attackers"),
+        TC::SolveConditionMet => "solve condition met".into(),
+        TC::ClassLevelGE { level } => format!("class level ≥ {level}"),
+        TC::SourceIsHarnessed => "source is harnessed".into(),
+        TC::AttractionVisitRoll { min, max } => format!("attraction roll {min}-{max}"),
+        TC::WasCast { zone, .. } => match zone {
+            Some(z) => format!("cast from {}", fmt_zone(z)),
+            None => "was cast".into(),
+        },
+        TC::WasPlayed => "was played".into(),
+        TC::AdditionalCostPaid { .. } => "additional cost was paid".into(),
+        TC::SourceIsAttacking => "source is attacking".into(),
+        TC::CastVariantPaid { .. } => "cast variant was paid".into(),
+        TC::CastVariantPaidPersistent { .. } => "cast variant was paid (persistent)".into(),
+        TC::ActivatedAbilityIsNonMana => "activated ability is not a mana ability".into(),
+        TC::DealtDamageBySourceThisTurn => "dealt damage by source this turn".into(),
+        TC::DealtDamageThisTurnBySource { source } => {
+            format!("dealt damage this turn by {}", fmt_target(source))
+        }
+        TC::FirstTimeObjectTappedThisTurn => "first time tapped this turn".into(),
+        TC::WasType { card_type } => format!("was a {}", fmt_core_type(card_type)),
+        TC::LifeTotalGE { minimum } => format!("life ≥ {minimum}"),
+        TC::ControlCount { minimum, filter } => {
+            format!("you control {}+ {}", minimum, fmt_target(filter))
+        }
+        TC::ControlsNone { filter } => format!("you control no {}", fmt_target(filter)),
+        TC::AttackedThisTurn => "attacked this turn".into(),
+        TC::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
+        TC::CastSpellThisTurn { filter } => match filter {
+            Some(f) => format!("cast a {} spell this turn", fmt_target(f)),
+            None => "cast a spell this turn".into(),
+        },
+        TC::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => format!(
+            "{} {} {}",
+            fmt_quantity(lhs),
+            fmt_comparator(comparator),
+            fmt_quantity(rhs)
+        ),
+        TC::HasMaxSpeed => "has max speed".into(),
+        TC::IsMonarch => "is monarch".into(),
+        TC::IsInitiative => "has the initiative".into(),
+        TC::NoMonarch => "no monarch".into(),
+        TC::WasStartingPlayer { .. } => "was the starting player".into(),
+        TC::SpellCastWithVariantThisTurn { .. } => {
+            "a spell was cast with this variant this turn".into()
+        }
+        TC::HasCityBlessing => "has the city's blessing".into(),
+        TC::CompletedDungeon { .. } => "completed a dungeon".into(),
+        TC::SourceIsTapped => "source is tapped".into(),
+        TC::SourceIsTransformed => "source is transformed".into(),
+        TC::SourceIsFaceUp => "source is face-up".into(),
+        TC::SourceIsFaceDown => "source is face-down".into(),
+        TC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
+        TC::CounterAddedThisTurn => "added a counter this turn".into(),
+        TC::LostLifeLastTurn => "lost life last turn".into(),
+        TC::DefendingPlayerControlsNone { filter } => {
+            format!("defending player controls no {}", fmt_target(filter))
+        }
+        TC::TributeNotPaid => "tribute was not paid".into(),
+        TC::CastDuringPhase { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("cast during {}", parts.join(" or "))
+        }
+        TC::CastTimingPermission { .. } => "cast with timing permission".into(),
+        TC::ManaColorSpent { color, minimum } => {
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+        }
+        TC::ManaSpentCondition { .. } => "mana spent condition".into(),
+        TC::HadCounters { .. } => "had counters".into(),
+        TC::ControlsCommander { .. } => "you control a commander".into(),
+        TC::IsRenowned { .. } => "is renowned".into(),
+        TC::HasCounters {
+            minimum, maximum, ..
+        } => match maximum {
+            Some(max) => format!("has {minimum}-{max} counters"),
+            None => format!("has {minimum}+ counters"),
+        },
+        TC::ZoneChangeObjectMatchesFilter {
+            destination,
+            filter,
+            ..
+        } => format!(
+            "object entering {} is {}",
+            fmt_zone(destination),
+            fmt_target(filter)
+        ),
+        TC::ZoneChangeObjectIsTapped => "entering object is tapped".into(),
+        TC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        TC::EventDamageSourceMatchesFilter { filter } => {
+            format!("damage source is {}", fmt_target(filter))
+        }
+        TC::DamagedPlayerIsEventSourceOwner => "damaged player is the source's owner".into(),
+        TC::ChosenLabelIs { label } => format!("chosen label is {label}"),
+        TC::AttackersDeclaredCount {
+            comparator, count, ..
+        } => format!("attackers declared {} {count}", fmt_comparator(comparator)),
+        TC::ExceptFirstDrawInDrawStep => "except first draw in draw step".into(),
+        TC::PlacedByAbilitySource => "placed by this ability".into(),
+        TC::TriggeringSpellTargetsFilter { filter } => {
+            format!("triggering spell targets {}", fmt_target(filter))
+        }
+        TC::And { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            parts.join(" and ")
+        }
+        TC::Or { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            parts.join(" or ")
+        }
+        TC::Not { condition } => format!("not ({})", fmt_trigger_condition(condition)),
+    }
+}
+
+/// Format a `TriggerConstraint` as a human-readable string for the parse-details overlay.
+fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> String {
+    use crate::types::ability::TriggerConstraint as TC;
+    match c {
+        TC::OncePerTurn => "once per turn".into(),
+        TC::OncePerGame => "once per game".into(),
+        TC::OnlyDuringYourTurn => "only during your turn".into(),
+        TC::NthSpellThisTurn { n, filter } => match filter {
+            Some(f) => format!("on your {n}th {} spell this turn", fmt_target(f)),
+            None => format!("on your {n}th spell this turn"),
+        },
+        TC::NthDrawThisTurn { n } => format!("on your {n}th draw this turn"),
+        TC::OnlyDuringOpponentsTurn => "only during opponent's turn".into(),
+        TC::OnlyDuringYourMainPhase => "only during your main phase".into(),
+        TC::AtClassLevel { level } => format!("at class level {level}"),
+        TC::MaxTimesPerTurn { max } => format!("first {max} times each turn"),
+        TC::OncePerOpponentPerTurn => "once per opponent per turn".into(),
+        TC::EventSourceControlledBy { controller } => {
+            format!("event source controlled by {}", fmt_controller(controller))
+        }
+    }
+}
+
+/// Format a `StaticCondition` as a human-readable string for the parse-details overlay.
+fn fmt_static_condition(cond: &StaticCondition) -> String {
+    use crate::types::ability::StaticCondition as SC;
+    match cond {
+        SC::DevotionGE { colors, threshold } => {
+            let parts: Vec<&str> = colors.iter().map(fmt_mana_color_short).collect();
+            format!("devotion to {} ≥ {threshold}", parts.join(""))
+        }
+        SC::IsPresent { filter } => match filter {
+            Some(f) => format!("{} is present", fmt_target(f)),
+            None => "is present".into(),
+        },
+        SC::ChosenColorIs { color } => format!("chosen color is {}", fmt_mana_color_full(color)),
+        SC::ChosenLabelIs { label } => format!("chosen label is {label}"),
+        SC::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => format!(
+            "{} {} {}",
+            fmt_quantity(lhs),
+            fmt_comparator(comparator),
+            fmt_quantity(rhs)
+        ),
+        SC::HasMaxSpeed => "has max speed".into(),
+        SC::SpeedGE { threshold } => format!("speed ≥ {threshold}"),
+        SC::And { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_static_condition).collect();
+            parts.join(" and ")
+        }
+        SC::Or { conditions } => {
+            let parts: Vec<String> = conditions.iter().map(fmt_static_condition).collect();
+            parts.join(" or ")
+        }
+        SC::Not { condition } => format!("not ({})", fmt_static_condition(condition)),
+        SC::DayNightIs { state } => format!("it is {state:?}"),
+        SC::HasCounters {
+            minimum, maximum, ..
+        } => match maximum {
+            Some(max) => format!("has {minimum}-{max} counters"),
+            None => format!("has {minimum}+ counters"),
+        },
+        SC::CastVariantPaid { .. } => "cast variant was paid".into(),
+        SC::RecipientHasCounters {
+            minimum, maximum, ..
+        } => match maximum {
+            Some(max) => format!("recipient has {minimum}-{max} counters"),
+            None => format!("recipient has {minimum}+ counters"),
+        },
+        SC::ClassLevelGE { level } => format!("class level ≥ {level}"),
+        SC::DefendingPlayerControls { filter } => {
+            format!("defending player controls {}", fmt_target(filter))
+        }
+        SC::SourceAttackingAlone => "source is attacking alone".into(),
+        SC::SourceIsAttacking => "source is attacking".into(),
+        SC::SourceIsBlocking => "source is blocking".into(),
+        SC::SourceIsBlocked => "source is blocked".into(),
+        SC::IsMonarch => "is monarch".into(),
+        SC::IsInitiative => "has the initiative".into(),
+        SC::NoMonarch => "no monarch".into(),
+        SC::HasCityBlessing => "has the city's blessing".into(),
+        SC::CompletedADungeon => "completed a dungeon".into(),
+        SC::WasStartingPlayer { .. } => "was the starting player".into(),
+        SC::SpellCastWithVariantThisTurn { .. } => {
+            "a spell was cast with this variant this turn".into()
+        }
+        SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
+        SC::UnlessPay { .. } => "unless a cost is paid".into(),
+        SC::Unrecognized { .. } => "unrecognized".into(),
+        SC::DuringYourTurn => "during your turn".into(),
+        SC::SourceEnteredThisTurn => "source entered this turn".into(),
+        SC::SourceHasDealtDamage => "source has dealt damage".into(),
+        SC::WasCast { zone } => match zone {
+            Some(z) => format!("cast from {}", fmt_zone(z)),
+            None => "was cast".into(),
+        },
+        SC::IsRingBearer => "is the ring-bearer".into(),
+        SC::RingLevelAtLeast { level } => format!("ring level ≥ {level}"),
+        SC::ControlsCommander { .. } => "you control a commander".into(),
+        SC::SourceIsTapped => "source is tapped".into(),
+        SC::IsTapped { .. } => "is tapped".into(),
+        SC::SourceIsSaddled => "source is saddled".into(),
+        SC::SourceControllerEquals { .. } => "source controller unchanged".into(),
+        SC::SourceIsEquipped => "source is equipped".into(),
+        SC::SourceIsEnchanted => "source is enchanted".into(),
+        SC::SourceIsMonstrous => "source is monstrous".into(),
+        SC::SourceIsHarnessed => "source is harnessed".into(),
+        SC::SourceAttachedToCreature => "source is attached to a creature".into(),
+        SC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        SC::RecipientMatchesFilter { filter } => format!("recipient is {}", fmt_target(filter)),
+        SC::RecipientAttackingOwnerTarget { .. } => {
+            "recipient is attacking its owner's target".into()
+        }
+        SC::SourceIsPaired => "source is paired".into(),
+        SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
+        SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
+        SC::AdditionalCostPaid => "additional cost was paid".into(),
+        SC::None => "none".into(),
+    }
 }
 
 /// Format a single `ContinuousModification` as a human-readable string.
@@ -3241,7 +3688,7 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
         d.push(("mods".into(), simple.join(", ")));
     }
     if let Some(cond) = &stat.condition {
-        d.push(("conditional".into(), format!("{cond:?}")));
+        d.push(("conditional".into(), fmt_static_condition(cond)));
     }
     if stat.characteristic_defining {
         d.push(("CDA".into(), "yes".into()));

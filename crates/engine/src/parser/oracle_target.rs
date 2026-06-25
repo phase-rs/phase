@@ -13357,4 +13357,63 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Another));
     }
+
+    /// CR 205.3h: `parse_type_phrase` parses "a Plan" — "Plan" is an enchantment
+    /// subtype (Marvel's Spider-Man) — to `Typed{[Subtype("Plan")]}`, fully
+    /// consumed. The elided-verb "or" disjunction ("you control an artifact
+    /// creature or a Plan") is assembled one level up in `parse_you_control_a`,
+    /// so `parse_type_phrase` itself stops at the first segment and leaves the
+    /// connector as remainder (asserted below).
+    #[test]
+    fn parse_type_phrase_recognizes_plan() {
+        let (f, rest) = parse_type_phrase("a Plan");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Plan".to_string())]
+        );
+    }
+
+    /// `parse_type_phrase` does NOT swallow an article-led "or" RHS — it stops at
+    /// the first segment and leaves " or a Plan" as remainder. This is the
+    /// load-bearing precondition for the `parse_you_control_a` elided-verb loop:
+    /// the connector must survive so the condition layer can fold the disjuncts.
+    #[test]
+    fn parse_type_phrase_leaves_article_led_or_rhs_as_remainder() {
+        let (f, rest) = parse_type_phrase("an artifact creature or a Plan");
+        assert_eq!(rest, " or a Plan", "article-led or RHS must remain");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// Regression: a single article-led conjunction with no connector still
+    /// parses to a single Typed filter (not an Or).
+    #[test]
+    fn single_artifact_creature_still_typed_not_or() {
+        let (f, rest) = parse_type_phrase("an artifact creature");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// Regression: a bare (no-article) connector RHS still parses to an Or via
+    /// the existing non-comma separator branch (unchanged by this work).
+    #[test]
+    fn bare_connector_rhs_still_or() {
+        let (f, rest) = parse_type_phrase("artifact creature or enchantment");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        assert!(
+            matches!(f, TargetFilter::Or { .. }),
+            "expected Or filter, got {f:?}"
+        );
+    }
 }

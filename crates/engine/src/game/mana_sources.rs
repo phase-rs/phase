@@ -3099,6 +3099,7 @@ mod tests {
         // Walk up from the crate root to find the repo's client/public
         // card-data.json. Tests may run from the workspace root or the
         // crate dir depending on the runner; try both.
+        // allow-full-card-db: whole-corpus mana-classifier drift guard — must scan every printed card
         let candidates = [
             Path::new("client/public/card-data.json"),
             Path::new("../../client/public/card-data.json"),

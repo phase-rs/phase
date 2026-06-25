@@ -11,7 +11,9 @@ use super::counter::{
     parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
     try_parse_multiply_pt_effect, try_parse_put_counter, try_parse_remove_counter,
 };
-use super::lower::parse_for_each_multiplier_prefix;
+use super::lower::{
+    parse_for_each_multiplier_prefix, parse_where_x_quantity_expression, strip_trailing_where_x,
+};
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::{
@@ -29,11 +31,11 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
     CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile, FilterProp,
-    LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
-    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter, ZoneOwner,
+    CopyRetargetPermission, DigSource, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
+    FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
+    TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -2581,6 +2583,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             rest_destination: None,
             reveal,
             enter_tapped: false,
+            source: DigSource::Library,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {
             player,
@@ -3899,7 +3902,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 choice_type,
                 ChoiceType::CardName
                     | ChoiceType::CreatureType
-                    | ChoiceType::CardType
+                    | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
             ),
@@ -6496,7 +6499,7 @@ fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
 /// dynamic count. When the suffix is missing or the inner phrase fails to
 /// parse to a known quantity, the original count (typically `Variable { "X" }`
 /// or `Fixed { value: N }`) is returned unchanged.
-/// CR 701.50e + CR 107.3i: Parse connive count from text after "connive"/"connives".
+/// CR 701.50d + CR 107.3i: Parse connive count from text after "connive"/"connives".
 /// Handles literal N, bare `X` (spell-cost path), and ", where X is <quantity>"
 /// bindings (Spymaster's Vault class).
 fn parse_connive_count_expr<'a>(rest_orig: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
@@ -7072,6 +7075,8 @@ pub(super) fn parse_imperative_family_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ImperativeFamilyAst> {
+    let text = text.trim_start();
+    let lower = lower.trim_start();
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
     // CR 701.60a: "[subject] no longer suspected" — the un-designation
@@ -7081,6 +7086,14 @@ pub(super) fn parse_imperative_family_ast(
     // first-word dispatch, alongside the other non-verb-led effects below.
     if let Some(effect) = parse_no_longer_suspected_ast(lower) {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
+    if let Some(ast) = parse_assemble_contraption_imperative(lower) {
+        return Some(ast);
+    }
+
+    if let Some(ast) = parse_reassemble_contraption_imperative(text, lower, ctx) {
+        return Some(ast);
     }
 
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
@@ -7523,7 +7536,7 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a + CR 701.50e: "connive" / "connives" — extract optional
+        // CR 702.162a + CR 701.50d: "connive" / "connives" — extract optional
         // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
             let after_verb_lower = &lower[first_word.len()..];
@@ -7748,20 +7761,29 @@ pub(super) fn parse_imperative_family_ast(
         }
         // Endure N keyword action
         "endure" | "endures" => {
+            let (text_pair, where_x) = strip_trailing_where_x(TextPair::new(text, lower));
             let rest = alt((tag::<_, _, OracleError<'_>>("endure "), tag("endures ")))
-                .parse(lower)
+                .parse(text_pair.lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
-            // CR 701.63b: "endure X" degrades to 0 (nothing happens). parse_number_or_x
-            // maps a bare "x" to 0; the unwrap fallback only applies when no count token
-            // is present at all.
-            let count = nom_primitives::parse_number_or_x
-                .parse(rest.trim())
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            Some(ImperativeFamilyAst::GainKeyword(Effect::Endure {
-                amount: count,
-            }))
+            let amount = if let Some(expr) = where_x {
+                parse_where_x_quantity_expression(&expr)
+                    .unwrap_or(QuantityExpr::Fixed { value: 0 })
+            } else {
+                let count = nom_primitives::parse_number_or_x
+                    .parse(rest.trim())
+                    .map(|(_, n)| n as i32)
+                    .unwrap_or(1);
+                QuantityExpr::Fixed { value: count }
+            };
+            // CR 608.2k: subject-shifted "it endures" in a trigger names the
+            // event object (the entering creature), not the ability source.
+            let subject = if ctx.subject.is_some() {
+                resolve_it_pronoun(ctx)
+            } else {
+                TargetFilter::SelfRef
+            };
+            Some(ImperativeFamilyAst::GainKeyword(Effect::Endure { amount, subject }))
         }
         // CR 701.53a: "incubate N"
         "incubate" => try_parse_incubate(lower).map(ImperativeFamilyAst::GainKeyword),
@@ -8703,6 +8725,137 @@ fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> 
     })
 }
 
+/// Unstable Contraptions: "assemble a Contraption" / "assembles two
+/// Contraptions" / "assemble X plus one Contraptions".
+fn parse_assemble_contraption_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
+    nom_parse_lower(lower, |input| {
+        map(
+            all_consuming(terminated(
+                preceded(
+                    opt(alt((tag::<_, _, OracleError<'_>>("~ "), tag("it ")))),
+                    preceded(
+                        alt((tag::<_, _, OracleError<'_>>("assemble "), tag("assembles "))),
+                        parse_assemble_contraption_count,
+                    ),
+                ),
+                opt(tag(".")),
+            )),
+            |count| match count {
+                ContraptionAssembleCount::Quantity(count) => {
+                    ImperativeFamilyAst::AssembleContraptions { count }
+                }
+                ContraptionAssembleCount::FromRollDifference => {
+                    ImperativeFamilyAst::AssembleContraptionsFromRollDifference
+                }
+            },
+        )
+        .parse(input)
+    })
+}
+
+#[derive(Clone)]
+enum ContraptionAssembleCount {
+    Quantity(QuantityExpr),
+    FromRollDifference,
+}
+
+fn parse_assemble_contraption_count(input: &str) -> OracleResult<'_, ContraptionAssembleCount> {
+    alt((
+        value(
+            ContraptionAssembleCount::FromRollDifference,
+            (
+                tag::<_, _, OracleError<'_>>("a number of contraptions equal to the "),
+                tag("difference between those results"),
+            ),
+        ),
+        value(
+            ContraptionAssembleCount::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            (
+                tag::<_, _, OracleError<'_>>("a number of contraptions equal to the "),
+                tag("result"),
+            ),
+        ),
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>("a contraption for each "),
+                nom_quantity::parse_for_each_clause_ref,
+            ),
+            |qty| ContraptionAssembleCount::Quantity(QuantityExpr::Ref { qty }),
+        ),
+        value(
+            ContraptionAssembleCount::Quantity(QuantityExpr::Fixed { value: 1 }),
+            tag::<_, _, OracleError<'_>>("a contraption"),
+        ),
+        value(
+            ContraptionAssembleCount::Quantity(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }),
+                offset: 1,
+            }),
+            tag::<_, _, OracleError<'_>>("x plus one contraptions"),
+        ),
+        value(
+            ContraptionAssembleCount::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+            tag::<_, _, OracleError<'_>>("x contraptions"),
+        ),
+        map(
+            terminated(nom_primitives::parse_number, tag(" contraptions")),
+            |count| {
+                ContraptionAssembleCount::Quantity(QuantityExpr::Fixed {
+                    value: count as i32,
+                })
+            },
+        ),
+    ))
+    .parse(input)
+}
+
+/// Unstable Contraptions: "reassemble target Contraption you control" / "it
+/// reassembles target Contraption that player controls".
+fn parse_reassemble_contraption_imperative(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ImperativeFamilyAst> {
+    let text = text.trim_start();
+    let lower = lower.trim_start();
+    let (rest, control_mode) = preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>("~ "), tag("it ")))),
+        alt((
+            value(
+                ReassembleControlMode::KeepController,
+                tag::<_, _, OracleError<'_>>("reassemble "),
+            ),
+            value(ReassembleControlMode::GainControl, tag("reassembles ")),
+        )),
+    )
+    .parse(lower)
+    .ok()?;
+    let consumed = lower.len() - rest.len();
+    let after_verb = text.get(consumed..)?;
+    let (target, rest, _) = parse_target_with_syntax(after_verb, ctx);
+    if matches!(target, TargetFilter::Any)
+        || all_consuming(terminated(space0::<_, OracleError<'_>>, opt(tag("."))))
+            .parse(rest)
+            .is_err()
+    {
+        return None;
+    }
+    Some(ImperativeFamilyAst::ReassembleContraption {
+        target,
+        control_mode,
+    })
+}
+
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
@@ -9254,6 +9407,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
+        ImperativeFamilyAst::AssembleContraptions { count } => {
+            Effect::AssembleContraptions { count }
+        }
+        ImperativeFamilyAst::AssembleContraptionsFromRollDifference => {
+            Effect::AssembleContraptionsFromRollDifference
+        }
+        ImperativeFamilyAst::ReassembleContraption {
+            target,
+            control_mode,
+        } => Effect::ReassembleContraption {
+            target,
+            control_mode,
+        },
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         // CR 701.56a: Time travel.
         ImperativeFamilyAst::TimeTravel => Effect::TimeTravel,
@@ -16114,5 +16280,148 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_oracle_text_aerial_toastmaster_activation_assembles_a_contraption() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{3}{W}, Sacrifice another artifact: This creature assembles a Contraption.",
+            "Aerial Toastmaster",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Cyborg".to_string(), "Rigger".to_string()],
+        );
+        assert!(
+            parsed.abilities.iter().any(|ability| matches!(
+                *ability.effect,
+                Effect::AssembleContraptions {
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            )),
+            "abilities: {:?}",
+            parsed
+                .abilities
+                .iter()
+                .map(|ability| &ability.effect)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn parse_effect_chain_then_assemble_adds_follow_up_clause() {
+        let def = super::super::parse_effect_chain(
+            "Counter target spell, then assemble a Contraption.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("expected assemble follow-up on {def:?}"));
+        assert!(matches!(
+            *sub.effect,
+            Effect::AssembleContraptions {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_effect_chain_assemble_x_plus_one_contraptions() {
+        let def = super::super::parse_effect_chain(
+            "Assemble X plus one Contraptions.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            *def.effect,
+            Effect::AssembleContraptions {
+                count: QuantityExpr::Offset { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_effect_chain_reassemble_target_contraption_you_control() {
+        let def = super::super::parse_effect_chain(
+            "Reassemble target Contraption you control.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ReassembleContraption {
+                target,
+                control_mode,
+            } => {
+                assert_eq!(*control_mode, ReassembleControlMode::KeepController);
+                assert!(matches!(target, TargetFilter::Typed(_)));
+            }
+            other => panic!("expected ReassembleContraption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_oracle_text_triggered_reassembles_that_player_controls() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever this creature deals combat damage to a player, it reassembles target Contraption that player controls.",
+            "Suspicious Nanny",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Spy".to_string(), "Rigger".to_string()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.execute.is_some())
+            .unwrap_or_else(|| panic!("expected triggered reassemble in {:?}", parsed.triggers));
+        let execute = trigger.execute.as_ref().expect("trigger execute");
+        match &*execute.effect {
+            Effect::ReassembleContraption {
+                target,
+                control_mode,
+            } => {
+                assert_eq!(*control_mode, ReassembleControlMode::GainControl);
+                match target {
+                    TargetFilter::Typed(filter) => {
+                        assert_eq!(filter.controller, Some(ControllerRef::TargetPlayer));
+                    }
+                    other => panic!("expected typed target, got {other:?}"),
+                }
+            }
+            other => panic!("expected ReassembleContraption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_oracle_text_triggered_it_assembles_for_each_contraption() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When this creature enters, it assembles a Contraption for each Contraption you control.",
+            "Steamflogger of the Month",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Rigger".to_string()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.execute.is_some())
+            .unwrap_or_else(|| panic!("expected triggered assemble in {:?}", parsed.triggers));
+        let execute = trigger.execute.as_ref().expect("trigger execute");
+        match &*execute.effect {
+            Effect::AssembleContraptions { count } => match count {
+                QuantityExpr::Ref { qty } => match qty {
+                    QuantityRef::ObjectCount { filter } => match filter {
+                        TargetFilter::Typed(filter) => {
+                            assert!(filter
+                                .type_filters
+                                .contains(&TypeFilter::Subtype("Contraption".to_string())));
+                            assert_eq!(filter.controller, Some(ControllerRef::You));
+                        }
+                        other => panic!("expected typed for-each filter, got {other:?}"),
+                    },
+                    other => panic!("expected object-count quantity, got {other:?}"),
+                },
+                other => panic!("expected for-each quantity ref, got {other:?}"),
+            },
+            other => panic!("expected AssembleContraptions, got {other:?}"),
+        }
     }
 }

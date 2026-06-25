@@ -146,9 +146,10 @@ fn wick_otherwise_attaches_as_token_else_ability() {
         let wick = scenario
             .add_creature(P0, "Wick, the Whorled Mind", 0, 3)
             .id();
-        scenario
+        let existing_snail = scenario
             .add_creature(P0, "Resident Snail", 1, 1)
-            .with_subtypes(vec!["Snail"]);
+            .with_subtypes(vec!["Snail"])
+            .id();
         let mut runner = scenario.build();
         let snails_before = count_snails(&runner);
         let ability = build_resolved_from_def(execute, wick, P0);
@@ -159,6 +160,19 @@ fn wick_otherwise_attaches_as_token_else_ability() {
             count_snails(&runner),
             snails_before,
             "with a Snail already controlled, the if-branch (token) must be gated off"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&existing_snail)
+                .and_then(|o| o
+                    .counters
+                    .get(&engine::types::counter::CounterType::Plus1Plus1))
+                .copied()
+                .unwrap_or(0),
+            1,
+            "the else branch must put a +1/+1 counter on the controlled Snail"
         );
     }
 }

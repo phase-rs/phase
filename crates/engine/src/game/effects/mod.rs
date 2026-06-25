@@ -465,8 +465,6 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
     match attr {
         // CR 402.1: cards in the candidate's hand.
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
-        // CR 119.1: the candidate's current life total.
-        QuantityRef::LifeTotal { .. } => Some(p.life),
         // CR 119.3: life lost this turn is tracked per candidate player.
         QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
         // CR 404.1: cards in the candidate's graveyard.
@@ -496,6 +494,13 @@ pub(crate) fn candidate_player_scalar_with_state(
         return Some(value);
     }
     match attr {
+        // CR 119.1 + CR 810.9a: the candidate's life total reads the team's
+        // shared total in a team format (off-team it is the candidate's own
+        // life). Stateful because `team_life_total` folds over teammates'
+        // `Player::life` via the live game state.
+        QuantityRef::LifeTotal { .. } => {
+            Some(crate::game::players::team_life_total(state, candidate.id))
+        }
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             Some(crate::game::arithmetic::usize_to_i32_saturating(
                 state
@@ -1292,6 +1297,77 @@ fn freeze_reflexive_event_count(
         source_id,
     );
     u32::try_from(count).ok().filter(|&c| c > 0)
+}
+
+/// CR 608.2c: A conditional clause's `else_ability` target slots are not
+/// collected when the trigger or spell ability is put on the stack — only the
+/// gated head's targets are announced (CR 603.3d). When the `if` branch fails
+/// and the else branch runs, bind its targets at resolution: auto-bind when
+/// exactly one legal combination exists (CR 115.4), or prompt via
+/// `ChooseFromZoneChoice` when multiple object targets are legal (Bolster class).
+///
+/// Returns `true` when resolution paused on a player choice.
+fn try_begin_deferred_else_branch_target_selection(
+    state: &mut GameState,
+    else_resolved: &mut ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    if !else_resolved.targets.is_empty() {
+        return Ok(false);
+    }
+    let slots = crate::game::ability_utils::build_target_slots(state, else_resolved)
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+    if slots.is_empty() {
+        return Ok(false);
+    }
+    let constraints = &else_resolved.target_constraints;
+    if let Some(selected) = crate::game::ability_utils::auto_select_targets_for_ability(
+        state,
+        else_resolved,
+        &slots,
+        constraints,
+    )
+    .map_err(|e| EffectError::InvalidParam(e.to_string()))?
+    {
+        crate::game::ability_utils::assign_targets_in_chain(state, else_resolved, &selected)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+        return Ok(false);
+    }
+    if !crate::game::ability_utils::has_legal_target_assignment_for_ability(
+        state,
+        else_resolved,
+        &slots,
+        constraints,
+    ) {
+        return Ok(false);
+    }
+    // CR 608.2d: ambiguous single-object-target else branches (Wick: "put a +1/+1
+    // counter on a Snail you control" with two Snails) prompt the controller to
+    // choose, mirroring the Bolster keyword-action tie-break path.
+    if slots.len() == 1 {
+        let candidates: Vec<crate::types::identifiers::ObjectId> = slots[0]
+            .legal_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::types::ability::TargetRef::Object(id) => Some(*id),
+                crate::types::ability::TargetRef::Player(_) => None,
+            })
+            .collect();
+        if !candidates.is_empty() {
+            state.pending_continuation =
+                Some(PendingContinuation::new(Box::new(else_resolved.clone())));
+            state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                player: else_resolved.controller,
+                cards: candidates,
+                count: 1,
+                up_to: false,
+                constraint: None,
+                source_id: else_resolved.source_id,
+            };
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// CR 603.12: Begin reflexive target selection for a `WhenYouDo` /
@@ -2869,6 +2945,14 @@ pub fn resolve_effect(
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
+        Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. } => {
+            crate::game::contraptions::resolve(state, ability, events)
+        }
         Effect::PutSticker { .. } | Effect::ApplySticker { .. } => {
             stickers::resolve(state, ability, events)
         }
@@ -3928,7 +4012,17 @@ fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
 /// ability's controller.
 fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::ScopedPlayer)
+                || tf.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer
+                        }
+                    )
+                })
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_uses_relative_controller_scoped)
         }
@@ -5136,6 +5230,13 @@ fn resolve_chain_body(
                     else_resolved.targets = ability.targets.clone();
                 }
                 else_resolved.context = ability.context.clone();
+                if try_begin_deferred_else_branch_target_selection(
+                    state,
+                    &mut else_resolved,
+                    events,
+                )? {
+                    return Ok(());
+                }
                 resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
             } else if let Some(ref sub) = ability.sub_ability {
                 // CR 608.2c: A skipped `IfYouDo` head whose effect
@@ -6129,6 +6230,13 @@ fn resolve_chain_body(
                         ability,
                         effect_context_object.as_ref(),
                     );
+                    if try_begin_deferred_else_branch_target_selection(
+                        state,
+                        &mut else_resolved,
+                        events,
+                    )? {
+                        return Ok(());
+                    }
                     resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
                 } else if let Some(ref next) = sub.sub_ability {
                     // CR 608.2c: A separate-sentence sibling after the gated sub is
@@ -6406,6 +6514,13 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
+            // pool — injecting library card IDs from a look-only Dig (e.g.
+            // Birthing Ritual) would route through effect_object_targets and
+            // silently skip every card (Zone::Library ≠ Zone::Battlefield),
+            // producing no PermanentSacrificed event and leaving
+            // effect_context_object = None for the downstream PriorLook Dig.
+            && !matches!(sub.effect, Effect::Sacrifice { .. })
         {
             // Inject revealed card IDs as targets for sub_abilities following
             // effects that write last_revealed_ids. Parallel to how
@@ -18179,10 +18294,24 @@ mod tests {
             ),
             Some(3)
         );
-        // CR 119.1: life total reads p.life.
+        // CR 810.9a: life total now needs game state (team fold), so the
+        // STATELESS reader returns None and falls the predicate closed.
         assert_eq!(
             candidate_player_scalar(
                 p,
+                &QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            None
+        );
+        // CR 119.1 + CR 810.9a: the STATEFUL reader returns the team total —
+        // off-team (Commander) this is the candidate's own life (17).
+        assert_eq!(
+            candidate_player_scalar_with_state(
+                &state,
+                p,
+                PlayerId(0),
                 &QuantityRef::LifeTotal {
                     player: PlayerScope::ScopedPlayer
                 }

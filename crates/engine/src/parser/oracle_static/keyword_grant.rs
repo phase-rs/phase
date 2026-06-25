@@ -755,6 +755,7 @@ fn parse_grant_all_activated_abilities_source(
 /// ability-grant-by-reference static. Each arm is a leaf of the source-set axis;
 /// adding a new referenced set is one more `alt` arm here, never a new variant.
 fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::ability::TargetFilter> {
+    use crate::types::counter::CounterType;
     alt((
         // CR 607.2a: cards exiled with the host. Optional card-type qualifier
         // narrows the granted set (Agatha grants creature cards only).
@@ -774,6 +775,97 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                 tag("creatures you control that don't have the same name as "),
                 alt((tag("it"), tag("~"))),
             ),
+        ),
+        // CR 613.1f: "each other creature with a +1/+1 counter on it"
+        // (Experiment Kraj) — all creatures except self with at least one
+        // +1/+1 counter.
+        value(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                            comparator: Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ])),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::SelfRef),
+                    },
+                ],
+            },
+            (
+                tag("each other creature with a +1/+1 counter on "),
+                alt((tag("it"), tag("them"))),
+            ),
+        ),
+        // CR 613.1f: "all creatures your opponents control" (Drana and Linvala)
+        // — battlefield permanents; scope to InZone { Battlefield } so dead
+        // or exiled creatures of theirs do not donate abilities.
+        value(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
+            tag("all creatures your opponents control"),
+        ),
+        // CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+            tag("all creature cards in all graveyards"),
+        ),
+        // CR 613.1f: "all land cards in all graveyards"
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+            tag("all land cards in all graveyards"),
+        ),
+        // CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
+        // — zone is explicit in the phrase; encode it so graveyard/hand land
+        // cards are excluded from the runtime provider scan.
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            tag("all lands on the battlefield"),
+        ),
+        // CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
+        // — battlefield permanents; scope to InZone { Battlefield } so
+        // legendary creature cards in hand/graveyard do not donate abilities.
+        value(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::HasSupertype {
+                            value: Supertype::Legendary,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
+            ),
+            tag("all legendary creatures you control"),
+        ),
+        // CR 613.1f: "all artifact cards in your graveyard"
+        // CR 108.3: Graveyard cards are "yours" by ownership, not control —
+        // use FilterProp::Owned rather than TypedFilter::controller here.
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
+            tag("all artifact cards in your graveyard"),
         ),
     ))
     .parse(input)

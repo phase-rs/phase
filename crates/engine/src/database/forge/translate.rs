@@ -176,6 +176,7 @@ fn translate_charm(
         allow_repeat_modes: false,
         constraints: Vec::new(),
         mode_costs: Vec::new(),
+        dynamic_max_choices: None,
     };
 
     let mut ability = AbilityDefinition::new(

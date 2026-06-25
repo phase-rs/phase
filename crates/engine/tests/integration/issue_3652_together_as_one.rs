@@ -3,23 +3,13 @@
 //!
 //! https://github.com/phase-rs/phase/issues/3652
 
-use engine::database::card_db::CardDatabase;
+use crate::support::shared_card_db as load_db;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-
-fn load_db() -> Option<&'static CardDatabase> {
-    static DB: std::sync::OnceLock<Option<CardDatabase>> = std::sync::OnceLock::new();
-    DB.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../client/public/card-data.json");
-        CardDatabase::from_export(&path).ok()
-    })
-    .as_ref()
-}
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, mana: &[ManaType]) {
     let dummy = ObjectId(0);

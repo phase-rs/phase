@@ -444,6 +444,7 @@ mod tests {
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
+            dynamic_max_choices: None,
         };
         let pending = PendingTrigger {
             source_id,

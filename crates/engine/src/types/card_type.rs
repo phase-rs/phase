@@ -161,6 +161,22 @@ impl CoreType {
         CoreType::Planeswalker,
     ];
 
+    /// CR 205.2a: The seven card types offered by a "choose a card type"
+    /// prompt (`ChoiceType::CardType`) — Battle, Kindred, Dungeon, and the
+    /// other supplemental types are never offered. Mirrors the `CARD_TYPES`
+    /// display-name list in `game/effects/choose.rs`; restricted enumerations
+    /// ("choose artifact, enchantment, instant, sorcery, or planeswalker")
+    /// compute their `excluded` set as the complement of this list.
+    pub const CHOOSABLE_TYPES: [CoreType; 7] = [
+        CoreType::Artifact,
+        CoreType::Creature,
+        CoreType::Enchantment,
+        CoreType::Instant,
+        CoreType::Land,
+        CoreType::Planeswalker,
+        CoreType::Sorcery,
+    ];
+
     /// CR 702.16a: The lowercase singular noun used to express "protection from
     /// [card type]" — e.g. "protection from creatures". Returns `None` for the
     /// supplemental types (Tribal/Kindred/Dungeon/Battle) which are never offered
@@ -267,6 +283,8 @@ pub const ENCHANTMENT_SUBTYPES: &[&str] = &[
     "Case",
     "Class",
     "Curse",
+    // CR 205.3h: "Plan" enchantment subtype (Marvel's Spider-Man / MSH).
+    "Plan",
     "Role",
     "Room",
     "Rune",

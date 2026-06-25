@@ -158,7 +158,7 @@ pub enum TriggerEventKey {
     DiscoverResolved,
     /// CR 701.46a: An adapt resolution.
     AdaptResolved,
-    /// CR 701.50b: A permanent connived (the connive process — draw, discard,
+    /// CR 701.50f: A permanent connived (the connive process — draw, discard,
     /// maybe +1/+1 — completed).
     ConniveResolved,
     /// CR 701.43d: A creature was exerted.
@@ -437,7 +437,7 @@ pub enum TriggerMode {
     // Adapt / amass / learn / venture
     /// CR 701.46: Triggers when a creature adapts.
     Adapt,
-    /// CR 701.50b: Triggers when a permanent connives (after the connive process
+    /// CR 701.50f: Triggers when a permanent connives (after the connive process
     /// completes).
     Connives,
     /// CR 702.143: Triggers when a card is foretold.

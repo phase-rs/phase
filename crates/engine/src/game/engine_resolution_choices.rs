@@ -2385,7 +2385,7 @@ pub(super) fn handle_resolution_choice(
             };
 
             effects::connive::add_connive_counters(state, conniver_id, nonland_count, events);
-            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
             // id (LKI if it left the battlefield) so "whenever a creature you
             // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
@@ -4105,6 +4105,26 @@ pub(crate) fn run_batch_completion(
                 // CR 609.3 inside: opens as many as possible; never errors.
                 let _ =
                     crate::game::attractions::open_attractions(state, player, remaining, events);
+            }
+        }
+        BatchCompletion::ContraptionAssembleRemainder {
+            player,
+            source_id,
+            object_id,
+            sprocket,
+            remaining_after,
+        } => {
+            crate::game::contraptions::finish_contraption_assembly(
+                state, player, object_id, sprocket, events,
+            );
+            if remaining_after > 0 {
+                crate::game::contraptions::continue_assemble_batch(
+                    state,
+                    player,
+                    source_id,
+                    remaining_after,
+                    events,
+                );
             }
         }
     }

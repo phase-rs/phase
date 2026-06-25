@@ -549,6 +549,13 @@ function CardImagePreview({
   debugObjectId?: number | null;
 }) {
   const { t } = useTranslation("game");
+  // Card art can 404 even when a URL resolves — future-dated sets whose images
+  // aren't on the CDN yet, or tokens whose preset (and image ref) is missing.
+  // Track the load failure so we render a named placeholder in the image slot
+  // instead of the browser's broken-image glyph, keeping the alt-view info
+  // panel usable. Reset whenever the src changes so navigating cards re-tries.
+  const [imgError, setImgError] = useState(false);
+  useEffect(() => setImgError(false), [src]);
   const frameClass = mobileMode
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
@@ -609,12 +616,21 @@ function CardImagePreview({
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        <img
-          src={src}
-          alt={cardName}
-          className={imageClass}
-          draggable={false}
-        />
+        {imgError ? (
+          <div
+            className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+          >
+            <span className="text-sm font-medium text-gray-300">{cardName}</span>
+          </div>
+        ) : (
+          <img
+            src={src}
+            alt={cardName}
+            className={imageClass}
+            draggable={false}
+            onError={() => setImgError(true)}
+          />
+        )}
         {displayCost && (
           <ManaCostPips cost={displayCost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}

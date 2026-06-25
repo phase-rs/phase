@@ -18,6 +18,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { CombatLine } from "./CombatLine.tsx";
+import { ManualManaToggle } from "./ManualManaToggle.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
@@ -245,6 +246,17 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
     </button>
   ) : null;
 
+  // Land-column stack: the per-game "Manual mana" toggle above the undo button.
+  // `landColumnExtra` is an absolutely-positioned single-child overlay that
+  // stacks upward from `bottom-0` (see PlayerArea), where the undo button's
+  // `mt-auto` is inert — so use an explicit `gap-1` flex column for spacing.
+  const landColumnExtra = (
+    <div className="flex flex-col items-center gap-1">
+      <ManualManaToggle />
+      {undoButton}
+    </div>
+  );
+
   return (
     <BoardInteractionContext.Provider value={boardInteractionState}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -297,7 +309,7 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
           battlefieldView={playerBattlefieldView}
           playerId={myId}
           mode="full"
-          landColumnExtra={undoButton}
+          landColumnExtra={landColumnExtra}
           creatureOverride={sortedPlayerCreatures}
           hud={playerHud}
         />

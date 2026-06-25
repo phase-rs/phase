@@ -92,6 +92,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Steamflogger Boss-class assemble replacement: "If a Rigger you control
+    //     would assemble a Contraption, it assembles two Contraptions instead." ---
+    if let Some(def) = parse_assemble_contraption_replacement(&text, &norm_lower) {
+        return Some(def);
+    }
+
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
@@ -1119,6 +1125,78 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
     // CR 614.1a: "If you would flip a coin" — controller-scoped.
     def.valid_player = Some(ReplacementPlayerScope::You);
     Some(def)
+}
+
+/// CR 614.1a + CR 701.45: Assemble-count replacement effects.
+///
+/// Parses the Steamflogger Boss pattern as a real replacement definition:
+/// the antecedent subject becomes `valid_card`, and the consequent numeric
+/// Contraption count becomes a structured `quantity_modification` multiplier on
+/// `ReplacementEvent::AssembleContraption`.
+fn parse_assemble_contraption_replacement(
+    text: &str,
+    lower: &str,
+) -> Option<ReplacementDefinition> {
+    let (subject, factor) = all_consuming((
+        tag::<_, _, OracleError<'_>>("if "),
+        terminated(
+            take_until(" would assemble a contraption, it assembles "),
+            tag(" would assemble a contraption, it assembles "),
+        ),
+        nom_primitives::parse_number,
+        tag(" contraptions instead"),
+        opt(char('.')),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(_, (_, subject, factor, _, _))| (subject, factor))?;
+
+    let valid_card = parse_assemble_contraption_subject(subject.trim())?;
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AssembleContraption)
+            .quantity_modification(QuantityModification::Times { factor })
+            .valid_card(valid_card)
+            .description(text.to_string()),
+    )
+}
+
+fn parse_assemble_contraption_subject(subject: &str) -> Option<TargetFilter> {
+    let parse_subject_with_controller = |input| -> OracleResult<'_, (&str, Option<ControllerRef>)> {
+        alt((
+            terminated(rest, tag(" you control"))
+                .map(|subject| (subject, Some(ControllerRef::You))),
+            rest.map(|subject| (subject, None)),
+        ))
+        .parse(input)
+    };
+    let (_, (subject, controller)) = all_consuming(parse_subject_with_controller)
+        .parse(subject)
+        .ok()?;
+    let parse_leading_article = |input| -> OracleResult<'_, &str> {
+        preceded(opt(alt((tag("a "), tag("an ")))), rest).parse(input)
+    };
+    let (_, subject) = all_consuming(parse_leading_article).parse(subject).ok()?;
+    let subject = subject.trim();
+    let (mut filter, leftover) = parse_type_phrase(subject);
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return None;
+    }
+
+    if let TargetFilter::Typed(tf) = &mut filter {
+        let has_creature = tf.type_filters.contains(&TypeFilter::Creature);
+        let has_subtype = tf
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Subtype(_)));
+        if has_subtype && !has_creature {
+            tf.type_filters.insert(0, TypeFilter::Creature);
+        }
+    }
+
+    Some(match controller {
+        Some(controller) => inject_controller(filter, controller),
+        None => filter,
+    })
 }
 
 /// CR 614.1a + CR 119.3: Lose-life replacement effects.
@@ -13534,6 +13612,30 @@ mod tests {
                 }),
             }),
             "proliferate twice instead → repeat_for Multiply(2 × event count) so stacked doublers compound"
+        );
+    }
+
+    #[test]
+    fn parses_steamflogger_boss_assemble_replacement() {
+        let def = parse_replacement_line(
+            "If a Rigger you control would assemble a Contraption, it assembles two Contraptions instead.",
+            "Steamflogger Boss",
+        )
+        .expect("Steamflogger Boss replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::AssembleContraption);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(
+                TypedFilter::creature()
+                    .subtype("Rigger".to_string())
+                    .controller(ControllerRef::You)
+                    .into()
+            )
         );
     }
 

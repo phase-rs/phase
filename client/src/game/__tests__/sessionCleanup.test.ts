@@ -11,6 +11,7 @@ describe("clearPromptOverlayState", () => {
     useUiStore.setState({
       pendingAbilityChoice: null,
       enchantmentsDialogPlayer: null,
+      manualManaOverride: false,
     });
   });
 
@@ -52,5 +53,13 @@ describe("clearPromptOverlayState", () => {
     expect(state.gameState).not.toBeNull();
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
     expect(useUiStore.getState().enchantmentsDialogPlayer).toBeNull();
+  });
+
+  it("resets the per-game manualManaOverride toggle so it can't leak across games", () => {
+    useUiStore.setState({ manualManaOverride: true });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().manualManaOverride).toBe(false);
   });
 });

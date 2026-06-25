@@ -3,10 +3,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { StackEntry } from "./StackEntry.tsx";
-import {
-  pressureMultiplier,
-  stackPressureFromLength,
-} from "../../utils/stackPressure.ts";
+import { pressureMultiplier } from "../../utils/stackPressure.ts";
+import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -316,11 +314,12 @@ export function StackDisplay() {
             >
               <AnimatePresence mode="popLayout">
                 {(() => {
-                  // Mass-trigger pacing: engine-authored StackPressure thresholds
-                  // (10/30/100) collapse per-entry animation under stack pressure.
-                  // See crates/engine/src/game/stack.rs + utils/stackPressure.ts.
+                  // Mass-trigger pacing: collapse per-entry animation under stack
+                  // pressure — depth (engine thresholds 10/30/100) OR recent
+                  // resolution churn (rate axis, for low-depth-high-throughput
+                  // loops depth can't see). See utils/stackThroughput.ts.
                   const pacing = pressureMultiplier(
-                    stackPressureFromLength(displayStack.length),
+                    effectiveStackPressure(displayStack.length),
                   );
                   return groupedStack.map(({ entry, count }, index) => (
                     <StackEntry

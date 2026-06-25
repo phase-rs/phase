@@ -16,11 +16,12 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Chooser, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterSourceRider, CounteredSpellDestination, Duration,
-    Effect, EffectScope, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec,
-    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
+    CounteredSpellDestination, DigSource, Duration, Effect, EffectScope, FaceDownBody,
+    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1404,6 +1405,20 @@ fn starts_clause_text_lower(s: &str) -> bool {
         return true;
     }
 
+    if alt((
+        value((), tag::<_, _, OracleError<'_>>("assemble ")),
+        value((), tag("reassemble ")),
+        value((), tag("it assemble ")),
+        value((), tag("it assembles ")),
+        value((), tag("it reassemble ")),
+        value((), tag("it reassembles ")),
+    ))
+    .parse(s)
+    .is_ok()
+    {
+        return true;
+    }
+
     // Table-driven prefix check via nom tag() — try all imperative verbs and
     // pronoun/determiner clause starters.  Split into multiple alt() groups
     // chained with .or() to stay within nom's 21-tuple limit.
@@ -2750,6 +2765,121 @@ pub(super) fn apply_clause_continuation(
             // clause (e.g. `Sacrifice` — Birthing Ritual) sits between the
             // `Dig` and this continuation, `defs.last()` is that intervening
             // clause, not the `Dig`. Search back for the nearest `Dig`/`Mill`.
+            //
+            // Special case — optional sacrifice interleaving (Birthing Ritual):
+            // "look at top 7. Then you MAY sacrifice a creature. If you do, you
+            // may put a creature card ... from among those cards onto the
+            // battlefield." The choice must happen AFTER the sacrifice, not
+            // before (CR 608.2c: follow written order). Detect this pattern and
+            // restructure: root Dig becomes look-only; a `from_prior_look` Dig
+            // gated on OptionalEffectPerformed is wired as the Sacrifice's
+            // sub_ability; a decline branch Dig (keep_count=0, rest→Library)
+            // is its else_ability, routing all 7 cards to library bottom if
+            // the player declined the sacrifice.
+            let dig_pos = defs
+                .iter()
+                .rposition(|d| matches!(&*d.effect, Effect::Dig { .. } | Effect::Mill { .. }));
+            if let Some(dig_pos) = dig_pos {
+                if matches!(&*defs[dig_pos].effect, Effect::Dig { .. }) {
+                    // Find an optional, lookback-transparent sacrifice/pay-cost
+                    // clause between the root Dig and the end of defs.
+                    let sac_pos = defs[dig_pos + 1..]
+                        .iter()
+                        .position(|d| {
+                            d.optional
+                                && clause_is_dig_lookback_transparent(&d.effect)
+                                && matches!(
+                                    &*d.effect,
+                                    Effect::Sacrifice { .. } | Effect::PayCost { .. }
+                                )
+                        })
+                        .map(|i| dig_pos + 1 + i);
+
+                    if let Some(sac_pos) = sac_pos {
+                        // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
+                        debug_assert!(
+                            face_down_profile.is_none() && enters_under.is_none(),
+                            "Dig-source face-down from-among with intervening sacrifice \
+                             is not yet supported"
+                        );
+
+                        // 1. Demote the root Dig to look-only (no choice yet).
+                        if let Effect::Dig {
+                            keep_count,
+                            destination,
+                            filter,
+                            rest_destination,
+                            reveal,
+                            up_to,
+                            ..
+                        } = &mut *defs[dig_pos].effect
+                        {
+                            *keep_count = Some(0);
+                            *destination = None;
+                            *filter = TargetFilter::Any;
+                            *rest_destination = None;
+                            *reveal = false;
+                            *up_to = false;
+                        }
+
+                        // 2. Map quantity → keep_count / up_to for the choice Dig.
+                        let (choice_keep_count, choice_up_to) = match quantity {
+                            PutCount::All => (Some(u32::MAX), false),
+                            PutCount::AnyNumber => (Some(u32::MAX), true),
+                            PutCount::Up(n) => (Some(n), true),
+                            PutCount::Exactly(n) => (Some(n), false),
+                        };
+
+                        // 3. Decline branch: put all looked-at cards on library
+                        // bottom with no interactive choice (player declined
+                        // the optional sacrifice).
+                        let put_on_bottom = AbilityDefinition::new(
+                            kind,
+                            Effect::Dig {
+                                player: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 0 },
+                                keep_count: Some(0),
+                                up_to: false,
+                                filter: TargetFilter::Any,
+                                destination: None,
+                                rest_destination: Some(Zone::Library),
+                                reveal: false,
+                                enter_tapped: false,
+                                source: DigSource::PriorLook,
+                            },
+                        );
+
+                        // 4. Choice Dig: reads private_look_ids, evaluates
+                        // CMC filter with sacrifice snapshot in context.
+                        // CR 701.20e: "put the rest on the bottom" is
+                        // unconditional — route unchosen cards to Library.
+                        let mut from_prior_look_dig = AbilityDefinition::new(
+                            kind,
+                            Effect::Dig {
+                                player: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 0 },
+                                keep_count: choice_keep_count,
+                                up_to: choice_up_to,
+                                filter: card_filter,
+                                destination: kept_dest,
+                                rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
+                                reveal: false,
+                                enter_tapped,
+                                source: DigSource::PriorLook,
+                            },
+                        );
+                        // Gate on sacrifice having been performed.
+                        from_prior_look_dig.condition = Some(AbilityCondition::effect_performed());
+                        // Decline branch fires when sacrifice was not performed.
+                        from_prior_look_dig.else_ability = Some(Box::new(put_on_bottom));
+
+                        // 5. Wire: Sacrifice.sub_ability = from_prior_look_dig.
+                        defs[sac_pos].sub_ability = Some(Box::new(from_prior_look_dig));
+                        return;
+                    }
+                }
+            }
+
             let Some(previous) = defs
                 .iter_mut()
                 .rev()
@@ -4432,6 +4562,12 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::ProcessRadCounters
@@ -6686,6 +6822,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }
     }
 
@@ -7897,23 +8034,29 @@ mod tests {
         assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
     }
 
-    /// Parser AST-shape test (issue #420). Birthing Ritual's full triggered-
-    /// ability effect text must assemble into a `Dig` → `Sacrifice` chain where
-    /// the "if you do, you may put a creature card ... onto the battlefield"
-    /// continuation PATCHES the `Dig` (not the intervening `Sacrifice`), and
-    /// the trailing "put the rest on the bottom" clause binds to the same
-    /// `Dig`. Before the issue #420 fix, clause 3 fell through to a stray
-    /// `Effect::ChangeZone { target: ParentTarget }` and the `Dig` kept
-    /// `destination: None`, routing the kept card to the hand.
+    /// Parser AST-shape test (issue #420 / issue #4273). Birthing Ritual's
+    /// full triggered-ability effect text must assemble into:
+    ///   Dig(look-only, count=7)
+    ///     → Sacrifice(optional)
+    ///       → Dig(from_prior_look, dest=Battlefield, filter=Creature+CmcLE(X+1),
+    ///             condition: OptionalEffectPerformed,
+    ///             else_ability: Dig(from_prior_look, keep_count=0, rest→Library))
     ///
-    /// CR 608.2c: the controller follows the card's instructions in written
-    /// order — later text ("if you do, ... onto the battlefield") modifies the
-    /// earlier "look at the top seven cards" instruction.
+    /// This ordering matches the Oracle text (CR 608.2c: follow written order):
+    /// 1. look at top 7 (no player choice)
+    /// 2. may sacrifice (interactive)
+    /// 3. if you sacrificed: choose from among the looked-at cards (interactive)
+    /// 4. put the rest on the bottom (unconditional cleanup — via rest_destination
+    ///    in the choice Dig, or via the else_ability decline branch)
+    ///
+    /// Before the issue #4273 fix the Dig was assembled with dest=Battlefield and
+    /// the full filter, presenting WaitingFor::DigChoice BEFORE the sacrifice.
     #[test]
     fn birthing_ritual_assembles_dig_battlefield_sacrifice_chain() {
         use super::super::parse_effect_chain;
         use crate::types::ability::{
-            Comparator, FilterProp, ObjectScope, QuantityRef, TypeFilter, TypedFilter,
+            AbilityCondition, Comparator, FilterProp, ObjectScope, QuantityRef, TypeFilter,
+            TypedFilter,
         };
 
         // Effect text of the triggered ability — everything after the
@@ -7927,51 +8070,126 @@ mod tests {
             AbilityKind::Spell,
         );
 
-        // Collect the effect chain by walking `sub_ability`.
-        let mut effects: Vec<&Effect> = Vec::new();
+        // Collect the sub_ability chain.
+        let mut chain_nodes: Vec<&crate::types::ability::AbilityDefinition> = Vec::new();
         let mut node = Some(&def);
         while let Some(d) = node {
-            effects.push(&d.effect);
+            chain_nodes.push(d);
             node = d.sub_ability.as_deref();
         }
+        let effects: Vec<&Effect> = chain_nodes.iter().map(|d| d.effect.as_ref()).collect();
 
-        // Clause 1 — the `Dig`, patched by the DigFromAmong continuation.
+        // Step 1: look-only Dig (stores private_look_ids, no player choice).
         let Effect::Dig {
+            count,
             destination,
             keep_count,
-            up_to,
-            reveal,
-            rest_destination,
             filter,
+            rest_destination,
+            source,
             ..
         } = effects[0]
         else {
-            panic!("expected Dig as first effect, got {:?}", effects[0]);
+            panic!(
+                "expected look-only Dig as first effect, got {:?}",
+                effects[0]
+            );
         };
-        assert_eq!(*destination, Some(Zone::Battlefield));
-        assert_eq!(*keep_count, Some(1));
-        assert!(*up_to, "\"you may put\" → up_to");
-        // CR 701.20e + CR 400.2: "look at the top seven cards" is a private
-        // *look* — looking shows a card only to the specified player, unlike a
-        // public *reveal* (CR 701.20a). The library is a hidden zone (CR 400.2),
-        // so the kept card is routed directly to the battlefield with `reveal`
-        // false. (`reveal` is only promoted to true for the destination-None
-        // reveal-only form, where downstream sub-abilities consume a public
-        // tracked set.)
-        assert!(!*reveal, "\"look at\" is private — not a reveal-form");
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Fixed { value: 7 }
+                    | QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+            ),
+            "look-only Dig should count 7 cards (or equivalent), got {count:?}"
+        );
+        assert_eq!(
+            *keep_count,
+            Some(0),
+            "look-only Dig: no cards kept (pure peek)"
+        );
+        assert_eq!(*destination, None, "look-only Dig: no destination");
+        // The PutRest continuation ("put the rest on the bottom …") is a
+        // separate clause that patches this field after the DigFromAmong
+        // restructuring. The resolver ignores rest_destination on a look-only
+        // Dig (keep_count=0, reveal=false) because it takes an early return
+        // after populating private_look_ids (dig.rs:123). Some(Library) here
+        // is correct and harmless.
         assert_eq!(
             *rest_destination,
             Some(Zone::Library),
-            "\"put the rest on the bottom\" binds to the Dig (random order preserved)"
+            "look-only Dig: PutRest patches rest_destination (unused at runtime)"
+        );
+        assert!(
+            matches!(filter, TargetFilter::Any),
+            "look-only Dig: no filter on the peek"
+        );
+        assert_eq!(
+            *source,
+            DigSource::Library,
+            "look-only Dig reads from library"
+        );
+
+        // Step 2: optional Sacrifice.
+        let Effect::Sacrifice { .. } = effects[1] else {
+            panic!("expected Sacrifice as second effect, got {:?}", effects[1]);
+        };
+        assert!(
+            chain_nodes[1].optional,
+            "Sacrifice must be optional (\"you may sacrifice\")"
+        );
+
+        // The PriorLook choice Dig is wired as Sacrifice.sub_ability.
+        let sac_sub = chain_nodes[1]
+            .sub_ability
+            .as_deref()
+            .expect("Sacrifice must have a sub_ability (the PriorLook choice Dig)");
+
+        // Step 3: PriorLook choice Dig, gated on sacrifice performed.
+        let Effect::Dig {
+            destination: choice_dest,
+            keep_count: choice_keep,
+            up_to: choice_up_to,
+            filter: choice_filter,
+            rest_destination: choice_rest,
+            source: choice_src,
+            reveal: choice_reveal,
+            ..
+        } = sac_sub.effect.as_ref()
+        else {
+            panic!(
+                "Sacrifice.sub_ability must be a Dig, got {:?}",
+                sac_sub.effect
+            );
+        };
+        assert_eq!(
+            *choice_src,
+            DigSource::PriorLook,
+            "choice Dig must be PriorLook"
+        );
+        assert_eq!(
+            *choice_dest,
+            Some(Zone::Battlefield),
+            "choice Dig puts kept card on battlefield"
+        );
+        assert_eq!(*choice_keep, Some(1), "\"you may put\" → keep_count 1");
+        assert!(*choice_up_to, "\"you may put\" → up_to");
+        assert!(!*choice_reveal, "choice Dig is a private look, not reveal");
+        assert_eq!(
+            *choice_rest,
+            Some(Zone::Library),
+            "\"put the rest on the bottom\" → rest_destination Library"
         );
         // Creature + mana-value-relative-to-sacrificed-creature filter.
         let TargetFilter::Typed(TypedFilter {
             type_filters,
             properties,
             ..
-        }) = filter
+        }) = choice_filter
         else {
-            panic!("expected Typed creature+cmc filter, got {filter:?}");
+            panic!("expected Typed creature+cmc filter, got {choice_filter:?}");
         };
         assert!(
             type_filters.contains(&TypeFilter::Creature),
@@ -7994,13 +8212,39 @@ mod tests {
             )),
             "filter has Cmc <= (sacrificed creature MV + 1), got {properties:?}"
         );
-
-        // A `Sacrifice` step is present.
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::Sacrifice { .. })),
-            "expected a Sacrifice step in the chain, got {effects:?}"
+        // Gate: choice Dig only fires if sacrifice was performed.
+        assert_eq!(
+            sac_sub.condition,
+            Some(AbilityCondition::effect_performed()),
+            "choice Dig must be gated on OptionalEffectPerformed"
+        );
+        // Decline branch: all looked-at cards go to library bottom.
+        let else_ab = sac_sub
+            .else_ability
+            .as_deref()
+            .expect("choice Dig must carry an else_ability (decline: all on bottom)");
+        let Effect::Dig {
+            keep_count: else_keep,
+            rest_destination: else_rest,
+            source: else_src,
+            ..
+        } = else_ab.effect.as_ref()
+        else {
+            panic!(
+                "else_ability must be a Dig (put all on bottom), got {:?}",
+                else_ab.effect
+            );
+        };
+        assert_eq!(
+            *else_src,
+            DigSource::PriorLook,
+            "else_ability Dig must be PriorLook"
+        );
+        assert_eq!(*else_keep, Some(0), "else_ability Dig keeps no cards");
+        assert_eq!(
+            *else_rest,
+            Some(Zone::Library),
+            "else_ability Dig routes all to library bottom"
         );
 
         // No stray `ChangeZone { target: ParentTarget }` from clause 3.
@@ -8012,10 +8256,10 @@ mod tests {
                     ..
                 }
             )),
-            "clause 3 must patch the Dig, not fall through to ChangeZone{{ParentTarget}}"
+            "clause 3 must NOT emit a stray ChangeZone{{ParentTarget}}"
         );
 
-        // No Unimplemented fallbacks.
+        // No Unimplemented fallbacks in the main chain.
         assert!(
             !effects
                 .iter()
@@ -9079,6 +9323,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }
     }
 

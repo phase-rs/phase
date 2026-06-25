@@ -8,6 +8,9 @@ pub mod testing;
 pub mod types;
 pub mod util;
 
+#[cfg(test)]
+mod test_support;
+
 // Re-export `im` so downstream crates can construct persistent containers
 // without declaring their own dependency. Keeps the backing-container choice
 // (im vs rpds vs dashmap) centralized here.

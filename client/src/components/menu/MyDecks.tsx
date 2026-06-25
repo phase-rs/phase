@@ -23,6 +23,7 @@ import {
   useFeedCacheSnapshot,
 } from "../../services/feedPersistence";
 import { FeedManagerModal } from "./FeedManagerModal";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
 import {
@@ -668,15 +669,24 @@ export function MyDecks({
     },
     [renameFolder, t],
   );
-  const handleDeleteFolder = useCallback(
-    (id: string, name: string) => {
-      if (!confirm(t("folder.deleteConfirm", { name }))) return;
-      deleteFolder(id);
-      // Drop the now-dead id from the persisted collapse set so it can't leak.
-      setCollapsedFolderIds(collapsedFolderIds.filter((existing) => existing !== id));
-    },
-    [deleteFolder, t, setCollapsedFolderIds, collapsedFolderIds],
+  const [folderPendingDelete, setFolderPendingDelete] = useState<{ id: string; name: string } | null>(
+    null,
   );
+  const handleDeleteFolder = useCallback((id: string, name: string) => {
+    // Defer until after the popover menu click finishes so the portaled backdrop
+    // doesn't receive the tail of the same pointer event.
+    requestAnimationFrame(() => {
+      setFolderPendingDelete({ id, name });
+    });
+  }, []);
+  const confirmDeleteFolder = useCallback(() => {
+    if (!folderPendingDelete) return;
+    const { id } = folderPendingDelete;
+    deleteFolder(id);
+    // Drop the now-dead id from the persisted collapse set so it can't leak.
+    setCollapsedFolderIds(collapsedFolderIds.filter((existing) => existing !== id));
+    setFolderPendingDelete(null);
+  }, [folderPendingDelete, deleteFolder, setCollapsedFolderIds, collapsedFolderIds]);
 
   useEffect(() => {
     setActiveFilter(contextualFilter ?? "all");
@@ -1720,6 +1730,15 @@ export function MyDecks({
       <FeedManagerModal
         open={showFeedManager}
         onClose={handleFeedManagerClose}
+      />
+      <ConfirmDialog
+        open={folderPendingDelete !== null}
+        title={t("folder.delete")}
+        message={t("folder.deleteConfirm", { name: folderPendingDelete?.name ?? "" })}
+        confirmLabel={t("folder.delete")}
+        onConfirm={confirmDeleteFolder}
+        onCancel={() => setFolderPendingDelete(null)}
+        tone="danger"
       />
     </Wrapper>
   );

@@ -190,12 +190,90 @@ fn parse_was_cast_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 
 fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 120.10: excess-damage check must precede the plain damage check so
+        // "was dealt excess damage this turn" wins over the shorter "was dealt
+        // damage this turn" prefix in `parse_source_was_dealt_damage_this_turn`.
+        parse_subject_was_dealt_excess_damage_this_turn,
         parse_player_was_dealt_damage_threshold_this_turn,
         parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_to_opponent_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// Wrapper around `parse_type_phrase` that fails (nom error) when the result is
+/// `TargetFilter::Any`, used as a nom-compatible parser combinator.
+fn parse_type_phrase_nonempty(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, rest) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((rest, filter))
+}
+
+/// CR 120.10 + CR 603.4: "a [subject] was dealt excess damage this turn" —
+/// intervening-if predicate used by Maarika-class triggers.
+///
+/// Parses a broad class of subjects:
+///   - "that creature" / "that permanent" — CR 603.2 + CR 120.1 demonstrative
+///     references bound to the *specific* object that received the triggering
+///     event's damage (`TargetFilter::EventTarget`). This must NOT be a generic
+///     type filter: otherwise the intervening-`if` would scan every excess-damage
+///     record this turn and fire off an unrelated creature's earlier overkill
+///     (Maarika false-positive). Binding to the event target restricts the query
+///     to the one creature/permanent this trigger's damage went to.
+///   - "a creature", "a permanent", etc. — bare indefinite references that stay
+///     a generic type-phrase filter (the demonstrative binding does not apply).
+///   - Any `parse_type_phrase` result (e.g. "a creature or planeswalker an
+///     opponent controlled" from Rith, Liberated Primeval).
+///
+/// All forms map to `DamageDealtThisTurn { source: Any, target: <filter>,
+/// excess_only: true }` compared ≥ 1, which is true when at least one
+/// `DamageRecord` this turn targeted a matching object with `excess > 0`.
+fn parse_subject_was_dealt_excess_damage_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // Subject: a pronominal "that creature/permanent" or a type-phrase noun.
+    let (rest, target) = alt((
+        // CR 603.2 + CR 120.1 + CR 603.4: "that creature" / "that permanent" is
+        // the *specific* object that received this trigger's damage, not any
+        // creature/permanent of that type. Bind to `TargetFilter::EventTarget`
+        // so the intervening-`if` only checks the damaged object — Maarika's
+        // "if that creature was dealt excess damage this turn" must not fire off
+        // an unrelated creature's earlier excess hit. The event target is itself
+        // the damaged creature/permanent, so no separate type guard is needed.
+        value(
+            TargetFilter::EventTarget,
+            tag::<_, _, OracleError<'_>>("that creature"),
+        ),
+        value(TargetFilter::EventTarget, tag("that permanent")),
+        // Bare article form: "a creature or planeswalker an opponent controlled"
+        // (Rith), "a creature", "a permanent", etc. Delegate to parse_type_phrase
+        // which handles "a/an <type>", "a/an <type> <controller-suffix>",
+        // and compound "a <type> or <type>" forms.
+        parse_type_phrase_nonempty,
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" was dealt excess damage this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(target),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                // CR 120.10: Only match records where the damage was overkill.
+                excess_only: true,
+            },
+            1,
+        ),
+    ))
 }
 
 /// CR 603.4 + CR 120.3: "you were/an opponent was dealt N or more damage this
@@ -234,6 +312,8 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             amount,
         ),
@@ -287,6 +367,8 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::CombatOnly,
+
+                excess_only: false,
             },
             1,
         ),
@@ -316,6 +398,8 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             1,
         ),
@@ -350,6 +434,8 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             1,
         ),
@@ -2718,19 +2804,56 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // "another " to `FilterProp::Another`).
     let (rest, _article) =
         nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(rest)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, mut remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    let filter = inject_controller(filter, ctrl);
+
+    // CR 608.2c + CR 109.5: Elided-verb disjunctive control —
+    // "you control <type A> or <article> <type B>" (Doctor Doom: "you control
+    // an artifact creature or a Plan"). The repeated "you control"/article RHS
+    // ("or a Plan") is NOT a standalone control condition, so the top-level
+    // `parse_condition_disjunction` cannot split it; instead a single shared
+    // verb governs both type filters. Each additional " or <article> <type>"
+    // segment is folded into a disjunction of presence filters. `parse_type_phrase`
+    // (unchanged) parses each article-led segment; this loop only adds the
+    // elided-verb continuation specific to the control-condition grammar, so the
+    // recipient/attached `it's X or Y` paths (which DO repeat a parseable RHS)
+    // are unaffected. Dispatch uses nom `tag(" or ")` + `peek(article)`.
+    let mut filters = vec![filter];
+    loop {
+        let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remainder) else {
+            break;
+        };
+        // Require an article-led RHS — a bare-type RHS ("... or creatures") or a
+        // standalone-condition RHS is left for the existing dispatchers.
+        let Ok((_, _)): Result<(&str, &str), nom::Err<OracleError<'_>>> =
+            nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(after_or)
+        else {
+            break;
+        };
+        let (next_filter, next_remainder) = parse_type_phrase(after_or);
+        if matches!(next_filter, TargetFilter::Any) {
+            break;
+        }
+        filters.push(next_filter);
+        remainder = next_remainder;
+    }
+
+    let combined = if filters.len() == 1 {
+        filters.pop().expect("one filter")
+    } else {
+        TargetFilter::Or { filters }
+    };
+    let combined = inject_controller(combined, ctrl);
     let consumed = input.len() - remainder.len();
     Ok((
         &input[consumed..],
         StaticCondition::IsPresent {
-            filter: Some(filter),
+            filter: Some(combined),
         },
     ))
 }
@@ -3918,6 +4041,8 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             amount,
         ),
@@ -7325,6 +7450,79 @@ mod tests {
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
         }
+    }
+
+    /// CR 604.1 + CR 611.3a: Doctor Doom's conditional-static gate
+    /// "as long as you control an artifact creature or a Plan, ~ has
+    /// indestructible" must lower its CONDITION to a typed
+    /// `IsPresent { Or[ Typed{[Artifact,Creature],You,Battlefield},
+    /// Typed{[Plan],You,Battlefield} ] }`, NOT `StaticCondition::Unrecognized`.
+    /// DISCRIMINATING: pre-fix `parse_type_phrase` left " or a Plan" unconsumed
+    /// (Plan unknown + non-comma connector rejected an article-led RHS), so the
+    /// condition fell to `Unrecognized` — which `evaluate_condition` treats as
+    /// `true`, making the keyword grant always-on (coverage-unsupported).
+    #[test]
+    fn doctor_doom_disjunctive_control_condition_is_typed_not_unrecognized() {
+        let (rest, c) =
+            parse_inner_condition("you control an artifact creature or a plan").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            !matches!(c, StaticCondition::Unrecognized { .. }),
+            "condition must NOT be Unrecognized, got {c:?}"
+        );
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Or { filters }),
+        } = &c
+        else {
+            panic!("expected IsPresent {{ Or[..] }}, got {c:#?}");
+        };
+        assert_eq!(filters.len(), 2, "two disjuncts");
+        let TargetFilter::Typed(left) = &filters[0] else {
+            panic!("left disjunct must be Typed");
+        };
+        assert!(left.type_filters.contains(&TypeFilter::Artifact));
+        assert!(left.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(left.controller, Some(ControllerRef::You));
+        assert!(left.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+        let TargetFilter::Typed(right) = &filters[1] else {
+            panic!("right disjunct must be Typed");
+        };
+        assert_eq!(
+            right.type_filters,
+            vec![TypeFilter::Subtype("Plan".to_string())],
+            "right disjunct must be the Plan subtype, got {right:?}"
+        );
+        assert_eq!(right.controller, Some(ControllerRef::You));
+        assert!(right.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+    }
+
+    /// Regression: a single "you control an artifact creature" (no connector)
+    /// still lowers to a single `IsPresent { Typed{[Artifact,Creature],You,
+    /// Battlefield} }`.
+    #[test]
+    fn you_control_single_artifact_creature_still_typed() {
+        let (rest, c) = parse_inner_condition("you control an artifact creature").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
     }
 
     #[test]
@@ -11438,6 +11636,8 @@ mod tests {
                                 aggregate: AggregateFunction::Max,
                                 group_by: Some(DamageGroupKey::SourceId),
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11468,6 +11668,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11499,6 +11701,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11530,6 +11734,8 @@ mod tests {
                                 aggregate: AggregateFunction::Sum,
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
+
+                                excess_only: false,
                             },
                     },
                 comparator: Comparator::GE,
@@ -11559,6 +11765,8 @@ mod tests {
                         aggregate: AggregateFunction::Sum,
                         group_by: None,
                         damage_kind: DamageKindFilter::Any,
+
+                        excess_only: false,
                     },
                 },
                 comparator: Comparator::GE,
@@ -11588,6 +11796,8 @@ mod tests {
                             aggregate: AggregateFunction::Sum,
                             group_by: None,
                             damage_kind: DamageKindFilter::CombatOnly,
+
+                            excess_only: false,
                         },
                 },
             comparator: Comparator::GE,
@@ -11626,6 +11836,8 @@ mod tests {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::DamageDealtThisTurn {
                         damage_kind: DamageKindFilter::CombatOnly,
+
+                        excess_only: false,
                         ..
                     },
                 },
@@ -13455,5 +13667,97 @@ mod tests {
             .expect("bound-it combat-state gate should parse");
         assert_eq!(rest, "");
         assert_eq!(cond, expected);
+    }
+
+    /// CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "that creature was dealt
+    /// excess damage this turn" is the Maarika-class intervening-if. It must map
+    /// to a `DamageDealtThisTurn` check with `excess_only: true` whose target is
+    /// bound to `TargetFilter::EventTarget` — the *specific* damaged object of
+    /// the trigger — not a generic creature filter. A generic filter would let
+    /// the condition fire off an unrelated creature's earlier excess hit.
+    #[test]
+    fn parse_inner_condition_that_creature_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) = parse_inner_condition("that creature was dealt excess damage this turn")
+            .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert!(excess_only, "excess_only must be true");
+        assert_eq!(
+            target.as_ref(),
+            &TargetFilter::EventTarget,
+            "\"that creature\" must bind to the triggering event's damaged object"
+        );
+    }
+
+    /// CR 603.2 + CR 120.1: "that permanent" binds to the event target too.
+    #[test]
+    fn parse_inner_condition_that_permanent_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) =
+            parse_inner_condition("that permanent was dealt excess damage this turn")
+                .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { ref target, .. },
+                },
+            ..
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert_eq!(target.as_ref(), &TargetFilter::EventTarget);
+    }
+
+    /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's "a creature or
+    /// planeswalker an opponent controlled was dealt excess damage this turn"
+    /// must parse as an opponent-filtered DamageDealtThisTurn with excess_only.
+    /// `parse_type_phrase` produces `TargetFilter::Or` for compound types, so
+    /// this test checks that excess_only is set and the target is non-Any.
+    #[test]
+    fn parse_inner_condition_typed_subject_was_dealt_excess_damage_this_turn() {
+        let (rest, cond) = parse_inner_condition(
+            "a creature or planeswalker an opponent controlled was dealt excess damage this turn",
+        )
+        .expect("should parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref target,
+                            excess_only,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = cond
+        else {
+            panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
+        };
+        assert!(excess_only, "excess_only must be true");
+        // parse_type_phrase emits Or{Typed(Creature+Opp), Typed(Planeswalker+Opp)}
+        // for compound types — verify the filter is non-trivial (not Any).
+        assert!(
+            !matches!(target.as_ref(), TargetFilter::Any),
+            "target filter must be non-Any, got: {target:?}"
+        );
     }
 }

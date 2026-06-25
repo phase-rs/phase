@@ -79,7 +79,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
     // emissary via the production handler.
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
         player: P0,
-        choice_type: ChoiceType::CardType,
+        choice_type: ChoiceType::card_type(),
         options: vec![
             "Artifact".to_string(),
             "Creature".to_string(),

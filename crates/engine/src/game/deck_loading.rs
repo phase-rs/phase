@@ -30,6 +30,9 @@ pub struct PlayerDeckPayload {
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
+    /// Unstable Contraptions: optional supplementary Contraption deck.
+    #[serde(default)]
+    pub contraption_deck: Vec<DeckEntry>,
     /// CR 123.2c: The revealed sticker sheets this player uses this game.
     #[serde(default)]
     pub sticker_sheets: Vec<String>,
@@ -70,6 +73,8 @@ pub struct PlayerDeckList {
     pub commander: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    #[serde(default)]
+    pub contraption_deck: Vec<String>,
     #[serde(default)]
     pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
@@ -128,6 +133,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
         attraction_deck: resolve_names(db, &list.attraction_deck),
+        contraption_deck: resolve_names(db, &list.contraption_deck),
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
@@ -148,6 +154,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
+            contraption_deck: resolve_names(db, &list.player.contraption_deck),
             sticker_sheets: list.player.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.player.signature_spell),
             bracket_tier: list.player.bracket_tier,
@@ -157,6 +164,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
+            contraption_deck: resolve_names(db, &list.opponent.contraption_deck),
             sticker_sheets: list.opponent.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.opponent.signature_spell),
             bracket_tier: list.opponent.bracket_tier,
@@ -169,6 +177,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
+                contraption_deck: resolve_names(db, &deck.contraption_deck),
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
@@ -244,6 +253,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sideboard: Vec::new(),
         commander: Vec::new(),
         attraction_deck: Vec::new(),
+        contraption_deck: Vec::new(),
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
@@ -363,6 +373,37 @@ fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], own
     for entry in entries {
         for _ in 0..entry.count {
             create_attraction_deck_card(state, &entry.card, owner);
+        }
+    }
+}
+
+/// Unstable Contraptions: create a Contraption in the supplementary deck
+/// (command zone).
+pub fn create_contraption_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.in_contraption_deck = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == owner)
+        .expect("owner exists")
+        .contraption_deck
+        .push_back(obj_id);
+    obj_id
+}
+
+fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_contraption_deck_card(state, &entry.card, owner);
         }
     }
 }
@@ -521,6 +562,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
     }
+    load_player_contraption_deck(state, &payload.player.contraption_deck, PlayerId(0));
+    load_player_contraption_deck(state, &payload.opponent.contraption_deck, PlayerId(1));
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        load_player_contraption_deck(state, &ai_deck.contraption_deck, PlayerId((2 + i) as u8));
+    }
     crate::game::stickers::set_player_sticker_sheets(
         state,
         PlayerId(0),
@@ -634,11 +680,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     sorted.sort();
     state.all_creature_types = sorted;
 
-    // Shuffle each player's library and Attraction deck (CR 103.3a / CR 717.2).
+    // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
         crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
     }
 }
 

@@ -610,6 +610,7 @@ fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
             | TargetFilter::DefendingPlayer
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTargetController
@@ -690,7 +691,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
                 .into_iter()
@@ -768,6 +769,16 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         TargetFilter::TriggeringSource => {
             let event = event?;
             let obj_id = extract_source_from_event(event)?;
+            Some(TargetRef::Object(obj_id))
+        }
+        // CR 603.2 + CR 120.1: "that creature" / "that permanent" — the object
+        // that *received* the triggering event's damage (recipient counterpart
+        // of `TriggeringSource`). Resolves via the same authority
+        // `ObjectScope::EventTarget` uses so the antecedent is the specific
+        // damaged object, never a generic type filter.
+        TargetFilter::EventTarget => {
+            let event = event?;
+            let obj_id = extract_target_object_from_event(event)?;
             Some(TargetRef::Object(obj_id))
         }
         // CR 603.7c + CR 109.4 + CR 110.2: "the attacking player" / "its

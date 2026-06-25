@@ -69,12 +69,8 @@ pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
     if player_has_cant_lose_life(state, player) || player_cant_pay_life_as_cost(state, player) {
         return 0;
     }
-    state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| u32::try_from((p.life / 2).max(0)).unwrap_or(0))
-        .unwrap_or(0)
+    // CR 119.4a: in a team format the payable budget is bounded by the team total.
+    u32::try_from((crate::game::players::team_life_total(state, player) / 2).max(0)).unwrap_or(0)
 }
 
 /// CR 118.3 + CR 119.4b + CR 119.8: Pure predicate — can this player pay `amount` life?
@@ -91,12 +87,9 @@ pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bo
     if player_has_cant_lose_life(state, player) {
         return false;
     }
-    // CR 118.3: life total must be at least the amount to be paid.
-    state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .is_some_and(|p| p.life >= amount as i32)
+    // CR 119.4a: in a team format affordability is bounded by the team's
+    // shared life total (off-team this is the player's own life).
+    crate::game::players::team_life_total(state, player) >= amount as i32
 }
 
 /// CR 118.3b + CR 119.4 + CR 119.8: Pay `amount` life from `player` as a cost.
@@ -129,12 +122,11 @@ pub fn pay_life_as_cost(
         return PayLifeCostResult::Prohibited;
     }
 
-    // CR 118.3: Resource check — must have enough life.
-    let has_life = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .is_some_and(|p| p.life >= amount as i32);
+    // CR 119.4a: Resource check — affordability is bounded by the team's
+    // shared total. The DEDUCTION below lands on the individual `Player::life`
+    // (CR 810.9: life loss happens to each player individually) and may go
+    // negative — only the affordability gate reads the team total.
+    let has_life = crate::game::players::team_life_total(state, player) >= amount as i32;
     if !has_life {
         return PayLifeCostResult::InsufficientLife;
     }
@@ -188,6 +180,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::zones::Zone;
@@ -347,5 +340,74 @@ mod tests {
 
         assert_eq!(result, PayLifeCostResult::Paid { amount: 3 });
         assert_eq!(state.players[1].life, 17);
+    }
+
+    /// CR 119.4a + CR 810.9a: in 2HG, `can_pay_life_cost` affordability is
+    /// bounded by the TEAM total. Member at 3, teammate at 9 (team 12) → a
+    /// 10-life cost is payable even though the individual has only 3. Reverting
+    /// Site 3 to `p.life >= amount` flips this to unpayable. The order is
+    /// preserved: 0 is payable and a lock blocks any positive amount.
+    #[test]
+    fn can_pay_life_cost_team_bounded_in_2hg() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 3;
+        state.players[1].life = 9; // team total 12
+
+        assert!(
+            can_pay_life_cost(&state, PlayerId(0), 10),
+            "team total 12 affords a 10-life cost"
+        );
+        assert!(!can_pay_life_cost(&state, PlayerId(0), 13));
+        // CR 119.4b: 0 always payable.
+        assert!(can_pay_life_cost(&state, PlayerId(0), 0));
+        // CR 119.8: lock blocks any positive amount.
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), 1));
+    }
+
+    /// Off-team degeneracy sibling for Site 3: in a 1v1, affordability is the
+    /// player's own life (no team fold).
+    #[test]
+    fn can_pay_life_cost_off_team_individual() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 4;
+        assert!(can_pay_life_cost(&state, PlayerId(0), 4));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), 5));
+    }
+
+    /// CR 119.4a + CR 810.9: `max_phyrexian_life_payments` is bounded by the
+    /// team total (12 / 2 = 6), not the individual (3 / 2 = 1). The lock still
+    /// short-circuits to 0.
+    #[test]
+    fn max_phyrexian_payments_team_bounded_in_2hg() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 3;
+        state.players[1].life = 9; // team 12
+        assert_eq!(max_phyrexian_life_payments(&state, PlayerId(0)), 6);
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        assert_eq!(max_phyrexian_life_payments(&state, PlayerId(0)), 0);
+    }
+
+    /// CR 119.4a + CR 810.9: pay-life affordability is team-bounded, and the
+    /// DEDUCTION lands on the individual `Player::life` — a member may go
+    /// negative while the team stays positive. Pay 6 from a {2, 6} team: payer
+    /// goes to -4 (team 4), no SBA runs here (this is the cost helper only).
+    #[test]
+    fn pay_life_team_bounded_deduction_lands_individual_in_2hg() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = 2;
+        state.players[1].life = 6; // team 8
+        let mut events = Vec::new();
+
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 6, &mut events);
+
+        assert_eq!(result, PayLifeCostResult::Paid { amount: 6 });
+        // Deduction is individual (CR 810.9): payer 2 - 6 = -4.
+        assert_eq!(state.players[0].life, -4);
+        // Team total now 2 (-4 + 6).
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            2
+        );
     }
 }

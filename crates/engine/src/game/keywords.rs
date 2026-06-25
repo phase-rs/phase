@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::game::casting_costs::cost_has_x;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
@@ -236,6 +237,74 @@ fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &Mana
             .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
             .unwrap_or(ManaCost::NoCost),
         _ => cost.clone(),
+    }
+}
+
+/// CR 602.1a + CR 702.141a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
+/// anywhere in an activated ability's cost tree before legality or payment.
+/// The mana payment path treats those placeholders as free, so every activation
+/// fetch must concretize them against the source object (Sliver Gravemother class).
+pub(crate) fn resolve_self_mana_in_ability_cost(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> AbilityCost {
+    match cost {
+        AbilityCost::Mana { cost: mana } => AbilityCost::Mana {
+            cost: resolve_keyword_mana_cost(state, source_id, mana),
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|sub| resolve_self_mana_in_ability_cost(state, source_id, sub))
+                .collect(),
+        },
+        AbilityCost::OneOf { costs } => AbilityCost::OneOf {
+            costs: costs
+                .iter()
+                .map(|sub| resolve_self_mana_in_ability_cost(state, source_id, sub))
+                .collect(),
+        },
+        AbilityCost::PerCounter {
+            counter,
+            target,
+            base,
+        } => AbilityCost::PerCounter {
+            counter: counter.clone(),
+            target: target.clone(),
+            base: Box::new(resolve_self_mana_in_ability_cost(state, source_id, base)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// CR 702.141a + CR 202.3: Encore grants that bind X to the card's mana value
+/// (Sliver Gravemother) must not enter `ChooseXValue` with X choosable at 0.
+/// When the synthesized cost still carries a symbolic `{X}` shard, concretize it
+/// to the source object's mana value before activation proceeds.
+pub(crate) fn concretize_encore_mana_value_in_ability_cost(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &mut AbilityCost,
+) {
+    match cost {
+        AbilityCost::Mana { cost: mana } if cost_has_x(mana) => {
+            let mana_value = state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.mana_cost.mana_value())
+                .unwrap_or(0);
+            mana.concretize_x(mana_value);
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for sub in costs {
+                concretize_encore_mana_value_in_ability_cost(state, source_id, sub);
+            }
+        }
+        AbilityCost::PerCounter { base, .. } => {
+            concretize_encore_mana_value_in_ability_cost(state, source_id, base);
+        }
+        _ => {}
     }
 }
 
@@ -887,10 +956,12 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ai_support::legal_actions;
+    use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, TargetFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -913,6 +984,98 @@ mod tests {
         obj.keywords.push(Keyword::Flying);
         assert!(has_keyword(&obj, &Keyword::Flying));
         assert!(!has_keyword(&obj, &Keyword::Haste));
+    }
+
+    #[test]
+    fn resolve_self_mana_in_ability_cost_descends_per_counter_base() {
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                generic: 0,
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Black,
+                    ManaCostShard::Red,
+                    ManaCostShard::Green,
+                ],
+            };
+        }
+
+        let cost = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::SelfManaValue,
+            }),
+        };
+
+        let resolved = resolve_self_mana_in_ability_cost(&state, source, &cost);
+        let AbilityCost::PerCounter { base, .. } = resolved else {
+            panic!("expected PerCounter wrapper preserved");
+        };
+        assert_eq!(
+            *base,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(5),
+            }
+        );
+    }
+
+    #[test]
+    fn concretize_encore_mana_value_descends_per_counter_base() {
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                generic: 0,
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Black,
+                    ManaCostShard::Red,
+                    ManaCostShard::Green,
+                ],
+            };
+        }
+
+        let mut cost = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::X],
+                },
+            }),
+        };
+
+        concretize_encore_mana_value_in_ability_cost(&state, source, &mut cost);
+
+        let AbilityCost::PerCounter { base, .. } = cost else {
+            panic!("expected PerCounter wrapper preserved");
+        };
+        assert_eq!(
+            *base,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(5),
+            }
+        );
     }
 
     /// CR 702.164b: a creature's total toxic value is the sum of N over ALL its
@@ -1581,7 +1744,6 @@ mod tests {
     }
 
     use crate::game::combat::{AttackerInfo, CombatState};
-    use crate::game::zones::create_object;
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
 
@@ -1674,6 +1836,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -1794,7 +1957,6 @@ mod tests {
     #[test]
     fn ninjutsu_enter_as_copy_defers_combat_placement_until_copy_resolves() {
         use crate::game::engine::apply_as_current;
-        use crate::game::zones::create_object;
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, ContinuousModification, Effect, ReplacementDefinition,
             ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,

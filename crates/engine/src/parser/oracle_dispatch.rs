@@ -13,11 +13,16 @@ use super::oracle_ir::context::ParseContext;
 /// Aura/bestow cards) so a `"that creature"` copy-token anaphor dispatched
 /// through this nom path remaps to the enchanted host. `None` for non-Aura
 /// cards leaves `ParentTarget` semantics intact.
+///
+/// Returns the full `AbilityDefinition` so that fields beyond `effect`
+/// (e.g. `distribute`, `multi_target`) survive to the calling `parse_oracle_ir`
+/// loop. Callers that previously wrapped the result in `AbilityDefinition::new`
+/// must use the returned def directly.
 pub(super) fn dispatch_line_nom(
     line: &str,
     card_name: &str,
     host_self_reference: Option<TargetFilter>,
-) -> Effect {
+) -> AbilityDefinition {
     let lower = line.to_lowercase();
     let mut ctx = ParseContext {
         subject: None,
@@ -30,58 +35,92 @@ pub(super) fn dispatch_line_nom(
     if is_effect_sentence_candidate(&lower) || is_damage_prevention_pattern(&lower) {
         let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &mut ctx);
         if !has_unimplemented(&def) {
-            return *def.effect;
+            // Return the full AbilityDefinition so callers retain distribute,
+            // multi_target, and any other parsed metadata.
+            return def;
         }
     }
 
     let lower_trimmed = lower.trim_start();
     if has_trigger_prefix(lower_trimmed) {
-        return Effect::Unimplemented {
-            name: "trigger_structure".into(),
-            description: Some(format!(
-                "Trigger prefix matched but line failed trigger parser: {line}"
-            )),
-        };
+        return AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "trigger_structure",
+                format!("Trigger prefix matched but line failed trigger parser: {line}"),
+            ),
+        )
+        .description(line.to_string());
     }
 
     if is_static_pattern(&lower) {
-        return Effect::Unimplemented {
-            name: "static_structure".into(),
-            description: Some(format!(
-                "Static pattern matched but line failed static parser: {line}"
-            )),
-        };
+        return AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "static_structure",
+                format!("Static pattern matched but line failed static parser: {line}"),
+            ),
+        )
+        .description(line.to_string());
     }
 
     if is_replacement_pattern(&lower) {
-        return Effect::Unimplemented {
-            name: "replacement_structure".into(),
-            description: Some(format!(
-                "Replacement pattern matched but line failed replacement parser: {line}"
-            )),
-        };
+        return AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "replacement_structure",
+                format!("Replacement pattern matched but line failed replacement parser: {line}"),
+            ),
+        )
+        .description(line.to_string());
     }
 
     if is_effect_sentence_candidate(&lower) {
-        return Effect::Unimplemented {
-            name: "effect_structure".into(),
-            description: Some(format!(
-                "Effect sentence candidate but line failed effect parser: {line}"
-            )),
-        };
+        return AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "effect_structure",
+                format!("Effect sentence candidate but line failed effect parser: {line}"),
+            ),
+        )
+        .description(line.to_string());
     }
 
-    Effect::Unimplemented {
-        name: "unknown".into(),
-        description: Some(line.to_string()),
-    }
+    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
+        .description(line.to_string())
 }
 
-pub(super) fn make_unimplemented_with_effect(line: &str, effect: Effect) -> AbilityDefinition {
-    if !matches!(effect, Effect::Unimplemented { .. }) {
-        return AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string());
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::MultiTargetSpec;
+    use crate::types::game_state::DistributionUnit;
 
-    tracing::debug!(oracle_text = line, "unimplemented ability line");
-    AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string())
+    /// Issue #4266 regression: `dispatch_line_nom` was returning `*def.effect`,
+    /// discarding `distribute` and `multi_target` from the parsed
+    /// `AbilityDefinition`. The caller then wrapped the bare `Effect` in a new
+    /// `AbilityDefinition::new(...)`, losing those fields permanently. Forked
+    /// Bolt therefore never reached `WaitingFor::DistributeAmong` and instead
+    /// dealt the full 2 damage to every selected target.
+    ///
+    /// This test is fail-on-revert: if the return type reverts to `-> Effect`,
+    /// the `.distribute` / `.multi_target` field accesses below will not compile.
+    #[test]
+    fn dispatch_line_nom_preserves_distribute_and_multi_target_for_divided_damage() {
+        let def = dispatch_line_nom(
+            "~ deals 2 damage divided as you choose among one or two targets.",
+            "Forked Bolt",
+            None,
+        );
+        assert_eq!(
+            def.distribute,
+            Some(DistributionUnit::Damage),
+            "distribute lost by dispatch_line_nom"
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::fixed(1, 2)),
+            "multi_target lost by dispatch_line_nom"
+        );
+    }
 }

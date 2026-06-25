@@ -207,6 +207,10 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("planeswalker", TypeFilter::Planeswalker),
         ("lands", TypeFilter::Land),
         ("land", TypeFilter::Land),
+        // Plural before singular (longest-match-first): the word-boundary guard
+        // rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no "Battle"
+        // entry, so the plural must be an explicit head-noun word here.
+        ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
@@ -228,7 +232,15 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
 
     for &(word, ref tf) in TYPE_WORDS {
         if let Some(rest) = input.strip_prefix(word) {
-            return Ok((rest, tf.clone()));
+            // Word-boundary guard (mirrors parse_outlaw_type below and
+            // parse_subtype_entry in oracle_util.rs): a head-noun type word must
+            // be followed by end-of-input or a non-alphanumeric char. Without
+            // this, a TYPE_WORD that prefixes a longer subtype shadows it — e.g.
+            // "land" eating "lander" or "spell" eating "spellshaper" instead of
+            // falling through to the boundary-guarded subtype table.
+            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Ok((rest, tf.clone()));
+            }
         }
     }
 
@@ -1005,6 +1017,127 @@ mod tests {
                 "outlawry must not parse as the outlaw disjunction"
             );
         }
+    }
+
+    // --- TYPE_WORDS word-boundary guard (the head-noun-prefix class) ---
+    //
+    // Without the boundary guard on the TYPE_WORDS scan, a head-noun entry like
+    // "land" or "spell" strip_prefix-matches longer subtypes ("lander",
+    // "spellshaper") and returns the wrong card-type filter instead of falling
+    // through to the boundary-guarded subtype table. "Plan" itself is an
+    // enchantment subtype (CR 205.3h), so it resolves via that subtype table.
+
+    #[test]
+    fn test_type_word_plant_is_subtype_not_plan() {
+        // The "plant" head noun resolves to the Plant subtype; no head-noun
+        // TYPE_WORD prefix shadows it.
+        let (rest, tf) = parse_type_filter_word("plant").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plants_is_subtype_not_plan() {
+        // Regular plural: "plants" must resolve to the Plant subtype, not Plan.
+        let (rest, tf) = parse_type_filter_word("plants").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_planet_is_subtype_not_plan() {
+        // "planet" is a land subtype; the "plan" prefix must not shadow it.
+        let (rest, tf) = parse_type_filter_word("planet").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Planet".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_power_plant_never_plan() {
+        // "power-plant" is a land subtype (Power-Plant). The hyphenated form must
+        // resolve as a subtype.
+        let (_, tf) = parse_type_filter_word("power-plant").unwrap();
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "power-plant must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_power_space_plant_never_plan() {
+        // The space-separated "power plant" head noun must never classify as the
+        // "Plan" subtype. Either it fails to parse or it resolves to a non-Plan
+        // filter — both are acceptable; "Plan" is the prohibited result.
+        if let Ok((_, tf)) = parse_type_filter_word("power plant") {
+            assert_ne!(
+                tf,
+                TypeFilter::Subtype("Plan".to_string()),
+                "power plant must never be the Plan subtype"
+            );
+        }
+    }
+
+    #[test]
+    fn test_type_word_plan_still_plan() {
+        // "Plan" is an enchantment subtype (CR 205.3h): bare "plan" resolves to
+        // Subtype("Plan") via the subtype table.
+        let (rest, tf) = parse_type_filter_word("plan").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plan_trailing_space_still_plan() {
+        // "plan" followed by a space boundary resolves to the Plan subtype and
+        // leaves the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("plan you control").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, " you control");
+    }
+
+    #[test]
+    fn test_type_word_spellshaper_is_subtype_not_card() {
+        // Class-lock: pre-fix the "spell" entry (→ Card) eats "spellshaper".
+        // Post-fix the boundary guard lets the subtype table resolve Spellshaper.
+        let (rest, tf) = parse_type_filter_word("spellshaper").unwrap();
+        assert_ne!(tf, TypeFilter::Card, "spellshaper must not be Card");
+        assert_eq!(tf, TypeFilter::Subtype("Spellshaper".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_lander_is_subtype_not_land() {
+        // Class-lock: pre-fix the "land" entry (→ Land) eats "lander".
+        // Post-fix the boundary guard lets the subtype table resolve Lander.
+        let (_, tf) = parse_type_filter_word("lander").unwrap();
+        assert_ne!(tf, TypeFilter::Land, "lander must not be Land");
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "lander must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_battles_is_battle() {
+        // Regression guard for the word-boundary fix: "battle" is the only
+        // TYPE_WORDS entry that was missing its plural sibling. The boundary
+        // guard rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no
+        // "Battle" entry, so parse_subtype cannot recover it — without the
+        // explicit "battles" TYPE_WORDS entry this returns Err.
+        let (rest, tf) = parse_type_filter_word("battles").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_battles_trailing_context() {
+        // Regression guard for the word-boundary fix: "battles you control" is a
+        // supported head-noun phrase (see oracle_static grammar/type_change/
+        // restriction). The "battles" plural entry must classify as Battle and
+        // leave the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("battles you control").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, " you control");
     }
 
     // --- parse_stack_object_target (CR 701.6a + CR 115.1) ---

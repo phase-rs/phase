@@ -510,17 +510,6 @@ fn fire_caustic_bronco_attack(runner: &mut engine::game::scenario::GameRunner, b
 
 const WICK: &str = "Whenever Wick or another Rat you control enters, create a 1/1 black Snail creature token if you don't control a Snail. Otherwise, put a +1/+1 counter on a Snail you control.";
 
-/// STOP-AND-RETURN (out of scope): Wick's "create a token if you don't control a
-/// Snail. Otherwise, …" parses its condition correctly, but the trailing-`if` on
-/// the FIRST clause of a trigger is HOISTED to the trigger-level intervening-`if`
-/// (`TriggerDefinition.condition`, CR 603.4) instead of staying on the clause as
-/// `execute.condition`. With the condition at the trigger level, (a) the
-/// "Otherwise" plumbing finds no clause-level `condition.is_some()` anchor and
-/// (b) the whole trigger would only fire when you control no Snail (incorrect —
-/// Wick always triggers). The hoist-vs-rehome decision lives in
-/// `parser/oracle_effect/mod.rs` (NOT this change's scope, and currently under
-/// concurrent edit). Ignored until that placement is fixed; see the report.
-#[ignore = "trailing-if on first trigger clause is hoisted to trigger-level condition; fix lives in oracle_effect/mod.rs (out of scope)"]
 #[test]
 fn wick_no_snail_creates_token() {
     let mut scenario = GameScenario::new_n_player(2, 29);
@@ -544,10 +533,6 @@ fn wick_no_snail_creates_token() {
     );
 }
 
-/// STOP-AND-RETURN (out of scope): same trigger-level hoist as
-/// `wick_no_snail_creates_token`. Ignored until the clause-vs-trigger condition
-/// placement is fixed in `oracle_effect/mod.rs`.
-#[ignore = "trailing-if on first trigger clause is hoisted to trigger-level condition; fix lives in oracle_effect/mod.rs (out of scope)"]
 #[test]
 fn wick_with_snail_pumps_existing_snail() {
     let mut scenario = GameScenario::new_n_player(2, 29);
@@ -582,6 +567,51 @@ fn wick_with_snail_pumps_existing_snail() {
     );
 }
 
+#[test]
+fn wick_with_two_snails_pumps_chosen_snail() {
+    let mut scenario = GameScenario::new_n_player(2, 29);
+    scenario.at_phase(Phase::PreCombatMain);
+    let snail_a = {
+        let mut b = scenario.add_creature(P0, "Snail A", 1, 1);
+        b.with_subtypes(vec!["Snail"]);
+        b.id()
+    };
+    let snail_b = {
+        let mut b = scenario.add_creature(P0, "Snail B", 1, 1);
+        b.with_subtypes(vec!["Snail"]);
+        b.id()
+    };
+    let wick = {
+        let mut b =
+            scenario.add_creature_to_hand_from_oracle(P0, "Wick, the Whorled Mind", 2, 2, WICK);
+        b.as_legendary();
+        b.with_subtypes(vec!["Rat"]);
+        b.with_mana_cost(ManaCost::default());
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let snails_before = count_snails(&runner);
+
+    cast_and_resolve_etb(&mut runner, wick);
+
+    assert_eq!(
+        count_snails(&runner),
+        snails_before,
+        "with Snails already controlled, no new Snail token is created"
+    );
+    let counters_a = counters_on(&runner, snail_a, CounterType::Plus1Plus1);
+    let counters_b = counters_on(&runner, snail_b, CounterType::Plus1Plus1);
+    assert_eq!(
+        counters_a + counters_b,
+        1,
+        "exactly one controlled Snail must receive the +1/+1 counter"
+    );
+    assert!(
+        counters_a == 1 || counters_b == 1,
+        "the chosen Snail must receive the counter (a={counters_a}, b={counters_b})"
+    );
+}
+
 fn count_snails(runner: &engine::game::scenario::GameRunner) -> usize {
     runner
         .state()
@@ -599,8 +629,8 @@ fn count_snails(runner: &engine::game::scenario::GameRunner) -> usize {
 }
 
 /// Cast a free creature and resolve it + its ETB trigger, answering any object
-/// target (Wick's "+1/+1 on a Snail you control" picks a Snail automatically via
-/// the legal-target list when present).
+/// target (Wick's "+1/+1 on a Snail you control" picks the first legal Snail when
+/// a choice is required).
 fn cast_and_resolve_etb(runner: &mut engine::game::scenario::GameRunner, creature: ObjectId) {
     let card_id = runner.state().objects[&creature].card_id;
     runner
@@ -640,6 +670,15 @@ fn cast_and_resolve_etb(runner: &mut engine::game::scenario::GameRunner, creatur
             WaitingFor::OrderTriggers { .. } => {
                 if runner
                     .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                let pick = cards.first().copied().expect("a legal Snail must exist");
+                if runner
+                    .act(GameAction::SelectCards { cards: vec![pick] })
                     .is_err()
                 {
                     break;

@@ -74,6 +74,7 @@
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverridesConfirm_one": "Alle {{count}} Artwork-Überschreibung aufheben?",
     "clearArtOverridesConfirm_other": "Alle {{count}} Artwork-Überschreibungen aufheben?",
+    "clearArtOverridesAction": "Löschen",
     "vfxQualityOptions": {
       "full": "Voll",
       "reduced": "Reduziert",
@@ -160,6 +161,10 @@
     "description": "Der Export bündelt deine Einstellungen, importierten Decks und Feed-Abonnements in einer einzigen JSON-Datei. Der Import stellt sie auf einem anderen Gerät wieder her. IndexedDB-Caches (Feed-Cache, Audio-Cache, gespeicherte Spiele) sind nicht enthalten — diese werden automatisch neu aufgebaut.",
     "exportBackup": "Sicherung exportieren…",
     "importBackup": "Sicherung importieren…",
+    "importModeTitle": "Sicherung importieren",
+    "importModeMessage": "Alles durch die Sicherung ersetzen (destruktiv) oder zusammenführen — vorhandene Decks behalten und neue aus der Sicherung hinzufügen.",
+    "importOverwrite": "Alles ersetzen",
+    "importMerge": "Zusammenführen",
     "importConfirm": "Vorhandene Einstellungen und Decks überschreiben?\n\nOK: alles durch die Sicherung ersetzen (destruktiv).\nAbbrechen: zusammenführen — vorhandene Decks behalten, neue aus der Sicherung hinzufügen.",
     "backupDownloaded": "Sicherung heruntergeladen.",
     "imported_one": "{{count}} Deck importiert.",
@@ -171,7 +176,8 @@
   },
   "resetAll": {
     "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",
-    "button": "Alle Einstellungen zurücksetzen"
+    "button": "Alle Einstellungen zurücksetzen",
+    "confirmAction": "Zurücksetzen"
   },
   "pacing": {
     "title": "Tempo",

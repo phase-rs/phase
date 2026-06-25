@@ -1509,6 +1509,63 @@ mod tests {
         assert!(!state.players[0].hand.contains(&land));
     }
 
+    /// Issue #3257: Macabre Waltz — chosen graveyard creature must return to hand.
+    #[test]
+    fn targeted_up_to_two_graveyard_bounce_moves_chosen_creature() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, FilterProp, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let def = parse_effect_chain(
+            "Return up to two target creature cards from your graveyard to your hand, then discard a card.",
+            AbilityKind::Spell,
+        );
+        let Effect::Bounce { target, .. } = def.effect.as_ref() else {
+            panic!("expected bounce head");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed bounce filter");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+
+        let mut ability = ResolvedAbility::new(
+            def.effect.as_ref().clone(),
+            vec![TargetRef::Object(bear)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = def.multi_target.clone();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&bear).map(|o| o.zone),
+            Some(Zone::Hand),
+            "chosen graveyard creature must return to hand"
+        );
+    }
+
     /// CR 115.1 + CR 608.2c: the zero-target short-circuit is only for
     /// targeted "up to N target ..." bounce. Non-targeted at-resolution bounce
     /// must still enumerate legal permanents even if it happens to carry

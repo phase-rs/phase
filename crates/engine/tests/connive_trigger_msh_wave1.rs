@@ -6,9 +6,9 @@
 //! the local test fixture (MSH is release-gated), so the tests drive the real
 //! parser + trigger pipeline through representative Oracle text.
 //!
-//! CR 701.50b: a permanent "connives" after the connive process completes; the
+//! CR 701.50f: a permanent "connives" after the connive process completes; the
 //! `EffectResolved { kind: Connive }` event must carry the CONNIVER's id (CR
-//! 701.50c LKI), not the causing source — otherwise "whenever a creature you
+//! 701.50b LKI), not the causing source — otherwise "whenever a creature you
 //! control connives" is evaluated against the wrong object.
 
 use engine::game::ability_utils::build_resolved_from_def;
@@ -64,7 +64,7 @@ fn drain_priority(runner: &mut engine::game::scenario::GameRunner) {
     }
 }
 
-/// Glorious Purpose class + the CR 701.50c conviver-id fix (load-bearing).
+/// Glorious Purpose class + the CR 701.50b conviver-id fix (load-bearing).
 ///
 /// A creature you control connives, caused by an EXTERNAL source whose own
 /// characteristics do NOT satisfy the watcher's "a creature you control" filter

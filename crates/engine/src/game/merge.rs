@@ -563,7 +563,7 @@ fn put_component_into_zone(
     // (mirrors `move_to_zone`, which snapshots before exit cleanup). Origin is
     // `None`: the component enters `dest` as a new object, not as a departure
     // from the battlefield.
-    let Some((owner, record)) = state.objects.get(&component_id).map(|obj| {
+    let Some((owner, mut record)) = state.objects.get(&component_id).map(|obj| {
         (
             obj.owner,
             obj.snapshot_for_zone_change(component_id, None, dest),
@@ -595,7 +595,9 @@ fn put_component_into_zone(
         crate::game::zones::record_descend_on_graveyard_arrival(state, component_id, owner);
     }
 
-    crate::game::restrictions::record_zone_change(state, record.clone());
+    let turn_zone_change_index =
+        crate::game::restrictions::record_zone_change(state, record.clone());
+    record.turn_zone_change_index = turn_zone_change_index;
     events.push(GameEvent::ZoneChanged {
         object_id: component_id,
         from: None,

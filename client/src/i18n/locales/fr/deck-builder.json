@@ -126,6 +126,8 @@
     "pastePlaceholder": "Collez la liste du deck (format MTGA ou .dck)...",
     "fromFile": "Depuis un fichier",
     "parse": "Analyser",
+    "parsing": "Analyse…",
+    "parseError": "Aucune carte trouvée. Collez un deck au format MTGA ou .dck.",
     "exportModalTitle": "Exporter le deck",
     "saveToFile": "Enregistrer dans un fichier",
     "copied": "Copié !",

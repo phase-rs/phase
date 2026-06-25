@@ -2,7 +2,8 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
@@ -277,7 +278,13 @@ export function createAIController(config: AIControllerConfig): AIController {
       waitingForType === "MulliganDecision" ||
       waitingForType === "MulliganBottomCards" ||
       waitingForType === "OpeningHandBottomCards";
-    const delay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
+    // Collapse the humanization delay under stack pressure. The depth-based skip
+    // gate (checkAndSchedule) only fires at Elevated depth, which a 0↔1 trigger
+    // loop never reaches — so without this the AI pays a full 500–900ms beat on
+    // every oscillation cycle. Rate-driven pressure shrinks it (Rapid → ~75ms).
+    const stackLen = gameState?.stack?.length ?? 0;
+    const baseDelay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
+    const delay = Math.round(baseDelay * pressureMultiplier(effectiveStackPressure(stackLen)));
     timeoutId = setTimeout(async () => {
       timeoutId = null;
       if (!active) {

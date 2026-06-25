@@ -3072,6 +3072,8 @@ fn apply_action(
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
+            // CR 118.3a: `finalize_mana_payment` clears `active_payment_pins`
+            // itself on every Ok/Err path, so no caller clear is needed.
             casting_costs::finalize_mana_payment(state, *player, &mut events)?
         }
         // CR 107.4f + CR 601.2f + CR 601.2h: Caster submitted per-shard Phyrexian
@@ -3184,6 +3186,8 @@ fn apply_action(
                     }
                 }
             }
+            // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
+            // `active_payment_pins` itself on every Ok/Err path; no caller clear.
             casting_costs::finalize_mana_payment_with_phyrexian_choices(
                 state,
                 player,
@@ -3308,6 +3312,37 @@ fn apply_action(
                 convoke_mode: *convoke_mode,
             }
         }
+        // CR 118.3a: Pin a specific pool unit so the finalize spend prefers it.
+        // Immediate-stage: records the hint on `pending_cast`, no stack push.
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_spend_pool_mana(state, player, pip_id)?;
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            }
+        }
+        // CR 118.3a: Remove a previously-recorded pin (always legal).
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_unspend_pool_mana(state, pip_id);
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            }
+        }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
@@ -3398,9 +3433,10 @@ fn apply_action(
                 }
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
-                p.mana_pool.add(unit);
-            }
+            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
+            // are consumed by the shared algorithm and never pinned (the frontend
+            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            state.add_mana_to_pool(*player, unit);
             if mode == ConvokeMode::Waterbend {
                 events.push(GameEvent::ManaAdded {
                     player_id: *player,
@@ -3460,12 +3496,15 @@ fn apply_action(
             if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
                 crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
             }
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+            // CR 118.3a: route through the stamping authority (delve marker is a
+            // generic-only convoke marker, never pinned).
+            state.add_mana_to_pool(
+                player,
+                crate::types::mana::ManaUnit::convoke_payment(
                     crate::types::mana::ManaType::Colorless,
                     object_id,
-                ));
-            }
+                ),
+            );
             WaitingFor::ManaPayment {
                 player,
                 convoke_mode: Some(ConvokeMode::Delve),
@@ -5262,25 +5301,36 @@ pub(super) fn begin_pending_trigger_target_selection(
         &trigger_events,
         subject_match_count,
     );
-    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
-        if target_slots.is_empty() {
-            return Ok(None);
+    // CR 603.3d: "If a choice is required when the triggered ability goes on the
+    // stack but no legal choices can be made for it ... the ability is simply
+    // removed from the stack." `build_target_slots` returns `Err` ONLY to report
+    // exactly that — every error site in `collect_target_slots` is a
+    // `No legal targets available` `ActionNotAllowed`. A targeted trigger's
+    // targets can be legal at "push first" dispatch yet become illegal here at
+    // "choose second" when an effect earlier in the SAME simultaneous cascade
+    // removed the only legal target (e.g. the artifact a Schema Thief token would
+    // copy was destroyed by a damage trigger that resolved first). Map that to
+    // the no-prompt drop path below — never propagate it and abort the in-flight
+    // action, which would leave the game unable to pass priority (a soft-lock
+    // freeze). Errors from `begin_target_selection_for_ability` are genuine
+    // selection-invariant violations and MUST still propagate (via `?` below).
+    let selection_result = match build_target_slots(state, &ability) {
+        Ok(target_slots) if !target_slots.is_empty() => {
+            begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+                .map(|selection| Some((target_slots, selection)))
         }
-        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
-            .map(|selection| Some((target_slots, selection)))
-    });
+        // Empty target slots (no targeting), or CR 603.3d no-legal-target: no
+        // prompt is needed/possible — fall through to the removal branch.
+        Ok(_) | Err(_) => Ok(None),
+    };
     super::triggers::restore_trigger_event_context(state, context_snapshot);
     let Some((target_slots, selection)) = selection_result? else {
-        // CR 603.3d: No target prompt is required (empty target slots, or
-        // `build_target_slots`/`begin_target_selection_for_ability` reported
-        // no legal completion). Symmetric to the modal `all-modes-unavailable`
+        // CR 603.3d: No target prompt is required — empty target slots, or
+        // `build_target_slots` reported no legal target at choose-time (mapped to
+        // `Ok(None)` above). Symmetric to the modal `all-modes-unavailable`
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
-        // cursor. The new flow filters this case BEFORE pushing in the
-        // non-modal branches (Err(_) drops the trigger; Ok(Some(targets))
-        // auto-pushes a complete entry), so this is normally a dead branch —
-        // kept for symmetry with the modal cleanup and for any
-        // delayed-revalidation paths.
+        // cursor.
         if let Some(entry_id) = state.pending_trigger_entry.take() {
             if state.stack.back().map(|e| e.id) == Some(entry_id) {
                 state.stack.pop_back();
@@ -5950,6 +6000,23 @@ pub(super) fn handle_untap_land_for_mana(
         player_data.mana_pool.remove_from_source(*aura_id);
     }
 
+    // CR 118.3a: an UntapLandForMana during ManaPayment can drain a pinned unit
+    // out of the pool. Prune any dangling pins so the finalize spend never tries
+    // to honor a pip that no longer exists. Done AFTER the `player_data` borrow
+    // above ends so the immutable pool read and the `pending_cast` mutation don't
+    // overlap a live `&mut`.
+    if state.pending_cast.is_some() {
+        let surviving: std::collections::HashSet<crate::types::mana::ManaPipId> = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.mana.iter().map(|u| u.pip_id).collect())
+            .unwrap_or_default();
+        if let Some(pc) = state.pending_cast.as_mut() {
+            pc.pinned_pool_units.retain(|id| surviving.contains(id));
+        }
+    }
+
     // Untap the land
     let obj = state
         .objects
@@ -5967,6 +6034,145 @@ pub(super) fn handle_untap_land_for_mana(
     }
 
     Ok(())
+}
+
+/// CR 118.3a: Record a player-directed pin on a specific pool unit so the
+/// finalize spend prefers it. The unit stays in the pool — this is a priority
+/// hint, not a removal. A pin is accepted only when the unit is eligible to pay
+/// at least one shard (or a generic pip) of the full locked cost; otherwise the
+/// pin could never be honored, so it is rejected (`ActionNotAllowed`).
+pub(super) fn handle_spend_pool_mana(
+    state: &mut GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.mana.iter().find(|u| u.pip_id == pip_id))
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+
+    let pending = state.pending_cast.as_ref().ok_or_else(|| {
+        EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
+    })?;
+    let object_id = pending.object_id;
+    let cost = pending.cost.clone();
+    let activation_ability_index = pending.activation_ability_index;
+
+    // CR 118.3a: eligibility against the full LOCKED cost. Nothing is paid at pin
+    // time, so there is no "currently-unpaid" subset — the unit qualifies if it
+    // could pay any shard (or generic pip) of the whole cost under the SAME
+    // spend-restriction context the finalize spend will use. A `pending_cast`
+    // can be an activated ability, not just a spell (CR 602): mirror
+    // `finalize_mana_payment` and build a `PaymentContext::Activation` so an
+    // activation-restricted unit (`OnlyForActivation`, `allows_spell == false`)
+    // is correctly eligible to pin when it can legally pay the activation.
+    // Owned holders so the context's borrowed slices outlive the eligibility check.
+    let spell_meta;
+    let source_types;
+    let source_subtypes;
+    let ability_tag;
+    let ctx = if let Some(ability_index) = activation_ability_index {
+        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
+        source_types = types;
+        source_subtypes = subtypes;
+        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
+        Some(crate::types::mana::PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag,
+        })
+    } else {
+        spell_meta = super::casting::build_spell_meta(state, player, object_id);
+        spell_meta
+            .as_ref()
+            .map(crate::types::mana::PaymentContext::Spell)
+    };
+
+    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref()) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+
+    if let Some(pc) = state.pending_cast.as_mut() {
+        if !pc.pinned_pool_units.contains(&pip_id) {
+            pc.pinned_pool_units.push(pip_id);
+        }
+    }
+    Ok(())
+}
+
+/// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the
+/// pin is absent or there is no pending cast.
+pub(super) fn handle_unspend_pool_mana(
+    state: &mut GameState,
+    pip_id: crate::types::mana::ManaPipId,
+) {
+    if let Some(pc) = state.pending_cast.as_mut() {
+        pc.pinned_pool_units.retain(|id| *id != pip_id);
+    }
+}
+
+/// CR 118.3a: True when `unit` could legally pay at least one shard or generic
+/// pip of `cost` under the spell's spend-restriction context. Combines
+/// restriction gating (`ManaRestriction::allows`) with shard color/attribute
+/// matching (`shard_to_mana_type`) — the same predicates the spend funnel uses.
+fn mana_unit_eligible_for_cost(
+    unit: &crate::types::mana::ManaUnit,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> bool {
+    use crate::types::mana::{ManaCost, ManaType};
+    use mana_payment::ShardRequirement;
+
+    // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
+    if let Some(ctx) = ctx {
+        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+            return false;
+        }
+    }
+    // Convoke/improvise/delve markers are creature-tap stand-ins, never pinned.
+    if unit.is_convoke_payment() {
+        return false;
+    }
+
+    let (shards, generic) = match cost {
+        ManaCost::Cost { shards, generic } => (shards, *generic),
+        // No-cost / self-referential costs have no payable pip.
+        _ => return false,
+    };
+
+    // CR 107.4b: any unit can pay a generic pip ({N} or {X}).
+    if generic > 0 {
+        return true;
+    }
+
+    shards.iter().any(|&shard| {
+        // CR 107.4: a unit pays a shard if its color (or attribute, for {S}/{Z})
+        // is among those the shard accepts.
+        let accepts = |c: ManaType| unit.color == c;
+        match mana_payment::shard_to_mana_type(shard) {
+            ShardRequirement::Single(mt) => accepts(mt),
+            ShardRequirement::Hybrid(a, b) => accepts(a) || accepts(b),
+            ShardRequirement::Phyrexian(c) => accepts(c),
+            ShardRequirement::HybridPhyrexian(a, b) => accepts(a) || accepts(b),
+            // {2/C} and {C/color}: payable with the color, or (for {2/C}) generic.
+            ShardRequirement::TwoGenericHybrid(c) => accepts(c),
+            ShardRequirement::ColorlessHybrid(c) => accepts(ManaType::Colorless) || accepts(c),
+            ShardRequirement::Snow => unit.is_snow(),
+            ShardRequirement::TwoOrMoreColorSource => unit.source_could_produce_two_or_more_colors,
+            // {X} contributes nothing off the stack (CR 107.3); generic-payable
+            // when X > 0 is already covered by the `generic` check above.
+            ShardRequirement::X => false,
+            ShardRequirement::TwoGenericHybridPhyrexian(c) => accepts(c),
+        }
+    })
 }
 
 fn handle_equip_activation(
@@ -6129,7 +6335,7 @@ fn handle_crew_activation(
         ));
     }
 
-    // CR 702.122c: Exclude creatures with "can't crew Vehicles".
+    // CR 702.122d: Exclude creatures with "can't crew Vehicles".
     let eligible_creatures: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -6152,7 +6358,7 @@ fn handle_crew_activation(
         .collect();
 
     // Validate total power of all eligible creatures can meet the threshold.
-    // CR 702.122c: a creature's contribution may be modified ("as though its
+    // CR 702.122a: a creature's contribution may be modified ("as though its
     // power were N greater" / "using its toughness rather than its power").
     let total_power: i32 = eligible_creatures
         .iter()
@@ -6266,7 +6472,7 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        // CR 702.122c: apply any crew power-contribution modifier.
+        // CR 702.122a: apply any crew power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -6441,8 +6647,8 @@ fn handle_station_announcement(
 
     // CR 702.184a + CR 113.7a: Snapshot the creature's power BEFORE tapping —
     // the counter count is determined at cost-payment time and survives the
-    // creature leaving the battlefield before resolution. CR 702.184c +
-    // CR 702.122c: static abilities may modify the contributed value ("stations
+    // creature leaving the battlefield before resolution. CR 702.184c:
+    // static abilities may modify the contributed value ("stations
     // permanents as though its power were N greater"); the helper applies any
     // such modifier and otherwise reads `power`, the default per the rule.
     let snapshot_power = super::static_abilities::object_crew_power_contribution(
@@ -6542,7 +6748,7 @@ fn handle_saddle_activation(
         })
         .collect();
 
-    // CR 702.171a + CR 702.122c: a creature's saddle contribution may be modified.
+    // CR 702.171a: a creature's saddle contribution may be modified.
     let total_power: i32 = eligible_creatures
         .iter()
         .map(|&id| {
@@ -6618,7 +6824,7 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        // CR 702.122c: apply any saddle power-contribution modifier.
+        // CR 702.171a: apply any saddle power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -7053,6 +7259,107 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
+    /// One + Red Hulk + Schema Thief board). A targeted trigger whose only legal
+    /// target vanished between "push first" dispatch and "choose second"
+    /// selection-setup (an effect earlier in the same simultaneous cascade
+    /// removed it) must be REMOVED FROM THE STACK here — not abort the in-flight
+    /// action with `Err`, which silently dropped `PassPriority` from the legal
+    /// action set and soft-locked the game. Schema Thief ("create a token that's
+    /// a copy of target artifact that player controls") triggered against a
+    /// player who controlled no artifact; this models that with a damage trigger
+    /// that has no opponent-creature target.
+    #[test]
+    fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
+        let mut state = GameState::new_two_player(7);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Source permanent (player 0). No opponent creatures exist, so a
+        // "deal 1 damage to target creature an opponent controls" trigger has
+        // no legal target when selection is set up.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+                damage_source: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        // Reconstruct the post-"push first" state: the trigger entry is on the
+        // stack (in construction) and recorded as the pending trigger awaiting
+        // manual target selection.
+        let pending = crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ability.clone(),
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Pinger".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        state.pending_trigger = Some(pending);
+        state.pending_trigger_entry = Some(entry_id);
+        let stack_len_before = state.stack.len();
+
+        let result = begin_pending_trigger_target_selection(&mut state);
+
+        assert!(
+            matches!(result, Ok(None)),
+            "CR 603.3d: a no-legal-target trigger must be dropped, not error: {result:?}",
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_len_before - 1,
+            "the in-construction trigger entry must be popped from the stack",
+        );
+        assert!(
+            state.pending_trigger.is_none(),
+            "the pending_trigger cursor must be cleared",
+        );
+        assert!(
+            state.pending_trigger_entry.is_none(),
+            "the pending_trigger_entry cursor must be cleared",
+        );
     }
 
     #[test]
@@ -7680,18 +7987,9 @@ mod tests {
     /// "loaded from card-data.json" shows up as a test failure here.
     #[test]
     fn walking_ballista_db_load_path_enters_with_x_counters() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            // Card-data export missing in this build context (e.g. fresh
-            // clone before `gen-card-data.sh` runs). Skip rather than fail.
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let face = db
             .get_face_by_name("Walking Ballista")
             .expect("Walking Ballista must be in the export")
@@ -7982,16 +8280,9 @@ mod tests {
     /// triggering entry.
     #[test]
     fn cathars_crusade_db_load_path_puts_counter_on_each_creature_you_control() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let crusade_face = db
             .get_face_by_name("Cathars' Crusade")
             .expect("Cathars' Crusade must be in the export")
@@ -9618,6 +9909,56 @@ mod tests {
         ));
     }
 
+    /// CR 118.3a regression: each land tapped for mana must yield a pool unit
+    /// with a DISTINCT, nonzero `pip_id`. A shared/zero id makes every same-color
+    /// pip in the manual-payment UI select and deselect together (the reported
+    /// "tap one → all select, tap again → all deselect" bug), because pinning a
+    /// `pip_id` then matches every unit carrying that same id.
+    #[test]
+    fn tapped_lands_produce_distinct_pip_ids() {
+        let mut state = setup_game_at_main_phase();
+
+        let mut land_ids = Vec::new();
+        for _ in 0..3 {
+            let land_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&land_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+                obj.entered_battlefield_turn = Some(1);
+            }
+            land_ids.push(land_id);
+        }
+
+        for land_id in land_ids {
+            apply_as_current(
+                &mut state,
+                GameAction::TapLandForMana { object_id: land_id },
+            )
+            .unwrap();
+        }
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three taps must float three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every pooled unit must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "pip ids must be distinct, got {ids:?}");
+    }
+
     /// Build a Wild Growth–style aura attached to `land_id` for tests in this
     /// module. Single-color "{G}" `TapsForMana` trigger via
     /// `valid_card: AttachedTo`. Returns the aura's `ObjectId`.
@@ -10566,6 +10907,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10640,6 +10982,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10738,6 +11081,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11568,6 +11912,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11626,6 +11971,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -12147,6 +12493,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -12533,6 +12880,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
@@ -13585,6 +13933,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -16775,6 +17124,7 @@ mod phase_trigger_regression_tests {
                 .add(ManaUnit {
                     color: ManaType::Colorless,
                     source_id: ObjectId(0),
+                    pip_id: crate::types::mana::ManaPipId(0),
                     supertype: None,
                     source_could_produce_two_or_more_colors: false,
                     restrictions: Vec::new(),
@@ -21709,7 +22059,7 @@ mod crew_tests {
         assert!(result.is_err());
     }
 
-    /// CR 702.122c: a creature with "crews Vehicles as though its power were N
+    /// CR 702.122a: a creature with "crews Vehicles as though its power were N
     /// greater" (Reckoner Bankbuster) contributes its modified power, letting an
     /// otherwise-insufficient creature pay the crew cost alone.
     #[test]
@@ -21749,7 +22099,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: regression — the legal-action enumerator must measure crew
+    /// CR 702.122a: regression — the legal-action enumerator must measure crew
     /// contribution through `object_crew_power_contribution`, exactly like the
     /// activation gate and announcement validator. A Pilot-style creature whose
     /// raw power is below the crew cost but whose adjusted power meets it must
@@ -21793,7 +22143,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
+    /// CR 702.122a: "using its toughness rather than its power" (Giant Ox)
     /// substitutes toughness for power, and the modifier applies only to the
     /// named keyword actions (crew-only here, not saddle).
     #[test]
@@ -22617,7 +22967,7 @@ mod keyword_action_stack_tests {
     //!     paid even if the ability is countered);
     //!   - a priority window opens between cost payment and resolution;
     //!   - triggers keyed off "becomes crewed/saddled/stationed/equipped"
-    //!     fire at resolution time, not at cost payment (CR 702.122d,
+    //!     fire at resolution time, not at cost payment (CR 702.122e,
     //!     CR 702.171b, CR 702.184a, CR 702.6a).
     //!
     //! Counterspells are simulated by popping the top stack entry directly
@@ -23126,7 +23476,7 @@ mod keyword_action_stack_tests {
 
     // --- Trigger timing -----------------------------------------------------
     //
-    // CR 702.122d / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
+    // CR 702.122e / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
     // saddled / stationed" resolves when the keyword ability resolves from the
     // stack — not when its cost is paid. The per-keyword matcher keys off the
     // resolution-time event (`VehicleCrewed` / `Saddled` / `Stationed`), so
@@ -23170,7 +23520,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             !fires_at_announce,
-            "CR 702.122d: Crewed trigger must not fire at announcement"
+            "CR 702.122e: Crewed trigger must not fire at announcement"
         );
 
         apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
@@ -23181,7 +23531,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             fires_at_resolve,
-            "CR 702.122d: Crewed trigger fires when the Crew ability resolves"
+            "CR 702.122e: Crewed trigger fires when the Crew ability resolves"
         );
     }
 
@@ -24015,6 +24365,7 @@ mod mdfc_land_tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),

@@ -1097,6 +1097,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Named { .. } => "Named",
         TargetFilter::Owner => "Owner",
         TargetFilter::SourceChosenPlayer => "SourceChosenPlayer",
+        TargetFilter::EventTarget => "EventTarget",
     }
 }
 
@@ -3299,7 +3300,7 @@ fn controls_count_at_least(perms: &Permanents, count: usize) -> ConvResult<Parse
 /// CR 205.2a: Map mtgish `CardType` → engine `CoreType`. Variants without
 /// a CoreType analog (Conspiracy, Phenomenon, Plane, Scheme, Vanguard) have
 /// no place in a permanent-count ParsedCondition and strict-fail.
-fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
+pub(crate) fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
     Ok(match ct {
         CardType::Artifact => CoreType::Artifact,
         CardType::Battle => CoreType::Battle,

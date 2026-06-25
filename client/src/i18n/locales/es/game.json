@@ -359,7 +359,8 @@
     "onlyForActivation": "Gastar solo para activar habilidades",
     "onlyForXCosts": "Gastar solo en costes que incluyan {X}",
     "convokePayment": "Pago de convocar",
-    "grantsProperty": "Otorga una propiedad al hechizo"
+    "grantsProperty": "Otorga una propiedad al hechizo",
+    "grantCantBeCountered": "Gástalo en este hechizo para que no se pueda contrarrestar"
   },
   "zone": {
     "commandZone": "Zona de mando",
@@ -416,6 +417,8 @@
     "paymentPending": "El pago sigue pendiente. Gira permanentes o cancela esta acción.",
     "poolLabel": "Reserva:",
     "poolEmpty": "Vacía",
+    "pinUnit": "Fijar este maná para pagar primero",
+    "unpinUnit": "Quitar fijación de este maná",
     "pay": "Pagar",
     "chooseAmountTitle": "Elige la cantidad a pagar",
     "chooseAmountAria": "Elige la cantidad a pagar",
@@ -423,7 +426,13 @@
     "resourceEnergy": "energía",
     "resourceMana": "maná",
     "resourceCounters": "contadores",
-    "resourceSpeed": "velocidad"
+    "resourceSpeed": "velocidad",
+    "manualMana": "Manual",
+    "manualManaTooltip": "Maná manual — solo esta partida. Toca tus propias tierras y maná para pagar.",
+    "spendHint": "Haz clic en tu maná para gastarlo en este coste",
+    "covered": "✓ Cubierto",
+    "spending": "Gastando",
+    "fillHint": "(mayús+clic para añadir todos de una fuente)"
   },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
@@ -1218,6 +1227,22 @@
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
     },
+    "bulk": {
+      "selectAll": "Seleccionar todo",
+      "invert": "Invertir",
+      "clear": "Limpiar",
+      "sortLabel": "Ordenar",
+      "groupLabel": "Agrupar",
+      "optNone": "Ninguno",
+      "optName": "Nombre",
+      "optCmc": "Valor de maná",
+      "optType": "Tipo",
+      "optColor": "Color",
+      "counterDiscard": "Descartar {{selected}} de {{cap}}",
+      "counterKeep": "Conservar {{selected}} de {{cap}}",
+      "keepInstead": "Conservar en su lugar",
+      "discardInstead": "Descartar en su lugar"
+    },
     "discard": {
       "title": "Descartar",
       "titleAdditionalCost": "Descartar como coste adicional",
@@ -1232,7 +1257,9 @@
       "subtitleUpTo_other": "Elige hasta {{count}} cartas para descartar",
       "subtitleUnless": "Elige {{count}} cartas o 1 carta que coincida para descartar",
       "subtitleExact_one": "Elige {{count}} carta para descartar",
-      "subtitleExact_other": "Elige {{count}} cartas para descartar"
+      "subtitleExact_other": "Elige {{count}} cartas para descartar",
+      "subtitleKeep_one": "Elige 1 carta para conservar — el resto se descarta",
+      "subtitleKeep_other": "Elige {{count}} cartas para conservar — el resto se descarta"
     },
     "harmonize": {
       "title": "Armonizar",

@@ -20,6 +20,12 @@ import { PeekTab } from "../modal/DialogShell.tsx";
 import { useOptionalDialogPeek } from "../modal/dialogPeekContext.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
+import {
+  canonGrant,
+  canonRestriction,
+  manaGroupTooltip,
+} from "../../viewmodel/manaPoolGroups.ts";
+import type { ManaRestriction, ManaSpellGrant } from "../../adapter/types.ts";
 
 const MANA_ORDER: ManaType[] = ["White", "Blue", "Black", "Red", "Green", "Colorless"];
 
@@ -146,18 +152,85 @@ export function ManaPaymentUI() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [costShards, isPhyrexianPayment]);
 
-  // Summarize mana pool by color
-  const manaPoolSummary = useMemo(() => {
-    if (!player) return [];
-    const counts: Record<ManaType, number> = {
-      White: 0, Blue: 0, Black: 0, Red: 0, Green: 0, Colorless: 0,
-    };
+  // CR 118.3a: spendable pool units grouped by (color, restrictions, grants,
+  // source). Each group renders as one `N×{symbol}` chip labelled with its
+  // source permanent, so a large pool stays compact and rules-relevant mana
+  // (Delighted Halfling / Cavern of Souls — distinct grants AND a named source)
+  // is its own directable chip. Convoke markers are excluded (not spendable).
+  // The frontend resolves the source NAME for display only; it computes no
+  // eligibility — the engine accepts or rejects each pin.
+  const paymentGroups = useMemo<PaymentGroup[]>(() => {
+    if (!player || !gameState) return [];
+    const groups = new Map<string, PaymentGroup>();
     for (const unit of player.mana_pool.mana) {
       if (unit.restrictions.includes("ConvokePayment")) continue;
-      counts[unit.color]++;
+      const grants = unit.grants ?? [];
+      const sourceName = gameState.objects[unit.source_id]?.name ?? null;
+      const key = JSON.stringify([
+        unit.color,
+        [...unit.restrictions].map(canonRestriction).sort(),
+        [...grants].map(canonGrant).sort(),
+        sourceName,
+      ]);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.pipIds.push(unit.pip_id);
+      } else {
+        groups.set(key, {
+          key,
+          color: unit.color,
+          restrictions: unit.restrictions,
+          grants,
+          special: unit.restrictions.length > 0 || grants.length > 0,
+          sourceName,
+          pipIds: [unit.pip_id],
+        });
+      }
     }
-    return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
-  }, [player]);
+    return [...groups.values()].sort((a, b) => {
+      const colorDelta = MANA_ORDER.indexOf(a.color) - MANA_ORDER.indexOf(b.color);
+      if (colorDelta !== 0) return colorDelta;
+      return (a.special ? 1 : 0) - (b.special ? 1 : 0);
+    });
+  }, [player, gameState]);
+
+  // CR 118.3a + CR 601.2g: engine-computed cost still unpaid by the units the
+  // player has selected so far (`null` when not exposed — e.g. ambiguous/
+  // activation/Phyrexian). The frontend never computes this — it renders the
+  // engine's residual so the cost visibly shrinks as mana is picked.
+  const remainingShards = useMemo(() => {
+    const remaining = gameState?.derived?.pending_payment_remaining;
+    return remaining ? manaCostToShards(remaining) : null;
+  }, [gameState]);
+
+  // CR 118.3a: the engine records player-directed pins on `pending_cast`.
+  // The frontend is a pure mirror — it renders the engine's pin set and the
+  // individual pool units, and dispatches Spend/UnspendPoolMana on click. It
+  // computes no eligibility (the engine accepts or rejects each pin).
+  const pinnedPipIds = useMemo(
+    () => new Set(gameState?.pending_cast?.pinned_pool_units ?? []),
+    [gameState],
+  );
+
+  const pinUnit = useCallback(
+    (pipId: number) => dispatch({ type: "SpendPoolMana", data: { pip_id: pipId } }),
+    [dispatch],
+  );
+  const unpinUnit = useCallback(
+    (pipId: number) => dispatch({ type: "UnspendPoolMana", data: { pip_id: pipId } }),
+    [dispatch],
+  );
+  // Shift / fill: pin several units of one group at once. Over-pinning is safe —
+  // the engine spends pinned units first only up to the cost (CR 118.3a), so any
+  // extra pinned mana simply stays in the pool at finalize.
+  const pinPips = useCallback(
+    (pipIds: number[]) => {
+      for (const pipId of pipIds) {
+        dispatch({ type: "SpendPoolMana", data: { pip_id: pipId } });
+      }
+    },
+    [dispatch],
+  );
 
   // CR 702.51a / CR 702.126a: each creature/artifact tapped for convoke/improvise
   // adds a `ConvokePayment`-restricted marker to the pool (engine
@@ -283,11 +356,29 @@ export function ManaPaymentUI() {
 
           {costShards && (
             <>
-              {/* Cost display row */}
+              {/* Cost display row — for a plain (non-ambiguous) cost we show the
+                  cost STILL TO PAY after the player's current selection
+                  (engine-computed `pending_payment_remaining`), so it visibly
+                  shrinks as mana is picked and reads "covered" once the
+                  selection pays the whole cost. Ambiguous (hybrid/Phyrexian)
+                  costs keep the full-cost display because their per-shard
+                  toggles index the full shard list. */}
               <div className="mb-3 flex items-center justify-center gap-1.5">
-                {costShards.map((shard, idx) => (
-                  <ManaSymbol key={idx} shard={shard} size="lg" />
-                ))}
+                {!isAmbiguous && remainingShards != null ? (
+                  remainingShards.length > 0 ? (
+                    remainingShards.map((shard, idx) => (
+                      <ManaSymbol key={idx} shard={shard} size="lg" />
+                    ))
+                  ) : (
+                    <span className="text-sm font-semibold text-emerald-400">
+                      {t("mana.covered")}
+                    </span>
+                  )
+                ) : (
+                  costShards.map((shard, idx) => (
+                    <ManaSymbol key={idx} shard={shard} size="lg" />
+                  ))
+                )}
               </div>
 
               {convokeMode && (
@@ -436,15 +527,76 @@ export function ManaPaymentUI() {
             </p>
           )}
 
-          {/* Current mana pool */}
-          <div className="mb-3 flex items-center justify-center gap-2">
-            <span className="text-xs text-gray-500">{t("mana.poolLabel")}</span>
-            {manaPoolSummary.length > 0 ? (
-              manaPoolSummary.map(({ color, amount }) => (
-                <ManaBadge key={color} color={color} amount={amount} />
-              ))
-            ) : (
-              <span className="text-xs text-gray-600">{t("mana.poolEmpty")}</span>
+          {/* CR 118.3a: two-pile mana selection. Each fungible group renders as
+              one `N×{symbol}` chip (count + source permanent) so a large pool
+              stays compact. Tapping an AVAILABLE chip moves one unit to SPENDING
+              (shift-click moves all of that group); the engine spends pinned
+              units first, so a selection covering the cost pays with exactly
+              those units — and applies any rider they carry (Cavern of Souls /
+              Delighted Halfling "can't be countered"). Tapping a SPENDING chip
+              returns one. Phyrexian payment shows the pool read-only (no piles). */}
+          <div className="mb-3 space-y-2">
+            {paymentGroups.length === 0 && (
+              <div className="flex items-center justify-center gap-2">
+                <span className="text-xs text-gray-500">{t("mana.poolLabel")}</span>
+                <span className="text-xs text-gray-600">{t("mana.poolEmpty")}</span>
+              </div>
+            )}
+
+            {paymentGroups.length > 0 && !isManaPayment && (
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                {paymentGroups.map((group) => (
+                  <ManaChip key={group.key} group={group} count={group.pipIds.length} />
+                ))}
+              </div>
+            )}
+
+            {paymentGroups.length > 0 && isManaPayment && (
+              <>
+                <div>
+                  <p className="mb-1 text-center text-[11px] text-gray-500">
+                    {t("mana.spendHint")}
+                    <span className="ml-1 text-gray-600">{t("mana.fillHint")}</span>
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-1.5">
+                    {paymentGroups.map((group) => {
+                      const ids = group.pipIds.filter((id) => !pinnedPipIds.has(id));
+                      if (ids.length === 0) return null;
+                      return (
+                        <ManaChip
+                          key={group.key}
+                          group={group}
+                          count={ids.length}
+                          onActivate={(fill) => (fill ? pinPips(ids) : pinUnit(ids[0]))}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {pinnedPipIds.size > 0 && (
+                  <div className="rounded-lg bg-cyan-500/5 px-2 py-1.5 ring-1 ring-cyan-400/20">
+                    <p className="mb-1 text-center text-[11px] text-cyan-300/80">
+                      {t("mana.spending")}
+                    </p>
+                    <div className="flex flex-wrap items-center justify-center gap-1.5">
+                      {paymentGroups.map((group) => {
+                        const ids = group.pipIds.filter((id) => pinnedPipIds.has(id));
+                        if (ids.length === 0) return null;
+                        return (
+                          <ManaChip
+                            key={group.key}
+                            group={group}
+                            count={ids.length}
+                            selected
+                            onActivate={() => unpinUnit(ids[ids.length - 1])}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -458,7 +610,7 @@ export function ManaPaymentUI() {
             </button>
             <button
               onClick={handleCancel}
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              className={gameButtonClass({ tone: "slate", size: "md" })}
             >
               {t("common:actions.cancel")}
             </button>
@@ -466,5 +618,103 @@ export function ManaPaymentUI() {
         </div>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+// Color → shard symbol code for `ManaSymbol` (White→"W", …, Colorless→"C").
+const COLOR_SHARD: Record<ManaType, string> = {
+  White: "W",
+  Blue: "U",
+  Black: "B",
+  Red: "R",
+  Green: "G",
+  Colorless: "C",
+};
+
+/**
+ * A run of fungible pool units the payment panel renders as one chip — same
+ * color, spend restrictions, spell grants, AND source permanent. `pipIds` holds
+ * the concrete unit ids (the pin targets); `sourceName` is resolved for display
+ * only. Grouping by source keeps a large pool compact while still giving
+ * rules-relevant mana (Delighted Halfling, Cavern of Souls) its own labeled chip.
+ */
+interface PaymentGroup {
+  key: string;
+  color: ManaType;
+  restrictions: ManaRestriction[];
+  grants: ManaSpellGrant[];
+  special: boolean;
+  sourceName: string | null;
+  pipIds: number[];
+}
+
+interface ManaChipProps {
+  group: PaymentGroup;
+  /** How many units of the group this chip represents (available or spending). */
+  count: number;
+  selected?: boolean;
+  /** Present → interactive. `fill` is true on shift-click (act on all, not one). */
+  onActivate?: (fill: boolean) => void;
+}
+
+/**
+ * CR 118.3a: one fungible group as `N×{symbol}` + source label. Clicking pins or
+ * returns a unit of the group; shift-click acts on all of it. The amber dot +
+ * tooltip surface any spend restriction / spell grant (e.g. "legendary-only;
+ * uncounterable") so the player can direct rider-bearing mana on purpose.
+ */
+function ManaChip({ group, count, selected = false, onActivate }: ManaChipProps) {
+  const { t } = useTranslation("game");
+  // Combine the restriction/grant detail with the source name so neither is
+  // hidden when both exist (the inline source label may be truncated).
+  const tooltip =
+    [manaGroupTooltip((k) => t(k), group), group.sourceName]
+      .filter(Boolean)
+      .join(" — ") || undefined;
+
+  const ring = selected
+    ? "bg-cyan-400/15 ring-1 ring-cyan-400/60"
+    : "bg-white/5 ring-1 ring-white/10";
+
+  const inner = (
+    <>
+      <span className="text-[11px] font-bold tabular-nums text-gray-200">{count}×</span>
+      <span className="relative inline-flex">
+        <ManaSymbol shard={COLOR_SHARD[group.color]} size="md" />
+        {group.special && (
+          <span
+            aria-hidden
+            className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-amber-300 ring-1 ring-slate-900/60"
+          />
+        )}
+      </span>
+      {group.sourceName && (
+        <span className="max-w-[120px] truncate text-[10px] text-gray-400">
+          {group.sourceName}
+        </span>
+      )}
+    </>
+  );
+
+  const base = `inline-flex items-center gap-1 rounded-full px-2 py-1 ${ring}`;
+
+  if (!onActivate) {
+    return (
+      <span title={tooltip} className={base}>
+        {inner}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => onActivate(e.shiftKey)}
+      aria-pressed={selected}
+      title={tooltip}
+      className={`${base} transition hover:ring-gray-400`}
+    >
+      {inner}
+    </button>
   );
 }

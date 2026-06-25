@@ -642,8 +642,11 @@ pub enum AdditionalCostTaxAction {
     Cast,
 }
 
-/// CR 702.122c: How a creature's contributed power is modified when it crews a
-/// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
+/// CR 702.122a / CR 702.171a / CR 702.184c: How a creature's contributed power
+/// is modified when it crews a Vehicle, saddles a Mount, or stations a permanent.
+/// (Station's modifier is explicit in CR 702.184c; Crew/Saddle modify the
+/// "total power N" threshold of CR 702.122a / CR 702.171a.)
+/// See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CrewContributionKind {
     /// "as though its power were N greater" — contribute `power + delta`.
@@ -1413,9 +1416,9 @@ pub enum StaticMode {
         action: CombatAloneAction,
         requirement: CombatAloneRequirement,
     },
-    /// CR 702.122c: This creature can't crew Vehicles.
+    /// CR 702.122d: This creature can't crew Vehicles.
     CantCrew,
-    /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
+    /// CR 702.122a / CR 702.171a / CR 702.184c: This creature contributes to a
     /// crew/saddle/station cost as though its power were modified (Reckoner
     /// Bankbuster: "as though its power were 2 greater") or using its toughness
     /// instead of its power (Giant Ox). `actions` records which keyword actions

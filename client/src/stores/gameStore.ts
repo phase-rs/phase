@@ -18,6 +18,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
 import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
 export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
@@ -193,6 +194,10 @@ export const useGameStore = create<GameStore>()(
     ...initialState,
 
     initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer) => {
+      // Clear the display-only stack-pacing tracker so a fast-churning end to a
+      // prior game can't bleed stale resolution rate into this game's opening
+      // pacing (rematch started within the throughput window).
+      resetStackThroughput();
       await adapter.initialize();
       const initResult = await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig, firstPlayer);
       const state = await adapter.getState();
@@ -235,6 +240,9 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
+      // Reset stack-pacing throughput — resuming may load a different game than
+      // the one just played; stale churn must not carry across.
+      resetStackThroughput();
       await adapter.initialize();
       await adapter.restoreState(savedState);
       const state = await adapter.getState();
@@ -256,6 +264,8 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeP2PHost: async (gameId, adapter) => {
+      // Reset stack-pacing throughput on entry to this game context.
+      resetStackThroughput();
       // `adapter.initialize()` on a resumed P2PHostAdapter already
       // called `wasm.resumeMultiplayerHostState(savedState)` — the
       // engine is populated and in multiplayer mode. All we need here

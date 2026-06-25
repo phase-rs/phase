@@ -8,11 +8,11 @@
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -2785,6 +2785,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -3891,7 +3892,22 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         // CR 205.2: choose a card type from the bounded card-type set.
         Action::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // creature or land", Winding Way; "choose artifact, creature, or
+        // land", Turnabout) — the spell-action sibling of
+        // `ReplacementActionWouldEnter::ChooseACardtypeFromList` in
+        // `replacement.rs`. Shares `filter::restricted_card_type_choice` so
+        // both schema locations of this shape persist a real
+        // `ChoiceType::CardType { excluded }` (and therefore
+        // `ChosenAttribute::CardType`) instead of a free-form `Labeled`
+        // choice — required for downstream `IsCardtypeVariable` filters and
+        // `IsChosenCardType` prohibitions to bind.
+        Action::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: filter_mod::restricted_card_type_choice(opts)?,
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -4391,6 +4407,7 @@ fn convert_look_at_top(
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4409,6 +4426,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4426,6 +4444,7 @@ fn convert_look_at_top(
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4446,6 +4465,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4462,6 +4482,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4521,6 +4542,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4534,6 +4556,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4547,6 +4570,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4561,6 +4585,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4575,6 +4600,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         _ => Err(prereq(format!(
@@ -6699,16 +6725,66 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
-        CardInGraveyard, Cards, Color, ColorList, Comparison, Condition, Cost, CounterType,
-        CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources, ManaSymbol,
-        PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType, TokenCopyEffects,
-        TokenFlag, PT,
+        CardInGraveyard, Cards, CardtypeVariable, Color, ColorList, Comparison, Condition, Cost,
+        CounterType, CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources,
+        ManaSymbol, PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType,
+        TokenCopyEffects, TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, Comparator, ControllerRef, Effect, FilterProp, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityKind, ChoiceType, Comparator, ControllerRef, Effect, FilterProp, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
+    use engine::types::card_type::CoreType;
     use engine::types::mana::ManaColor;
+
+    // Issue #4201 follow-up — Turnabout's "choose artifact, creature, or
+    // land" spell action (`Action::ChooseACardtypeFromList`, the
+    // non-replacement sibling of `ReplacementActionWouldEnter::Choose*From
+    // List`) must persist a restricted `ChoiceType::CardType` the same way
+    // the ETB axis does, and the chosen type must feed the downstream
+    // `Permanents::IsCardtypeVariable(TheChosenCardtype)` filter that
+    // Turnabout's tap/untap modes read.
+    #[test]
+    fn choose_a_cardtype_from_list_action_lowers_to_restricted_card_type_choice() {
+        let effect = convert(&Action::ChooseACardtypeFromList(vec![
+            CardType::Artifact,
+            CardType::Creature,
+            CardType::Land,
+        ]))
+        .unwrap();
+
+        match effect {
+            Effect::Choose {
+                choice_type: ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(persist);
+                assert_eq!(
+                    excluded,
+                    vec![
+                        CoreType::Enchantment,
+                        CoreType::Instant,
+                        CoreType::Planeswalker,
+                        CoreType::Sorcery,
+                    ]
+                );
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
+
+        // The same persisted choice feeds `IsCardtypeVariable(TheChosenCardtype)`
+        // — Turnabout's tap/untap modes filter permanents by it.
+        let filter = crate::convert::filter::convert(&Permanents::IsCardtypeVariable(
+            CardtypeVariable::TheChosenCardtype,
+        ))
+        .unwrap();
+        assert!(matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::IsChosenCardType)
+        ));
+    }
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {

@@ -25,6 +25,7 @@ fn export_path() -> PathBuf {
 }
 
 /// Path to the curated integration-test fixture (a subset of the export).
+// TWIN-SYNC: keep this fixture path in lockstep with src/test_support.rs.
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json")
 }

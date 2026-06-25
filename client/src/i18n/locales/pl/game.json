@@ -359,7 +359,8 @@
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
     "convokePayment": "Płatność Convoke",
-    "grantsProperty": "Nadaje czarowi właściwość"
+    "grantsProperty": "Nadaje czarowi właściwość",
+    "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
@@ -416,6 +417,8 @@
     "paymentPending": "Płatność wciąż oczekuje. Obróć trwałe lub anuluj tę akcję.",
     "poolLabel": "Pula:",
     "poolEmpty": "Pusta",
+    "pinUnit": "Przypnij tę manę, aby zapłacić najpierw",
+    "unpinUnit": "Odepnij tę manę",
     "pay": "Zapłać",
     "chooseAmountTitle": "Wybierz kwotę do zapłaty",
     "chooseAmountAria": "Wybierz kwotę do zapłaty",
@@ -423,7 +426,13 @@
     "resourceEnergy": "energii",
     "resourceMana": "many",
     "resourceCounters": "znaczników",
-    "resourceSpeed": "prędkości"
+    "resourceSpeed": "prędkości",
+    "manualMana": "Ręcznie",
+    "manualManaTooltip": "Ręczna mana — tylko ta gra. Stuknij własne ziemie i manę, aby zapłacić.",
+    "spendHint": "Kliknij swoją manę, aby wydać ją na ten koszt",
+    "covered": "✓ Pokryte",
+    "spending": "Wydawane",
+    "fillHint": "(shift+klik dodaje wszystkie z jednego źródła)"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
@@ -1218,6 +1227,22 @@
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
     },
+    "bulk": {
+      "selectAll": "Zaznacz wszystko",
+      "invert": "Odwróć",
+      "clear": "Wyczyść",
+      "sortLabel": "Sortuj",
+      "groupLabel": "Grupuj",
+      "optNone": "Brak",
+      "optName": "Nazwa",
+      "optCmc": "Wartość many",
+      "optType": "Typ",
+      "optColor": "Kolor",
+      "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
+      "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
+      "keepInstead": "Zatrzymaj zamiast tego",
+      "discardInstead": "Odrzuć zamiast tego"
+    },
     "discard": {
       "title": "Odrzuć",
       "titleAdditionalCost": "Odrzuć jako koszt dodatkowy",
@@ -1232,7 +1257,9 @@
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",
       "subtitleExact_one": "Wybierz {{count}} kartę do odrzucenia",
-      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia"
+      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia",
+      "subtitleKeep_one": "Wybierz 1 kartę do zatrzymania — reszta zostaje odrzucona",
+      "subtitleKeep_other": "Wybierz {{count}} kart do zatrzymania — reszta zostaje odrzucona"
     },
     "harmonize": {
       "title": "Harmonize",

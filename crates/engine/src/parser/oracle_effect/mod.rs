@@ -16093,7 +16093,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("a basic land type").parse(rest).is_ok() {
         Some(ChoiceType::BasicLandType)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
-        Some(ChoiceType::CardType)
+        Some(ChoiceType::card_type())
     } else if is_card_type_enumeration(rest) {
         // CR 205.2: Older "choose a card type" cards (Cloud Key) spell out the
         // options ("artifact, creature, enchantment, instant, or sorcery")
@@ -16101,7 +16101,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // as the same CardType choice so the chosen type persists for downstream
         // `IsChosenCardType` reads (cost reduction, protection from the chosen
         // type, etc.).
-        Some(ChoiceType::CardType)
+        Some(ChoiceType::card_type())
     } else if alt((
         tag::<_, _, E>("a card name"),
         tag("a nonland card name"),
@@ -29586,7 +29586,13 @@ mod tests {
             .sub_ability
             .expect("endure conjunct must survive as a sub_ability");
         assert!(
-            matches!(*sub.effect, Effect::Endure { amount: 1 }),
+            matches!(
+                *sub.effect,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
             "expected chained Endure{{1}}, got {:?}",
             sub.effect
         );
@@ -29602,7 +29608,13 @@ mod tests {
     fn effect_it_endures_strips_subject_to_endure() {
         let e = parse_effect("it endures 1");
         assert!(
-            matches!(e, Effect::Endure { amount: 1 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:1}}, got {e:?}"
         );
     }
@@ -29611,7 +29623,13 @@ mod tests {
     fn effect_this_creature_endures_strips_subject_to_endure() {
         let e = parse_effect("this creature endures 2");
         assert!(
-            matches!(e, Effect::Endure { amount: 2 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:2}}, got {e:?}"
         );
     }
@@ -29622,24 +29640,51 @@ mod tests {
         // ("Fortress Kin-Guard endures N" → "~ endures N" upstream).
         let e = parse_effect("~ endures 3");
         assert!(
-            matches!(e, Effect::Endure { amount: 3 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:3}}, got {e:?}"
         );
     }
 
     #[test]
-    fn effect_endure_dynamic_x_degrades_gracefully() {
-        // CR 701.63b: "it endures X, where X is ..." cannot fit the `amount: u32`
-        // field. It must degrade to a benign value (endure 0 = nothing happens),
-        // never panic. Documented follow-up: dynamic endure amount.
+    fn effect_endure_dynamic_x_degrades_gracefully_without_binding() {
+        // CR 701.63b: bare "it endures X" without a defining clause still
+        // degrades to endure 0 (nothing happens).
         let e = parse_effect("it endures X");
         assert!(
             matches!(
                 e,
-                Effect::Endure { amount: 0 } | Effect::Unimplemented { .. }
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 0 },
+                    ..
+                } | Effect::Unimplemented { .. }
             ),
-            "dynamic endure X must degrade to Endure{{0}} or Unimplemented, got {e:?}"
+            "bare dynamic endure X must degrade to Endure{{0}} or Unimplemented, got {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_endure_dynamic_x_binds_counters_on_this_creature() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let e = parse_effect("it endures X, where X is the number of counters on this creature");
+        match e {
+            Effect::Endure { amount, .. } => match amount {
+                QuantityExpr::Ref { qty } => match qty {
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    } => {}
+                    other => panic!("unexpected qty {other:?}"),
+                },
+                other => panic!("unexpected amount {other:?}"),
+            },
+            other => panic!("expected Endure, got {other:?}"),
+        }
     }
 
     #[test]
@@ -30559,6 +30604,21 @@ mod tests {
             "expected Discard, got {:?}",
             execute.effect
         );
+    }
+
+    #[test]
+    fn show_and_tell_each_player_may_put_is_optional_per_player() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield.",
+            "Show and Tell",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let ability = parsed.abilities.first().expect("spell ability");
+        assert!(ability.optional, "Show and Tell must be optional");
+        assert_eq!(ability.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*ability.effect, Effect::ChangeZone { .. }));
     }
 
     #[test]
@@ -33718,6 +33778,35 @@ mod tests {
                 }
             ),
             "Expected divided X DealDamage with multi_target, got {:?}",
+            clause.effect
+        );
+    }
+
+    /// Clause-level unit test for the distributed-damage parser pattern
+    /// ("deals N damage divided as you choose among one or two targets").
+    /// Covers `try_parse_distribute_damage` in isolation; the dispatch-level
+    /// regression for issue #4266 (preserve distribute/multi_target through
+    /// `dispatch_line_nom`) lives in `oracle_dispatch::tests`.
+    #[test]
+    fn deal_damage_divided_fixed_among_one_or_two_targets_forked_bolt() {
+        let clause = parse_effect_clause(
+            "~ deals 2 damage divided as you choose among one or two targets.",
+            &mut ParseContext::default(),
+        );
+        // CR 115.1d: one or two targets (min 1, max 2).
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
+        // CR 601.2d: damage divided as the controller chooses.
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    damage_source: None,
+                    ..
+                }
+            ),
+            "Expected divided DealDamage(2), got {:?}",
             clause.effect
         );
     }
@@ -36935,7 +37024,7 @@ mod tests {
         );
     }
 
-    /// CR 701.50e + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
+    /// CR 701.50d + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
     /// bind X to creatures that died this turn, not hardcode 1.
     #[test]
     fn connive_where_x_is_creatures_died_this_turn() {
@@ -57712,16 +57801,16 @@ mod snapshot_tests {
         // IsChosenCardType reads (CR 205.2).
         assert!(matches!(
             try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
         assert!(matches!(
             try_parse_named_choice("choose a card type"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
         // Trailing period, as it appears in oracle text.
         assert!(matches!(
             try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery."),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
     }
 
@@ -57733,7 +57822,7 @@ mod snapshot_tests {
         assert!(!is_card_type_enumeration("a creature"));
         assert!(!matches!(
             try_parse_named_choice("choose a creature type"),
-            Some(ChoiceType::CardType)
+            Some(ChoiceType::CardType { .. })
         ));
     }
 }

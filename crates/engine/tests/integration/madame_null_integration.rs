@@ -108,6 +108,8 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             combat_status: Default::default(),
             trigger_definitions: Vec::new(),
             co_departed: Vec::new(),
+            entered_incarnation: None,
+            turn_zone_change_index: 0,
         }),
     });
 }

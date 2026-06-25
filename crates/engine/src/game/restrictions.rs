@@ -447,17 +447,22 @@ pub(crate) fn battlefield_entry_matches_filter(
 }
 
 /// CR 400.7: Record a zone-change snapshot for data-driven condition queries.
+/// Returns the per-turn zone-change index assigned to this record.
 pub fn record_zone_change(
     state: &mut crate::types::game_state::GameState,
-    record: crate::types::game_state::ZoneChangeRecord,
-) {
+    mut record: crate::types::game_state::ZoneChangeRecord,
+) -> usize {
     let object_id = record.object_id;
     let to_zone = record.to_zone;
+    let turn_zone_change_index = state.zone_changes_this_turn.len();
+    record.turn_zone_change_index = turn_zone_change_index;
     state.zone_changes_this_turn.push(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
     }
+
+    turn_zone_change_index
 }
 
 /// CR 601.3: Verify casting restrictions are satisfied before allowing a spell to be cast.

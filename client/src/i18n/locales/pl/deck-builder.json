@@ -126,6 +126,8 @@
     "pastePlaceholder": "Wklej listę talii (format MTGA lub .dck)...",
     "fromFile": "Z pliku",
     "parse": "Przetwórz",
+    "parsing": "Przetwarzanie…",
+    "parseError": "Nie znaleziono kart. Wklej talię w formacie MTGA lub .dck.",
     "exportModalTitle": "Eksportuj talię",
     "saveToFile": "Zapisz do pliku",
     "copied": "Skopiowano!",

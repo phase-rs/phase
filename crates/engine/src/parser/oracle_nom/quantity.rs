@@ -1998,6 +1998,8 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::NoncombatOnly,
+
+                excess_only: false,
             },
             tag("total amount of noncombat damage dealt to your opponents this turn"),
         ),
@@ -2015,6 +2017,8 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
             tag("damage dealt to target opponent this turn"),
         ),
@@ -8173,6 +8177,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             }
         );
 
@@ -8208,6 +8214,8 @@ mod tests {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::NoncombatOnly,
+
+                excess_only: false,
             }
         );
     }

@@ -372,8 +372,8 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, TargetFilter,
-        TriggerDefinition, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, DigSource, Effect, QuantityExpr,
+        TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -639,6 +639,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);
         assert_eq!(f.cantrip_count, 4);
@@ -660,6 +661,7 @@ mod tests {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);
         // impulse-dig should NOT count as cantrip

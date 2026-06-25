@@ -359,7 +359,8 @@
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
-    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
+    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
+    "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"
   },
   "zone": {
     "commandZone": "Kommandozone",
@@ -416,6 +417,8 @@
     "paymentPending": "Die Bezahlung steht noch aus. Tappe bleibende Karten oder brich diese Aktion ab.",
     "poolLabel": "Vorrat:",
     "poolEmpty": "Leer",
+    "pinUnit": "Dieses Mana zum Bezahlen vormerken",
+    "unpinUnit": "Mana-Vormerkung aufheben",
     "pay": "Bezahlen",
     "chooseAmountTitle": "Wähle die zu zahlende Menge",
     "chooseAmountAria": "Wähle die zu zahlende Menge",
@@ -423,7 +426,13 @@
     "resourceEnergy": "Energie",
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
-    "resourceSpeed": "Tempo"
+    "resourceSpeed": "Tempo",
+    "manualMana": "Manuell",
+    "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
+    "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
+    "covered": "✓ Gedeckt",
+    "spending": "Wird ausgegeben",
+    "fillHint": "(Umschalt+Klick fügt alle einer Quelle hinzu)"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
@@ -1218,6 +1227,22 @@
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
     },
+    "bulk": {
+      "selectAll": "Alle auswählen",
+      "invert": "Umkehren",
+      "clear": "Leeren",
+      "sortLabel": "Sortieren",
+      "groupLabel": "Gruppieren",
+      "optNone": "Keine",
+      "optName": "Name",
+      "optCmc": "Manawert",
+      "optType": "Typ",
+      "optColor": "Farbe",
+      "counterDiscard": "{{selected}} von {{cap}} abwerfen",
+      "counterKeep": "{{selected}} von {{cap}} behalten",
+      "keepInstead": "Stattdessen behalten",
+      "discardInstead": "Stattdessen abwerfen"
+    },
     "discard": {
       "title": "Abwerfen",
       "titleAdditionalCost": "Als zusätzliche Kosten abwerfen",
@@ -1232,7 +1257,9 @@
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",
       "subtitleExact_one": "Wähle {{count}} Karte zum Abwerfen",
-      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen"
+      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen",
+      "subtitleKeep_one": "Wähle 1 Karte zum Behalten — der Rest wird abgeworfen",
+      "subtitleKeep_other": "Wähle {{count}} Karten zum Behalten — der Rest wird abgeworfen"
     },
     "harmonize": {
       "title": "Harmonisieren",

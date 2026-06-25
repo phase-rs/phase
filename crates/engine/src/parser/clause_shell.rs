@@ -299,6 +299,17 @@ fn try_peel_opponent_may_prefix(
     text: &str,
 ) -> Option<(Option<OpponentMayScope>, Option<PlayerFilter>, String)> {
     let lower = text.to_lowercase();
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
+        value((), tag("each player may ")).parse(i)
+    }) {
+        let rest_lower = rest.trim_start().to_lowercase();
+        if alt((tag::<_, _, OracleError<'_>>("play "), tag("cast ")))
+            .parse(rest_lower.as_str())
+            .is_err()
+        {
+            return Some((None, Some(PlayerFilter::All), rest.to_string()));
+        }
+    }
     nom_on_lower(text, &lower, |input| {
         alt((
             value(
@@ -794,6 +805,38 @@ mod tests {
         assert!(ctx.optional);
         assert_eq!(ctx.may_implicit_player_scope, Some(PlayerFilter::Opponent));
         assert!(ctx.opponent_may_scope.is_none());
+    }
+
+    #[test]
+    fn peel_each_player_may_put_strips_optional_and_all_scope() {
+        let (peeled, ctx) = peel_clause(
+            "each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield",
+        );
+        assert_eq!(
+            peeled,
+            "put an artifact, creature, enchantment, or land card from their hand onto the battlefield"
+        );
+        assert!(ctx.optional);
+        assert_eq!(ctx.may_implicit_player_scope, Some(PlayerFilter::All));
+    }
+
+    #[test]
+    fn peel_each_player_may_play_permission_is_not_generic_optional() {
+        let text = "each player may play the card they exiled this way";
+        let (peeled, ctx) = peel_clause(text);
+        assert_eq!(peeled, text);
+        assert!(!ctx.optional);
+        assert!(ctx.may_implicit_player_scope.is_none());
+    }
+
+    #[test]
+    fn peel_optional_slots_each_player_may_put() {
+        let (is_optional, _, implicit_scope, rest) = peel_optional_slots(
+            "each player may put a land card from their hand onto the battlefield",
+        );
+        assert!(is_optional);
+        assert_eq!(implicit_scope, Some(PlayerFilter::All));
+        assert_eq!(rest, "put a land card from their hand onto the battlefield");
     }
 
     #[test]

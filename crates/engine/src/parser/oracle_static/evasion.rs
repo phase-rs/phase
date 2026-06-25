@@ -1989,7 +1989,7 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     None
 }
 
-/// CR 702.122c / 702.171a / 702.184a: nom parser for the crew/saddle/station
+/// CR 702.122a / 702.171a / 702.184c: nom parser for the crew/saddle/station
 /// power-contribution modifier predicate. Composes the named action-list prefix
 /// (which records the affected keyword actions) with the modifier tail.
 fn parse_crew_contribution_predicate_nom(
@@ -2030,7 +2030,7 @@ fn parse_crew_contribution_predicate_nom(
     Ok((input, (kind, actions)))
 }
 
-/// CR 702.122c / 702.171a / 702.184a: "<subject> crews Vehicles [/ saddles
+/// CR 702.122a / 702.171a / 702.184c: "<subject> crews Vehicles [/ saddles
 /// Mounts / stations permanents] as though its power were N greater" or "…
 /// using its toughness rather than its power" — a continuous static that
 /// modifies the creature's contributed power when paying a crew/saddle/station

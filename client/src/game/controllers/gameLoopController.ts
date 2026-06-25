@@ -2,7 +2,8 @@ import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
-import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
 import { dispatchAction, dispatchResolveAll } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
@@ -81,11 +82,20 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (autoPassTimeout != null) {
       clearTimeout(autoPassTimeout);
     }
+    // Scale the auto-pass beat by stack pressure. A low-depth-high-churn loop
+    // (Exquisite Blood + Sanguine Bond) keeps depth < Elevated forever, so the
+    // batch path never engages and the human seat pays a full 200ms beat per
+    // cycle — the dominant artificial wait in that case. Rate-driven pressure
+    // collapses the beat (Rapid → ~30ms) once the loop is churning.
+    const stackLen = useGameStore.getState().gameState?.stack?.length ?? 0;
+    const beat = Math.round(
+      AUTO_PASS_BEAT_MS * pressureMultiplier(effectiveStackPressure(stackLen)),
+    );
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;
       if (!active) return;
       dispatchAction({ type: "PassPriority" });
-    }, AUTO_PASS_BEAT_MS);
+    }, beat);
   }
 
   function start(): void {
