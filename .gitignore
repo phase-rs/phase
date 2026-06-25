@@ -44,6 +44,7 @@ client/public/coverage-summary.json
 client/public/scryfall-data.json
 client/public/scryfall-printings.json
 client/public/scryfall-sets.json
+client/public/scryfall-token-images.json
 client/public/set-list.json
 client/public/decks.json
 client/public/decks-skipped.json
