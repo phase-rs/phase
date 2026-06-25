@@ -6,7 +6,9 @@ use rand::Rng;
 use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
+use engine::types::game_state::{
+    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
@@ -15,6 +17,7 @@ use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blocke
 use crate::config::{AiConfig, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
+use crate::mana_colors::demand_aware_single_color;
 use crate::plan::PlanSnapshot;
 use crate::planner::{
     apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
@@ -159,6 +162,28 @@ pub fn choose_action_with_session(
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
             return Some(action);
+        }
+    }
+
+    // CR 106.3 + CR 608.2d: Selecting which color a flexible mana source
+    // produces while paying for a spell is mechanical, not a policy judgment —
+    // the AI must produce the color the in-flight cost demands. `candidates.rs`
+    // enumerates *every* color option, so `score_candidates` is always non-empty
+    // and the old `fallback_action` SingleColor arm never fired on the normal
+    // path; the scorer then picked an arbitrary (first-enumerated) color,
+    // tapping a U/R dual for {R} when the spell needed {U} and stranding the pip
+    // (ManaPayment dead-end). This deterministic pre-emption — parallel to the
+    // TributeChoice and SearchChoice pre-emptions above — is the real fix.
+    if let WaitingFor::ChooseManaColor {
+        choice: ManaChoicePrompt::SingleColor { ref options },
+        ..
+    } = state.waiting_for
+    {
+        if let Some(color) = demand_aware_single_color(options, state) {
+            return Some(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(color),
+                count: 1,
+            });
         }
     }
 
@@ -312,16 +337,29 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
     if state.waiting_for.has_pending_cast() {
+        // The internal discriminant tag is niche-optimized (non-sequential), so
+        // print the variant *name* (the Debug prefix before its first field) and
+        // the in-flight spell's card name instead — an opaque discriminant alone
+        // is not enough to diagnose which cast/card exposed the gap.
+        let debug = format!("{:?}", state.waiting_for);
+        let variant = debug.split([' ', '{']).next().unwrap_or("<unknown>");
+        // ManaPayment externalizes its PendingCast into `GameState::pending_cast`
+        // rather than the WaitingFor variant, so check both sources.
+        let spell = state
+            .waiting_for
+            .pending_cast_ref()
+            .or(state.pending_cast.as_deref())
+            .and_then(|pc| state.objects.get(&pc.object_id))
+            .map_or("<none>", |obj| obj.name.as_str());
         debug_assert!(
             false,
-            "AI fallback reached during pending cast ({:?}) — \
-             can_cast_object_now has a gap that allowed an uncompletable \
-             cast through. Tighten the pre-cast check rather than relying \
-             on CancelCast recovery.",
-            std::mem::discriminant(&state.waiting_for)
+            "AI fallback reached during pending cast (variant {variant}, spell {spell}) — \
+             can_cast_object_now has a gap that allowed an uncompletable cast through. \
+             Tighten the pre-cast check rather than relying on CancelCast recovery."
         );
         tracing::error!(
-            waiting_for = ?std::mem::discriminant(&state.waiting_for),
+            variant,
+            spell,
             "AI fallback cancelled an uncompletable cast — can_cast_object_now gap"
         );
         return Some(GameAction::CancelCast);
@@ -970,12 +1008,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Mana-related states: picking a color or paying mana.
         WaitingFor::ChooseManaColor { choice, .. } => {
-            use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
             match choice {
                 ManaChoicePrompt::SingleColor { options } => {
-                    options.first().map(|&color| GameAction::ChooseManaColor {
-                        choice: ManaChoice::SingleColor(color),
-                        count: 1,
+                    // Defense-in-depth: the primary fix is the pre-emption in
+                    // `choose_action_with_session`; this honors the demanded
+                    // color too should this path ever be reached.
+                    demand_aware_single_color(options, state).map(|color| {
+                        GameAction::ChooseManaColor {
+                            choice: ManaChoice::SingleColor(color),
+                            count: 1,
+                        }
                     })
                 }
                 ManaChoicePrompt::Combination { options } => {
@@ -2257,6 +2299,143 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(1);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         assert_eq!(action, Some(GameAction::PassPriority));
+    }
+
+    fn pending_cast_with_cost(
+        shards: Vec<engine::types::mana::ManaCostShard>,
+        generic: u32,
+    ) -> Box<engine::types::game_state::PendingCast> {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+        use engine::types::game_state::PendingCast;
+        Box::new(PendingCast::new(
+            ObjectId(100),
+            CardId(100),
+            ResolvedAbility::new(
+                engine::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(100),
+                PlayerId(0),
+            ),
+            engine::types::mana::ManaCost::Cost { shards, generic },
+        ))
+    }
+
+    /// Minimal ChooseManaColor SingleColor state with the given option list and
+    /// pending cast. The `context` is a degenerate `ResolvingEffect` resume — the
+    /// pre-emption never inspects it, only `choice` and `state.pending_cast`.
+    /// Production Improvise/dual repro paths use `ManaChoiceContext::ManaAbility`,
+    /// but the context variant is irrelevant to the pre-emption (which reads only
+    /// `pending_cast` + `options`), so `ResolvingEffect` is used for fixture
+    /// simplicity.
+    fn choose_mana_color_state(
+        options: Vec<ManaType>,
+        pending: Option<Box<engine::types::game_state::PendingCast>>,
+    ) -> GameState {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+        use engine::types::game_state::{ManaChoiceContext, ManaChoicePrompt};
+        let mut state = make_state();
+        state.pending_cast = pending;
+        let resume = ResolvedAbility::new(
+            engine::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::SingleColor { options },
+            context: ManaChoiceContext::ResolvingEffect(Box::new(resume)),
+        };
+        state
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_selects_demanded_color() {
+        // Repro: {2}{U} spell, U/R source offered [Red, Blue]. The AI must
+        // produce Blue (demanded) — the old scorer picked the first-enumerated
+        // color (Red) and stranded the {U} pip into a ManaPayment dead-end.
+        // Drives the PUBLIC choose_action path, not fallback_action.
+        let state = choose_mana_color_state(
+            vec![ManaType::Red, ManaType::Blue],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Blue],
+                2,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_selects_demanded_red() {
+        // {1}{R} spell, source offered [Blue, Red] → must produce Red.
+        let state = choose_mana_color_state(
+            vec![ManaType::Blue, ManaType::Red],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Red],
+                1,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_demanded_color_first() {
+        // Demanded color is first here; paired with selects_demanded_color
+        // (demanded second) this proves demand-driven, not positional.
+        let state = choose_mana_color_state(
+            vec![ManaType::Blue, ManaType::Red],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Blue],
+                2,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_no_pending_cast_uses_first() {
+        // No pending cast (e.g. a mana-ability color choice at priority) →
+        // first option, identical to the old behavior.
+        let state = choose_mana_color_state(vec![ManaType::Red, ManaType::Blue], None);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+        );
     }
 
     #[test]

@@ -14,9 +14,12 @@ use std::collections::HashMap;
 use engine::ai_support::legal_actions;
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply, EngineError};
+use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
+
+use crate::mana_colors::demand_aware_single_color;
 use web_time::{Duration, Instant};
 
 /// How far into the opponent's upcoming turn to project.
@@ -343,7 +346,6 @@ fn resolve_choice(
             ..
         }
         | WaitingFor::ManaPayment { .. }
-        | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PhyrexianPayment { .. }
         | WaitingFor::CombatTaxPayment { .. }
@@ -356,6 +358,40 @@ fn resolve_choice(
                 .cloned()
                 .ok_or(BailReason::NoLegalManaPayment)?
         }
+
+        // CR 106.3 + CR 608.2d: Mana-color choice during payment. The
+        // SingleColor prompt must produce the color the pending cost demands —
+        // projecting an arbitrary color (the old `actions.first()`) can strand a
+        // colored pip and dead-end the projected ManaPayment, mirroring the live
+        // AI bug fixed in `search.rs`. Combination / AnyCombination keep
+        // first-legal, matching the `fallback_action` shapes.
+        WaitingFor::ChooseManaColor { choice, .. } => match choice {
+            ManaChoicePrompt::SingleColor { options } => demand_aware_single_color(options, state)
+                .map(|color| GameAction::ChooseManaColor {
+                    choice: ManaChoice::SingleColor(color),
+                    count: 1,
+                })
+                .ok_or(BailReason::NoLegalManaPayment)?,
+            ManaChoicePrompt::Combination { options } => options
+                .first()
+                .map(|combo| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(combo.clone()),
+                    count: 1,
+                })
+                .ok_or(BailReason::NoLegalManaPayment)?,
+            ManaChoicePrompt::AnyCombination { count, options } => {
+                // Bail on empty options like the sibling arms, rather than
+                // fabricating a Colorless pip the engine would reject.
+                let color = options
+                    .first()
+                    .copied()
+                    .ok_or(BailReason::NoLegalManaPayment)?;
+                GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(vec![color; *count]),
+                    count: 1,
+                }
+            }
+        },
 
         // CR 107.1c + CR 601.2f: X-value projection picks the maximum legal X.
         // Candidates are emitted in `min..=max` order
