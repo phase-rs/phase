@@ -6448,6 +6448,40 @@ pub fn parse_you_discard_this_way_clause(input: &str) -> OracleResult<'_, (Targe
     Ok((rest, (filter, false)))
 }
 
+/// CR 603.12 + CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" —
+/// the active-voice reflexive gate created by a preceding "sacrifice [quantifier]
+/// [type]" instruction in the same ability (Nyssa of Traken: "sacrifice any
+/// number of artifacts. When you sacrifice one or more artifacts this way, tap
+/// up to that many target creatures and draw that many cards").
+///
+/// CR 701.21a defines sacrifice as a battlefield → graveyard move, so the
+/// sacrificed permanent is published into `state.last_zone_changed_ids` by the
+/// parent `Sacrifice` effect. Semantically identical to the active
+/// `parse_you_discard_this_way_clause` existential check, differing only in the
+/// active verb ("sacrifice") and its fixed-graveyard destination. The optional
+/// trailing plural "s" lets "one or more artifacts" / "an artifact" / "a creature"
+/// all narrow through the shared `parse_type_phrase` helper, covering the class.
+pub fn parse_you_sacrifice_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you sacrifice ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        value((), tag("any number of ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
@@ -6527,6 +6561,37 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
+    /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
+    /// every quantifier form, mirroring the discard/put combinators.
+    #[test]
+    fn parse_you_sacrifice_this_way_clause_quantifier_variants() {
+        for input in [
+            "you sacrifice one or more artifacts this way",
+            "you sacrifice any number of artifacts this way",
+            "you sacrifice an artifact this way",
+            "you sacrifice at least one artifact this way",
+        ] {
+            let (rest, (filter, negated)) =
+                parse_you_sacrifice_this_way_clause(input).expect("must parse sacrifice gate");
+            assert_eq!(rest, "", "input {input:?} left remainder {rest:?}");
+            assert!(!negated);
+            match filter {
+                TargetFilter::Typed(TypedFilter {
+                    ref type_filters, ..
+                }) => assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Artifact)),
+                    "expected Artifact filter for {input:?}, got {type_filters:?}"
+                ),
+                other => panic!("expected Typed Artifact filter for {input:?}, got {other:?}"),
+            }
+        }
+        // A bare "this way" with no recognizable filter must fail closed.
+        assert!(parse_you_sacrifice_this_way_clause("you sacrifice this way").is_err());
+    }
 
     /// CR 506.2 + CR 508.6 + CR 603.4: Suppressor Skyguard's intervening-if
     /// "that player has another opponent who isn't being attacked" parses to a

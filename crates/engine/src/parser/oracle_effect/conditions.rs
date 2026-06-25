@@ -710,6 +710,21 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                     text[offset..].to_string(),
                 );
             }
+            // CR 603.12 + CR 701.21a: "when you sacrifice one or more X this way,
+            // [body]" — the reflexive gate created by a preceding "sacrifice
+            // [quantifier] X" instruction (Nyssa of Traken). The sacrifice's
+            // battlefield → graveyard move publishes the permanents into
+            // `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
+            if let Ok((after_clause, (filter, _negated))) =
+                crate::parser::oracle_nom::condition::parse_you_sacrifice_this_way_clause(rest)
+            {
+                let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+                let offset = text.len() - body_lower.len();
+                return (
+                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    text[offset..].to_string(),
+                );
+            }
         }
     }
     (None, text.to_string())

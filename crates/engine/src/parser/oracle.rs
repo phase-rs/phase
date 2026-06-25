@@ -66,7 +66,7 @@ use super::oracle_keyword::{
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
-    strip_ability_word_with_name,
+    strip_ability_word_with_name, strip_flavor_word_with_name,
 };
 use super::oracle_replacement::{
     find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
@@ -2833,8 +2833,11 @@ pub(crate) fn parse_oracle_ir(
         // "Threshold — {T}: ...", "Heroic — Whenever ..."). Must intercept BEFORE
         // is_static_pattern and is_replacement_pattern checks, which would otherwise
         // match on keywords like "gets" or "prevent" in the effect text and misroute
-        // the line.
-        if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+        // the line. Uses the wider flavor-word cap (CR 207.2c) so Universes-Beyond
+        // 5-6 word flavor names ("Woman Who Walked the Earth", "Deal with the Black
+        // Guardian") strip; the activated branch stays gated on ability-word
+        // recognition and the trigger branch re-validates via has_trigger_prefix.
+        if let Some((aw_name, effect_text)) = strip_flavor_word_with_name(&line) {
             let effect_lower = effect_text.to_lowercase();
             let aw_condition = ability_word_to_condition(&aw_name);
             if aw_condition.is_some() {

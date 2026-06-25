@@ -10312,14 +10312,26 @@ fn try_parse_verb_and_target<'a>(
     }
     // Simple targeted verbs: parse_target on text after the verb prefix
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("tap ")).parse(i)) {
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Tap { target }, rem));
+        return Some((
+            TargetedImperativeAst::Tap {
+                target,
+                multi_target,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("untap ")).parse(i)) {
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Untap { target }, rem));
+        return Some((
+            TargetedImperativeAst::Untap {
+                target,
+                multi_target,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("goad ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
@@ -13287,10 +13299,14 @@ fn lower_subject_predicate_ast(
             optional: subject.is_optional,
             unless_pay: None,
         },
-        PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
+        PredicateAst::Restriction {
             effect,
             duration,
-            sub_ability: None,
+            sub_ability,
+        } => ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability,
             distribute: None,
             multi_target,
             condition: None,
@@ -55035,6 +55051,133 @@ mod tests {
             }) if type_filters.iter().any(|filter| {
                 matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Hamster")
             })
+        ));
+    }
+
+    /// CR 509.1b + CR 611.2c: Martha Jones's conjoined-subject evasion grant
+    /// "<source> and up to one other target creature can't be blocked this turn"
+    /// lowers to two `CantBeBlocked` grants — the source as the primary effect,
+    /// the targeted creature as a `multi_target {0, Fixed 1}` sub_ability. Builds
+    /// the class of "<self> and up to N other target creature(s)" evasion riders.
+    #[test]
+    fn source_and_other_cant_be_blocked_splits_into_two_grants() {
+        use crate::types::ability::FilterProp;
+        use crate::types::statics::StaticMode;
+        let def = super::parse_effect_chain(
+            "~ and up to one other target creature can't be blocked this turn",
+            AbilityKind::Spell,
+        );
+
+        // Primary grant: the source (SelfRef), no target, UntilEndOfTurn.
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = def.effect.as_ref()
+        else {
+            panic!("expected primary GenericEffect, got {:?}", def.effect);
+        };
+        assert!(target.is_none());
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        assert!(matches!(
+            static_abilities[0].mode,
+            StaticMode::CantBeBlocked
+        ));
+        assert!(matches!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(
+            def.multi_target.is_none(),
+            "primary grant takes no target slot"
+        );
+
+        // Secondary grant: up to one OTHER target creature, multi_target {0,1}.
+        let other = def
+            .sub_ability
+            .as_ref()
+            .expect("expected the targeted-creature grant as a sub_ability");
+        let Effect::GenericEffect {
+            static_abilities: sub_statics,
+            duration: sub_duration,
+            target: Some(sub_target),
+        } = other.effect.as_ref()
+        else {
+            panic!(
+                "expected secondary GenericEffect with target, got {:?}",
+                other.effect
+            );
+        };
+        // CR 611.2b: the sub_ability's UntilEndOfTurn is normalized to None and
+        // re-applied at resolution by the GenericEffect resolver's default
+        // (`ability.duration.or(inner).unwrap_or(UntilEndOfTurn)`), so either the
+        // explicit duration or the normalized None is rules-correct here.
+        assert!(matches!(
+            (sub_duration, other.duration.as_ref()),
+            (Some(Duration::UntilEndOfTurn), _)
+                | (None, Some(Duration::UntilEndOfTurn))
+                | (None, None)
+        ));
+        assert!(matches!(sub_statics[0].mode, StaticMode::CantBeBlocked));
+        assert!(matches!(
+            sub_target,
+            TargetFilter::Typed(TypedFilter { ref type_filters, ref properties, .. })
+                if type_filters.iter().any(|f| matches!(f, TypeFilter::Creature))
+                    && properties.iter().any(|p| matches!(p, FilterProp::Another))
+        ));
+        assert_eq!(
+            other.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        );
+    }
+
+    /// CR 603.12 + CR 701.21a + CR 701.26a: Nyssa of Traken's reflexive
+    /// "When you sacrifice one or more artifacts this way, tap up to that many
+    /// target creatures and draw that many cards" — the reflexive sacrifice gate
+    /// is consumed (→ `ZoneChangedThisWay { Artifact }`), the tap keeps its
+    /// `up_to(EventContextAmount)` count instead of discarding it, and the Draw
+    /// sibling is preserved.
+    #[test]
+    fn reflexive_sacrifice_this_way_taps_and_draws_that_many() {
+        let def = super::parse_effect_chain(
+            "When you sacrifice one or more artifacts this way, tap up to that many target creatures and draw that many cards",
+            AbilityKind::Spell,
+        );
+
+        // Tap with a dynamic up-to count + the reflexive sacrifice condition.
+        let Effect::SetTapState {
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("expected SetTapState Single/Tap, got {:?}", def.effect);
+        };
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            })),
+            "tap must surface up-to-that-many target slots",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+            }) if type_filters.iter().any(|f| matches!(f, TypeFilter::Artifact))
+        ));
+
+        // Draw that many cards rides as the sibling.
+        let draw = def.sub_ability.as_ref().expect("expected Draw sibling");
+        assert!(matches!(
+            &*draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                ..
+            }
         ));
     }
 

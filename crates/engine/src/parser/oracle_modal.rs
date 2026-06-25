@@ -1503,6 +1503,24 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
     split_short_label_prefix(line, 4).map(|(name, rest)| (name.to_lowercase(), rest.to_string()))
 }
 
+/// CR 207.2c: flavor words (Universes Beyond) are italic ability-word prefixes
+/// with no rules meaning; unlike the in-game ability words enumerated by CR
+/// 207.2c (which are <=2 words), flavor-word names routinely run 5-6 words
+/// ("Woman Who Walked the Earth", "Deal with the Black Guardian"). At the 4-word
+/// cap these never strip, so the trigger body behind them never reaches the
+/// trigger parser. Only the Priority-6b trigger-dispatch path (oracle.rs:2837)
+/// uses this wider cap: its activated branch is gated on
+/// `ability_word_to_condition` (known ability words, <=2 words) and its trigger
+/// branch re-validates via `has_trigger_prefix`, so an over-long strip that
+/// yields no trigger body is rejected and the original line falls through. All
+/// other consumers keep the 4-word `strip_ability_word*` cap.
+const FLAVOR_WORD_MAX_WORDS: usize = 6;
+
+pub(super) fn strip_flavor_word_with_name(line: &str) -> Option<(String, String)> {
+    split_short_label_prefix(line, FLAVOR_WORD_MAX_WORDS)
+        .map(|(name, rest)| (name.to_lowercase(), rest.to_string()))
+}
+
 /// Known ability-word names. Per CR 207.2c, ability words are italicized flavor
 /// markers that tie together cards with similar functionality but have no rules
 /// meaning — their body text must parse through ordinary trigger/effect/static
@@ -1757,6 +1775,56 @@ mod tests {
         // indicates a different pattern (e.g. a keyword with inline reminder).
         let raw = "Increment (reminder) extra text";
         assert_eq!(extract_ability_word_reminder_body(raw), None);
+    }
+
+    #[test]
+    fn strip_flavor_word_strips_five_and_six_word_prefixes() {
+        // CR 207.2c: Universes-Beyond flavor words run 5-6 words and never strip
+        // at the 4-word ability-word cap. The wider cap (used only by the
+        // Priority-6b trigger dispatch) recovers the trigger body behind them.
+        let (name, body) =
+            strip_flavor_word_with_name("Woman Who Walked the Earth — When ~ enters, investigate.")
+                .expect("5-word flavor prefix must strip at the wider cap");
+        assert_eq!(name, "woman who walked the earth");
+        assert_eq!(body, "When ~ enters, investigate.");
+
+        let (name, body) = strip_flavor_word_with_name(
+            "Deal with the Black Guardian — When ~ enters, you may have an opponent gain control of it.",
+        )
+        .expect("5-word flavor prefix must strip");
+        assert_eq!(name, "deal with the black guardian");
+        assert_eq!(
+            body,
+            "When ~ enters, you may have an opponent gain control of it."
+        );
+
+        // A genuine 6-word prefix also strips.
+        let (_, body) =
+            strip_flavor_word_with_name("One Two Three Four Five Six — When ~ dies, draw a card.")
+                .expect("6-word prefix must strip");
+        assert_eq!(body, "When ~ dies, draw a card.");
+    }
+
+    #[test]
+    fn strip_ability_word_keeps_four_word_cap_for_flavor_lengths() {
+        // The narrow ability-word helpers stay at the 4-word cap: a 5-word
+        // prefix must NOT strip through them (only the dedicated flavor helper
+        // and only on the trigger-dispatch path widens).
+        assert_eq!(
+            strip_ability_word_with_name(
+                "Woman Who Walked the Earth — When ~ enters, investigate."
+            ),
+            None,
+        );
+        assert_eq!(
+            strip_ability_word("Woman Who Walked the Earth — When ~ enters, investigate."),
+            None,
+        );
+        // A 6-word prefix is beyond even the flavor cap and must not strip.
+        assert_eq!(
+            strip_flavor_word_with_name("One Two Three Four Five Six Seven — When ~ dies, draw."),
+            None,
+        );
     }
 
     fn bare_target_mode(body: &str) -> ModeAst {

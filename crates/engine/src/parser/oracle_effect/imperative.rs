@@ -1356,11 +1356,22 @@ pub(super) fn parse_targeted_action_ast(
             min_count: 0,
         });
     }
-    // Simple targeted verbs: tap, untap — parse target after verb prefix
-    if let Some((verb, rest)) = nom_on_lower(text, lower, |input| {
-        alt((value("tap", tag("tap ")), value("untap", tag("untap ")))).parse(input)
+    // Simple targeted verbs: tap, untap — parse target after verb prefix.
+    // CR 701.26a/b: dispatch on the typed `TapStateChange` marker produced by the
+    // combinator (not a stringly-typed verb), so the AST split is exhaustive.
+    if let Some((state, rest)) = nom_on_lower(text, lower, |input| {
+        alt((
+            value(TapStateChange::Tap, tag("tap ")),
+            value(TapStateChange::Untap, tag("untap ")),
+        ))
+        .parse(input)
     }) {
-        let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
+        // CR 115.1d + CR 701.26a: Preserve the "up to N target" count instead of
+        // discarding it — "tap up to that many target creatures" (Nyssa of Traken)
+        // carries a dynamic `EventContextAmount` count that the lowering threads
+        // onto `ParsedEffectClause.multi_target` so the right number of optional
+        // target slots is surfaced.
+        let (target_text, multi_target) = super::strip_optional_target_prefix(strip_article(rest));
         // CR 608.2k: A bare object pronoun ("untaps it") in a subject-bearing
         // clause is an anaphor, not a parent-target chain. Route it through
         // `resolve_it_pronoun` — identical to the sacrifice/counter clauses in
@@ -1379,11 +1390,16 @@ pub(super) fn parse_targeted_action_ast(
             assert_no_compound_remainder(_rem, text);
             target
         };
-        return match verb {
-            "tap" => Some(TargetedImperativeAst::Tap { target }),
-            "untap" => Some(TargetedImperativeAst::Untap { target }),
-            _ => unreachable!(),
-        };
+        return Some(match state {
+            TapStateChange::Tap => TargetedImperativeAst::Tap {
+                target,
+                multi_target,
+            },
+            TapStateChange::Untap => TargetedImperativeAst::Untap {
+                target,
+                multi_target,
+            },
+        });
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("goad ")).parse(input))
     {
@@ -1850,12 +1866,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     match ast {
         // CR 701.26a/b: map the parser AST tap/untap variants onto the
         // parameterized `Effect::SetTapState` (scope = Single/All, state = Tap/Untap).
-        TargetedImperativeAst::Tap { target } => Effect::SetTapState {
+        // CR 701.26a: The variable target count (`multi_target`) is carried on the
+        // CLAUSE, not the Effect, so it is threaded in `lower_imperative_family_ast`
+        // (the bare-Effect path here cannot hold it).
+        TargetedImperativeAst::Tap { target, .. } => Effect::SetTapState {
             target,
             scope: EffectScope::Single,
             state: TapStateChange::Tap,
         },
-        TargetedImperativeAst::Untap { target } => Effect::SetTapState {
+        TargetedImperativeAst::Untap { target, .. } => Effect::SetTapState {
             target,
             scope: EffectScope::Single,
             state: TapStateChange::Untap,
@@ -9307,6 +9326,30 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             extra_filters,
         ),
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
+        // CR 115.1d + CR 701.26a/b: "tap/untap up to N target creatures" (Nyssa of
+        // Traken: "tap up to that many target creatures"). The bare-Effect lowering
+        // (`lower_targeted_action_ast`) cannot carry the variable target count, so
+        // a Tap/Untap AST that captured a `multi_target` is lowered here and the
+        // count is threaded onto the clause — mirroring the `Support` arm below.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            ast @ (TargetedImperativeAst::Tap {
+                multi_target: Some(_),
+                ..
+            }
+            | TargetedImperativeAst::Untap {
+                multi_target: Some(_),
+                ..
+            }),
+        )) => {
+            let multi_target = match &ast {
+                TargetedImperativeAst::Tap { multi_target, .. }
+                | TargetedImperativeAst::Untap { multi_target, .. } => multi_target.clone(),
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_targeted_action_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
         // On permanents (is_other=true): "up to N other target creatures"
         // On instants/sorceries (is_other=false): "up to N target creatures"
