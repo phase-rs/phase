@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 
-use engine::game::combat::{can_block_pair, AttackTarget};
+use engine::game::combat::{
+    can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
+    collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+};
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
+use engine::types::ability::StaticDefinition;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -15,6 +19,43 @@ use crate::config::AiProfile;
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
 use crate::projection::{project_to, Projection, ProjectionHorizon};
+
+/// Block-legality static slices collected once per combat decision and threaded
+/// through the per-pair `can_block_pair` checks. Hoisting these out of the
+/// O(battlefield²) attacker/blocker loops avoids re-walking the battlefield's
+/// functioning statics for every candidate pair.
+pub(crate) struct BlockLegalitySlices {
+    blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
+}
+
+impl BlockLegalitySlices {
+    pub(crate) fn collect(state: &GameState) -> Self {
+        Self {
+            blocker_restriction: collect_blocker_restriction_statics(state),
+            block_restriction: collect_block_restriction_statics(state),
+            blocker_allowed: collect_blocker_allowed_statics(state),
+        }
+    }
+
+    /// CR 509.1a–b: per-pair block legality against the precomputed slices.
+    pub(crate) fn can_block_pair(
+        &self,
+        state: &GameState,
+        blocker_id: ObjectId,
+        attacker_id: ObjectId,
+    ) -> bool {
+        can_block_pair_with_precomputed(
+            state,
+            blocker_id,
+            attacker_id,
+            &self.blocker_restriction,
+            &self.block_restriction,
+            &self.blocker_allowed,
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CombatObjective {
@@ -164,6 +205,12 @@ pub fn choose_attackers_with_targets_with_profile(
         profile,
     );
 
+    // Hoist the block-legality static slices once for the whole candidate sweep —
+    // `defender_best_block` runs an O(blockers) `can_block_pair` filter per
+    // candidate, so collecting these per call would re-walk the battlefield's
+    // statics O(candidates × blockers) times.
+    let slices = BlockLegalitySlices::collect(state);
+
     // Determine which creatures should attack (same logic as before)
     let mut attacking_ids = Vec::new();
     for &id in &candidates {
@@ -190,7 +237,7 @@ pub fn choose_attackers_with_targets_with_profile(
         // the defender would never offer — it instead kills the attacker for free
         // with a first-striker or a larger body (gamestate1: a 1/1 animated land
         // sent into a 2/1 first strike).
-        match defender_best_block(state, id, my_value, &opponent_blockers) {
+        match defender_best_block(state, id, my_value, &opponent_blockers, &slices) {
             None => attacking_ids.push(id),
             Some(DefenderBlock {
                 blocker_value,
@@ -1304,6 +1351,9 @@ fn crackback_damage(
     // Without a projection, fall back to current-state filtering.
     let projected_state = projection.map(|p| &p.state);
     let attacker_source = projected_state.unwrap_or(state);
+    // Hoist block-legality statics once for the greedy O(attackers × blockers)
+    // assignment sweep below. `attacker_source` is the only state queried.
+    let slices = BlockLegalitySlices::collect(attacker_source);
     let mut opp_attackers: Vec<(ObjectId, i32)> = opponents
         .iter()
         .flat_map(|&opp| {
@@ -1348,7 +1398,7 @@ fn crackback_damage(
             if used[i] {
                 continue;
             }
-            if !can_block_pair(attacker_source, bid, opp_id) {
+            if !slices.can_block_pair(attacker_source, bid, opp_id) {
                 continue; // skip — still available for other attackers
             }
             used[i] = true;
@@ -1627,11 +1677,12 @@ fn defender_best_block(
     attacker_id: ObjectId,
     attacker_value: f64,
     blockers: &[ObjectId],
+    slices: &BlockLegalitySlices,
 ) -> Option<DefenderBlock> {
     let attacker = state.objects.get(&attacker_id)?;
     blockers
         .iter()
-        .filter(|&&bid| can_block_pair(state, bid, attacker_id))
+        .filter(|&&bid| slices.can_block_pair(state, bid, attacker_id))
         .filter_map(|&bid| {
             let blocker = state.objects.get(&bid)?;
             let blocker_value = evaluate_creature(state, bid);
@@ -2014,6 +2065,35 @@ mod tests {
         assert!(
             !attackers.contains(&small),
             "Should skip 1/1 into 5/5 when life is equal"
+        );
+    }
+
+    /// A 1/1 that would normally NOT attack into a 5/5 blocker is still chosen
+    /// when it carries an unblockable static — the `is_unblockable` short-circuit
+    /// fires before `defender_best_block`. This guards that the hoisted
+    /// `BlockLegalitySlices` path leaves the unblockable-attacker decision
+    /// byte-for-byte identical to the pre-hoist behavior. Reverted-fix
+    /// discrimination: if the slices threading broke the unblockable detection or
+    /// the block sweep, this attacker would be (wrongly) skipped like the plain
+    /// 1/1 in `skips_unprofitable_attack`.
+    #[test]
+    fn unblockable_attacker_still_chosen_with_static_restriction() {
+        use engine::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let small = add_creature(&mut state, PlayerId(0), "Squirrel", 1, 1, vec![]);
+        state
+            .objects
+            .get_mut(&small)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlocked));
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            attackers.contains(&small),
+            "an unblockable 1/1 must still attack into a 5/5 blocker"
         );
     }
 
