@@ -3767,7 +3767,7 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantAttack
             | StaticMode::CantAttackOrBlock
             | StaticMode::CantCrew
-            // CR 702.122c: a granted crew/saddle/station power modifier (e.g. Stoic
+            // CR 702.122a / CR 702.171a / CR 702.184c: a granted crew/saddle/station power modifier (e.g. Stoic
             // Star-Captain's "Each creature you control crews … as though its power
             // were 2 greater") must propagate onto the affected creatures so the
             // crew/saddle power summation observes it via active_static_definitions.
@@ -3857,7 +3857,7 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
             vec![StaticMode::Other("CantTransform".to_string())],
             tag("transform"),
         ),
-        // CR 702.122c: "crew [Vehicles]".
+        // CR 702.122d: "crew [Vehicles]".
         value(
             vec![StaticMode::CantCrew],
             (tag("crew"), opt(tag(" vehicles"))),

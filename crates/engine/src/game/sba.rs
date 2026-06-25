@@ -59,6 +59,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
+        let iteration_events_start = events.len();
 
         // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
         // condition met in this single SBA check forms ONE simultaneous event.
@@ -188,6 +189,16 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // Gated on an Archenemy game.
         if state.archenemy.is_some() {
             crate::game::archenemy::check_scheme_abandon_sba(state, events, &mut any_performed);
+        }
+
+        // CR 603.10a + CR 704.3: every SBA performed in this iteration is one
+        // simultaneous event. Sub-checks (704.5f zero toughness vs 704.5g lethal
+        // destroy, legend rule, etc.) each stamp their own subset, but a combat
+        // trade can kill one creature via counters and another via damage in the
+        // same pass — stamp the full battlefield-departure batch here so co-dying
+        // observers (Rot Wolf, Blood Artist) still trigger for each other.
+        if any_performed && events.len() > iteration_events_start {
+            zones::stamp_simultaneous_from_slice(state, &mut events[iteration_events_start..]);
         }
 
         if !any_performed {

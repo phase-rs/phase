@@ -151,7 +151,17 @@ export function CardChoiceModal() {
       );
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
-      return <ChooseFromZoneModal data={waitingFor.data} />;
+      // A "for each player, choose ..." iteration (Breach the Multiverse) emits
+      // this WaitingFor once per player's zone in sequence. Keying on the prompt
+      // identity (player + source + card set) remounts the modal between steps so
+      // its internal `selectedSet` resets — otherwise a stale prior pick survives
+      // and the next confirm dispatches a card not in the new candidate set.
+      return (
+        <ChooseFromZoneModal
+          key={`${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`}
+          data={waitingFor.data}
+        />
+      );
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;

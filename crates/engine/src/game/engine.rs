@@ -6335,7 +6335,7 @@ fn handle_crew_activation(
         ));
     }
 
-    // CR 702.122c: Exclude creatures with "can't crew Vehicles".
+    // CR 702.122d: Exclude creatures with "can't crew Vehicles".
     let eligible_creatures: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -6358,7 +6358,7 @@ fn handle_crew_activation(
         .collect();
 
     // Validate total power of all eligible creatures can meet the threshold.
-    // CR 702.122c: a creature's contribution may be modified ("as though its
+    // CR 702.122a: a creature's contribution may be modified ("as though its
     // power were N greater" / "using its toughness rather than its power").
     let total_power: i32 = eligible_creatures
         .iter()
@@ -6472,7 +6472,7 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        // CR 702.122c: apply any crew power-contribution modifier.
+        // CR 702.122a: apply any crew power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -6647,8 +6647,8 @@ fn handle_station_announcement(
 
     // CR 702.184a + CR 113.7a: Snapshot the creature's power BEFORE tapping —
     // the counter count is determined at cost-payment time and survives the
-    // creature leaving the battlefield before resolution. CR 702.184c +
-    // CR 702.122c: static abilities may modify the contributed value ("stations
+    // creature leaving the battlefield before resolution. CR 702.184c:
+    // static abilities may modify the contributed value ("stations
     // permanents as though its power were N greater"); the helper applies any
     // such modifier and otherwise reads `power`, the default per the rule.
     let snapshot_power = super::static_abilities::object_crew_power_contribution(
@@ -6748,7 +6748,7 @@ fn handle_saddle_activation(
         })
         .collect();
 
-    // CR 702.171a + CR 702.122c: a creature's saddle contribution may be modified.
+    // CR 702.171a: a creature's saddle contribution may be modified.
     let total_power: i32 = eligible_creatures
         .iter()
         .map(|&id| {
@@ -6824,7 +6824,7 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        // CR 702.122c: apply any saddle power-contribution modifier.
+        // CR 702.171a: apply any saddle power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -22059,7 +22059,7 @@ mod crew_tests {
         assert!(result.is_err());
     }
 
-    /// CR 702.122c: a creature with "crews Vehicles as though its power were N
+    /// CR 702.122a: a creature with "crews Vehicles as though its power were N
     /// greater" (Reckoner Bankbuster) contributes its modified power, letting an
     /// otherwise-insufficient creature pay the crew cost alone.
     #[test]
@@ -22099,7 +22099,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: regression — the legal-action enumerator must measure crew
+    /// CR 702.122a: regression — the legal-action enumerator must measure crew
     /// contribution through `object_crew_power_contribution`, exactly like the
     /// activation gate and announcement validator. A Pilot-style creature whose
     /// raw power is below the crew cost but whose adjusted power meets it must
@@ -22143,7 +22143,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
+    /// CR 702.122a: "using its toughness rather than its power" (Giant Ox)
     /// substitutes toughness for power, and the modifier applies only to the
     /// named keyword actions (crew-only here, not saddle).
     #[test]
@@ -22967,7 +22967,7 @@ mod keyword_action_stack_tests {
     //!     paid even if the ability is countered);
     //!   - a priority window opens between cost payment and resolution;
     //!   - triggers keyed off "becomes crewed/saddled/stationed/equipped"
-    //!     fire at resolution time, not at cost payment (CR 702.122d,
+    //!     fire at resolution time, not at cost payment (CR 702.122e,
     //!     CR 702.171b, CR 702.184a, CR 702.6a).
     //!
     //! Counterspells are simulated by popping the top stack entry directly
@@ -23476,7 +23476,7 @@ mod keyword_action_stack_tests {
 
     // --- Trigger timing -----------------------------------------------------
     //
-    // CR 702.122d / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
+    // CR 702.122e / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
     // saddled / stationed" resolves when the keyword ability resolves from the
     // stack — not when its cost is paid. The per-keyword matcher keys off the
     // resolution-time event (`VehicleCrewed` / `Saddled` / `Stationed`), so
@@ -23520,7 +23520,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             !fires_at_announce,
-            "CR 702.122d: Crewed trigger must not fire at announcement"
+            "CR 702.122e: Crewed trigger must not fire at announcement"
         );
 
         apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
@@ -23531,7 +23531,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             fires_at_resolve,
-            "CR 702.122d: Crewed trigger fires when the Crew ability resolves"
+            "CR 702.122e: Crewed trigger fires when the Crew ability resolves"
         );
     }
 

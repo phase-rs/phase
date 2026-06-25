@@ -33782,6 +33782,35 @@ mod tests {
         );
     }
 
+    /// Clause-level unit test for the distributed-damage parser pattern
+    /// ("deals N damage divided as you choose among one or two targets").
+    /// Covers `try_parse_distribute_damage` in isolation; the dispatch-level
+    /// regression for issue #4266 (preserve distribute/multi_target through
+    /// `dispatch_line_nom`) lives in `oracle_dispatch::tests`.
+    #[test]
+    fn deal_damage_divided_fixed_among_one_or_two_targets_forked_bolt() {
+        let clause = parse_effect_clause(
+            "~ deals 2 damage divided as you choose among one or two targets.",
+            &mut ParseContext::default(),
+        );
+        // CR 115.1d: one or two targets (min 1, max 2).
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
+        // CR 601.2d: damage divided as the controller chooses.
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    damage_source: None,
+                    ..
+                }
+            ),
+            "Expected divided DealDamage(2), got {:?}",
+            clause.effect
+        );
+    }
+
     #[test]
     fn exile_top_of_your_library_parses_as_exile_top() {
         let effect = parse_effect("Exile the top card of your library");
@@ -36995,7 +37024,7 @@ mod tests {
         );
     }
 
-    /// CR 701.50e + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
+    /// CR 701.50d + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
     /// bind X to creatures that died this turn, not hardcode 1.
     #[test]
     fn connive_where_x_is_creatures_died_this_turn() {

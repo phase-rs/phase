@@ -2385,7 +2385,7 @@ pub(super) fn handle_resolution_choice(
             };
 
             effects::connive::add_connive_counters(state, conniver_id, nonland_count, events);
-            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
             // id (LKI if it left the battlefield) so "whenever a creature you
             // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {

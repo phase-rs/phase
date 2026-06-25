@@ -9043,7 +9043,7 @@ pub enum Effect {
     },
     /// CR 701.50a: Target creature connives (draw a card, then discard a card;
     /// if a nonland card is discarded, put a +1/+1 counter on it).
-    /// CR 701.50e: "Connive N" draws N, discards N, counters per nonland.
+    /// CR 701.50d: "Connive N" draws N, discards N, counters per nonland.
     /// `count` is a `QuantityExpr` so dynamic bindings (e.g. Spymaster's Vault's
     /// "connives X, where X is the number of creatures that died this turn") resolve
     /// at activation time via `resolve_quantity_with_targets`.
@@ -12898,7 +12898,8 @@ pub enum AbilityTag {
     Cycling,
     /// CR 702.165a: ability originated from a Backup keyword definition.
     Backup,
-    /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
+    /// CR 702.193a: This ability originated from a Power-up keyword definition (a
+    /// keyword-labeled activated ability, like Exhaust, per CR 602.5b + CR 602.1).
     PowerUp,
     /// CR 702.6a: This ability originated from an Equip keyword definition.
     Equip,

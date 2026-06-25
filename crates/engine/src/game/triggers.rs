@@ -12690,6 +12690,177 @@ pub mod tests {
         );
     }
 
+    /// Issue #1996: Rot Wolf — infect damage kills via -1/-1 counters (704.5f),
+    /// not the lethal-damage destroy path (704.5g). The dies trigger must still
+    /// collect when the damaged creature is put into the graveyard.
+    #[test]
+    fn rot_wolf_infect_damage_death_trigger_end_to_end() {
+        use crate::game::sba;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::TriggerIndex;
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        const ROT_WOLF_TRIGGER: &str =
+            "Whenever a creature dealt damage by ~ this turn dies, you may draw a card.";
+
+        let mut scenario = GameScenario::new();
+        let rot_wolf_id = scenario.add_creature(P0, "Rot Wolf", 2, 2).id();
+        let victim_id = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rot_wolf_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Infect);
+
+        let death_trigger = parse_trigger_line(ROT_WOLF_TRIGGER, "Rot Wolf");
+        assert_eq!(death_trigger.mode, TriggerMode::ChangesZone);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rot_wolf_id)
+            .unwrap()
+            .trigger_definitions
+            .push(death_trigger);
+
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+
+        runner
+            .state_mut()
+            .damage_dealt_this_turn
+            .push_back(DamageRecord {
+                source_id: rot_wolf_id,
+                source_controller: P0,
+                target: TargetRef::Object(victim_id),
+                target_controller: P1,
+                amount: 2,
+                is_combat: true,
+                ..Default::default()
+            });
+
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+
+        let mut death_events = Vec::new();
+        sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+
+        assert!(
+            death_events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
+            "704.5f death must emit ZoneChanged, got {death_events:?}"
+        );
+        assert!(
+            !death_events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { .. })),
+            "704.5f death must not emit CreatureDestroyed"
+        );
+
+        let pending = collect_pending_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !pending.is_empty(),
+            "Rot Wolf draw trigger must collect pending entries"
+        );
+        process_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !runner.state().stack.is_empty(),
+            "Rot Wolf trigger must reach the stack"
+        );
+    }
+
+    /// Issue #1996: combat trade — Rot Wolf and the blocked creature die in the
+    /// same SBA pass. The draw trigger must still fire.
+    #[test]
+    fn rot_wolf_infect_trade_death_trigger_end_to_end() {
+        use crate::game::sba;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::TriggerIndex;
+        use crate::types::keywords::Keyword;
+
+        const ROT_WOLF_TRIGGER: &str =
+            "Whenever a creature dealt damage by ~ this turn dies, you may draw a card.";
+
+        let mut scenario = GameScenario::new();
+        let rot_wolf_id = scenario.add_creature(P0, "Rot Wolf", 2, 2).id();
+        let victim_id = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rot_wolf_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Infect);
+
+        let death_trigger = parse_trigger_line(ROT_WOLF_TRIGGER, "Rot Wolf");
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rot_wolf_id)
+            .unwrap()
+            .trigger_definitions
+            .push(death_trigger);
+
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+
+        runner
+            .state_mut()
+            .damage_dealt_this_turn
+            .push_back(DamageRecord {
+                source_id: rot_wolf_id,
+                source_controller: P0,
+                target: TargetRef::Object(victim_id),
+                target_controller: P1,
+                amount: 2,
+                is_combat: true,
+                ..Default::default()
+            });
+
+        // Trade: infect kills the blocker; blocker damage kills Rot Wolf.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rot_wolf_id)
+            .unwrap()
+            .damage_marked = 2;
+
+        let mut death_events = Vec::new();
+        sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+
+        let pending = collect_pending_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !pending.is_empty(),
+            "Rot Wolf draw trigger must collect when both creatures die together"
+        );
+        process_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !runner.state().stack.is_empty(),
+            "Rot Wolf trigger must reach the stack after a combat trade"
+        );
+    }
+
     #[test]
     fn test_no_monarch_trigger_condition() {
         // CR 725.1: NoMonarch is true only when no player holds the monarch.
