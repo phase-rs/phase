@@ -713,6 +713,7 @@
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
     "skip": "Ignorer",
+    "opponentChoice": "(au choix de l'adversaire)",
     "chooseNewTarget": "Choisissez la nouvelle cible du sort",
     "chooseNewTargetForSpell": "Choisissez une nouvelle cible pour {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",

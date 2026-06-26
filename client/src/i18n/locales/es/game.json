@@ -713,6 +713,7 @@
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
     "skip": "Omitir",
+    "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
     "chooseNewTargetForSpell": "Elige un nuevo objetivo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",

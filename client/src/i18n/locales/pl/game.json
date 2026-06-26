@@ -715,6 +715,7 @@
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",
+    "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
     "sacrificeExact_other": "Sacrifice {{count}} permanents",
     "sacrificeUpTo_one": "Sacrifice up to {{count}} permanent",
