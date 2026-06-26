@@ -58,9 +58,21 @@ describe("DeckBuilderPage format routing", () => {
     expect(capturedProps?.format).toBe("Standard");
   });
 
+  it("accepts Planechase as a deck-builder format", () => {
+    renderDeckBuilderPage("/deck-builder?format=planechase");
+
+    expect(capturedProps?.format).toBe("Planechase");
+  });
+
   it("falls back when the URL browse legality filter is Two-Headed Giant", () => {
     renderDeckBuilderPage("/deck-builder?browseFormat=twoheadedgiant");
 
     expect(capturedProps?.searchFilters.browseFormat).toBe("Standard");
+  });
+
+  it("accepts Planechase as a browse legality filter", () => {
+    renderDeckBuilderPage("/deck-builder?browseFormat=planechase");
+
+    expect(capturedProps?.searchFilters.browseFormat).toBe("Planechase");
   });
 });

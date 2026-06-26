@@ -20,7 +20,7 @@ use engine::ai_support::{
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_views;
-use engine::game::validate_name_deck_for_format;
+use engine::game::validate_name_deck_for_format_full;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -55,7 +55,7 @@ use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
-    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    LOBBY_MIN_SUPPORTED_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
@@ -598,6 +598,13 @@ fn classify_hello_gate(
         (false, _) => HelloGateOutcome::RejectHandshakeRequired,
         (true, ClientMessage::ClientHello { .. }) => HelloGateOutcome::IgnoreRedundantHello,
         (true, _) => HelloGateOutcome::PassThrough,
+    }
+}
+
+fn supported_protocol_range(mode: ServerMode) -> std::ops::RangeInclusive<u32> {
+    match mode {
+        ServerMode::Full => MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        ServerMode::LobbyOnly => LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
     }
 }
 
@@ -2436,6 +2443,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            planar_deck: deck.planar_deck,
             attraction_deck: deck.attraction_deck,
             contraption_deck: deck.contraption_deck,
             sticker_sheets: deck.sticker_sheets,
@@ -2662,7 +2670,7 @@ async fn handle_client_message(
     match classify_hello_gate(
         identity.client_hello.is_some(),
         &client_msg,
-        MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        supported_protocol_range(mode),
     ) {
         HelloGateOutcome::Accept(info) => {
             info!(
@@ -3565,13 +3573,27 @@ async fn handle_client_message(
 
             // Validate player deck against the selected format
             if let Some(ref fc) = format_config {
-                if let Err(reasons) = validate_name_deck_for_format(
+                if fc.format == engine::types::format::GameFormat::Planechase
+                    && !ai_seats.is_empty()
+                {
+                    let msg = ServerMessage::Error {
+                        message: "Planechase does not support AI seats yet".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+                if let Err(reasons) = validate_name_deck_for_format_full(
                     db,
                     &deck.main_deck,
                     &deck.sideboard,
                     &deck.commander,
+                    &deck.planar_deck,
+                    &deck.signature_spell,
                     fc.format,
                     Some(match_config.match_type),
+                    usize::from(pc),
                 ) {
                     let msg = ServerMessage::Error {
                         message: format!(
@@ -3613,13 +3635,16 @@ async fn handle_client_message(
                     },
                 };
                 if let Some(ref fc) = format_config {
-                    if let Err(reasons) = validate_name_deck_for_format(
+                    if let Err(reasons) = validate_name_deck_for_format_full(
                         db,
                         &ai_deck_data.main_deck,
                         &ai_deck_data.sideboard,
                         &ai_deck_data.commander,
+                        &ai_deck_data.planar_deck,
+                        &ai_deck_data.signature_spell,
                         fc.format,
                         Some(match_config.match_type),
+                        usize::from(pc),
                     ) {
                         let msg = ServerMessage::Error {
                             message: format!(
@@ -6232,30 +6257,44 @@ mod handshake_tests {
     }
 
     #[test]
-    fn accepts_min_supported_protocol_below_current() {
-        // Range hello gate: a client one version behind (e.g., release after
-        // the server has rolled forward to preview) must still be admitted to
-        // the lobby. Cross-version game interop is gated separately at join
-        // boundaries (per-game protocol-version filtering, follow-up work).
-        // `MIN_SUPPORTED_PROTOCOL < PROTOCOL_VERSION` is true by construction
-        // (MIN derives from PROTOCOL_VERSION.saturating_sub(1)) whenever
-        // PROTOCOL_VERSION > 0; no runtime assert needed.
+    fn rejects_previous_protocol_for_breaking_planechase_release() {
+        let previous = PROTOCOL_VERSION.saturating_sub(1);
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {
                 client_version: "0.1.10".into(),
                 build_commit: "old1234".into(),
-                protocol_version: MIN_SUPPORTED_PROTOCOL,
+                protocol_version: previous,
             },
             MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: previous,
+                server: PROTOCOL_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_previous_protocol_for_lobby_only_range() {
+        let previous = PROTOCOL_VERSION.saturating_sub(1);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.10".into(),
+                build_commit: "old1234".into(),
+                protocol_version: previous,
+            },
+            LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
     }
 
     #[test]
     fn rejects_client_hello_below_min_supported() {
-        // Two versions behind is outside the supported window; reject.
-        let too_old = MIN_SUPPORTED_PROTOCOL.saturating_sub(1);
+        let too_old = PROTOCOL_VERSION.saturating_sub(1);
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {

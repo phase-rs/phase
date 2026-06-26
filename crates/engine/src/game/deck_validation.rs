@@ -20,6 +20,8 @@ pub struct DeckCompatibilityRequest {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    #[serde(default)]
+    pub planar_deck: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker
     /// formats. Included in `all_deck_cards` so copy-count and identity checks are
     /// accurate regardless of which validation path is active.
@@ -29,8 +31,14 @@ pub struct DeckCompatibilityRequest {
     pub selected_format: Option<GameFormat>,
     #[serde(default)]
     pub selected_match_type: Option<MatchType>,
+    #[serde(default = "default_player_count")]
+    pub player_count: usize,
     #[serde(default)]
     pub summary_only: bool,
+}
+
+fn default_player_count() -> usize {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,13 +255,40 @@ pub fn validate_name_deck_for_format_with_sig(
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
 ) -> Result<(), Vec<String>> {
+    validate_name_deck_for_format_full(
+        db,
+        main_deck,
+        sideboard,
+        commander,
+        &[],
+        signature_spell,
+        selected_format,
+        selected_match_type,
+        default_player_count(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn validate_name_deck_for_format_full(
+    db: &CardDatabase,
+    main_deck: &[String],
+    sideboard: &[String],
+    commander: &[String],
+    planar_deck: &[String],
+    signature_spell: &[String],
+    selected_format: GameFormat,
+    selected_match_type: Option<MatchType>,
+    player_count: usize,
+) -> Result<(), Vec<String>> {
     let request = DeckCompatibilityRequest {
         main_deck: main_deck.to_vec(),
         sideboard: sideboard.to_vec(),
         commander: commander.to_vec(),
+        planar_deck: planar_deck.to_vec(),
         signature_spell: signature_spell.to_vec(),
         selected_format: Some(selected_format),
         selected_match_type,
+        player_count,
         summary_only: false,
     };
     validate_deck_for_format(db, &request)
@@ -372,6 +407,114 @@ fn evaluate_constructed(
             "More than 1 copy of a restricted card",
             &restricted_violations,
             6,
+        ));
+    }
+
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
+}
+
+fn evaluate_planechase(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    if !(2..=4).contains(&request.player_count) {
+        reasons.push(format!(
+            "Planechase requires 2 to 4 players (found {})",
+            request.player_count
+        ));
+    }
+    if !request.commander.is_empty() {
+        reasons.push("Planechase decks do not use a commander slot".to_string());
+    }
+    if request.main_deck.len() < 60 {
+        reasons.push(format!(
+            "Main deck has {} cards (minimum 60)",
+            request.main_deck.len()
+        ));
+    }
+
+    let counts = combined_copy_counts(db, request);
+    let over_limit = copy_limit_violations(db, &counts, 4);
+    if !over_limit.is_empty() {
+        reasons.push(summarize_cards(
+            "More than 4 copies (main + sideboard combined)",
+            &over_limit,
+            6,
+        ));
+    }
+
+    if request.planar_deck.is_empty() {
+        return CompatibilityCheck {
+            compatible: reasons.is_empty(),
+            reasons,
+        };
+    }
+
+    // CR 901.15a: a shared planar deck must contain at least 40 cards, or at
+    // least ten cards per player if there are fewer than four players.
+    let min_planar_cards = 40usize.min(request.player_count.saturating_mul(10));
+    if request.planar_deck.len() < min_planar_cards {
+        reasons.push(format!(
+            "Planar deck has {} cards (minimum {min_planar_cards})",
+            request.planar_deck.len()
+        ));
+    }
+
+    let mut seen_names = HashSet::new();
+    let mut duplicates = BTreeSet::new();
+    let mut non_planar = BTreeSet::new();
+    let mut planes = 0usize;
+    let mut phenomena = 0usize;
+    for name in &request.planar_deck {
+        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+            continue;
+        };
+        let canonical = face.name.to_lowercase();
+        if !seen_names.insert(canonical) {
+            duplicates.insert(face.name.clone());
+        }
+        let is_plane = face.card_type.core_types.contains(&CoreType::Plane);
+        let is_phenomenon = face.card_type.core_types.contains(&CoreType::Phenomenon);
+        if is_plane {
+            planes += 1;
+        }
+        if is_phenomenon {
+            phenomena += 1;
+        }
+        if !is_plane && !is_phenomenon {
+            non_planar.insert(face.name.clone());
+        }
+    }
+    if !duplicates.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck singleton violations",
+            &duplicates,
+            6,
+        ));
+    }
+    if !non_planar.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck cards must be Plane or Phenomenon",
+            &non_planar,
+            6,
+        ));
+    }
+    if planes == 0 {
+        reasons.push("Planar deck must contain at least one Plane".to_string());
+    }
+    let max_phenomena = request.player_count.saturating_mul(2);
+    if phenomena > max_phenomena {
+        reasons.push(format!(
+            "Planar deck has {phenomena} phenomena (maximum {max_phenomena})"
         ));
     }
 
@@ -1444,6 +1587,18 @@ fn quick_oathbreaker_check(
     }
 }
 
+fn quick_planechase_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> QuickCheckResult {
+    let unknown_cards = collect_unknown_cards(db, request);
+    let check = evaluate_planechase(db, request, &unknown_cards);
+    QuickCheckResult {
+        reason: check.reasons.into_iter().next(),
+        unknown_cards,
+    }
+}
+
 fn evaluate_selected_format_summary(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1497,6 +1652,7 @@ fn evaluate_selected_format_summary(
         GameFormat::TinyLeaders => quick_tiny_leaders_check(db, request),
         GameFormat::Oathbreaker => quick_oathbreaker_check(db, request),
         GameFormat::Momir => quick_momir_check(db, request),
+        GameFormat::Planechase => quick_planechase_check(db, request),
         GameFormat::Brawl | GameFormat::HistoricBrawl => quick_brawl_check(
             db,
             request,
@@ -1871,6 +2027,13 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
+        GameFormat::Planechase => {
+            let check = evaluate_planechase(db, request, unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
     };
 
@@ -1975,6 +2138,11 @@ fn collect_unknown_cards(
 ) -> BTreeSet<String> {
     let mut unknown = BTreeSet::new();
     for name in all_deck_cards(request) {
+        if !card_is_known(db, name) {
+            unknown.insert(name.to_string());
+        }
+    }
+    for name in &request.planar_deck {
         if !card_is_known(db, name) {
             unknown.insert(name.to_string());
         }
@@ -2390,6 +2558,7 @@ mod tests {
     use super::*;
 
     use crate::types::keywords::PartnerType;
+    use serde_json::{Map, Value};
 
     fn test_db_json() -> String {
         serde_json::json!({
@@ -2807,6 +2976,198 @@ mod tests {
         deck
     }
 
+    fn planechase_card_json(name: &str, supertypes: &[&str], core_types: &[&str]) -> Value {
+        serde_json::json!({
+            "name": name,
+            "mana_cost": { "type": "NoCost" },
+            "card_type": {
+                "supertypes": supertypes,
+                "core_types": core_types,
+                "subtypes": []
+            },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null,
+            "legalities": {
+                "standard": "legal",
+                "commander": "legal"
+            }
+        })
+    }
+
+    fn insert_planechase_card(
+        cards: &mut Map<String, Value>,
+        name: &str,
+        supertypes: &[&str],
+        core_types: &[&str],
+    ) {
+        cards.insert(
+            name.to_lowercase(),
+            planechase_card_json(name, supertypes, core_types),
+        );
+    }
+
+    fn planechase_test_db() -> CardDatabase {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        for index in 1..=40 {
+            insert_planechase_card(&mut cards, &format!("Plane {index}"), &[], &["Plane"]);
+        }
+        for index in 1..=5 {
+            insert_planechase_card(
+                &mut cards,
+                &format!("Phenomenon {index}"),
+                &[],
+                &["Phenomenon"],
+            );
+        }
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn plane_names(count: usize) -> Vec<String> {
+        (1..=count).map(|index| format!("Plane {index}")).collect()
+    }
+
+    fn phenomenon_names(count: usize) -> Vec<String> {
+        (1..=count)
+            .map(|index| format!("Phenomenon {index}"))
+            .collect()
+    }
+
+    fn planechase_request(
+        player_count: usize,
+        planar_deck: Vec<String>,
+    ) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            planar_deck,
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Planechase),
+            selected_match_type: None,
+            player_count,
+            summary_only: false,
+        }
+    }
+
+    #[test]
+    fn planechase_planar_minimum_scales_with_actual_player_count() {
+        let db = planechase_test_db();
+
+        for (player_count, minimum) in [(2, 20), (3, 30), (4, 40)] {
+            let short = planechase_request(player_count, plane_names(minimum - 1));
+            let check = evaluate_planechase(&db, &short, &BTreeSet::new());
+            assert!(
+                !check.compatible,
+                "{player_count}-player Planechase must reject a {minimum_minus_one}-card planar deck",
+                minimum_minus_one = minimum - 1
+            );
+            assert!(
+                check
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains(&format!("minimum {minimum}"))),
+                "reasons: {:?}",
+                check.reasons
+            );
+
+            let exact = planechase_request(player_count, plane_names(minimum));
+            let check = evaluate_planechase(&db, &exact, &BTreeSet::new());
+            assert!(
+                check.compatible,
+                "{player_count}-player Planechase must accept exactly {minimum} planar cards, reasons: {:?}",
+                check.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn planechase_phenomenon_cap_is_player_count_scaled() {
+        let db = planechase_test_db();
+        let mut planar_deck = plane_names(15);
+        planar_deck.extend(phenomenon_names(5));
+
+        let check = evaluate_planechase(&db, &planechase_request(2, planar_deck), &BTreeSet::new());
+
+        assert!(!check.compatible, "five phenomena exceeds the 2-player cap");
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("5 phenomena (maximum 4)")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn planechase_planar_deck_is_singleton_by_english_name() {
+        let db = planechase_test_db();
+        let mut planar_deck = plane_names(19);
+        planar_deck.push("Plane 1".to_string());
+
+        let check = evaluate_planechase(&db, &planechase_request(2, planar_deck), &BTreeSet::new());
+
+        assert!(
+            !check.compatible,
+            "duplicate English names must be rejected"
+        );
+        assert!(
+            check.reasons.iter().any(|reason| {
+                reason.contains("Planar deck singleton violations") && reason.contains("Plane 1")
+            }),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn planechase_planar_deck_rejects_non_planar_cards() {
+        let db = planechase_test_db();
+        let mut planar_deck = plane_names(19);
+        planar_deck.push("Legal Standard".to_string());
+
+        let check = evaluate_planechase(&db, &planechase_request(2, planar_deck), &BTreeSet::new());
+
+        assert!(
+            !check.compatible,
+            "main-deck cards cannot appear in the planar deck"
+        );
+        assert!(
+            check.reasons.iter().any(|reason| {
+                reason.contains("Planar deck cards must be Plane or Phenomenon")
+                    && reason.contains("Legal Standard")
+            }),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn planechase_empty_custom_planar_deck_is_allowed() {
+        let db = planechase_test_db();
+        let check = evaluate_planechase(&db, &planechase_request(2, Vec::new()), &BTreeSet::new());
+
+        assert!(
+            check.compatible,
+            "empty custom planar deck should pass validation so loading can use the default deck, reasons: {:?}",
+            check.reasons
+        );
+    }
+
     fn tiny_leaders_test_db_json() -> String {
         serde_json::json!({
             "white tiny leader": {
@@ -2922,9 +3283,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -2945,9 +3308,11 @@ mod tests {
             main_deck: deck,
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3020,9 +3385,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3040,9 +3407,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3063,9 +3432,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: true,
         };
 
@@ -3087,9 +3458,11 @@ mod tests {
             // to the singleton count below.
             sideboard: vec!["Legal Standard".to_string()],
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3114,9 +3487,11 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo3),
+            player_count: default_player_count(),
             summary_only: false,
         };
         let with_sideboard = DeckCompatibilityRequest {
@@ -3143,9 +3518,11 @@ mod tests {
             main_deck: vec!["Mystery Card".to_string()],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3167,9 +3544,11 @@ mod tests {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3237,9 +3616,11 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["PDH Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3308,9 +3689,11 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Rare Creature".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3378,9 +3761,11 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Uncommon Sorcery".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3403,9 +3788,11 @@ mod tests {
                 "Partner Commander".to_string(),
                 "Legal Commander".to_string(),
             ],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3425,9 +3812,11 @@ mod tests {
             main_deck: Vec::new(),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let thg_request = DeckCompatibilityRequest {
@@ -3453,18 +3842,22 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo1),
+            player_count: default_player_count(),
             summary_only: false,
         };
         let commander_request = DeckCompatibilityRequest {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: Some(MatchType::Bo1),
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3496,9 +3889,11 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pioneer),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
@@ -3512,9 +3907,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3530,9 +3927,11 @@ mod tests {
             main_deck: legal_60_main("Premodern Banned"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3552,9 +3951,11 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3575,9 +3976,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
@@ -3591,9 +3994,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
@@ -3609,9 +4014,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
@@ -3641,9 +4048,11 @@ mod tests {
             main_deck: expand("Pioneer Only", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pauper),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
@@ -3663,9 +4072,11 @@ mod tests {
             main_deck: expand("Legal Standard", 30),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let check = evaluate_constructed(
@@ -3691,9 +4102,11 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3707,9 +4120,11 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legendary Planeswalker".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3723,9 +4138,11 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3746,9 +4163,11 @@ mod tests {
                 "Legal Commander".to_string(),
                 "Partner Commander".to_string(),
             ],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3766,9 +4185,11 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3786,9 +4207,11 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: expand("Plains", 10),
             commander: vec!["White Tiny Leader".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3822,9 +4245,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["White Tiny Leader".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3848,9 +4273,11 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: Vec::new(),
             commander: vec!["Ajani, Nacatl Pariah".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -3874,9 +4301,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::HistoricBrawl),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4273,9 +4702,11 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -4302,9 +4733,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: vec![],
             commander: vec![],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -4317,9 +4750,11 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -4332,9 +4767,11 @@ mod tests {
             main_deck: expand("Red Card", 58),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: vec!["Big Spell".to_string()],
             selected_format: Some(GameFormat::Oathbreaker),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -4362,9 +4799,11 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -4379,9 +4818,11 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4400,9 +4841,11 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4423,9 +4866,11 @@ mod tests {
             main_deck: main,
             sideboard: expand("Legal Standard", 2),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4444,9 +4889,11 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4465,9 +4912,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4514,9 +4963,11 @@ mod tests {
             main_deck: expand("Relentless Rats", 60),
             sideboard: expand("Relentless Rats", 15),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4536,9 +4987,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4559,9 +5012,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
 
@@ -4619,9 +5074,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4643,9 +5100,11 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: vec!["Plains".to_string()],
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4667,9 +5126,11 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let err = validate_deck_for_format(&db, &request)
@@ -4687,9 +5148,11 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: Some(MatchType::Bo3),
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
@@ -4714,9 +5177,11 @@ mod tests {
             main_deck: vec!["Legal Standard".to_string(); 99],
             sideboard: vec![],
             commander: vec!["Test Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -4814,9 +5279,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4836,9 +5303,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4858,9 +5327,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4884,9 +5355,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4941,9 +5414,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4967,9 +5442,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4998,9 +5475,11 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            planar_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Momir),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         }
     }

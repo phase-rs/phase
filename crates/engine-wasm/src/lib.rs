@@ -17,7 +17,7 @@ use engine::game::{
     filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
     is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
     rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -632,13 +632,16 @@ pub fn initialize_game(
                     ("Player".to_string(), &deck_list.player),
                     ("AI opponent".to_string(), &deck_list.opponent),
                 ] {
-                    if let Err(reasons) = validate_name_deck_for_format(
+                    if let Err(reasons) = validate_name_deck_for_format_full(
                         db,
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.planar_deck,
+                        &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
+                        count as usize,
                     ) {
                         return Some(
                             reasons
@@ -650,13 +653,16 @@ pub fn initialize_game(
                 }
                 for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
                     let seat = format!("AI player {}", idx + 2);
-                    if let Err(reasons) = validate_name_deck_for_format(
+                    if let Err(reasons) = validate_name_deck_for_format_full(
                         db,
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.planar_deck,
+                        &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
+                        count as usize,
                     ) {
                         return Some(
                             reasons
@@ -1373,6 +1379,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
                 attraction_deck: deck_data.attraction_deck,
+                planar_deck: deck_data.planar_deck,
                 contraption_deck: deck_data.contraption_deck,
                 sticker_sheets: deck_data.sticker_sheets,
                 signature_spell: deck_data.signature_spell,

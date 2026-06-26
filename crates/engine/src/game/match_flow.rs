@@ -101,6 +101,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p.current_sideboard).clone(),
             commander: (*p.current_commander).clone(),
             attraction_deck: Vec::new(),
+            planar_deck: Vec::new(),
             contraption_deck: Vec::new(),
             sticker_sheets: state
                 .players
@@ -119,6 +120,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p0.current_sideboard).clone(),
             commander: (*p0.current_commander).clone(),
             attraction_deck: Vec::new(),
+            planar_deck: (*p0.registered_planar_deck).clone(),
             contraption_deck: Vec::new(),
             sticker_sheets: state.players[0].sticker_sheets.clone(),
             signature_spell: (*p0.current_signature_spell).clone(),
@@ -129,6 +131,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p1.current_sideboard).clone(),
             commander: (*p1.current_commander).clone(),
             attraction_deck: Vec::new(),
+            planar_deck: Vec::new(),
             contraption_deck: Vec::new(),
             sticker_sheets: state.players[1].sticker_sheets.clone(),
             signature_spell: (*p1.current_signature_spell).clone(),
@@ -361,6 +364,13 @@ mod tests {
         }
     }
 
+    fn plane_entry(name: &str, count: u32) -> DeckEntry {
+        let mut card = basic_land(name);
+        card.card_type.core_types = vec![CoreType::Plane];
+        card.card_type.subtypes = Vec::new();
+        DeckEntry { card, count }
+    }
+
     #[test]
     fn bo3_progression_reaches_match_completion() {
         let mut state = GameState::new_two_player(7);
@@ -583,6 +593,92 @@ mod tests {
     }
 
     #[test]
+    fn bo3_planechase_restart_preserves_custom_planar_deck() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::planechase(), 2, 13);
+        state.match_config.match_type = MatchType::Bo3;
+
+        let custom_planes = vec![
+            plane_entry("Custom Plane Alpha", 1),
+            plane_entry("Custom Plane Beta", 1),
+        ];
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![entry("P0", 7)],
+                planar_deck: custom_planes.clone(),
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![entry("P1", 7)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        load_deck_into_state(&mut state, &payload);
+        let _ = start_game(&mut state);
+
+        state.match_phase = MatchPhase::BetweenGames;
+        state.match_score = crate::types::match_config::MatchScore {
+            p0_wins: 1,
+            p1_wins: 0,
+            draws: 0,
+        };
+        state.game_number = 2;
+        state.next_game_chooser = Some(PlayerId(1));
+        state.sideboard_submitted.clear();
+        state.waiting_for = WaitingFor::BetweenGamesSideboard {
+            player: PlayerId(0),
+            game_number: 2,
+            score: state.match_score,
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitSideboard {
+                main: vec![DeckCardCount {
+                    name: "P0".to_string(),
+                    count: 7,
+                }],
+                sideboard: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitSideboard {
+                main: vec![DeckCardCount {
+                    name: "P1".to_string(),
+                    count: 7,
+                }],
+                sideboard: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChoosePlayDraw { play_first: true }).unwrap();
+
+        let registered_planar_names: Vec<_> = state.deck_pools[0]
+            .registered_planar_deck
+            .iter()
+            .map(|entry| entry.card.name.as_str())
+            .collect();
+        assert_eq!(
+            registered_planar_names,
+            vec!["Custom Plane Alpha", "Custom Plane Beta"]
+        );
+
+        let live_planar_names: std::collections::HashSet<_> = state
+            .planar_deck
+            .iter()
+            .map(|id| state.objects[id].name.as_str())
+            .collect();
+        assert_eq!(
+            live_planar_names,
+            ["Custom Plane Alpha", "Custom Plane Beta"]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
     fn deck_payload_from_current_pools_propagates_ai_seat_bracket_tier() {
         use crate::game::bracket_estimate::CommanderBracketTier;
         use crate::types::game_state::PlayerDeckPool;
@@ -618,6 +714,10 @@ mod tests {
             payload.player.bracket_tier,
             CommanderBracketTier::Core,
             "player seat bracket_tier must round-trip"
+        );
+        assert!(
+            payload.player.planar_deck.is_empty(),
+            "no custom Planechase payload should remain empty so the default planar deck path can inject defaults"
         );
         assert_eq!(
             payload.opponent.bracket_tier,

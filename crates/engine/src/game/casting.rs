@@ -1989,7 +1989,8 @@ pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: T
     }
 }
 
-pub(super) fn player_can_spend_as_any_color_for_spell(
+#[cfg(test)]
+fn player_can_spend_as_any_color_for_spell(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -2041,7 +2042,7 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
 pub(super) fn player_can_spend_as_any_color_for_payment(
     state: &GameState,
     player: PlayerId,
-    source_id: ObjectId,
+    source_id: Option<ObjectId>,
     ctx: Option<&PaymentContext<'_>>,
 ) -> bool {
     if matches!(
@@ -2050,7 +2051,7 @@ pub(super) fn player_can_spend_as_any_color_for_payment(
     ) {
         super::static_abilities::player_can_spend_as_any_color(state, player)
     } else {
-        player_can_spend_as_any_color_for_spell(state, player, source_id)
+        player_can_spend_as_any_color_for_optional_spell(state, player, source_id)
     }
 }
 
@@ -10481,7 +10482,7 @@ fn can_cast_prepared_now(
 fn can_pay_mana_cost_after_auto_tap_with_context(
     mut simulated: GameState,
     player: PlayerId,
-    source_id: ObjectId,
+    source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
@@ -10492,7 +10493,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         player,
         cost,
         &mut tap_events,
-        Some(source_id),
+        source_id,
         ctx,
         excluded_sources,
     );
@@ -10521,14 +10522,16 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
             mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
                 || ctx.is_some_and(|ctx| {
                     matches!(ctx, PaymentContext::Spell(_))
-                        && can_pay_with_spell_tap_payments(
-                            &simulated,
-                            player,
-                            source_id,
-                            cost,
-                            Some(ctx),
-                            permissions,
-                        )
+                        && source_id.is_some_and(|source_id| {
+                            can_pay_with_spell_tap_payments(
+                                &simulated,
+                                player,
+                                source_id,
+                                cost,
+                                Some(ctx),
+                                permissions,
+                            )
+                        })
                 })
         })
 }
@@ -10738,7 +10741,7 @@ pub fn can_pay_cost_after_auto_tap(
     can_pay_mana_cost_after_auto_tap_with_context(
         simulated,
         player,
-        source_id,
+        Some(source_id),
         cost,
         spell_ctx.as_ref(),
         &HashSet::new(),
@@ -10821,7 +10824,7 @@ fn can_feasibly_pay_mana_cost_without_x(
     let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let any_color = source_id.is_some_and(|sid| {
-        player_can_spend_as_any_color_for_payment(state, player, sid, spell_ctx.as_ref())
+        player_can_spend_as_any_color_for_payment(state, player, Some(sid), spell_ctx.as_ref())
     });
     let residual = mana_payment::reduce_cost_by_pool(
         &player_data.mana_pool,
@@ -10927,7 +10930,7 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     can_pay_mana_cost_after_auto_tap_with_context(
         simulated,
         player,
-        source_id,
+        Some(source_id),
         cost,
         Some(&activation_ctx),
         excluded_sources,
@@ -11274,7 +11277,7 @@ pub(super) fn pay_effect_mana_cost(
     pay_non_cast_mana_cost(
         state,
         player,
-        source_id,
+        Some(source_id),
         cost,
         PaymentContext::Effect,
         events,
@@ -11286,10 +11289,10 @@ pub(super) fn pay_effect_mana_cost(
 /// spend restrictions (Smoky Lounge's "spend this mana only to … unlock doors")
 /// gate which restricted mana is eligible. Routes through the same single
 /// authority as effect-time payments, differing only in the payment context.
-pub(super) fn pay_special_action_mana_cost(
+pub(crate) fn pay_special_action_mana_cost(
     state: &mut GameState,
     player: PlayerId,
-    source_id: ObjectId,
+    source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
     action: crate::types::mana::SpecialAction,
     events: &mut Vec<GameEvent>,
@@ -11304,6 +11307,24 @@ pub(super) fn pay_special_action_mana_cost(
     )
 }
 
+pub(crate) fn can_pay_special_action_mana_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+    action: crate::types::mana::SpecialAction,
+) -> bool {
+    let ctx = PaymentContext::SpecialAction(action);
+    can_pay_mana_cost_after_auto_tap_with_context(
+        state.clone(),
+        player,
+        source_id,
+        cost,
+        Some(&ctx),
+        &HashSet::new(),
+    )
+}
+
 /// CR 106.6: Single-authority core for non-cast, non-activation mana payments
 /// (effect-resolution costs and special-action costs). Auto-taps sources,
 /// validates affordability, and executes the spend with the given payment
@@ -11311,7 +11332,7 @@ pub(super) fn pay_special_action_mana_cost(
 fn pay_non_cast_mana_cost(
     state: &mut GameState,
     player: PlayerId,
-    source_id: ObjectId,
+    source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
     ctx: PaymentContext<'_>,
     events: &mut Vec<GameEvent>,
@@ -11324,7 +11345,7 @@ fn pay_non_cast_mana_cost(
         player,
         cost,
         events,
-        Some(source_id),
+        source_id,
         Some(&ctx),
     );
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
@@ -11443,7 +11464,8 @@ fn auto_tap_and_pay_cost_excluding(
     // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
     // life-for-{B} grants flow through the same dry-run + execution helpers.
     let permissions = {
-        let any_color = player_can_spend_as_any_color_for_payment(state, player, source_id, ctx);
+        let any_color =
+            player_can_spend_as_any_color_for_payment(state, player, Some(source_id), ctx);
         super::static_abilities::build_cost_permission_context(state, player, any_color)
     };
     {

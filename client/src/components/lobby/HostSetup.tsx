@@ -177,6 +177,9 @@ export function HostSetup({
   // player-name field to avoid the two-inputs-for-one-value confusion.
   const displayName = useMultiplayerStore((s) => s.displayName);
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
+  const setCompatibilityPlayerCount = useMultiplayerStore(
+    (s) => s.setCompatibilityPlayerCount,
+  );
   const hostingStatus = useMultiplayerStore((s) => s.hostingStatus);
 
   // Seed the format picker from whatever the user last selected (persisted
@@ -229,7 +232,8 @@ export function HostSetup({
   const defaultAiDeck = aiDeckCatalog.candidates[0]
     ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
     : null;
-  const effectiveAiSeats = formatConfig.team_based ? [] : aiSeats;
+  const aiSeatsSupported = !formatConfig.team_based && formatConfig.format !== "Planechase";
+  const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -241,7 +245,8 @@ export function HostSetup({
   // payload injects `playerCount` via `finalConfig` below.
   useEffect(() => {
     setFormatConfig(formatConfig);
-  }, [formatConfig, setFormatConfig]);
+    setCompatibilityPlayerCount(playerCount);
+  }, [formatConfig, playerCount, setCompatibilityPlayerCount, setFormatConfig]);
 
   const maxPlayers = isP2P
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
@@ -256,6 +261,7 @@ export function HostSetup({
     // min is 2, so it still defaults to a duel but users can bump up to 4).
     const newCount = defaults.min_players;
     setPlayerCount(newCount);
+    setCompatibilityPlayerCount(newCount);
     if (newCount !== 2) {
       setMatchType("Bo1");
     }
@@ -264,6 +270,7 @@ export function HostSetup({
 
   const handlePlayerCountChange = (count: number) => {
     setPlayerCount(count);
+    setCompatibilityPlayerCount(count);
     if (count !== 2) {
       setMatchType("Bo1");
     }
@@ -616,7 +623,7 @@ export function HostSetup({
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
                         {aiSeat ? <BotGlyph /> : <HumanGlyph />}
                       </span>
-                      {!formatConfig.team_based && (
+                      {aiSeatsSupported && (
                         <button
                           type="button"
                           onClick={() => toggleAiSeat(seatIndex)}

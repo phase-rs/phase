@@ -548,6 +548,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Reset per-turn counters
     // CR 305.2: Reset per-turn land play count.
     state.lands_played_this_turn = 0;
+    // CR 901.9 / CR 116.2i: planar die special-action costs reset each turn.
+    state.planar_die_actions_this_turn.clear();
     // CR 603.4: Snapshot spell count for werewolf "last turn" conditions before resetting.
     state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
     // CR 500.1: Reset per-turn spell cast counters.

@@ -12,7 +12,16 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-pub use lobby_broker::{MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION};
+/// Full game wire protocol version. Kept numerically aligned with the lobby
+/// broker while state/action messages share the same WebSocket protocol enum.
+pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
+
+/// Minimum protocol version accepted by full game servers. Planechase changed
+/// game-state/action payload shape, so stale clients must not join full games.
+pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
+
+/// Minimum protocol version accepted by lobby-only brokers.
+pub const LOBBY_MIN_SUPPORTED_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_PROTOCOL;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -1797,8 +1806,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_9() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+    fn protocol_version_is_10() {
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]

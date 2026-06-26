@@ -12,5 +12,6 @@ describe("sourceFormatToGameFormat", () => {
   it("still resolves deck-construction source keys", () => {
     expect(sourceFormatToGameFormat("Standard")).toBe("Standard");
     expect(sourceFormatToGameFormat("CMD")).toBe("Commander");
+    expect(sourceFormatToGameFormat("Planechase")).toBe("Planechase");
   });
 });

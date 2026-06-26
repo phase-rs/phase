@@ -22,15 +22,21 @@
 //! `synthesize_planechase` stamps `trigger_zones = [Zone::Command]` onto them
 //! (CR 113.6b), which makes `trigger_opts_in_to_command_zone` admit them.
 
+use std::collections::HashSet;
+
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::game::game_object::GameObject;
+use crate::game::{engine::EngineError, turn_control};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::format::GameFormat;
+use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// CR 901.9d / CR 706.7: The face the planar die landed on. The planar die is
 /// symbolic (CR 901.3a: one Planeswalker face, one chaos face, four blank
@@ -65,6 +71,40 @@ fn is_planar_object(state: &GameState, id: ObjectId) -> bool {
             .iter()
             .any(|ct| matches!(ct, CoreType::Plane | CoreType::Phenomenon))
     })
+}
+
+/// CR 901.15b / CR 901.6 / CR 311.5 / CR 312.4: In a single communal planar
+/// deck game, the planar controller is considered the owner of all cards in
+/// the planar deck, and controls each face-up plane/phenomenon.
+pub fn restamp_planar_objects_to_controller(state: &mut GameState) {
+    let Some(controller) = state.planar_controller else {
+        return;
+    };
+    let mut ids: Vec<ObjectId> = state.planar_deck.iter().copied().collect();
+    ids.extend(
+        state
+            .command_zone
+            .iter()
+            .copied()
+            .filter(|id| is_planar_object(state, *id)),
+    );
+    ids.sort_by_key(|id| id.0);
+    ids.dedup();
+    for id in ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.owner = controller;
+            obj.controller = controller;
+        }
+    }
+}
+
+fn restamp_planar_deck_to_controller(state: &mut GameState, controller: PlayerId) {
+    for id in state.planar_deck.iter().copied().collect::<Vec<_>>() {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.owner = controller;
+            obj.controller = controller;
+        }
+    }
 }
 
 /// CR 312: True when the active card in the command zone is a phenomenon.
@@ -227,6 +267,7 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
         if let Some(obj) = state.objects.get_mut(&to_id) {
             obj.face_down = false;
             obj.controller = new_controller;
+            obj.owner = new_controller;
         }
         // CR 701.31b self-planeswalk: when `to == from` the card never left the
         // command zone, so don't push a duplicate entry.
@@ -258,6 +299,112 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
             state.planar_deck.push_back(from_id);
         }
     }
+    restamp_planar_objects_to_controller(state);
+}
+
+/// CR 901.5 / CR 103.7: Reveal the starting plane after opening-hand actions.
+/// Phenomena are rotated to the bottom until a Plane is revealed. No
+/// Planeswalked/Chaos/DieRolled events are emitted and no triggers are
+/// collected for this starting reveal.
+pub fn reveal_starting_plane(state: &mut GameState) {
+    if state.format_config.format != GameFormat::Planechase
+        || active_plane(state).is_some()
+        || state.planar_deck.is_empty()
+    {
+        return;
+    }
+    state.planar_controller = Some(state.active_player);
+    let mut remaining = state.planar_deck.len();
+    while remaining > 0 {
+        remaining -= 1;
+        let Some(id) = state.planar_deck.pop_front() else {
+            return;
+        };
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        if obj.card_types.core_types.contains(&CoreType::Plane) {
+            obj.face_down = false;
+            obj.zone = Zone::Command;
+            state.command_zone.push_back(id);
+            restamp_planar_objects_to_controller(state);
+            return;
+        }
+        obj.face_down = true;
+        state.planar_deck.push_back(id);
+    }
+    restamp_planar_objects_to_controller(state);
+}
+
+pub fn planar_die_action_count_this_turn(state: &GameState, player: PlayerId) -> u32 {
+    state
+        .planar_die_actions_this_turn
+        .get(&player)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 901.9 / CR 116.2i: The Nth planar die special action in a turn costs
+/// generic mana equal to the number of previous such actions that turn.
+pub fn planar_die_roll_cost(state: &GameState, player: PlayerId) -> ManaCost {
+    ManaCost::generic(planar_die_action_count_this_turn(state, player))
+}
+
+/// CR 901.9 / CR 116.2i: Active player may roll during a main phase while they
+/// have priority and the stack is empty, if they can pay the escalating cost.
+pub fn can_roll_planar_die(state: &GameState, player: PlayerId) -> bool {
+    if state.format_config.format != GameFormat::Planechase
+        || state.active_player != player
+        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || turn_control::priority_seat(state) != player
+        || !matches!(
+            state.phase,
+            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
+        )
+        || !state.stack.is_empty()
+        || !crate::game::players::is_alive(state, player)
+        || state.planar_controller.is_none()
+        || (active_plane(state).is_none() && state.planar_deck.is_empty())
+    {
+        return false;
+    }
+    let cost = planar_die_roll_cost(state, player);
+    if cost.is_without_paying_mana() {
+        return true;
+    }
+    crate::game::casting::can_pay_special_action_mana_cost_after_auto_tap(
+        state,
+        player,
+        None,
+        &cost,
+        crate::types::mana::SpecialAction::RollPlanarDie,
+    )
+}
+
+pub fn take_paid_planar_die_action(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<PlanarDieFace, EngineError> {
+    if !can_roll_planar_die(state, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot roll the planar die now".to_string(),
+        ));
+    }
+    let cost = planar_die_roll_cost(state, player);
+    crate::game::casting::pay_special_action_mana_cost(
+        state,
+        player,
+        None,
+        &cost,
+        crate::types::mana::SpecialAction::RollPlanarDie,
+        events,
+    )?;
+    *state
+        .planar_die_actions_this_turn
+        .entry(player)
+        .or_insert(0) += 1;
+    Ok(roll_planar_die(state, player, events))
 }
 
 /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's chaos-triggered
@@ -354,11 +501,131 @@ pub fn set_planar_controller(state: &mut GameState, new: PlayerId, _events: &mut
         return;
     }
     state.planar_controller = Some(new);
-    if let Some(active_id) = active_plane(state) {
-        if let Some(obj) = state.objects.get_mut(&active_id) {
-            obj.controller = new;
+    restamp_planar_objects_to_controller(state);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlanarHandoff {
+    new_controller: Option<PlayerId>,
+    active: Option<ObjectId>,
+}
+
+pub fn prepare_player_left_game_handoff(
+    state: &mut GameState,
+    leaving: PlayerId,
+    leaving_set: &HashSet<PlayerId>,
+) -> Option<PlanarHandoff> {
+    if state.format_config.format != GameFormat::Planechase
+        || state.planar_controller != Some(leaving)
+    {
+        return None;
+    }
+    let active = active_plane(state).filter(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.owner == leaving || obj.controller == leaving)
+    });
+    let new_controller = state
+        .seat_order
+        .iter()
+        .copied()
+        .cycle()
+        .skip_while(|pid| *pid != leaving)
+        .skip(1)
+        .take(state.seat_order.len().saturating_sub(1))
+        .find(|pid| crate::game::players::is_alive(state, *pid) && !leaving_set.contains(pid));
+    state.planar_controller = new_controller;
+    if let Some(new_controller) = new_controller {
+        restamp_planar_deck_to_controller(state, new_controller);
+    }
+    Some(PlanarHandoff {
+        new_controller,
+        active,
+    })
+}
+
+pub fn preserve_phenomenon_stack_abilities_for_handoff(
+    state: &mut GameState,
+    handoff: Option<PlanarHandoff>,
+) {
+    let Some(handoff) = handoff else {
+        return;
+    };
+    let (Some(active), Some(new_controller)) = (handoff.active, handoff.new_controller) else {
+        return;
+    };
+    let is_phenomenon = state
+        .objects
+        .get(&active)
+        .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Phenomenon));
+    if !is_phenomenon {
+        return;
+    }
+    // CR 901.10b: phenomenon abilities owned by a player who left remain on
+    // the stack controlled by the new planar controller.
+    for entry in state.stack.iter_mut() {
+        if entry.source_id == active
+            && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        {
+            entry.controller = new_controller;
         }
     }
+}
+
+pub fn finish_player_left_game_handoff(
+    state: &mut GameState,
+    handoff: Option<PlanarHandoff>,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(handoff) = handoff else {
+        return;
+    };
+    let Some(new_controller) = handoff.new_controller else {
+        state.planar_controller = None;
+        return;
+    };
+    if let Some(active) = handoff.active {
+        if state.command_zone.contains(&active) {
+            let req =
+                crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(active, Zone::Exile);
+            crate::game::zone_pipeline::move_object(state, req, events);
+        }
+    }
+    let active_left = handoff
+        .active
+        .is_some_and(|id| !state.command_zone.contains(&id));
+    if !active_left {
+        set_planar_controller(state, new_controller, events);
+        return;
+    }
+    // CR 901.10a: if a plane leaves while a planeswalking ability is on the
+    // stack, that ability ceases to exist.
+    state
+        .stack
+        .retain(|entry| entry.source_id.0 < PLANAR_ABILITY_SENTINEL_BASE);
+
+    let Some(to_id) = state.planar_deck.pop_front() else {
+        restamp_planar_objects_to_controller(state);
+        return;
+    };
+    if let Some(obj) = state.objects.get_mut(&to_id) {
+        obj.face_down = false;
+        obj.zone = Zone::Command;
+        obj.owner = new_controller;
+        obj.controller = new_controller;
+    }
+    state.command_zone.push_back(to_id);
+    restamp_planar_objects_to_controller(state);
+    let event = GameEvent::Planeswalked {
+        player_id: new_controller,
+        from: handoff.active,
+        to: Some(to_id),
+    };
+    events.push(event.clone());
+    // CR 901.11: player-left-game handoff after the starting plane is a real
+    // planeswalk, so collect normal planeswalk/encounter triggers.
+    crate::game::triggers::collect_triggers_into_deferred(state, &[event]);
 }
 
 /// CR 311.5: helper so callers can confirm an object is a plane/phenomenon

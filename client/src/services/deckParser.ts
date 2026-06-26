@@ -13,6 +13,7 @@ export interface ParsedDeck {
   sideboard: DeckEntry[];
   commander?: string[];
   sticker_sheets?: string[];
+  planar_deck?: string[];
   /** Oathbreaker RC: the signature spell card name (0 or 1 entries). */
   signature_spell?: string[];
   companion?: string;
@@ -31,6 +32,7 @@ export interface ExpandedDeck {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  planar_deck: string[];
   sticker_sheets: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
@@ -58,12 +60,13 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
     main_deck: expandEntries(deck.main),
     sideboard: expandEntries(deck.sideboard),
     commander: deck.commander ?? [],
+    planar_deck: deck.planar_deck ?? [],
     sticker_sheets: deck.sticker_sheets ?? [],
     signature_spell: deck.signature_spell ?? [],
   };
 }
 
-type DeckSection = "main" | "sideboard" | "commander" | "companion";
+type DeckSection = "main" | "sideboard" | "commander" | "companion" | "planar_deck";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const COLON_SECTION_RE = /:$/;
 
@@ -84,6 +87,14 @@ function getNamedSection(line: string): DeckSection | null {
   const normalized = line.trim().toLowerCase().replace(COLON_SECTION_RE, "");
   if (normalized === "deck" || normalized === "[main]" || normalized === "mainboard") return "main";
   if (normalized === "sideboard" || normalized === "[sideboard]") return "sideboard";
+  if (
+    normalized === "planar"
+    || normalized === "planar deck"
+    || normalized === "planes"
+    || normalized === "[planar]"
+    || normalized === "[planar deck]"
+    || normalized === "[planes]"
+  ) return "planar_deck";
   if (
     normalized === "commander"
     || normalized === "commanders"
@@ -163,6 +174,10 @@ function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
   }));
 }
 
+function normalizeNames(names: string[] | undefined): string[] | undefined {
+  return names?.map(normalizeCardName);
+}
+
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
@@ -173,6 +188,7 @@ export function parsedDeckHasCards(deck: ParsedDeck): boolean {
     totalCards(deck.main) > 0
     || totalCards(deck.sideboard) > 0
     || (deck.commander?.length ?? 0) > 0
+    || (deck.planar_deck?.length ?? 0) > 0
     || deck.companion !== undefined
   );
 }
@@ -204,7 +220,11 @@ export function deriveImportedDeckName(content: string, deck: ParsedDeck): strin
     return `${deck.commander[0]} & ${deck.commander[1]} Deck`;
   }
 
-  if (totalCards(deck.main) > 0 || totalCards(deck.sideboard) > 0) {
+  if (
+    totalCards(deck.main) > 0
+    || totalCards(deck.sideboard) > 0
+    || (deck.planar_deck?.length ?? 0) > 0
+  ) {
     return "Imported Deck";
   }
 
@@ -251,6 +271,7 @@ function normalizeParsedDeck(
   const normalized: ParsedDeck = {
     main: deduplicateEntries(normalizeEntries(deck.main)),
     sideboard: deduplicateEntries(normalizeEntries(deck.sideboard)),
+    planar_deck: normalizeNames(deck.planar_deck),
     sticker_sheets: deck.sticker_sheets ? [...deck.sticker_sheets] : undefined,
   };
 
@@ -304,10 +325,17 @@ export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
   return Array.from(map.values());
 }
 
+function pushPlanarDeckEntry(deck: ParsedDeck, entry: DeckEntry): void {
+  deck.planar_deck ??= [];
+  for (let i = 0; i < entry.count; i++) {
+    deck.planar_deck.push(entry.name);
+  }
+}
+
 /**
  * Parse a .dck/.dec format deck file.
  * Format: "count CardName" per line (or "countx CardName").
- * Sections: [Main], [Sideboard], [Commander] (case-insensitive).
+ * Sections: [Main], [Sideboard], [Commander], [Planar Deck] (case-insensitive).
  * Lines starting with # are comments, empty lines are skipped.
  *
  * Commander auto-detection: cards in [Commander] or [Sideboard] sections
@@ -354,6 +382,8 @@ export function parseDeckFile(content: string): ParsedDeck {
         // will include the card. loadActiveDeck (storage.ts:98) ensures
         // companion is in sideboard if a source omits it.
         deck.companion = entry.name;
+      } else if (currentSection === "planar_deck") {
+        pushPlanarDeckEntry(deck, entry);
       } else {
         deck[currentSection].push(entry);
       }
@@ -379,6 +409,7 @@ const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
  * Format: "count CardName (SET) CollectorNumber" per line.
  * A blank line or "Sideboard" header switches to sideboard section.
  * "Commander" header switches to commander section.
+ * "Planar Deck" header switches to planar-deck section.
  * Header labels like "Deck", "Companion" are skipped.
  */
 export function parseMtgaDeck(content: string): ParsedDeck {
@@ -435,6 +466,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
         // companion is in sideboard if a source omits it.
         deck.companion = entry.name;
         if (currentSection === "companion") currentSection = "main";
+      } else if (currentSection === "planar_deck") {
+        pushPlanarDeckEntry(deck, entry);
       } else {
         deck[currentSection].push(entry);
       }
@@ -508,6 +541,13 @@ export function exportDeckFile(deck: ParsedDeck): string {
     }
   }
 
+  if (deck.planar_deck && deck.planar_deck.length > 0) {
+    lines.push("[Planar Deck]");
+    for (const name of deck.planar_deck) {
+      lines.push(`1 ${name}`);
+    }
+  }
+
   return lines.join("\n") + "\n";
 }
 
@@ -538,6 +578,14 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
     lines.push("Sideboard");
     for (const entry of deck.sideboard) {
       lines.push(`${entry.count} ${entry.name}`);
+    }
+  }
+
+  if (deck.planar_deck && deck.planar_deck.length > 0) {
+    lines.push("");
+    lines.push("Planar Deck");
+    for (const name of deck.planar_deck) {
+      lines.push(`1 ${name}`);
     }
   }
 

@@ -56,11 +56,17 @@ let activeBrokerGameCode: string | null = null;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
 
-function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: string[]; commander: string[] } {
+function asDeckPayload(deck: HostingDeck): {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck: string[];
+} {
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
+    planar_deck: deck.planar_deck ?? [],
   };
 }
 
@@ -72,7 +78,9 @@ function aiSeatDeckChoice(deckName: string | null): DeckChoice {
 }
 
 function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
-  return settings.formatConfig.team_based ? [] : settings.aiSeats;
+  return settings.formatConfig.team_based || settings.formatConfig.format === "Planechase"
+    ? []
+    : settings.aiSeats;
 }
 
 // Prevents onclose from clearing session token after GameStarted
@@ -138,6 +146,7 @@ export interface HostingDeck {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  planar_deck?: string[];
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
@@ -234,6 +243,7 @@ interface MultiplayerState {
   playerNames: Map<number, string>;
   // PlayerId → avatar art crop URL (ephemeral — assigned at game start)
   playerAvatars: Map<number, string>;
+  compatibilityPlayerCount: number | null;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;
   // Action round-trip tracking (ephemeral — not persisted)
@@ -281,6 +291,7 @@ interface MultiplayerActions {
    * keyed `clearToast()`. Retained for full-reset paths. */
   clearAllToasts: () => void;
   setFormatConfig: (config: FormatConfig | null) => void;
+  setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
@@ -499,6 +510,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       isSpectator: false,
       playerNames: new Map(),
       playerAvatars: new Map(),
+      compatibilityPlayerCount: null,
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
@@ -575,6 +587,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           state.toasts.size === 0 ? {} : { toasts: new Map() },
         ),
       setFormatConfig: (config) => set({ formatConfig: config }),
+      setCompatibilityPlayerCount: (count) =>
+        set({ compatibilityPlayerCount: count }),
       rememberHostConfig: (config) => set({ lastHostConfig: config }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),

@@ -2723,6 +2723,14 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     let stack_empty = state.stack.is_empty();
     let is_active = state.active_player == player;
 
+    if crate::game::planechase::can_roll_planar_die(state, player) {
+        actions.push(candidate(
+            GameAction::RollPlanarDie,
+            TacticalClass::Utility,
+            Some(player),
+        ));
+    }
+
     if is_main_phase
         && stack_empty
         && is_active

@@ -224,6 +224,41 @@ describe("DeckBuilder", () => {
     });
   });
 
+  it("preserves a saved planar deck through editor load and save", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Planechase Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        planar_deck: ["The Aether Flues", "Spatial Merging"],
+        format: "Planechase",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Planechase"
+        onFormatChange={vi.fn()}
+        initialDeckName="Planechase Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("Planechase Deck"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        localStorage.getItem(STORAGE_KEY_PREFIX + "Planechase Deck") ?? "{}",
+      );
+      expect(persisted.planar_deck).toEqual(["The Aether Flues", "Spatial Merging"]);
+    });
+  });
+
   it("does not restore Two-Headed Giant as a persisted deck-builder format", async () => {
     const onFormatChange = vi.fn();
     localStorage.setItem(

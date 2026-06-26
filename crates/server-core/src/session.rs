@@ -401,6 +401,7 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                planar_deck: deck.planar_deck.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
                 contraption_deck: deck.contraption_deck.clone(),
                 sticker_sheets: deck.sticker_sheets.clone(),

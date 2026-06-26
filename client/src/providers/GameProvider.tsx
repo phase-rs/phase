@@ -208,7 +208,15 @@ function bracketToEngineTier(bracket: CommanderBracket | null | undefined): Comm
   }
 }
 
-type ExpandedDeckWithTier = { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier: CommanderBracketTier };
+type ExpandedDeckWithTier = {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck: string[];
+  signature_spell: string[];
+  sticker_sheets: string[];
+  bracket_tier: CommanderBracketTier;
+};
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
   opponent: ExpandedDeckWithTier;
@@ -263,7 +271,15 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
   const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
   return {
     player,
-    opponent: { main_deck: [], sideboard: [], commander: [], bracket_tier: "core" },
+    opponent: {
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      signature_spell: [],
+      sticker_sheets: [],
+      bracket_tier: "core",
+    },
     ai_decks: [],
     ai_difficulties: [],
   };
@@ -287,6 +303,9 @@ async function buildLocalAiDeckList(
       main_deck: [],
       sideboard: [],
       commander: [],
+      planar_deck: [],
+      signature_spell: [],
+      sticker_sheets: [],
       bracket_tier: "core",
     });
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>

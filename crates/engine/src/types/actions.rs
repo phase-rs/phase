@@ -500,6 +500,9 @@ pub enum GameAction {
         object_id: ObjectId,
         door: crate::game::game_object::RoomDoor,
     },
+    /// CR 901.9 / CR 116.2i: Active-player special action to roll the planar
+    /// die during a main phase while the stack is empty.
+    RollPlanarDie,
     /// CR 709.5f-g: Response to `WaitingFor::ChooseRoomDoor` — the player picked
     /// which door (half) of the targeted Room to act on, and the operation to
     /// apply to it. The `(op, door)` pair must be one of the prompt's `options`.
@@ -1314,6 +1317,7 @@ impl GameAction {
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::RollPlanarDie
             | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }

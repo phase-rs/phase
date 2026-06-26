@@ -162,6 +162,7 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
+    if (formatConfig.format === "Planechase") return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
@@ -201,6 +202,7 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
+  const formatSupportsAi = selectedFormat !== "Planechase";
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && selectedCompat?.selected_format_compatible === false;
@@ -209,7 +211,8 @@ export function GameSetupPage() {
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+  const cannotStartAi =
+    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
 
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).

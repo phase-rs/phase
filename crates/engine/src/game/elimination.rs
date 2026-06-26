@@ -35,6 +35,19 @@ pub fn eliminate_players_simultaneously(
     events: &mut Vec<GameEvent>,
 ) {
     let mut eliminated_any = false;
+    let mut leaving_set = HashSet::new();
+
+    for &player in players_to_eliminate {
+        if !players::is_alive(state, player) {
+            continue;
+        }
+        leaving_set.insert(player);
+        for teammate in players::teammates(state, player) {
+            if players::is_alive(state, teammate) {
+                leaving_set.insert(teammate);
+            }
+        }
+    }
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -43,11 +56,13 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
 
-        do_eliminate(state, player, events);
+        do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
         for teammate in players::teammates(state, player) {
-            do_eliminate(state, teammate, events);
+            if players::is_alive(state, teammate) {
+                do_eliminate(state, teammate, &leaving_set, events);
+            }
         }
     }
 
@@ -298,7 +313,15 @@ fn exile_owned_objects_on_player_left_game(
 }
 
 /// Perform the actual elimination of a single player (CR 800.4).
-fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+fn do_eliminate(
+    state: &mut GameState,
+    player: PlayerId,
+    leaving_set: &HashSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    let planar_handoff =
+        crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
+
     // Mark as eliminated
     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
         p.is_eliminated = true;
@@ -306,6 +329,8 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     if !state.eliminated_players.contains(&player) {
         state.eliminated_players.push(player);
     }
+
+    crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
@@ -354,8 +379,10 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     // player leaving the game, so the consult is skipped while the
     // unconditional primitive guards still run (PLAN §3).
     exile_owned_objects_on_player_left_game(state, player, events);
+    crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
+    state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
     // If the active player is also leaving, the next living player in turn order gets it.
@@ -437,29 +464,6 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                 },
                 events,
             );
-        }
-    }
-
-    // CR 901.10 / CR 311.5 / CR 312.4: If the planar controller leaves the game,
-    // the next player in turn order that isn't leaving becomes the planar
-    // controller (the active player normally, unless they're the one leaving).
-    // This is NOT a state-based action — it happens immediately on leave.
-    if state.planar_controller == Some(player) {
-        let any_alive = state
-            .players
-            .iter()
-            .any(|p| !p.is_eliminated && p.id != player);
-
-        if !any_alive {
-            state.planar_controller = None;
-        } else {
-            let new_controller =
-                if players::is_alive(state, state.active_player) && state.active_player != player {
-                    state.active_player
-                } else {
-                    players::next_player(state, player)
-                };
-            crate::game::planechase::set_planar_controller(state, new_controller, events);
         }
     }
 

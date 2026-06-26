@@ -135,7 +135,7 @@ fn handle_unlock_room_door(
     casting::pay_special_action_mana_cost(
         state,
         player,
-        object_id,
+        Some(object_id),
         &cost,
         crate::types::mana::SpecialAction::UnlockDoor,
         events,
@@ -1650,6 +1650,7 @@ fn apply_action(
         | GameAction::CastSpellAsMadness { .. }
         | GameAction::CancelCast
         | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
         | GameAction::PayUnlessCost { .. }
         | GameAction::PayCombatTax { .. } => {
             state.lands_tapped_for_mana.remove(&actor);
@@ -1817,6 +1818,18 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+        }
+        (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
+            // does not use the stack; the escalating cost is charged before the
+            // roll and effect-caused rolls do not increment the counter.
+            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
+            WaitingFor::Priority { player: *player }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -3166,7 +3179,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         Some(&activation_ctx),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -3186,7 +3199,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         spell_ctx.as_ref(),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -7075,6 +7088,7 @@ pub fn start_game_with_starting_player(
         }
     } else {
         // No cards to mulligan with, skip straight to game
+        crate::game::planechase::reveal_starting_plane(state);
         turns::auto_advance(state, &mut events)
     };
 
@@ -7108,6 +7122,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
         turn_number: 1,
     });
 
+    crate::game::planechase::reveal_starting_plane(state);
     let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
     bump_state_revision(state);

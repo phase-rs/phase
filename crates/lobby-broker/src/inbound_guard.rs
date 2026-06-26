@@ -24,6 +24,8 @@ pub const MAX_MAIN_DECK_ENTRIES: usize = 500;
 pub const MAX_SIDEBOARD_ENTRIES: usize = 100;
 /// Max commander slots accepted on the wire.
 pub const MAX_COMMANDER_ENTRIES: usize = 4;
+/// Max supplementary Planechase planar-deck entries accepted on the wire.
+pub const MAX_PLANAR_DECK_ENTRIES: usize = 200;
 /// Max byte length of a single card name string inside a deck payload.
 pub const MAX_DECK_CARD_NAME_LEN: usize = 256;
 
@@ -72,6 +74,11 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &format!("{field}.commander"),
         &deck.commander,
         MAX_COMMANDER_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.planar_deck"),
+        &deck.planar_deck,
+        MAX_PLANAR_DECK_ENTRIES,
     )?;
     Ok(())
 }
@@ -240,6 +247,41 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("sideboard"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_oversized_planar_deck() {
+        let mut deck = deck(1, 0);
+        deck.planar_deck = vec!["Plane".to_string(); MAX_PLANAR_DECK_ENTRIES + 1];
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck,
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("planar_deck"));
+    }
+
+    #[test]
+    fn borrowed_join_guard_rejects_invalid_planar_deck_entry() {
+        let mut deck = deck(1, 0);
+        deck.planar_deck = vec!["Bad\nPlane".to_string()];
+        let err = guard_join_game_with_password_inbound(JoinGameWithPasswordInbound {
+            game_code: "GAME01",
+            deck: &deck,
+            display_name: "Guest",
+            password: None,
+            reservation_token: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("planar_deck[0]"));
     }
 
     #[test]

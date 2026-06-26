@@ -8088,7 +8088,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let any_color = super::casting::player_can_spend_as_any_color_for_payment(
         state,
         player,
-        source_id,
+        Some(source_id),
         effective_payment_context,
     );
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes

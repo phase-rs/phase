@@ -2262,9 +2262,10 @@ pub struct PhyrexianShard {
 }
 
 /// Per-player deck pool — registered (initial) and current (live) card
-/// lists for main deck, sideboard, and commander zone.
+/// lists for main deck, sideboard, command-zone deck components, and
+/// supplementary payloads carried across match games.
 ///
-/// All six `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
+/// All `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
 /// `GameState::clone()` shares the underlying deck slice via refcount
 /// bump instead of deep-cloning every card's `CardFace` (and its nested
 /// `Vec<AbilityDefinition>`) on every AI search-node clone. Mutations
@@ -2289,6 +2290,10 @@ pub struct PlayerDeckPool {
     pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 901.15a: Registered shared Planechase planar deck payload. Only the
+    /// PlayerId(0) pool carries the communal deck, matching `DeckPayload`.
+    #[serde(default)]
+    pub registered_planar_deck: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -6905,6 +6910,11 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 901.9 / CR 116.2i: Number of planar die special actions each player
+    /// has taken this turn. Effect-caused planar die rolls do not increment
+    /// this counter.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub planar_die_actions_this_turn: HashMap<PlayerId, u32>,
     /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
     /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
     /// that are set in motion turn face up and stay in the command zone, NOT here.
@@ -7583,6 +7593,7 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
             archenemy: None,
             initiative: None,
@@ -8032,6 +8043,7 @@ impl PartialEq for GameState {
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.planar_die_actions_this_turn == other.planar_die_actions_this_turn
             && self.scheme_deck == other.scheme_deck
             && self.archenemy == other.archenemy
     }

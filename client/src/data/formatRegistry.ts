@@ -403,6 +403,28 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "Planechase",
+    label: "Planechase",
+    short_label: "PLC",
+    description: "60-card multiplayer with a communal planar deck",
+    group: "Multiplayer",
+    default_config: {
+      format: "Planechase",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: 60,
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "Limited",
     label: "Limited",
     short_label: "LIM",
@@ -453,13 +475,13 @@ export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
 }
 
 export function isSoloSetupFormat(metadata: FormatMetadata): boolean {
-  return !metadata.default_config.team_based;
+  return !metadata.default_config.team_based && metadata.format !== "Planechase";
 }
 
 export const SOLO_SETUP_FORMATS = FORMAT_REGISTRY.filter(isSoloSetupFormat);
 
 export function isDeckConstructionFormat(metadata: FormatMetadata): boolean {
-  return metadata.group !== "Multiplayer";
+  return metadata.group !== "Multiplayer" || metadata.format === "Planechase";
 }
 
 export const DECK_CONSTRUCTION_FORMATS = FORMAT_REGISTRY.filter(isDeckConstructionFormat);

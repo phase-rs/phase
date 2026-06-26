@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::types::card::CardFace;
+use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
 use crate::types::player::PlayerId;
@@ -30,6 +31,10 @@ pub struct PlayerDeckPayload {
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
+    /// CR 901.15a: Optional shared Planechase planar deck. Only
+    /// `DeckPayload::player.planar_deck` is loaded as the communal deck.
+    #[serde(default)]
+    pub planar_deck: Vec<DeckEntry>,
     /// Unstable Contraptions: optional supplementary Contraption deck.
     #[serde(default)]
     pub contraption_deck: Vec<DeckEntry>,
@@ -73,6 +78,8 @@ pub struct PlayerDeckList {
     pub commander: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    #[serde(default)]
+    pub planar_deck: Vec<String>,
     #[serde(default)]
     pub contraption_deck: Vec<String>,
     #[serde(default)]
@@ -133,6 +140,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
         attraction_deck: resolve_names(db, &list.attraction_deck),
+        planar_deck: resolve_names(db, &list.planar_deck),
         contraption_deck: resolve_names(db, &list.contraption_deck),
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
@@ -154,6 +162,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
+            planar_deck: resolve_names(db, &list.player.planar_deck),
             contraption_deck: resolve_names(db, &list.player.contraption_deck),
             sticker_sheets: list.player.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.player.signature_spell),
@@ -164,6 +173,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
+            planar_deck: resolve_names(db, &list.opponent.planar_deck),
             contraption_deck: resolve_names(db, &list.opponent.contraption_deck),
             sticker_sheets: list.opponent.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.opponent.signature_spell),
@@ -177,6 +187,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
+                planar_deck: resolve_names(db, &deck.planar_deck),
                 contraption_deck: resolve_names(db, &deck.contraption_deck),
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
@@ -242,6 +253,66 @@ pub fn momir_fixed_deck_names() -> Vec<String> {
     names
 }
 
+pub const DEFAULT_PLANAR_DECK_NAMES: [&str; 40] = [
+    "Academy at Tolaria West",
+    "Agyrem",
+    "Akoum",
+    "Antarctic Research Base",
+    "Aplan Mortarium",
+    "Aretopolis",
+    "Bant",
+    "Bloodhill Bastion",
+    "Celestine Reef",
+    "Cliffside Market",
+    "Edge of Malacol",
+    "Eloren Wilds",
+    "Enigma Ridges",
+    "Esper",
+    "Feeding Grounds",
+    "Fields of Summer",
+    "Gavony",
+    "Ghirapur",
+    "Glen Elendra",
+    "Glimmervoid Basin",
+    "Goldmeadow",
+    "Grand Ossuary",
+    "Grixis",
+    "Grove of the Dreampods",
+    "Hedron Fields of Agadeem",
+    "Horizon Boughs",
+    "Immersturm",
+    "Inys Haen",
+    "Isle of Vesuva",
+    "Izzet Steam Maze",
+    "Jund",
+    "Kessig",
+    "Ketria",
+    "Kharasha Foothills",
+    "Kilnspire District",
+    "Krosa",
+    "Lair of the Ashen Idol",
+    "Lethe Lake",
+    "Littjara",
+    "Llanowar",
+];
+
+pub fn default_planar_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
+    DEFAULT_PLANAR_DECK_NAMES
+        .iter()
+        .map(|name| {
+            let card = db
+                .get_face_by_name(name)
+                .unwrap_or_else(|| panic!("default Planechase card {name} must resolve"))
+                .clone();
+            assert!(
+                card.card_type.core_types.contains(&CoreType::Plane),
+                "default Planechase card {name} must be a Plane"
+            );
+            DeckEntry { card, count: 1 }
+        })
+        .collect()
+}
+
 /// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
 /// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
 /// deck. Momir admits exactly one legal deck, so the submitted payload's deck
@@ -253,6 +324,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sideboard: Vec::new(),
         commander: Vec::new(),
         attraction_deck: Vec::new(),
+        planar_deck: Vec::new(),
         contraption_deck: Vec::new(),
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
@@ -377,6 +449,35 @@ fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], own
     }
 }
 
+/// CR 901.15a / CR 901.15b: Create a card in the single communal planar deck.
+/// Cards start face down in the command zone bookkeeping area; `state.planar_deck`
+/// is the deck order authority, with front = top.
+pub fn create_planar_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.face_down = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state.planar_deck.push_back(obj_id);
+    obj_id
+}
+
+fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    state.planar_deck.clear();
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_planar_deck_card(state, &entry.card, owner);
+        }
+    }
+    state.planar_controller = Some(owner);
+    crate::game::planechase::restamp_planar_objects_to_controller(state);
+}
+
 /// Unstable Contraptions: create a Contraption in the supplementary deck
 /// (command zone).
 pub fn create_contraption_deck_card(
@@ -458,6 +559,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
     let p0_sig = std::sync::Arc::new(payload.player.signature_spell.clone());
+    let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
@@ -470,6 +572,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_commander: p0_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p0_sig),
             current_signature_spell: p0_sig,
+            registered_planar_deck: p0_planar,
             bracket_tier: payload.player.bracket_tier,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
@@ -488,6 +591,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_commander: p1_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p1_sig),
             current_signature_spell: p1_sig,
+            registered_planar_deck: std::sync::Arc::new(Vec::new()),
             bracket_tier: payload.opponent.bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
@@ -508,6 +612,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 current_commander: cmdr,
                 registered_signature_spell: std::sync::Arc::clone(&sig),
                 current_signature_spell: sig,
+                registered_planar_deck: std::sync::Arc::new(Vec::new()),
                 bracket_tier: ai_deck.bracket_tier,
             });
     }
@@ -608,6 +713,10 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
+    if state.format_config.format == crate::types::format::GameFormat::Planechase {
+        load_shared_planar_deck(state, &payload.player.planar_deck, PlayerId(0));
+    }
+
     // Momir Basic: grant each player a game-start command-zone emblem carrying
     // the random-creature-token activated ability (CR 114.1 / CR 113.1b). The
     // grant runs BEFORE `rehydrate_game_from_card_db` populates the Momir pool
@@ -680,6 +789,10 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     sorted.sort();
     state.all_creature_types = sorted;
 
+    if !state.planar_deck.is_empty() {
+        crate::util::im_ext::shuffle_vector(&mut state.planar_deck, &mut state.rng);
+    }
+
     // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
@@ -720,6 +833,24 @@ pub fn load_and_hydrate_decks(
             Some(card_db) => {
                 momir_payload = momir_fixed_deck_payload(card_db, payload);
                 &momir_payload
+            }
+            None => payload,
+        }
+    } else {
+        payload
+    };
+    let planechase_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Planechase
+        && payload.player.planar_deck.is_empty()
+    {
+        match db {
+            Some(card_db) => {
+                planechase_payload = {
+                    let mut payload = payload.clone();
+                    payload.player.planar_deck = default_planar_deck_entries(card_db);
+                    payload
+                };
+                &planechase_payload
             }
             None => payload,
         }

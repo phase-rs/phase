@@ -47,6 +47,7 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "Planechase"
   | "Limited"
   | "Momir";
 
@@ -1553,6 +1554,7 @@ export type DebugAction =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "RollPlanarDie" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
@@ -1706,6 +1708,8 @@ export interface PhyrexianShard {
   options: ShardOptions;
 }
 
+export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
+
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
 export type GameEvent =
@@ -1774,6 +1778,9 @@ export type GameEvent =
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
+  | { type: "Planeswalked"; data: { player_id: PlayerId; from: ObjectId | null; to: ObjectId | null } }
+  | { type: "ChaosEnsued"; data: { plane_id: ObjectId } }
+  | { type: "PlanarDieRolled"; data: { player_id: PlayerId; face: PlanarDieFace } }
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
   // the engine's authoritative roll (1..=sides after modifiers). `result` is
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
@@ -1833,6 +1840,14 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+export interface PlanechaseView {
+  active_plane?: ObjectId | null;
+  planar_controller?: PlayerId | null;
+  planar_deck_count: number;
+  current_roll_cost: ManaCost;
+  can_roll: boolean;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -1888,6 +1903,8 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
    */
   pending_payment_remaining?: ManaCost;
+  /** Engine-authored Planechase state and planar-die legality. */
+  planechase?: PlanechaseView | null;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

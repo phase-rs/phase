@@ -90,6 +90,7 @@ export function useDeckBuilder({
   const { cardDataCache, cacheCards } = useDeckCardData([
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
+    ...(deck.planar_deck ?? []),
     ...commanders,
   ]);
 
@@ -142,13 +143,19 @@ export function useDeckBuilder({
       "//",
       ...deck.sideboard.map((e) => `${e.count}x${e.name}`),
       "//",
+      ...(deck.planar_deck ?? []),
+      "//",
       ...commanders,
     ].join("|"),
     [deck, commanders],
   );
 
   useEffect(() => {
-    if (currentDeck.main.length === 0 && currentDeck.sideboard.length === 0) {
+    if (
+      currentDeck.main.length === 0
+      && currentDeck.sideboard.length === 0
+      && (currentDeck.planar_deck?.length ?? 0) === 0
+    ) {
       setCompatibility(null);
       return;
     }
@@ -408,6 +415,7 @@ export function useDeckBuilder({
     setDeck({
       main: deduplicateEntries(next.main ?? []),
       sideboard: deduplicateEntries(next.sideboard ?? []),
+      planar_deck: next.planar_deck ? [...next.planar_deck] : undefined,
       companion: next.companion,
     });
     setCommanders(next.commander ?? []);

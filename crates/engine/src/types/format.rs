@@ -52,6 +52,9 @@ pub enum GameFormat {
     HistoricBrawl,
     FreeForAll,
     TwoHeadedGiant,
+    /// CR 901: Planechase using the single communal planar deck option
+    /// (CR 901.15a), plus normal 60-card player decks.
+    Planechase,
     /// Momir's Madness: 60 snow basic lands (12 each, no Snow-Covered Wastes),
     /// 20 life, a game-start command-zone emblem granting "{X}, Discard a card:
     /// Create a token that's a copy of a creature card with mana value X chosen
@@ -183,6 +186,7 @@ impl GameFormat {
             | GameFormat::Oathbreaker
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
+            | GameFormat::Planechase
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
             | GameFormat::Limited => None,
@@ -214,9 +218,10 @@ impl GameFormat {
             | GameFormat::Momir
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
-                SideboardPolicy::Unlimited
-            }
+            GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Planechase
+            | GameFormat::Limited => SideboardPolicy::Unlimited,
         }
     }
 
@@ -290,6 +295,7 @@ impl GameFormat {
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
             GameFormat::TwoHeadedGiant => "Two-Headed Giant",
+            GameFormat::Planechase => "Planechase",
             GameFormat::Momir => "Momir's Madness",
         }
     }
@@ -444,6 +450,14 @@ impl GameFormat {
                 description: "4 players, two teams of two",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::two_headed_giant(),
+            },
+            FormatMetadata {
+                format: GameFormat::Planechase,
+                label: "Planechase",
+                short_label: "PLC",
+                description: "60-card multiplayer with a communal planar deck",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::planechase(),
             },
             FormatMetadata {
                 format: GameFormat::Limited,
@@ -761,6 +775,27 @@ impl FormatConfig {
         }
     }
 
+    /// CR 901.15a: Planechase with one communal planar deck. Player decks use
+    /// normal 60-card construction; the supplementary planar deck is validated
+    /// separately against the actual player count.
+    pub fn planechase() -> Self {
+        FormatConfig {
+            format: GameFormat::Planechase,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 4,
+            deck_size: 60,
+            singleton: false,
+            command_zone: false,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            uses_commander: false,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+        }
+    }
+
     /// Return a copy of this config with the sandbox capability enabled.
     /// Pure data transform; the resulting config is otherwise identical and
     /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.
@@ -797,6 +832,7 @@ impl FormatConfig {
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
             GameFormat::TwoHeadedGiant => Self::two_headed_giant(),
+            GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
         }
     }
