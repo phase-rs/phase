@@ -449,10 +449,12 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.pending_team_draw_step.clear();
 
     let completed_player = state.active_player;
+    let completed_turn_key =
+        super::topology::normalize_shared_turn_recipient(state, completed_player);
     if state.turn_decision_controller.is_some() {
         let mut grant_extra_turn_after = false;
         state.scheduled_turn_controls.retain(|scheduled| {
-            if scheduled.target_player != completed_player {
+            if scheduled.target_player != completed_turn_key {
                 return true;
             }
             if Some(scheduled.controller) == state.turn_decision_controller {
@@ -473,17 +475,19 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // in APNAP order). `is_extra_turn` flows into the replacement pipeline so
     // condition-gated skip effects (e.g., Stranglehold) can observe it.
     let is_extra_turn = if let Some(extra_turn_player) = state.extra_turns.pop() {
-        state.active_player = extra_turn_player;
+        state.active_player =
+            super::topology::normalize_shared_turn_recipient(state, extra_turn_player);
         true
     } else {
-        state.active_player = super::players::next_player(state, state.active_player);
+        state.active_player = super::topology::next_turn_representative(state, state.active_player);
         false
     };
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
     // Days). This is a fast path for "you skip your next turn" that doesn't need
     // the replacement pipeline — there's no event-context predicate to evaluate.
-    let idx = state.active_player.0 as usize;
+    let skip_player = super::topology::normalize_shared_turn_recipient(state, state.active_player);
+    let idx = skip_player.0 as usize;
     if idx < state.turns_to_skip.len() && state.turns_to_skip[idx] > 0 {
         state.turns_to_skip[idx] -= 1;
         // Recursively start the next turn (skipping this one entirely).
@@ -528,7 +532,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(scheduled) = state
         .scheduled_turn_controls
         .iter()
-        .rfind(|scheduled| scheduled.target_player == state.active_player)
+        .rfind(|scheduled| {
+            scheduled.target_player
+                == super::topology::normalize_shared_turn_recipient(state, state.active_player)
+        })
         .copied()
     {
         state.turn_decision_controller = Some(scheduled.controller);
@@ -1281,7 +1288,7 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     if state.pending_team_draw_step.is_empty() {
         state.pending_team_draw_step.push(state.active_player);
-        if state.format_config.team_based {
+        if state.format_config.topology().has_shared_team_turns() {
             state
                 .pending_team_draw_step
                 .extend(super::players::teammates(state, state.active_player));
@@ -6611,6 +6618,57 @@ mod tests {
     }
 
     #[test]
+    fn two_headed_giant_natural_turn_advances_to_opposing_team() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(2));
+    }
+
+    #[test]
+    fn two_headed_giant_rotated_order_advances_to_next_team_representative() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        crate::game::engine::start_game_with_starting_player(&mut state, PlayerId(1));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)]
+        );
+        assert_eq!(state.active_player, PlayerId(2));
+
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(0));
+    }
+
+    #[test]
+    fn free_for_all_natural_turn_still_advances_seat_by_seat() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(1));
+    }
+
+    #[test]
     fn controlled_turn_uses_controller_then_grants_extra_turn_afterward() {
         let mut state = setup();
         state.active_player = PlayerId(0);
@@ -6637,6 +6695,40 @@ mod tests {
         assert_eq!(state.turn_decision_controller, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
+    }
+
+    #[test]
+    fn shared_team_control_retires_non_anchor_completed_turn() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.seat_order = vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)];
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(2);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.turn_number = 1;
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(0),
+                controller: PlayerId(2),
+                grant_extra_turn_after: false,
+            });
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.turn_decision_controller, None);
+        assert!(state.scheduled_turn_controls.is_empty());
+
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(0));
+        assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.priority_player, PlayerId(0));
     }
 
     #[test]

@@ -46,12 +46,8 @@ pub fn eliminate_players_simultaneously(
         do_eliminate(state, player, events);
         eliminated_any = true;
 
-        // For team-based formats, eliminate teammates too.
-        if state.format_config.team_based {
-            let team = players::teammates(state, player);
-            for teammate in team {
-                do_eliminate(state, teammate, events);
-            }
+        for teammate in players::teammates(state, player) {
+            do_eliminate(state, teammate, events);
         }
     }
 
@@ -504,12 +500,10 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|p| p.id)
         .collect();
 
-    if state.format_config.team_based {
-        // Count living teams (team = pair of players with same team index)
-        let mut living_teams = std::collections::HashSet::new();
+    if state.format_config.topology().has_shared_team_turns() {
+        let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
-            let team_idx = pid.0 / 2;
-            living_teams.insert(team_idx);
+            living_teams.insert(super::topology::team_dedup_key(state, pid));
         }
 
         if living_teams.len() <= 1 {

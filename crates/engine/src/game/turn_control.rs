@@ -26,8 +26,21 @@ pub fn priority_seat(state: &GameState) -> PlayerId {
 }
 
 pub fn authorized_submitter_for_player(state: &GameState, semantic_player: PlayerId) -> PlayerId {
-    if semantic_player == state.active_player {
-        turn_decision_maker(state)
+    let Some(controller) = state.turn_decision_controller else {
+        return semantic_player;
+    };
+
+    // CR 723.5 + CR 805.8: A turn controller makes decisions for the
+    // controlled player; in shared team turns, controlling one affected player
+    // controls that player's team.
+    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+        super::topology::team_members(state, state.active_player).contains(&semantic_player)
+    } else {
+        semantic_player == state.active_player
+    };
+
+    if controlled_seat {
+        controller
     } else {
         semantic_player
     }

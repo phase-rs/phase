@@ -40,8 +40,8 @@ pub fn handle_priority_pass_with_limit(
     // Also maintain legacy counter for transition period
     state.priority_pass_count += 1;
 
-    // CR 800.4: Eliminated players are excluded from priority passing.
-    let living_count = state.players.iter().filter(|p| !p.is_eliminated).count();
+    let participants = super::topology::priority_pass_participants(state);
+    let living_count = participants.len();
 
     if state.priority_passes.len() >= living_count {
         // CR 117.4: All living players have passed consecutively.
@@ -128,24 +128,18 @@ pub fn handle_priority_pass_with_limit(
 /// For team-based formats (2HG): CR 101.4 APNAP within teams — active team members first,
 /// then opponent team members.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
-    if state.format_config.team_based {
-        // 2HG: APNAP order within teams
-        // Build the full APNAP order and find the next player who hasn't passed
-        let order = players::apnap_order(state);
-        let current_idx = order.iter().position(|&id| id == current).unwrap_or(0);
-        for offset in 1..=order.len() {
-            let idx = (current_idx + offset) % order.len();
-            let candidate = order[idx];
-            if !state.priority_passes.contains(&candidate) {
-                return candidate;
-            }
+    let participants = super::topology::priority_pass_participants(state);
+    let Some(current_idx) = participants.iter().position(|&id| id == current) else {
+        return players::next_player(state, current);
+    };
+    for offset in 1..=participants.len() {
+        let idx = (current_idx + offset) % participants.len();
+        let candidate = participants[idx];
+        if !state.priority_passes.contains(&candidate) {
+            return candidate;
         }
-        // Fallback (shouldn't reach here if called before all have passed)
-        players::next_player(state, current)
-    } else {
-        // Non-team: simple clockwise in seat order
-        players::next_player(state, current)
     }
+    players::next_player(state, current)
 }
 
 /// CR 117.3a: After resolution, active player receives priority.

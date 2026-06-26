@@ -7345,21 +7345,10 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        // CR 810.4 + CR 810.11: `FormatConfig::starting_life` is the TEAM's
-        // shared total in a team-based format (Two-Headed Giant: 30, not 30
-        // per player / 60 per team). `game::players::team_life_total` derives
-        // the shared total by summing each living teammate's own `life`
-        // field, so the individual starting values must already split the
-        // shared total rather than each duplicating it. The engine currently
-        // only models 2-player teams (seats paired {0,1}, {2,3}, ... — see
-        // `game::players::teammates`/`team_index`), so the split is an even
-        // halving; CR 810.11 (3+-player teams) would need this to divide by
-        // the actual team size instead.
-        let per_player_life = if config.team_based {
-            config.starting_life / 2
-        } else {
-            config.starting_life
-        };
+        // CR 810.4: `FormatConfig::starting_life` is the team's shared total
+        // in Two-Headed Giant (30), so each seat starts with its topology-derived
+        // share and `game::players::team_life_total` folds the team back to 30.
+        let per_player_life = config.starting_life_for_seat();
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),

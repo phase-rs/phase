@@ -5508,8 +5508,8 @@ fn handle_play_land(
     // `turn_resource_owner` stays correct for turn-control effects (CR 723,
     // e.g. Mindslaver), which always act on the active player's own
     // resources regardless of who submits the choice — that path is
-    // unaffected since it never sets `team_based`.
-    let player = if state.format_config.team_based {
+    // unaffected since it never uses shared team turns.
+    let player = if state.format_config.topology().has_shared_team_turns() {
         acting_player
     } else {
         turn_control::turn_resource_owner(state)
@@ -5526,7 +5526,7 @@ fn handle_play_land(
     // their own allowance); the legacy single-counter `lands_played_this_turn`
     // is correct outside team-based formats, where only the active player
     // ever plays lands during their own turn.
-    let lands_played = if state.format_config.team_based {
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
         state
             .players
             .iter()
@@ -9886,6 +9886,93 @@ mod tests {
         // P0 submitting the same action must succeed.
         let result = apply(&mut state, PlayerId(0), GameAction::PassPriority);
         assert!(result.is_ok(), "P0 pass should succeed: {result:?}");
+    }
+
+    #[test]
+    fn two_hg_controlled_team_turn_routes_teammate_priority_to_controller() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(2)),
+            "CR 805.8 routes the active-team teammate through the turn controller"
+        );
+        assert_eq!(
+            state.priority_player,
+            PlayerId(2),
+            "public submitter should stay on the controller while P1 is the semantic seat"
+        );
+
+        let teammate_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            matches!(teammate_result, Err(EngineError::WrongPlayer)),
+            "teammate must not submit for themselves during a controlled team turn: {teammate_result:?}"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            controller_result.is_ok(),
+            "turn controller should submit for the teammate's priority: {controller_result:?}"
+        );
+    }
+
+    #[test]
+    fn non_team_controlled_turn_only_routes_active_player() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for the active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(1)),
+            "non-team controlled turns must not route unrelated players through the controller"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            matches!(controller_result, Err(EngineError::WrongPlayer)),
+            "controller must not submit for the next non-team opponent: {controller_result:?}"
+        );
+
+        let next_player_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            next_player_result.is_ok(),
+            "next non-team player should submit for themselves: {next_player_result:?}"
+        );
     }
 
     /// Regression: Concede self-authenticates via its own `player_id`, but
@@ -25107,6 +25194,41 @@ mod mdfc_land_tests {
             "explicit starting player path must emit no contest event"
         );
         assert_eq!(state.current_starting_player, PlayerId(1));
+    }
+
+    #[test]
+    fn two_hg_team_identity_survives_starting_player_rotation() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+
+        start_game_with_starting_player(&mut state, PlayerId(1));
+
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)]
+        );
+        assert!(!crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(1)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(2)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(3)
+        ));
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            30
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(1)),
+            30
+        );
     }
 
     /// Empty seat order keeps the PlayerId(0) fast path and emits no contest.

@@ -357,7 +357,7 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     let poison_loss = state.players.iter().any(|player| {
         // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
         !player.is_eliminated
-            && if state.format_config.team_based {
+            && if state.format_config.topology().has_shared_team_turns() {
                 super::players::team_poison_total(state, player.id) >= 15
             } else {
                 player.poison_counters >= 10
@@ -468,7 +468,7 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            if state.format_config.team_based {
+            if state.format_config.topology().has_shared_team_turns() {
                 super::players::team_poison_total(state, p.id) >= 15
             } else {
                 p.poison_counters >= 10

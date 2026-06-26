@@ -141,6 +141,7 @@ pub mod stickers;
 mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
+pub mod topology;
 pub mod transform;
 pub mod trigger_index;
 pub(crate) mod trigger_matchers;

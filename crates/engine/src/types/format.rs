@@ -97,6 +97,22 @@ pub enum DeckCopyLimit {
     UpTo(u32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStructure {
+    IndividualTurns,
+    SharedTeamTurns,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatTopology {
+    IndividualSeats,
+    FixedTeams {
+        team_size: u8,
+        team_count: u8,
+        turn_structure: TurnStructure,
+    },
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -130,6 +146,18 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+}
+
+impl FormatTopology {
+    pub fn has_shared_team_turns(self) -> bool {
+        matches!(
+            self,
+            FormatTopology::FixedTeams {
+                turn_structure: TurnStructure::SharedTeamTurns,
+                ..
+            }
+        )
+    }
 }
 
 impl GameFormat {
@@ -436,6 +464,31 @@ impl GameFormat {
 }
 
 impl FormatConfig {
+    pub fn topology(&self) -> FormatTopology {
+        match self.format {
+            GameFormat::TwoHeadedGiant => FormatTopology::FixedTeams {
+                team_size: 2,
+                team_count: 2,
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
+            _ if self.team_based => FormatTopology::FixedTeams {
+                team_size: 2,
+                team_count: 2,
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
+            _ => FormatTopology::IndividualSeats,
+        }
+    }
+
+    pub fn starting_life_for_seat(&self) -> i32 {
+        match self.topology() {
+            FormatTopology::IndividualSeats => self.starting_life,
+            FormatTopology::FixedTeams { team_size, .. } => {
+                self.starting_life / i32::from(team_size)
+            }
+        }
+    }
+
     pub fn standard() -> Self {
         FormatConfig {
             format: GameFormat::Standard,
@@ -825,6 +878,34 @@ mod tests {
         assert_eq!(config.min_players, 4);
         assert_eq!(config.max_players, 4);
         assert!(config.team_based);
+        assert_eq!(
+            config.topology(),
+            FormatTopology::FixedTeams {
+                team_size: 2,
+                team_count: 2,
+                turn_structure: TurnStructure::SharedTeamTurns,
+            }
+        );
+        assert_eq!(config.starting_life_for_seat(), 15);
+    }
+
+    #[test]
+    fn format_registry_still_omits_two_headed_giant() {
+        let formats: Vec<GameFormat> = GameFormat::registry()
+            .into_iter()
+            .map(|metadata| metadata.format)
+            .collect();
+
+        assert!(formats.contains(&GameFormat::Standard));
+        assert!(formats.contains(&GameFormat::FreeForAll));
+        assert!(formats.contains(&GameFormat::Momir));
+        assert!(!formats.contains(&GameFormat::TwoHeadedGiant));
+    }
+
+    #[test]
+    fn starting_life_for_seat_preserves_non_team_formats() {
+        assert_eq!(FormatConfig::standard().starting_life_for_seat(), 20);
+        assert_eq!(FormatConfig::commander().starting_life_for_seat(), 40);
     }
 
     #[test]
