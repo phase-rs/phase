@@ -3073,6 +3073,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

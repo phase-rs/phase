@@ -4377,6 +4377,15 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
+    /// ability's controller, used as the announcing player (`target_chooser`) for
+    /// a slot whose Oracle text reads "of an opponent's choice" / "of a player's
+    /// choice". Resolves to a deterministic opponent via
+    /// `resolve_effect_player_ref` (the spell's targeted opponent if any, else the
+    /// first opponent in seat order). This is a *player-reference* role only — it
+    /// is never used as an object-population filter (an opponent-controlled object
+    /// is expressed as `Typed(.., controller: Some(ControllerRef::Opponent))`).
+    Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives
     /// inside — used when a granted (activated/triggered) body refers to the

@@ -10800,6 +10800,7 @@ fn continue_with_prepared(
             let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal,
                 optional: false,
+                chooser: None,
             }];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
@@ -10869,6 +10870,7 @@ fn continue_with_prepared(
         let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal,
             optional: false,
+            chooser: None,
         }];
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;

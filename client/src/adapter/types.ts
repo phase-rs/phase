@@ -1195,6 +1195,11 @@ export interface PendingCast {
 export interface TargetSelectionSlot {
   legal_targets: TargetRef[];
   optional?: boolean;
+  // CR 601.2c: the player who announces (chooses the target for) this slot.
+  // Absent (serde-omitted) when the controller is the announcer — the default.
+  // Set only for slots whose Oracle text routes the choice to another player
+  // ("of an opponent's choice", e.g. Volcanic Offering). Display-only.
+  chooser?: number;
 }
 
 export interface TargetSelectionProgress {

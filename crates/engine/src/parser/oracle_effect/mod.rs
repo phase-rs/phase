@@ -14755,6 +14755,9 @@ fn try_parse_reanimate_self_and_target(
     // "up to N" cardinality (which the generic try_split wrapper omits).
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    // CR 601.2c + CR 115.1: keep the continuation's announcing player on its
+    // own chained link rather than leaking it to the primary target.
+    sub_ability.target_chooser = continuation_ctx.target_chooser.clone();
     sub_ability.multi_target = multi_target;
     sub_ability.optional = sub_clause.optional;
 
@@ -15560,6 +15563,9 @@ fn try_parse_multi_target_damage_chain(
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Each segment parses through the shared context, so retain the primary
+    // segment's announcer before a continuation can overwrite it.
+    let primary_target_chooser = ctx.target_chooser.clone();
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
     // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
@@ -15578,8 +15584,9 @@ fn try_parse_multi_target_damage_chain(
 
     // Walk the comma-delimited continuation list. Each iteration either
     // consumes one bare-damage segment (returning the next AbilityDefinition)
-    // or aborts the entire chain — partial parses are not committed.
-    let mut segments: Vec<Effect> = Vec::new();
+    // or aborts the entire chain — partial parses are not committed. Each
+    // continuation retains its own target announcer.
+    let mut segments: Vec<(Effect, Option<TargetFilter>)> = Vec::new();
     let mut cursor = remainder.trim_start();
     while !cursor.is_empty() {
         let cursor_lower = cursor.to_lowercase();
@@ -15607,7 +15614,7 @@ fn try_parse_multi_target_damage_chain(
         };
 
         let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
-        segments.push(segment_effect);
+        segments.push((segment_effect, ctx.target_chooser.clone()));
         cursor = leftover.trim_start();
     }
 
@@ -15615,14 +15622,17 @@ fn try_parse_multi_target_damage_chain(
         return None;
     }
 
+    ctx.target_chooser = primary_target_chooser;
+
     // Build the chain bottom-up so each segment becomes the `sub_ability` of
     // the previous one. Effects beyond the primary share the primary's
     // damage-source semantics by construction (each is a `DealDamage` with
     // `damage_source: None`).
     let mut chain_tail: Option<Box<AbilityDefinition>> = None;
-    for effect in segments.into_iter().rev() {
+    for (effect, target_chooser) in segments.into_iter().rev() {
         let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
         def.sub_ability = chain_tail.take();
+        def.target_chooser = target_chooser;
         chain_tail = Some(Box::new(def));
     }
 
@@ -16092,6 +16102,8 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     }
 
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Preserve the primary target's announcer while parsing the continuation.
+    let primary_target_chooser = ctx.target_chooser.clone();
 
     if remainder.is_empty() {
         return None;
@@ -16110,6 +16122,8 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
     let mut sub_clause = parse_effect_clause(sub_text, ctx);
+    let sub_target_chooser = ctx.target_chooser.clone();
+    ctx.target_chooser = primary_target_chooser;
 
     // Guard: if the sub-text parsed to Unimplemented, it's likely a target phrase
     // continuation ("each creature and planeswalker they control") rather than an
@@ -16129,6 +16143,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    sub_ability.target_chooser = sub_target_chooser;
 
     Some(ParsedEffectClause {
         effect: primary_effect,

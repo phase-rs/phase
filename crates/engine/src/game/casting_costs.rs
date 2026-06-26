@@ -1299,8 +1299,14 @@ pub(crate) fn begin_deferred_target_selection(
         &target_slots,
         &pending.target_constraints,
     )?;
+    // CR 601.2c + CR 115.1: first slot's announcer (controller unless the slot is
+    // "of an opponent's choice").
+    let initial_player = target_slots
+        .first()
+        .and_then(|slot| slot.chooser)
+        .unwrap_or(player);
     Ok(WaitingFor::TargetSelection {
-        player,
+        player: initial_player,
         pending_cast: Box::new(pending),
         target_slots,
         mode_labels,
@@ -3856,8 +3862,14 @@ pub(super) fn push_activated_ability_to_stack(
         pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
         pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
+        // CR 601.2c + CR 602.2b: first slot's announcer (activator unless the slot
+        // is "of an opponent's choice").
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(player);
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: initial_player,
             pending_cast: Box::new(pending_act),
             target_slots,
             mode_labels: Vec::new(),

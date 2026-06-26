@@ -4538,6 +4538,7 @@ mod tests {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4576,6 +4577,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

@@ -754,7 +754,8 @@
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",
     "keepCurrentTargets": "Keep Current Targets",
-    "skip": "Skip"
+    "skip": "Skip",
+    "opponentChoice": "(opponent's choice)"
   },
   "log": {
     "title": "Game Log",

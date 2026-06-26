@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -22,6 +22,7 @@ import { RichLabel } from "../mana/RichLabel.tsx";
 export function TargetingOverlay() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
+  const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -65,6 +66,12 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 601.2c: display-only hint when this slot is announced by a player other
+  // than the local viewer ("of an opponent's choice", e.g. Volcanic Offering).
+  // The engine's WaitingFor.player already routed the prompt to the announcer;
+  // this only labels the slot. No game logic in the client.
+  const isOpponentChosenSlot =
+    activeSlot?.chooser != null && activeSlot.chooser !== localPlayerId;
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
       ? waitingFor.data.source_id
@@ -201,6 +208,11 @@ export function TargetingOverlay() {
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             <RichLabel text={overlayPrompt} />
           </div>
+          {isOpponentChosenSlot && (
+            <div className="rounded-md bg-gray-800/90 px-3 py-1 text-xs font-medium text-amber-300 shadow">
+              {t("targeting.opponentChoice")}
+            </div>
+          )}
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />
