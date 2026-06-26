@@ -4546,6 +4546,14 @@ fn attach_unless_slots(
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 611.3a: A multi-clause conditional protection grant ("creatures you
+    // control gain protection from white if you control a Plains, from blue if
+    // ..., and from green if you control a Forest") must be parsed on the full
+    // clause, before `peel_clause` below strips the final clause's condition into
+    // the clause context and collapses every other color's gating.
+    if let Some(clause) = subject::try_parse_conditional_protection_grant_clause(text, ctx) {
+        return clause;
+    }
     // CR 608.2c: "do X unless [game state]" — strip trailing unless suffix and
     // attach the negated gate before body parsing (payment-unless uses
     // `unless_pay` / `extract_resolution_unless_pay_modifier` instead).

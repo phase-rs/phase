@@ -978,7 +978,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             {
                 ability_condition_to_static_condition(cond).map(|static_cond| {
                     for static_def in static_abilities.iter_mut() {
-                        static_def.condition = Some(static_cond.clone());
+                        // CR 611.3a: don't clobber a per-static condition the
+                        // static parser already established (e.g. each color of a
+                        // multi-clause conditional protection grant gated on its
+                        // own land); only fill statics left unconditioned.
+                        if static_def.condition.is_none() {
+                            static_def.condition = Some(static_cond.clone());
+                        }
                     }
                 })
             } else {

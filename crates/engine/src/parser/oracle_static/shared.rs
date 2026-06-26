@@ -1426,6 +1426,90 @@ pub(crate) fn parse_attached_static_condition(text: &str) -> Option<StaticCondit
     parse_static_condition(text).map(rebind_source_object_quantities_to_recipient)
 }
 
+/// CR 611.3a + CR 702.16: Parse a multi-clause conditional protection grant —
+/// "protection from `<quality>` if `<condition>`, from `<quality>` if
+/// `<condition>`, ..., and from `<quality>` if `<condition>`" (Dominaria's
+/// Judgment: "gain protection from white if you control a Plains, from blue if
+/// you control an Island, ..., and from green if you control a Forest").
+///
+/// Returns one `(ProtectionTarget, StaticCondition)` per clause so each color's
+/// protection is gated on its OWN condition. The prior generic grant path
+/// emitted a single static carrying every protection modification but only the
+/// FINAL clause's condition — silently dropping the gating for every other
+/// color (and leaving their qualities as raw `ProtectionTarget::CardType`
+/// strings like `"white if you control a plains"`).
+///
+/// Returns `None` unless the lead-in matches and EVERY comma/`and`-separated
+/// clause parses as "`<protection quality>` if `<condition>`", so single-clause
+/// grants and unrelated shapes fall through to the existing path untouched.
+pub(crate) fn parse_conditional_protection_grant_list(
+    predicate: &str,
+) -> Option<
+    Vec<(
+        crate::types::keywords::ProtectionTarget,
+        Option<StaticCondition>,
+    )>,
+> {
+    let body = strip_protection_grant_lead_in(predicate.trim())?;
+    let clauses = split_conditional_protection_clauses(body);
+    // A single clause is parsed correctly by the generic suffix-condition path;
+    // only the multi-clause list needs per-clause condition gating.
+    if clauses.len() < 2 {
+        return None;
+    }
+    let mut grants = Vec::with_capacity(clauses.len());
+    for (i, clause) in clauses.iter().enumerate() {
+        match clause.split_once(" if ") {
+            Some((quality, cond_text)) => {
+                let condition =
+                    parse_attached_static_condition(cond_text.trim().trim_end_matches('.'))?;
+                let target = crate::types::keywords::parse_protection_target(quality.trim());
+                grants.push((target, Some(condition)));
+            }
+            // The FINAL clause may already have had its "if <condition>" suffix
+            // peeled by the generic trailing-condition stripper one layer up
+            // (which re-applies it to this grant afterward). Accept a bare final
+            // quality and leave its condition for that re-application; reject a
+            // bare condition anywhere else so unrelated shapes fall through.
+            None if i + 1 == clauses.len() => {
+                let target = crate::types::keywords::parse_protection_target(clause.trim());
+                grants.push((target, None));
+            }
+            None => return None,
+        }
+    }
+    Some(grants)
+}
+
+/// Strip the "gain[s]/have/has protection from " lead-in. Oracle text spells
+/// these fixed words in lowercase, so a direct prefix match suffices; the
+/// caller has already isolated the predicate from its subject.
+fn strip_protection_grant_lead_in(predicate: &str) -> Option<&str> {
+    [
+        "gain protection from ",
+        "gains protection from ",
+        "have protection from ",
+        "has protection from ",
+    ]
+    .iter()
+    .find_map(|lead| predicate.strip_prefix(lead))
+}
+
+/// Split "white if ..., from blue if ..., and from green if ..." into bare
+/// "`<quality>` if `<condition>`" clauses. The leading clause's "from" was
+/// consumed by the lead-in strip; subsequent clauses repeat "from" (the final
+/// one Oxford-prefixed with "and"), so peel both.
+fn split_conditional_protection_clauses(body: &str) -> Vec<&str> {
+    body.split(", ")
+        .filter_map(|raw| {
+            let clause = raw.trim();
+            let clause = clause.strip_prefix("and ").unwrap_or(clause);
+            let clause = clause.strip_prefix("from ").unwrap_or(clause);
+            (!clause.is_empty()).then_some(clause)
+        })
+        .collect()
+}
+
 pub(crate) fn rebind_source_object_quantities_to_recipient(
     condition: StaticCondition,
 ) -> StaticCondition {
