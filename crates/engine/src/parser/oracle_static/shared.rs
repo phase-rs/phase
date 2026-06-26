@@ -1426,6 +1426,88 @@ pub(crate) fn parse_attached_static_condition(text: &str) -> Option<StaticCondit
     parse_static_condition(text).map(rebind_source_object_quantities_to_recipient)
 }
 
+/// CR 611.3a + CR 702.16: Parse a multi-clause conditional protection grant —
+/// "protection from `<quality>` if `<condition>`, from `<quality>` if
+/// `<condition>`, ..., and from `<quality>` if `<condition>`" (Dominaria's
+/// Judgment: "gain protection from white if you control a Plains, from blue if
+/// you control an Island, ..., and from green if you control a Forest").
+///
+/// Returns one `(ProtectionTarget, StaticCondition)` per clause so each color's
+/// protection is gated on its OWN condition. The prior generic grant path
+/// emitted a single static carrying every protection modification but only the
+/// FINAL clause's condition — silently dropping the gating for every other
+/// color (and leaving their qualities as raw `ProtectionTarget::CardType`
+/// strings like `"white if you control a plains"`).
+///
+/// The trailing-condition stripper one layer up peels the FINAL clause's "if
+/// `<condition>`" and re-applies it afterward, so the last clause may arrive as a
+/// bare quality (`None` condition); only that final clause may omit its `if`.
+/// Returns `None` for a single-clause grant or any unrecognized shape, so those
+/// fall through to the existing path untouched.
+pub(crate) fn parse_conditional_protection_grant_list(
+    predicate: &str,
+) -> Option<
+    Vec<(
+        crate::types::keywords::ProtectionTarget,
+        Option<StaticCondition>,
+    )>,
+> {
+    let (rest, grants) = conditional_protection_grant_list(predicate.trim()).ok()?;
+    // Require full consumption and a genuine multi-clause list; a single clause
+    // is parsed correctly by the generic suffix-condition path.
+    (rest.trim().is_empty() && grants.len() >= 2).then_some(grants)
+}
+
+/// nom body for [`parse_conditional_protection_grant_list`]: lead-in followed by
+/// one or more "from `<quality>` if `<condition>`" clauses (the leading clause's
+/// "from" is consumed by the lead-in; the final one is Oxford-prefixed "and").
+type ConditionalProtectionGrant = (
+    crate::types::keywords::ProtectionTarget,
+    Option<StaticCondition>,
+);
+
+fn conditional_protection_grant_list(
+    input: &str,
+) -> OracleResult<'_, Vec<ConditionalProtectionGrant>> {
+    let (input, _) = alt((
+        tag("gain protection from "),
+        tag("gains protection from "),
+        tag("have protection from "),
+        tag("has protection from "),
+    ))
+    .parse(input)?;
+    let (input, first) = conditional_protection_clause(input)?;
+    let (input, rest) = many0(preceded(
+        // Oxford-comma tolerant: longest separator first.
+        alt((tag(", and from "), tag(", from "), tag(" and from "))),
+        conditional_protection_clause,
+    ))
+    .parse(input)?;
+    let grants = std::iter::once(first).chain(rest).collect();
+    Ok((input, grants))
+}
+
+/// Parse one "`<protection quality>` if `<condition>`" clause, delegating the
+/// quality to [`parse_protection_target`](crate::types::keywords::parse_protection_target)
+/// and the condition run to [`parse_attached_condition_run`]. A bare trailing
+/// quality (its `if <condition>` already peeled upstream) yields a `None`
+/// condition for the caller to fill.
+fn conditional_protection_clause(input: &str) -> OracleResult<'_, ConditionalProtectionGrant> {
+    let (input, qualified) = opt((take_until(" if "), tag(" if "))).parse(input)?;
+    match qualified {
+        Some((quality, _)) => {
+            let (input, condition) = parse_attached_condition_run(input)?;
+            let target = crate::types::keywords::parse_protection_target(quality.trim());
+            Ok((input, (target, Some(condition))))
+        }
+        None => {
+            let (input, quality) = rest.parse(input)?;
+            let target = crate::types::keywords::parse_protection_target(quality.trim());
+            Ok((input, (target, None)))
+        }
+    }
+}
+
 pub(crate) fn rebind_source_object_quantities_to_recipient(
     condition: StaticCondition,
 ) -> StaticCondition {

@@ -18157,7 +18157,32 @@ fn try_parse_repeat_process_directive(
 /// case when reached via [`parse_oracle_text`] or any of the wrapper parsers
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
+/// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
+/// ("Until end of turn, creatures you control gain protection from white if you
+/// control a Plains, ..., and from green if you control a Forest" — Dominaria's
+/// Judgment) — handle the FULL clause here, before the chain's trailing-condition
+/// stripper peels the final clause's "if ..." and re-applies it across the whole
+/// grant. Each color keeps its own land condition, so no spurious outer condition
+/// is created.
+fn try_parse_conditional_protection_grant_ability(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<AbilityDefinition> {
+    let clause = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
+    let mut def = AbilityDefinition::new(kind, clause.effect);
+    if let Some(duration) = clause.duration {
+        def = def.duration(duration);
+    }
+    Some(def)
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    if let Some(def) =
+        try_parse_conditional_protection_grant_ability(text, kind, &mut ParseContext::default())
+    {
+        return def;
+    }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
@@ -18188,6 +18213,9 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
+    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
+        return def;
+    }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
