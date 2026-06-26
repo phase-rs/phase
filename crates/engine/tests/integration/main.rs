@@ -55,6 +55,7 @@ mod craft_tithing_blade_transform;
 mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod cumber_stone_opponent_debuff;
+mod curse_c17_when_enchanted_player_attacked_cycle;
 mod curse_co_departed_enchanted_player_trigger;
 mod curse_of_conformity_base_pt_and_lose_types;
 mod curse_of_deaths_hold_continuous_effect;

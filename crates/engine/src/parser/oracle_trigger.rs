@@ -9458,6 +9458,9 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
             def.valid_target = Some(TargetFilter::AttachedTo);
+            // CR 508.3b: only fires when the player themselves is attacked,
+            // not when a planeswalker they control or battle they protect is.
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
             return Some((TriggerMode::Attacks, def));
         }
     }
@@ -27344,6 +27347,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+        // CR 508.3b: only fires when the player themselves is attacked.
+        assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
         assert!(def.execute.is_some());
     }
 
