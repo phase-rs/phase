@@ -73,8 +73,14 @@ function getArcCoefficient(handSize: number): number {
 // rotation(i) === getCardRotation(i, H) and arc(i) === the hand's arcOffset.
 function handFanCurve(handSize: number) {
   const center = (handSize - 1) / 2;
-  const delta = handSize <= 1 ? 0 : Math.min(6, 36 / (handSize - 1));
-  const arcCoeff = getArcCoefficient(handSize);
+  // Derive the fan SHAPE (per-card tilt + arc) from at least two cards so the
+  // wings still fan when the hand is empty or holds a single card (a raw delta
+  // of 0 would render them flat). `center` stays at the TRUE hand center, so for
+  // handSize >= 2 this is identical to before and the wing curve stays
+  // continuous with getCardRotation(i, handSize) at the seam.
+  const shapeSize = Math.max(2, handSize);
+  const delta = Math.min(6, 36 / (shapeSize - 1));
+  const arcCoeff = getArcCoefficient(shapeSize);
   // The arc is a DOWNWARD parabola (edges drop, center rides highest). Past the
   // hand's own edge a naive continuation would sink the wings below the band and
   // clip them, so clamp wing lift to the outermost hand card's drop: wings rest
