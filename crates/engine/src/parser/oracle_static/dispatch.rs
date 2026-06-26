@@ -2560,11 +2560,18 @@ pub(crate) fn parse_static_line_inner(
         || nom_primitives::scan_contains(tp.lower, "cannot play lands")
     {
         let affected = parse_player_scope_filter(&tp);
-        return Some(
-            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
-                .affected(affected)
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
+            .affected(affected)
+            .description(text.to_string());
+        // CR 611.3a: a trailing "as long as <condition>" gates the restriction
+        // (Limited Resources: "... as long as ten or more lands are on the
+        // battlefield"). Without this the prohibition applied unconditionally.
+        if let Some((_, condition_tp)) = tp.split_around(" as long as ") {
+            if let Some(condition) = parse_static_condition(condition_tp.original) {
+                def = def.condition(condition);
+            }
+        }
+        return Some(def);
     }
 
     // --- "can't win the game" / "can't lose the game" (CR 104.3a/b) ---

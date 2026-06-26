@@ -1409,6 +1409,11 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "[N] or more [type] are on the battlefield" (Limited Resources)
+    if let Some(condition) = parse_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "the chosen color is [color]"
     if let Some(color_name) = nom_tag_lower(tp.lower, tp.lower, "the chosen color is ") {
         let trimmed = color_name.trim().trim_end_matches('.');
@@ -1728,6 +1733,40 @@ pub(crate) fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::Man
     }
 
     None
+}
+
+/// CR 611.3a: "[N] or more [type] are on the battlefield" → a count
+/// `QuantityComparison` (Limited Resources: "ten or more lands are on the
+/// battlefield"). Modeled as `ObjectCount(type) >= N`; the gate is then attached
+/// by the shared "as long as <condition>" machinery to the host static.
+pub(crate) fn parse_count_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    count_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) = take_until(" are on the battlefield").parse(input)?;
+    let (input, _) = tag(" are on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 /// Parse "the number of [quantity] is [comparator] [quantity]" into a QuantityComparison.
