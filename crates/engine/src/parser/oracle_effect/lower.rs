@@ -978,13 +978,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             {
                 ability_condition_to_static_condition(cond).map(|static_cond| {
                     for static_def in static_abilities.iter_mut() {
-                        // CR 611.3a: don't clobber a per-static condition the
-                        // static parser already established (e.g. each color of a
-                        // multi-clause conditional protection grant gated on its
-                        // own land); only fill statics left unconditioned.
-                        if static_def.condition.is_none() {
-                            static_def.condition = Some(static_cond.clone());
-                        }
+                        // CR 611.3a + CR 118.12a: compose the outer/effective
+                        // clause condition with any per-static condition the
+                        // static parser already established, rather than dropping
+                        // one. Both gates must survive to runtime (mirrors the
+                        // `StaticCondition::And` composition in
+                        // `oracle_static/anthem.rs`).
+                        static_def.condition = Some(match static_def.condition.take() {
+                            Some(existing) => StaticCondition::And {
+                                conditions: vec![static_cond.clone(), existing],
+                            },
+                            None => static_cond.clone(),
+                        });
                     }
                 })
             } else {

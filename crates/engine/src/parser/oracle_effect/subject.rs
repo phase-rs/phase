@@ -384,7 +384,7 @@ pub(super) fn try_parse_conditional_protection_grant_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    // CR 611.2b: "Until end of turn, creatures you control gain ..." carries a
+    // CR 611.2a: "Until end of turn, creatures you control gain ..." carries a
     // leading duration ahead of the subject; peel it (propagating the duration)
     // so the subject grammar sees a bare "creatures you control" subject.
     let (text, leading_duration) = strip_leading_duration(text);
@@ -4742,17 +4742,18 @@ mod tests {
         use crate::types::keywords::{Keyword, ProtectionTarget};
         use crate::types::mana::ManaColor;
 
-        let effect = super::super::parse_effect(
+        let def = super::super::parse_effect_chain(
             "Until end of turn, creatures you control gain protection from white if \
              you control a Plains, from blue if you control an Island, from black if \
              you control a Swamp, from red if you control a Mountain, and from green \
              if you control a Forest.",
+            AbilityKind::Spell,
         );
         let Effect::GenericEffect {
             static_abilities, ..
-        } = effect
+        } = &*def.effect
         else {
-            panic!("expected GenericEffect, got {effect:?}");
+            panic!("expected GenericEffect, got {:?}", def.effect);
         };
         assert_eq!(
             static_abilities.len(),
