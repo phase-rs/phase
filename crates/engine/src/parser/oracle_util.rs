@@ -1246,13 +1246,11 @@ fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
 /// `subtype_in_type_change_context` suppression on the "of"-based short-name
 /// path. `end` is the byte index just past the matched word.
 fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
-    // allow-noncombinator: normalization-layer prefix probe (pre-parse text
-    // munging, not parsing dispatch); mirrors the raw string ops in
-    // `follows_subtype_status_qualifier`.
-    haystack[end..]
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("in addition to its other types")
+    // Normalization-layer prefix probe (pre-parse text munging, not parsing
+    // dispatch); mirrors the raw string ops in `follows_subtype_status_qualifier`.
+    let rest = haystack[end..].trim_start().to_ascii_lowercase();
+    // allow-noncombinator: structural prefix probe on pre-parse normalized text
+    rest.starts_with("in addition to its other types")
 }
 
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
@@ -3220,6 +3218,7 @@ mod tests {
             "Coward",
         );
         assert!(
+            // allow-noncombinator: test assertion on normalized output, not parsing dispatch
             out.contains("becomes a Coward in addition to its other types"),
             "subtype-in-type-addition must stay literal, got: {out}"
         );
@@ -3229,10 +3228,12 @@ mod tests {
             "Coward",
         );
         assert!(
+            // allow-noncombinator: test assertion on normalized output, not parsing dispatch
             out2.contains("When ~ dies"),
             "self-reference occurrence must normalize to ~, got: {out2}"
         );
         assert!(
+            // allow-noncombinator: test assertion on normalized output, not parsing dispatch
             out2.contains("becomes a Coward in addition to its other types"),
             "subtype occurrence must stay literal, got: {out2}"
         );
