@@ -92,7 +92,6 @@ import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
 import { CompanionZone } from "../components/zone/CompanionZone.tsx";
-import { ZoneHand } from "../components/hand/ZoneHand.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import {
   PreferencesModal,
@@ -1247,9 +1246,9 @@ function GamePageContent({
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center">
-            <ZoneHand zone="exile" />
+            {/* Castable graveyard/exile cards now render as colored wings inside
+                PlayerHand's own fan (see ZoneFanCard), so the row is just the hand. */}
             <PlayerHand />
-            <ZoneHand zone="graveyard" />
           </div>
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}

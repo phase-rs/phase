@@ -21995,12 +21995,16 @@ fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
     .map(|_| ())
 }
 
-/// CR 118.12a: "unless that creature's controller has [~] deal N damage to them"
-/// (Blazing Salvo) — the controller may take the damage instead of the creature.
+/// CR 118.12a: "unless [that object's|its] controller has [~] deal N damage to
+/// them" (Blazing Salvo, Lava Blister) — the controller may take the damage
+/// instead of the primary effect.
 fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature's controller has ")
-        .parse(after_unless)
-        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature's controller has "),
+        tag("its controller has "),
+    ))
+    .parse(after_unless)
+    .ok()?;
     let (rest, _) = take_until::<_, _, OracleError<'_>>(" deal ")
         .parse(rest)
         .ok()?;
@@ -28191,6 +28195,35 @@ mod tests {
                     ..
                 } => {}
                 other => panic!("expected DealDamage 5, got {other:?}"),
+            },
+            other => panic!("expected EffectCost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lava_blister_its_controller_unless_have_deal_damage() {
+        let def = parse_effect_chain(
+            "Destroy target nonbasic land unless its controller has Lava Blister deal 6 damage to them.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Destroy { .. }),
+            "primary effect should remain Destroy, got {:?}",
+            def.effect
+        );
+        let unless_pay = def
+            .unless_pay
+            .as_ref()
+            .expect("Lava Blister must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        match &unless_pay.cost {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 6 },
+                    target: TargetFilter::Player,
+                    ..
+                } => {}
+                other => panic!("expected DealDamage 6 to payer, got {other:?}"),
             },
             other => panic!("expected EffectCost, got {other:?}"),
         }
