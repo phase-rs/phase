@@ -1291,7 +1291,6 @@ pub fn select_action_from_scores(
 ///
 /// Stop conditions (all CR-compliant):
 /// - Stack empties
-/// - Stack grows beyond the chunk-origin depth
 /// - An interactive `WaitingFor` appears (target selection, scry, etc.)
 /// - An unknown/non-requester human actor receives priority
 /// - AI has no action for its priority decision

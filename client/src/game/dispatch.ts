@@ -658,13 +658,18 @@ export async function dispatchResolveAll(
   let latchedTotal = 0;
   // Engine-authoritative gross resolved count, accumulated across chunks.
   let resolvedSoFar = 0;
+  let hasSaturatedTinyStackPass = false;
 
   try {
     for (;;) {
       // Re-evaluate pressure each iteration: a storm shrinks as it drains, so
       // it eventually drops back to the animated 5-at-a-time path near the end.
       const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
-      const instant = stackPressureFromLength(stackLen) === "Instant";
+      const isInstantLength = stackPressureFromLength(stackLen) === "Instant";
+      const useMassiveChunk =
+        isInstantLength ||
+        (hasSaturatedTinyStackPass && stackLen < STACK_PRESSURE_ELEVATED);
+      const instant = useMassiveChunk;
       const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
 
       const batchResult: BatchResolveResult = await adapter.resolveAll(
@@ -721,6 +726,15 @@ export async function dispatchResolveAll(
         await new Promise<void>((r) => setTimeout(r, chunkDelay));
       } else {
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      }
+
+      if (
+        !isInstantLength &&
+        batchResult.itemsResolved >= chunkSize &&
+        batchResult.waitingFor.type === "Priority" &&
+        newState.stack.length >= 1
+      ) {
+        hasSaturatedTinyStackPass = true;
       }
     }
 

@@ -52,10 +52,14 @@ where
     };
     // CR 117.4: fast-forwarding priority is only a shortcut over repeated
     // passes. The guard is not progress accounting; StackResolved events are.
-    let max_iterations = total
-        .saturating_mul(state.players.len())
-        .saturating_mul(4)
-        .clamp(100, 20_000);
+    let max_iterations = if max_resolutions == 0 {
+        total
+            .saturating_mul(state.players.len())
+            .saturating_mul(4)
+            .clamp(100, 20_000)
+    } else {
+        max_resolutions.min(20_000) as usize
+    };
 
     let mut events = Vec::new();
     let mut log_entries = Vec::new();
@@ -69,7 +73,7 @@ where
             _ => break,
         };
 
-        if state.stack.is_empty() || state.stack.len() > total {
+        if state.stack.is_empty() {
             break;
         }
 

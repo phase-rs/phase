@@ -112,6 +112,33 @@ describe("dispatchResolveAll progress", () => {
     expect(resolveAll).toHaveBeenCalledTimes(1);
     expect(useGameStore.getState().isResolvingAll).toBe(false);
   });
+
+  it("escalates to huge chunks when shallow stacks keep resolving in full 5-item sweeps", async () => {
+    useGameStore.setState({ gameState: stateWithStack(1) });
+    const resolveAll = vi
+      .fn<EngineResolveAll>()
+      .mockResolvedValueOnce(chunk(5, 1))
+      .mockResolvedValueOnce(chunk(5, 1));
+
+    const getState = vi
+      .fn<() => Promise<GameState>>()
+      .mockResolvedValueOnce(stateWithStack(1))
+      .mockResolvedValueOnce(stateWithStack(0));
+
+    useGameStore.setState({
+      adapter: {
+        resolveAll,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    expect(resolveAll).toHaveBeenCalledTimes(2);
+    expect(resolveAll).toHaveBeenNthCalledWith(1, 0, [], 5);
+    expect(resolveAll).toHaveBeenNthCalledWith(2, 0, [], 5_000);
+  });
 });
 
 type EngineResolveAll = (
