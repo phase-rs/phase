@@ -4336,6 +4336,30 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
     let mut subtypes: Vec<String> = Vec::new();
     loop {
         rest = rest.trim_start();
+        // Non-terminal extra core type word (e.g. "artifact creature"). A
+        // core-type word followed by a space is a *modifier*, not the clause's
+        // terminating noun, so it must be tried BEFORE the bare-noun terminator
+        // below. Otherwise "artifact creature" matches the terminal
+        // `tag("artifact")`, leaves a non-empty " creature" tail, and rejects
+        // the whole clause (the latent bug behind Missy / Cyber Conversion's
+        // "It's a 2/2 Cyberman artifact creature.").
+        if let Ok((after, ct)) = alt((
+            value(
+                CoreType::Artifact,
+                tag::<_, _, OracleError<'_>>("artifact "),
+            ),
+            value(CoreType::Enchantment, tag("enchantment ")),
+            value(CoreType::Land, tag("land ")),
+            value(CoreType::Planeswalker, tag("planeswalker ")),
+        ))
+        .parse(rest)
+        {
+            if !extra_core_types.contains(&ct) {
+                extra_core_types.push(ct);
+            }
+            rest = after;
+            continue;
+        }
         // Terminator: a core-type noun then optional ".". The terminal noun maps
         // directly to its `CoreType` — Creature is the only one that yields a
         // creature body; every other core type ("land", "artifact", ...)
@@ -4389,24 +4413,6 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                     })
                 }
             };
-        }
-        // Non-terminal extra core type word (e.g. "artifact creature").
-        if let Ok((after, ct)) = alt((
-            value(
-                CoreType::Artifact,
-                tag::<_, _, OracleError<'_>>("artifact "),
-            ),
-            value(CoreType::Enchantment, tag("enchantment ")),
-            value(CoreType::Land, tag("land ")),
-            value(CoreType::Planeswalker, tag("planeswalker ")),
-        ))
-        .parse(rest)
-        {
-            if !extra_core_types.contains(&ct) {
-                extra_core_types.push(ct);
-            }
-            rest = after;
-            continue;
         }
         // Subtype (land type "Forest", creature type "Spirit", ...).
         if let Some((canonical, consumed)) = crate::parser::oracle_util::parse_subtype(rest) {
@@ -7739,6 +7745,27 @@ mod tests {
         assert_eq!(creature.body, FaceDownBody::Creature);
         assert_eq!(creature.power, Some(3));
         assert_eq!(creature.toughness, Some(3));
+
+        // CR 205.1a: a creature body with an EXTRA core type before "creature"
+        // ("It's a 2/2 Cyberman artifact creature." — Missy / Cyber Conversion).
+        // The non-terminal "artifact " modifier must be consumed before the
+        // terminal "creature" noun; the subtype "Cyberman" is retained.
+        let cyberman =
+            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature").unwrap();
+        assert_eq!(cyberman.body, FaceDownBody::Creature);
+        assert_eq!(cyberman.power, Some(2));
+        assert_eq!(cyberman.toughness, Some(2));
+        assert_eq!(cyberman.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(cyberman.subtypes, vec!["Cyberman".to_string()]);
+
+        // Sibling without an extra core type proves the reorder did not regress
+        // the plain "<subtype> creature" form.
+        let zombie = parse_its_face_down_profile("it's a 1/1 zombie creature").unwrap();
+        assert_eq!(zombie.body, FaceDownBody::Creature);
+        assert_eq!(zombie.power, Some(1));
+        assert_eq!(zombie.toughness, Some(1));
+        assert!(zombie.extra_core_types.is_empty());
+        assert_eq!(zombie.subtypes, vec!["Zombie".to_string()]);
 
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).

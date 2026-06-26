@@ -4037,6 +4037,11 @@ mod tests {
                 &["Instant"][..],
             ),
             (
+                "Counter target instant or sorcery spell unless that spell's controller has Molten Influence deal 4 damage to them.",
+                "Molten Influence",
+                &["Instant"][..],
+            ),
+            (
                 "This creature can't attack unless defending player is poisoned.",
                 "Chained Throatseeker",
                 &["Creature"][..],

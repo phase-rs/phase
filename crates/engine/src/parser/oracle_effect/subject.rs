@@ -373,6 +373,77 @@ fn try_parse_subject_continuous_clause(
     build_continuous_clause(application, predicate, ctx)
 }
 
+/// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
+/// ("creatures you control gain protection from white if you control a Plains,
+/// from blue if you control an Island, ..., and from green if you control a
+/// Forest" — Dominaria's Judgment). Must be tried on the FULL clause text before
+/// the generic suffix-condition strip, which would peel only the final clause's
+/// condition and collapse the rest. Splits subject from predicate and emits one
+/// conditionally-gated grant per color.
+pub(super) fn try_parse_conditional_protection_grant_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // CR 611.2a: "Until end of turn, creatures you control gain ..." carries a
+    // leading duration ahead of the subject; peel it (propagating the duration)
+    // so the subject grammar sees a bare "creatures you control" subject.
+    let (text, leading_duration) = strip_leading_duration(text);
+    let verb_start = find_predicate_start(text)?;
+    let subject = text[..verb_start].trim();
+    let predicate = text[verb_start..].trim();
+    if subject.eq_ignore_ascii_case("you") {
+        return None;
+    }
+    let application = parse_subject_application(subject, ctx)?;
+    build_conditional_protection_grant_clause(&application, predicate, leading_duration)
+}
+
+/// CR 611.3a + CR 702.16: Build one conditional continuous protection grant per
+/// "from `<color>` if you control a `<land>`" clause (Dominaria's Judgment), so
+/// each color's protection is gated on its own land condition rather than the
+/// whole grant sharing only the final clause's condition.
+fn build_conditional_protection_grant_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+    leading_duration: Option<Duration>,
+) -> Option<ParsedEffectClause> {
+    let (without_duration, trailing_duration) = super::strip_trailing_duration(predicate);
+    let grants =
+        crate::parser::oracle_static::parse_conditional_protection_grant_list(without_duration)?;
+    let duration = leading_duration.or(trailing_duration);
+    let affected = static_affected_for_application(application);
+    let static_abilities = grants
+        .into_iter()
+        .map(|(target, condition)| {
+            let def = StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Protection(target),
+                }]);
+            // The final grant's condition may have been peeled one layer up and
+            // is re-applied to it after this clause returns; emit it unconditioned.
+            match condition {
+                Some(cond) => def.condition(cond),
+                None => def,
+            }
+        })
+        .collect();
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: duration.clone(),
+            target: application.target.clone(),
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn additive_type_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
@@ -4658,6 +4729,67 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
+
+    // CR 611.3a + CR 702.16: Dominaria's Judgment — "creatures you control gain
+    // protection from white if you control a Plains, from blue if you control an
+    // Island, ..., and from green if you control a Forest" must emit one
+    // conditionally-gated grant PER color, each gated on its own land. The prior
+    // generic path collapsed the list into a single static keeping only the final
+    // (Forest) condition and left the other colors as raw `CardType` strings.
+    #[test]
+    fn conditional_protection_grant_list_gates_each_color_on_its_own_land() {
+        use crate::types::ability::StaticCondition;
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let def = super::super::parse_effect_chain(
+            "Until end of turn, creatures you control gain protection from white if \
+             you control a Plains, from blue if you control an Island, from black if \
+             you control a Swamp, from red if you control a Mountain, and from green \
+             if you control a Forest.",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(
+            static_abilities.len(),
+            5,
+            "one conditional grant per color, got {static_abilities:?}"
+        );
+
+        // Each color must be gated on its matching basic land type.
+        let expected = [
+            (ManaColor::White, "Plains"),
+            (ManaColor::Blue, "Island"),
+            (ManaColor::Black, "Swamp"),
+            (ManaColor::Red, "Mountain"),
+            (ManaColor::Green, "Forest"),
+        ];
+        for (color, land) in expected {
+            let found = static_abilities.iter().any(|sd| {
+                let grants_color = sd
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Color(color)),
+                    });
+                let gated_on_land = matches!(
+                    &sd.condition,
+                    Some(StaticCondition::IsPresent { filter })
+                        if format!("{filter:?}").contains(land)
+                );
+                grants_color && gated_on_land
+            });
+            assert!(
+                found,
+                "expected protection from {color:?} gated on controlling a {land}, \
+                 got {static_abilities:?}"
+            );
+        }
+    }
 
     // CR 613.1d: "~ isn't a <core type>" must lower to a one-shot continuous
     // effect that REMOVES the type (RemoveType modification on SelfRef). Building
