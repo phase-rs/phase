@@ -10310,6 +10310,8 @@ mod tests {
         .unwrap();
 
         assert!(state.objects[&land_id].tapped);
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+        assert_eq!(state.priority_pass_count, 1);
         assert_eq!(
             state.players[0]
                 .mana_pool
