@@ -178,14 +178,30 @@ fn limited_resources_cant_play_land_gated_on_ten_lands() {
     };
     assert_eq!(*comparator, Comparator::GE);
     assert_eq!(*rhs, QuantityExpr::Fixed { value: 10 });
+    let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = lhs
+    else {
+        panic!("expected ObjectCount lhs, got {lhs:?}");
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed land filter, got {filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+}
+
+/// CR 305.1: An "as long as <unrecognized condition>" rider on "can't play
+/// lands" must NOT collapse to an unconditionally-enforced CantPlayLand — the
+/// line stays unsupported (honest) rather than prohibiting land plays always.
+#[test]
+fn cant_play_land_unrecognized_gate_stays_unsupported() {
+    let defs = parse_static_line_multi("Players can't play lands as long as the sky is green.");
     assert!(
-        matches!(
-            lhs,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { .. },
-            }
-        ) && format!("{lhs:?}").contains("Land"),
-        "expected ObjectCount over lands, got {lhs:?}"
+        !defs
+            .iter()
+            .any(|d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")),
+        "an unrecognized gate must not produce an unconditional CantPlayLand, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
 }
 
