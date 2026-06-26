@@ -3666,9 +3666,11 @@ pub(crate) fn parse_oracle_ir(
                     AbilityKind::Spell,
                 ) {
                 pile_def
-            } else if let Some(vote_def) =
-                crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
-            {
+            } else if let Some(vote_def) = crate::parser::oracle_vote::parse_vote_block(
+                parse_line,
+                AbilityKind::Spell,
+                card_name,
+            ) {
                 vote_def
             } else {
                 parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)

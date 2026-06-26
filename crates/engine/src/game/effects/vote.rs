@@ -1071,7 +1071,7 @@ mod tests {
                     Each friend draws a card. \
                     Each foe draws a card.";
         let parsed_def =
-            parse_vote_block(text, AbilityKind::Spell).expect("Pir's Whim shape parses");
+            parse_vote_block(text, AbilityKind::Spell, "").expect("Pir's Whim shape parses");
         let mut state = GameState::new_two_player(42);
         let controller = state.players[0].id;
         let opp = state.players[1].id;
@@ -1408,8 +1408,8 @@ mod tests {
                     For each time vote, take an extra turn after this one. \
                     For each money vote, choose a permanent owned by the voter \
                     and gain control of it.";
-        let parsed_def =
-            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
+        let parsed_def = parse_vote_block(text, AbilityKind::Spell, "")
+            .expect("Expropriate vote block must parse");
 
         // Extract per_choice_effect from the parsed Vote definition.
         let (choices, per_choice_effect) = match *parsed_def.effect {
@@ -1657,6 +1657,118 @@ mod tests {
                 }
             )),
             "threshold tally must still emit EffectResolved(Vote)"
+        );
+    }
+
+    /// CR 701.38 + CR 608.2d + CR 120.1 + CR 608.2c: End-to-end resolution of the
+    /// hoisted-Choose / secret-vote / SourceChosenPlayer-damage composition
+    /// (Truth or Consequences). Drives the parsed `Choose{Random} → Vote →
+    /// [Draw, DealDamage{SourceChosenPlayer}]` chain in a 2-player game and
+    /// asserts: (a) the random Choose resolves WITHOUT parking on a NamedChoice
+    /// (Strax precedent — `resolve_random_in_chain`); (b) the truth tally drives
+    /// the controller's draw count; (c) `3 × consequences-tally` damage lands on
+    /// the chosen opponent via the persisted `ChosenAttribute::Player`.
+    #[test]
+    fn truth_or_consequences_resolves_choose_then_vote_then_chosen_player_damage() {
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::identifiers::CardId;
+
+        let normalized = "Each player secretly votes for ~, then those votes are revealed. \
+                          You draw cards equal to the number of truth votes. \
+                          Then choose an opponent at random. \
+                          ~ deals 3 damage to that player for each consequences vote.";
+        let def = parse_vote_block(normalized, AbilityKind::Spell, "Truth or Consequences")
+            .expect("Truth or Consequences parses");
+        let choose_effect = (*def.effect).clone();
+        let vote_effect = (*def.sub_ability.as_ref().expect("Choose wraps Vote").effect).clone();
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+        let ctrl_life_before = state.players[0].life;
+        let opp_life_before = state.players[1].life;
+
+        // Source spell object — persist + SourceChosenPlayer read from it.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Truth or Consequences".to_string(),
+            Zone::Battlefield,
+        );
+        // Cards in the controller's library so the truth-tally draw succeeds.
+        create_object(
+            &mut state,
+            CardId(2),
+            controller,
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            controller,
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        let hand_before = state.players[0].hand.len();
+
+        let inner = ResolvedAbility::new(vote_effect, vec![], source_id, controller);
+        let ability =
+            ResolvedAbility::new(choose_effect, vec![], source_id, controller).sub_ability(inner);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Choose → Vote chain initiates");
+
+        // (a) Random Choose must NOT park interactively; the chain advances to
+        // the Vote ballot, and the lone opponent is chosen + persisted.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random Choose must resolve inline, not park on NamedChoice"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::VoteChoice { .. }),
+            "chain must park on the Vote ballot, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            crate::game::game_object::source_chosen_player(&state, source_id),
+            Some(opp),
+            "random Choose must persist the lone opponent"
+        );
+
+        // Submit ballots in APNAP order from the controller: controller → truth
+        // (index 0), opponent → consequences (index 1).
+        for choice in ["truth", "consequences"] {
+            let snapshot = state.waiting_for.clone();
+            crate::game::engine_resolution_choices::handle_resolution_choice(
+                &mut state,
+                snapshot,
+                crate::types::GameAction::ChooseOption {
+                    choice: choice.to_string(),
+                },
+                &mut events,
+            )
+            .unwrap_or_else(|err| panic!("ballot {choice} submits: {err:?}"));
+        }
+
+        // (b) truth tally = 1 → controller drew exactly one card.
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before + 1,
+            "controller draws (truth tally) cards"
+        );
+        // (c) consequences tally = 1 → 3 damage to the chosen opponent only.
+        assert_eq!(
+            state.players[1].life,
+            opp_life_before - 3,
+            "chosen opponent takes 3 × consequences-tally damage"
+        );
+        assert_eq!(
+            state.players[0].life, ctrl_life_before,
+            "controller is not the damage recipient"
         );
     }
 }

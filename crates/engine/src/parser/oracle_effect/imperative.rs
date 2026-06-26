@@ -654,6 +654,28 @@ pub(super) fn parse_numeric_imperative_ast(
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
             return Some(NumericImperativeAst::Draw { count, up_to });
         }
+        // CR 121.1: Bare plural "draw cards" / "draw card" with no quantifier is
+        // only produced as an aggregate/for-each head after the dynamic count tail
+        // ("... equal to the number of <X> votes" / "... for each <X> vote") has
+        // already been stripped by the vote parser. With the dynamic tail removed
+        // the residue carries no quantity, so a Fixed{1} placeholder cannot hide a
+        // dynamic-quantity gap (the coverage concern guarded just below): the vote
+        // aggregate binder immediately rebinds this slot to QuantityRef::VoteCount.
+        // "draw a card" / "draw N cards" are unaffected — they reach
+        // parse_count_expr with a parseable count; only a bare "card" / "cards"
+        // remainder (nothing else) trips this arm.
+        if all_consuming(value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
+        ))
+        .parse(rest.trim().trim_end_matches('.'))
+        .is_ok()
+        {
+            return Some(NumericImperativeAst::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                up_to,
+            });
+        }
         // CR 121.1: When the verb committed but the quantity phrase
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
@@ -11484,6 +11506,34 @@ mod tests {
             }
             other => panic!("expected Draw with a toughness count, got {other:?}"),
         }
+    }
+
+    /// CR 121.1: a bare plural "draw cards" / "draw card" with no quantifier —
+    /// the residue left after the vote parser strips a dynamic count tail
+    /// ("... equal to the number of <X> votes") — yields a Fixed(1) placeholder
+    /// the vote aggregate binder then rebinds to `QuantityRef::VoteCount`.
+    #[test]
+    fn parse_bare_draw_cards_yields_fixed_one() {
+        for text in ["draw cards", "draw card", "draw cards."] {
+            let lower = text.to_lowercase();
+            match parse_numeric_imperative_ast(text, &lower) {
+                Some(NumericImperativeAst::Draw { count, up_to }) => {
+                    assert!(!up_to, "bare draw is not 'up to' for {text:?}");
+                    assert_eq!(count, QuantityExpr::Fixed { value: 1 }, "text={text:?}");
+                }
+                other => panic!("expected bare Draw, got {other:?} for {text:?}"),
+            }
+        }
+    }
+
+    /// Negative guard: a bare-draw with an unmodeled tail must NOT collapse to
+    /// Fixed(1) — it stays `None` (→ `Effect::Unimplemented` upstream) so the
+    /// dynamic-quantity coverage gap is not silently hidden.
+    #[test]
+    fn parse_draw_cards_with_unmodeled_tail_is_none() {
+        let text = "draw cards from the top of their library";
+        let lower = text.to_lowercase();
+        assert!(parse_numeric_imperative_ast(text, &lower).is_none());
     }
 
     #[test]

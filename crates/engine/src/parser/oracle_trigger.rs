@@ -975,9 +975,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 },
             ))))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        } else if let Some(vote_def) =
-            crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
-        {
+        } else if let Some(vote_def) = crate::parser::oracle_vote::parse_vote_block(
+            &effect_for_parse,
+            AbilityKind::Spell,
+            card_name,
+        ) {
             let mut ability = vote_def;
             if has_up_to {
                 ability.optional_targeting = true;
