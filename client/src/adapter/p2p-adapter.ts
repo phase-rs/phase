@@ -29,7 +29,6 @@ import type {
   SeatView,
 } from "../multiplayer/seatTypes";
 import type { BrokerClient } from "../services/brokerClient";
-import { evaluateDeckCompatibilityJs } from "../services/engineRuntime";
 import {
   clearP2PHostSession,
   type PersistedP2PHostSession,
@@ -870,7 +869,12 @@ export class P2PHostAdapter implements EngineAdapter {
       if (this.pregameSeatState.seats[pid]?.type !== "JoinedHuman") return;
 
       try {
-        const result = await evaluateDeckCompatibilityJs({
+        // Validate against the worker engine's already-resident card DB
+        // (`checkDeckCompatibility` self-ensures it). Using the main-thread
+        // `engineRuntime` instance instead would parse a SECOND full ~93 MB
+        // card DB into the page — doubling host footprint past iOS Safari's
+        // per-tab memory ceiling and silently OOM-reloading the host tab.
+        const result = await this.wasm.checkDeckCompatibility({
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
