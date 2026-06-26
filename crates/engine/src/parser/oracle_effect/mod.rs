@@ -43,13 +43,14 @@ use lower::{
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
     split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
-    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
-    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
-    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_each_scope_who_cant_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_return_destination_ext,
+    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
+    strip_repeat_count_suffix, strip_return_destination_ext,
+    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
+    try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -4473,8 +4474,99 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
+fn unless_rider_defers_to_body_parser(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let Some((before_unless, _, after_unless)) =
+        nom_primitives::scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
+    else {
+        return false;
+    };
+    let before_trimmed = before_unless.trim_start();
+    let unless_tail = &lower[before_unless.len()..];
+    let after_trimmed = after_unless.trim_end_matches('.').trim();
+
+    // CR 605.1a: activation prohibition mana-ability exemption (restriction.rs).
+    if tag::<_, _, OracleError<'_>>("they're mana abilities")
+        .parse(after_trimmed)
+        .is_ok()
+    {
+        return true;
+    }
+
+    // CR 508.1h + CR 118.12: combat-tax static UnlessPay (parse_static_line path).
+    if alt((
+        tag::<_, _, OracleError<'_>>("their controller pays "),
+        tag("its controller pays "),
+    ))
+    .parse(after_unless)
+    .is_ok()
+    {
+        return true;
+    }
+
+    // CR 608.2c: discard imperative + unless discard qualifier (imperative.rs).
+    if tag::<_, _, OracleError<'_>>("discard ")
+        .parse(before_trimmed)
+        .is_ok()
+        && tag::<_, _, OracleError<'_>>("you discard ")
+            .parse(after_unless)
+            .is_ok()
+    {
+        return true;
+    }
+
+    // CR 118.12: counter spell unless payment (`parse_unless_payment` in counter path).
+    // `extract_resolution_unless_pay_modifier` deliberately skips counter text.
+    tag::<_, _, OracleError<'_>>("counter ")
+        .parse(before_trimmed)
+        .is_ok()
+        && parse_unless_payment(unless_tail).is_some()
+}
+
+fn parsed_unless_unsupported_clause(full_text: &str, rider: &str) -> ParsedEffectClause {
+    parsed_clause(Effect::unimplemented(
+        "Unsupported unless clause",
+        format!("{full_text} (unless: {rider})"),
+    ))
+}
+
+fn attach_unless_slots(
+    mut clause: ParsedEffectClause,
+    unless_condition: Option<AbilityCondition>,
+    unless_pay: Option<UnlessPayModifier>,
+) -> ParsedEffectClause {
+    if clause.condition.is_none() {
+        clause.condition = unless_condition;
+    }
+    if clause.unless_pay.is_none() {
+        clause.unless_pay = unless_pay;
+    }
+    clause
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 608.2c: "do X unless [game state]" — strip trailing unless suffix and
+    // attach the negated gate before body parsing (payment-unless uses
+    // `unless_pay` / `extract_resolution_unless_pay_modifier` instead).
+    let (unless_strip, clause_text) = strip_unless_entered_suffix(text, ctx);
+    let mut unless_pay_deferred = None;
+    let (unless_condition, text) = match unless_strip {
+        UnlessSuffixStrip::Absent => (None, clause_text),
+        UnlessSuffixStrip::Parsed(c) => (Some(c), clause_text),
+        UnlessSuffixStrip::Unrecognized { rider } => {
+            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(&clause_text, None);
+            if unless_pay.is_some() {
+                unless_pay_deferred = unless_pay;
+                (None, stripped)
+            } else if unless_rider_defers_to_body_parser(text) {
+                (None, clause_text)
+            } else {
+                return parsed_unless_unsupported_clause(text, &rider);
+            }
+        }
+    };
+    let text = text.as_str();
     // Phase 2: peel structural slots off the head of the clause before
     // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
     // (optional, opponent-may, condition, duration, for-each, player-scope)
@@ -4485,16 +4577,18 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
     if peel_ctx.is_empty() {
-        return parse_effect_clause_inner(text, ctx);
+        return attach_unless_slots(
+            parse_effect_clause_inner(text, ctx),
+            unless_condition,
+            unless_pay_deferred,
+        );
     }
     if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
-            if let Some(cond) = peel_ctx.condition().cloned() {
-                clause.condition = Some(cond);
-            }
+            clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
         }
-        return clause;
+        return attach_unless_slots(clause, None, unless_pay_deferred);
     }
     let original_lower = text.to_lowercase();
     if scan_contains_phrase(&original_lower, "this turn")
@@ -4509,21 +4603,17 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
                 peel_ctx.apply_optional(&mut clause.optional);
             }
             if clause.condition.is_none() {
-                if let Some(cond) = peel_ctx.condition().cloned() {
-                    clause.condition = Some(cond);
-                }
+                clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
             }
-            return clause;
+            return attach_unless_slots(clause, None, unless_pay_deferred);
         }
         if let Some(mut clause) =
             try_parse_additional_land_this_turn(TextPair::new(text, &original_lower))
         {
             if clause.condition.is_none() {
-                if let Some(cond) = peel_ctx.condition().cloned() {
-                    clause.condition = Some(cond);
-                }
+                clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
             }
-            return clause;
+            return attach_unless_slots(clause, None, unless_pay_deferred);
         }
     }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
@@ -4533,7 +4623,8 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     // retry with the original text. The shell is conservative — when in
     // doubt, leave the slot on the text and let the body parser handle it.
     if matches!(clause.effect, Effect::Unimplemented { .. }) {
-        return parse_effect_clause_inner(text, ctx);
+        let fallback = parse_effect_clause_inner(text, ctx);
+        return attach_unless_slots(fallback, unless_condition, unless_pay_deferred);
     }
     peel_ctx.apply_optional(&mut clause.optional);
     // Duration: route through `with_clause_duration` so
@@ -4552,11 +4643,11 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     // 6020+ runs before parse_effect_clause and may already have set
     // `condition` via its own dedicated stripper chain — don't clobber.
     if clause.condition.is_none() {
-        if let Some(cond) = peel_ctx.condition().cloned() {
+        if let Some(cond) = peel_ctx.condition().cloned().or(unless_condition) {
             clause.condition = Some(cond);
         }
     }
-    clause
+    attach_unless_slots(clause, None, unless_pay_deferred)
 }
 
 fn try_parse_for_each_copy_token_source(
@@ -19656,11 +19747,10 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).
-        let (unless_entered, text) = strip_unless_entered_suffix(&text, ctx);
-        let condition = if unless_entered.is_some() {
-            unless_entered
-        } else {
-            condition
+        let (unless_strip, text) = strip_unless_entered_suffix(&text, ctx);
+        let condition = match unless_strip {
+            UnlessSuffixStrip::Parsed(c) => Some(c),
+            _ => condition,
         };
         // CR 608.2e: Strip leading "instead " when a condition was extracted.
         // The condition already encodes the replacement gate; "instead" is a
@@ -19964,6 +20054,46 @@ pub(crate) fn parse_effect_chain_ir(
                     }),
                     DeclineDispatch::SubjectOnly,
                 )
+            } else if let Some((scope, body)) = strip_each_scope_who_does_subject(&text) {
+                // CR 118.12 + CR 608.2d + CR 109.5: subject-only OPTIONAL-ACCEPT
+                // consequence tail ("each player may draw a card. Each opponent
+                // who does can't attack you or permanents you control during their
+                // next turn." — The Second Doctor; "each player may create two
+                // tapped Treasure tokens. Each player who does can't attack you …"
+                // — City Hall; "Each player may shuffle …. Each player who does
+                // draws seven cards." — Step Between Worlds). POSITIVE TWIN of the
+                // `who doesn't` arm above: the parent is OPTIONAL ("may"), so the
+                // per-iteration gate is the BARE performed signal `effect_performed()`
+                // (OptionalEffectPerformed) — the inverse of the `who doesn't` arm's
+                // `Not{effect_performed()}`.
+                //
+                // The `ScopedPlayerMatches { filter: scope }` conjunct is the
+                // CROSS-SCOPE fix (The Second Doctor: parent iterates `All`,
+                // consequence filters `Opponent`; without it the controller, who
+                // may also have drawn, would self-restrict — CR 109.5). For
+                // same-scope cards (City Hall, Step Between Worlds: scope = `All`)
+                // the conjunct is trivially true for every iteration and acts as a
+                // no-op, so this is uniformly safe for the whole class — exactly
+                // mirroring the `who can't` arm's cross-scope handling.
+                //
+                // Do NOT stamp `player_scope`: the body inherits the parent's
+                // per-player iteration via `sub_ability` attachment. Retarget the
+                // preceding Sentence boundary → Then so the body lowers as a
+                // within-action ContinuationStep that stays inside the scoped
+                // template (no-op when the boundary is already Then, e.g. Turtles
+                // in Time's "…, then each player who does draws seven cards").
+                if let Some(prev) = clauses.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                let condition = AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::effect_performed(),
+                        AbilityCondition::ScopedPlayerMatches { filter: scope },
+                    ],
+                };
+                (body, Some(condition), DeclineDispatch::SubjectOnly)
             } else {
                 (text, condition, DeclineDispatch::None)
             };
@@ -40902,13 +41032,13 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_strips_correctly() {
-        let (cond, text) = strip_unless_entered_suffix(
+        let (strip, text) = strip_unless_entered_suffix(
             "discard a card unless ~ entered this turn",
             &mut ParseContext::default(),
         );
         assert_eq!(
-            cond,
-            Some(AbilityCondition::Not {
+            strip,
+            UnlessSuffixStrip::Parsed(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::SourceEnteredThisTurn),
             }),
             "Should produce Not(SourceEnteredThisTurn) condition"
@@ -40918,22 +41048,22 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_no_match() {
-        let (cond, text) =
+        let (strip, text) =
             strip_unless_entered_suffix("discard a card", &mut ParseContext::default());
-        assert!(cond.is_none());
+        assert!(matches!(strip, UnlessSuffixStrip::Absent));
         assert_eq!(text, "discard a card");
     }
 
     #[test]
     fn strip_unless_general_your_turn() {
         // "unless it's your turn" → Not(DuringYourTurn) → IsYourTurn { negated: true }
-        let (cond, text) = strip_unless_entered_suffix(
+        let (strip, text) = strip_unless_entered_suffix(
             "draw a card unless it's your turn",
             &mut ParseContext::default(),
         );
         assert_eq!(
-            cond,
-            Some(AbilityCondition::Not {
+            strip,
+            UnlessSuffixStrip::Parsed(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::IsYourTurn)
             }),
         );
@@ -40943,12 +41073,12 @@ mod tests {
     #[test]
     fn strip_unless_you_control_a_creature() {
         // "unless you control a creature" → Not(IsPresent) → ObjectCount EQ 0
-        let (cond, text) = strip_unless_entered_suffix(
+        let (strip, text) = strip_unless_entered_suffix(
             "sacrifice this enchantment unless you control a creature",
             &mut ParseContext::default(),
         );
-        match cond {
-            Some(AbilityCondition::QuantityCheck {
+        match strip {
+            UnlessSuffixStrip::Parsed(AbilityCondition::QuantityCheck {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
                 ..
@@ -40959,12 +41089,85 @@ mod tests {
     }
 
     #[test]
-    fn strip_unless_unrecognized_returns_none() {
-        let (cond, text) = strip_unless_entered_suffix(
+    fn strip_unless_opponent_poison_counters() {
+        use crate::types::player::PlayerCounterKind;
+
+        let (strip, text) = strip_unless_entered_suffix(
+            "sacrifice a creature unless an opponent has three or more poison counters",
+            &mut ParseContext::default(),
+        );
+        let UnlessSuffixStrip::Parsed(cond) = strip else {
+            panic!("expected parsed unless poison gate, got {strip:?}");
+        };
+        let AbilityCondition::Not { condition } = cond else {
+            panic!("expected Not-wrapped unless gate, got {cond:?}");
+        };
+        let AbilityCondition::QuantityCheck {
+            lhs,
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = *condition
+        else {
+            panic!("expected QuantityCheck GE 1, got {condition:?}");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerCount {
+                    filter:
+                        PlayerFilter::PlayerAttribute {
+                            relation: PlayerRelation::Opponent,
+                            attr,
+                            comparator: Comparator::GE,
+                            value,
+                        },
+                },
+        } = lhs
+        else {
+            panic!("expected PlayerCount opponent attribute, got {lhs:?}");
+        };
+        assert_eq!(
+            *attr,
+            QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope: CountScope::ScopedPlayer,
+            }
+        );
+        assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(text, "sacrifice a creature");
+    }
+
+    #[test]
+    fn parse_effect_clause_unless_they_control_basic_lands() {
+        let clause = parse_effect_clause(
+            "~ deals 2 damage to that player unless they control two or more basic lands",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            clause.condition.is_some(),
+            "expected unless control gate on clause, got {clause:?}"
+        );
+        assert!(!matches!(clause.effect, Effect::Unimplemented { .. }));
+    }
+
+    #[test]
+    fn parse_effect_clause_unrecognized_unless_fails_closed() {
+        let clause = parse_effect_clause(
+            "draw a card unless the active player compliments your hat",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Unimplemented { .. }),
+            "unrecognized unless rider must fail closed, got {clause:?}"
+        );
+    }
+
+    #[test]
+    fn strip_unless_unrecognized_returns_unrecognized() {
+        let (strip, text) = strip_unless_entered_suffix(
             "sacrifice it unless something weird happens",
             &mut ParseContext::default(),
         );
-        assert!(cond.is_none());
+        assert!(matches!(strip, UnlessSuffixStrip::Unrecognized { .. }));
         assert_eq!(text, "sacrifice it unless something weird happens");
     }
 
@@ -42356,6 +42559,68 @@ mod tests {
             strip_each_scope_who_cant_subject("for each opponent who can't, you draw a card")
                 .is_none(),
             "prepositional shape belongs to strip_for_each_opponent_who_doesnt"
+        );
+    }
+
+    /// CR 118.12 + CR 608.2d + CR 109.5: `strip_each_scope_who_does_subject`
+    /// covers the full subject-only × scope × positive-"does" matrix (The Second
+    /// Doctor: "each opponent who does can't attack you …"; Step Between Worlds:
+    /// "each player who does draws seven cards").
+    #[test]
+    fn strip_each_scope_who_does_subject_matrix() {
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each opponent who does can't attack you")
+                .expect("each opponent who does");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "can't attack you");
+
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each other player who does, loses 1 life")
+                .expect("each other player who does");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "loses 1 life");
+
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each player who does draws seven cards")
+                .expect("each player who does");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "draws seven cards");
+
+        // Case insensitivity via the nom_on_lower bridge.
+        let (scope, body) =
+            strip_each_scope_who_does_subject("Each Player Who Does draws seven cards")
+                .expect("case insensitivity");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "draws seven cards");
+    }
+
+    /// Self-correctness: `strip_each_scope_who_does_subject` MUST return None for
+    /// the negative cells ("doesn't" / "does not") even in isolation — "does" is a
+    /// strict prefix of those, and the `not(alt((tag("n't"), tag(" not"))))`
+    /// word-boundary guard rejects them WITHOUT relying on dispatch-arm order.
+    /// Parallel to `strip_each_scope_who_cant_subject_rejects_non_matches`.
+    #[test]
+    fn strip_each_scope_who_does_subject_rejects_non_matches() {
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who doesn't loses 1 life").is_none(),
+            "doesn't is the decline arm — the boundary guard must reject it"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who does not draw").is_none(),
+            "does not is the decline arm — the boundary guard must reject it"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who can't attack you").is_none(),
+            "can't is the mandatory-impossible arm, not the positive-accept arm"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("target opponent draws a card").is_none(),
+            "target-phrased subject is not a relative-clause consequence tail"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("for each opponent who does, you create a Treasure")
+                .is_none(),
+            "prepositional shape (recipient = controller) is a separate cluster"
         );
     }
 
@@ -44136,6 +44401,216 @@ mod tests {
                 );
             }
             other => panic!("expected LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 508.1c + CR 109.5: The Second Doctor — subject-only
+    /// OPTIONAL-ACCEPT consequence with a CROSS-SCOPE AddRestriction body.
+    /// "each player may draw a card. Each opponent who does can't attack you or
+    /// permanents you control during their next turn." must lower clause 2 as an
+    /// `And{[effect_performed(), ScopedPlayerMatches{Opponent}]}`-gated
+    /// `ContinuationStep` sub-ability of the optional `Effect::Draw`
+    /// (player_scope: All). The restriction's affected player is rebound
+    /// ParentTargetedPlayer → ScopedPlayer, the defended scope is the
+    /// "you or permanents you control" `PlayerOrPermanents`, and the pre-armed
+    /// `UntilEndOfNextTurnOf` duration survives lowering into the gated sub.
+    #[test]
+    fn second_doctor_subject_only_who_does_lowers_cross_scope_restriction() {
+        use crate::types::ability::SubAbilityLink;
+        use crate::types::triggers::AttackTargetFilter;
+        let def = parse_effect_chain(
+            "each player may draw a card. Each opponent who does can't attack you \
+             or permanents you control during their next turn.",
+            AbilityKind::Spell,
+        );
+        // Root: each player's OPTIONAL draw — player_scope: All.
+        assert!(matches!(*def.effect, Effect::Draw { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional draw iterates per player"
+        );
+        assert!(def.optional, "\"each player may draw a card\" is optional");
+
+        let restriction = def
+            .sub_ability
+            .as_ref()
+            .expect("the optional draw chains to the who-does consequence body");
+        // CROSS-SCOPE gate: accept signal AND scoped player is an Opponent.
+        assert_eq!(
+            restriction.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::Opponent
+                    },
+                ],
+            }),
+            "the body runs only for an OPPONENT who DID draw — controller never self-restricts"
+        );
+        assert_eq!(
+            restriction.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "must be a within-action ContinuationStep, not a SequentialSibling"
+        );
+        assert_eq!(
+            restriction.player_scope, None,
+            "the body inherits player_scope from the parent — it does not set its own"
+        );
+        // The expiry correctness hinges on this duration surviving lowering.
+        assert_eq!(
+            restriction.duration,
+            Some(Duration::UntilEndOfNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller
+            }),
+            "pre-armed end-of-next-turn anchor must survive into the gated sub"
+        );
+        match &*restriction.effect {
+            Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        affected_players,
+                        activity,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    *affected_players,
+                    RestrictionPlayerScope::ScopedPlayer,
+                    "the per-iteration opponent is restricted (rebound ParentTargetedPlayer → ScopedPlayer)"
+                );
+                assert_eq!(
+                    *activity,
+                    ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents
+                    },
+                    "\"you or permanents you control\" defends player + permanents"
+                );
+            }
+            other => panic!("expected AddRestriction, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 508.1c + CR 109.5: City Hall — STRENGTHENING the restriction
+    /// path with a SAME-SCOPE (All), player-only defended scope. Proves the
+    /// building block generalizes across (a) defended scope ("you" → `Player` vs
+    /// The Second Doctor's `PlayerOrPermanents`) and (b) consequence filter (All vs
+    /// Opponent), i.e. "build for the class, not the card".
+    #[test]
+    fn city_hall_subject_only_who_does_lowers_same_scope_restriction() {
+        use crate::types::ability::SubAbilityLink;
+        use crate::types::triggers::AttackTargetFilter;
+        let def = parse_effect_chain(
+            "each player may create two tapped Treasure tokens. Each player who \
+             does can't attack you during their next turn.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional token creation iterates per player"
+        );
+        assert!(def.optional, "\"each player may create\" is optional");
+
+        let restriction = def
+            .sub_ability
+            .as_ref()
+            .expect("the optional token creation chains to the who-does consequence");
+        assert_eq!(
+            restriction.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::All
+                    },
+                ],
+            }),
+            "same-scope: the ScopedPlayerMatches{{All}} conjunct is a trivial no-op"
+        );
+        assert_eq!(restriction.sub_link, SubAbilityLink::ContinuationStep);
+        match &*restriction.effect {
+            Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        affected_players,
+                        activity,
+                        ..
+                    },
+            } => {
+                assert_eq!(*affected_players, RestrictionPlayerScope::ScopedPlayer);
+                assert_eq!(
+                    *activity,
+                    ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::Player
+                    },
+                    "bare \"you\" defends the player only"
+                );
+            }
+            other => panic!("expected AddRestriction, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 109.5: Step Between Worlds — generalization across a
+    /// NON-restriction effect. "Each player may shuffle their hand and graveyard
+    /// into their library. Each player who does draws seven cards." must lower
+    /// clause 2 as an `effect_performed()`-gated `Draw` whose recipient is rebound
+    /// Controller → ScopedPlayer, proving the SubjectOnly recipient rebind carries
+    /// the consequence to the scoped player beyond the AddRestriction cards.
+    #[test]
+    fn step_between_worlds_subject_only_who_does_lowers_draw() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "Each player may shuffle their hand and graveyard into their library. \
+             Each player who does draws seven cards.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional shuffle iterates per player"
+        );
+        assert!(def.optional, "\"each player may shuffle\" is optional");
+
+        // The compound shuffle parent ("shuffle their hand and graveyard into
+        // their library") lowers into a 3-step chain (ChangeZoneAll Hand→Library,
+        // ChangeZoneAll Graveyard→Library, Shuffle); the who-does Draw consequence
+        // is the leaf sub-ability. Walk to the Draw node.
+        let mut node = def
+            .sub_ability
+            .as_deref()
+            .expect("the optional shuffle chains onward");
+        while !matches!(*node.effect, Effect::Draw { .. }) {
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("the chain reaches the who-does Draw consequence");
+        }
+        let draw = node;
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::All
+                    },
+                ],
+            }),
+            "the draw runs only for a player who DID shuffle"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
+        match &*draw.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 7 });
+                assert_eq!(
+                    target,
+                    &TargetFilter::ScopedPlayer,
+                    "the shuffling player draws (rebound Controller → ScopedPlayer)"
+                );
+            }
+            other => panic!("expected Draw, got {other:?}"),
         }
     }
 

@@ -994,17 +994,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
-        } else if unless_pay.is_none()
-            && scan_contains(&effect_for_parse_lower, "unless")
-            && !has_later_sentence_if(&effect_for_parse_lower)
-        {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported unless clause".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
         } else {
             try_parse_exile_top_each_library_with_collection_counter(
                 &effect_for_parse,
@@ -9469,6 +9458,9 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
             def.valid_target = Some(TargetFilter::AttachedTo);
+            // CR 508.3b: only fires when the player themselves is attacked,
+            // not when a planeswalker they control or battle they protect is.
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
             return Some((TriggerMode::Attacks, def));
         }
     }
@@ -27355,6 +27347,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+        // CR 508.3b: only fires when the player themselves is attacked.
+        assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
         assert!(def.execute.is_some());
     }
 

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-25T00:00:00Z",
+  "updated": "2026-06-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1004,6 +1004,158 @@
       ]
     },
     {
+      "name": "Living End",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G",
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Vibrance"
+        },
+        {
+          "count": 1,
+          "name": "Mistrise Village"
+        },
+        {
+          "count": 3,
+          "name": "Curator of Mysteries"
+        },
+        {
+          "count": 3,
+          "name": "Oliphaunt"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 3,
+          "name": "Generous Ent"
+        },
+        {
+          "count": 1,
+          "name": "Hedge Maze"
+        },
+        {
+          "count": 4,
+          "name": "Misty Rainforest"
+        },
+        {
+          "count": 1,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 1,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Wistfulness"
+        },
+        {
+          "count": 3,
+          "name": "Street Wraith"
+        },
+        {
+          "count": 1,
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Violent Outburst"
+        },
+        {
+          "count": 4,
+          "name": "Shardless Agent"
+        },
+        {
+          "count": 2,
+          "name": "Colossal Skyturtle"
+        },
+        {
+          "count": 4,
+          "name": "Subtlety"
+        },
+        {
+          "count": 2,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 3,
+          "name": "Living End"
+        },
+        {
+          "count": 4,
+          "name": "Endurance"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Dead // Gone"
+        },
+        {
+          "count": 4,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Inevitable Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Foundation Breaker"
+        },
+        {
+          "count": 2,
+          "name": "Force of Vigor"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Brotherhood's End"
+        }
+      ]
+    },
+    {
       "name": "Amulet Titan",
       "author": "MTGGoldfish",
       "colors": [
@@ -1174,11 +1326,11 @@
       ]
     },
     {
-      "name": "Living End",
+      "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
         "R",
+        "W",
         "U"
       ],
       "tags": [
@@ -1186,216 +1338,32 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Vibrance"
-        },
-        {
-          "count": 1,
-          "name": "Mistrise Village"
-        },
-        {
-          "count": 3,
-          "name": "Curator of Mysteries"
-        },
-        {
-          "count": 3,
-          "name": "Oliphaunt"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 3,
-          "name": "Generous Ent"
-        },
-        {
-          "count": 1,
-          "name": "Hedge Maze"
-        },
-        {
-          "count": 4,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 1,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 3,
-          "name": "Street Wraith"
-        },
-        {
-          "count": 1,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Violent Outburst"
-        },
-        {
-          "count": 4,
-          "name": "Shardless Agent"
-        },
-        {
-          "count": 2,
-          "name": "Colossal Skyturtle"
-        },
-        {
-          "count": 4,
-          "name": "Subtlety"
-        },
-        {
-          "count": 2,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 3,
-          "name": "Living End"
-        },
-        {
-          "count": 4,
-          "name": "Endurance"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Dead // Gone"
-        },
-        {
-          "count": 4,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Inevitable Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Foundation Breaker"
-        },
-        {
-          "count": 2,
-          "name": "Force of Vigor"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Brotherhood's End"
-        }
-      ]
-    },
-    {
-      "name": "Ruby Storm",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "G",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 2,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 2,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 2,
-          "name": "Scalding Tarn"
-        },
-        {
           "count": 4,
           "name": "Pyretic Ritual"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Stomping Ground"
         },
         {
           "count": 4,
           "name": "Manamorphose"
         },
         {
-          "count": 2,
-          "name": "Wooded Foothills"
+          "count": 3,
+          "name": "Past in Flames"
         },
         {
-          "count": 1,
-          "name": "Sacred Foundry"
+          "count": 4,
+          "name": "Ruby Medallion"
         },
         {
-          "count": 2,
-          "name": "Valakut Awakening"
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
         },
         {
           "count": 2,
           "name": "Wish"
+        },
+        {
+          "count": 4,
+          "name": "Glimpse the Impossible"
         },
         {
           "count": 4,
@@ -1407,33 +1375,77 @@
         },
         {
           "count": 1,
-          "name": "Commercial District"
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 3,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 3,
+          "name": "Arid Mesa"
         },
         {
           "count": 2,
           "name": "Elegant Parlor"
         },
         {
-          "count": 4,
-          "name": "Glimpse the Impossible"
+          "count": 2,
+          "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Ral, Monsoon Mage"
+          "name": "Desperate Ritual"
         },
         {
-          "count": 4,
-          "name": "Ruby Medallion"
+          "count": 1,
+          "name": "Gemstone Caverns"
         },
         {
           "count": 2,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 1,
+          "name": "March of Reckless Joy"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
           "name": "Artist's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Empty the Warrens"
+          "name": "Galvanic Relay"
+        },
+        {
+          "count": 3,
+          "name": "Flusterstorm"
+        },
+        {
+          "count": 1,
+          "name": "Out of Time"
+        },
+        {
+          "count": 1,
+          "name": "Blood Moon"
         },
         {
           "count": 1,
@@ -1449,11 +1461,7 @@
         },
         {
           "count": 1,
-          "name": "Blast Zone"
-        },
-        {
-          "count": 3,
-          "name": "Veil of Summer"
+          "name": "Empty the Warrens"
         },
         {
           "count": 3,
@@ -1461,10 +1469,6 @@
         },
         {
           "count": 1,
-          "name": "Galvanic Relay"
-        },
-        {
-          "count": 2,
           "name": "Fire Magic"
         }
       ]

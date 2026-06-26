@@ -2029,6 +2029,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::IsMonarch
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
+            | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
@@ -7084,6 +7085,12 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),
+        // CR 701.54a: Ring-bearer designation on the ability source.
+        AbilityCondition::IsRingBearer => crate::game::effects::ring::is_current_ring_bearer(
+            state,
+            ability.controller,
+            ability.source_id,
+        ),
         // "Instead" override conditions — return pure boolean value.
         // Terminal control flow (early return from resolve_ability_chain) is the caller's
         // responsibility in the sub-ability context.

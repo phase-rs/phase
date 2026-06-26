@@ -1602,10 +1602,25 @@ pub(super) fn matching_attack_events(
                 valid_card_matches(trigger, state, *id, source_id)
             } else if trigger.valid_source.is_some() {
                 valid_source_matches(trigger, state, *id, source_id)
+            } else if trigger.valid_target.is_some() {
+                // CR 508.3b: "Whenever [player] is attacked" — no attacker
+                // filter, any creature attacking that player satisfies the
+                // trigger. The defending-player restriction is enforced by
+                // `attack_target_matches` below.
+                true
             } else {
                 *id == source_id
             }
         };
+
+        // CR 508.3b: "Whenever [player] is attacked" triggers once per
+        // attacked player, not once per attacking creature. Deduplicate when
+        // the trigger has valid_target set but no valid_card/valid_source
+        // (the player-is-attacked pattern).
+        let dedup_by_player = trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none();
+        let mut seen_defending_players: Vec<PlayerId> = Vec::new();
 
         attacker_ids
             .iter()
@@ -1620,13 +1635,17 @@ pub(super) fn matching_attack_events(
                 if !attack_target_matches(trigger, state, target, *defending_player, source_id) {
                     return None;
                 }
+                let event_defending_player =
+                    attack_target_defending_player(state, target, *defending_player);
+                if dedup_by_player {
+                    if seen_defending_players.contains(&event_defending_player) {
+                        return None;
+                    }
+                    seen_defending_players.push(event_defending_player);
+                }
                 Some(GameEvent::AttackersDeclared {
                     attacker_ids: vec![*id],
-                    defending_player: attack_target_defending_player(
-                        state,
-                        target,
-                        *defending_player,
-                    ),
+                    defending_player: event_defending_player,
                     attacks: vec![(*id, target)],
                 })
             })
@@ -5710,6 +5729,130 @@ mod tests {
             )],
         };
         assert!(!match_attacks(&other_player_event, &trigger, curse, &state));
+    }
+
+    /// CR 508.3b: "Whenever [player] is attacked" with no attacker filter.
+    /// Regression test for the fix where `attacker_matches` returned false when
+    /// `valid_card` and `valid_source` are both None but `valid_target` is set.
+    #[test]
+    fn attacks_trigger_matches_any_attacker_when_only_valid_target_set() {
+        let mut state = setup();
+        let curse = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Curse of Vitality".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let attacker = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // No valid_card, no valid_source — only valid_target = AttachedTo.
+        // CR 508.3b: attack_target_filter restricts to player-only attacks.
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.valid_target = Some(TargetFilter::AttachedTo);
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+
+        // Positive: attacker attacks the enchanted player (P1).
+        let enchanted_player_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+        assert!(match_attacks(
+            &enchanted_player_event,
+            &trigger,
+            curse,
+            &state
+        ));
+
+        // Negative: attacker attacks a different player (P0).
+        let other_player_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            )],
+        };
+        assert!(!match_attacks(&other_player_event, &trigger, curse, &state));
+
+        // Deduplication: two creatures attack the same enchanted player —
+        // CR 508.3b says the trigger fires only once.
+        let attacker2 = create_object(
+            &mut state,
+            CardId(15),
+            PlayerId(0),
+            "Attacker2".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let two_attackers_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker, attacker2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    attacker,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    attacker2,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        let events = matching_attack_events(&two_attackers_event, &trigger, curse, &state);
+        assert_eq!(
+            events.len(),
+            1,
+            "CR 508.3b: 'whenever [player] is attacked' triggers once, not per creature"
+        );
+
+        // Negative: attacking a planeswalker controlled by the enchanted player
+        // should NOT fire the trigger (attack_target_filter = Player).
+        let pw = create_object(
+            &mut state,
+            CardId(16),
+            PlayerId(1),
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let pw_attack_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Planeswalker(pw),
+            )],
+        };
+        assert!(
+            !match_attacks(&pw_attack_event, &trigger, curse, &state),
+            "attacking a planeswalker should not fire 'enchanted player is attacked'"
+        );
     }
 
     #[test]

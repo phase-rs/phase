@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-25T00:00:00Z",
+  "updated": "2026-06-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -20,7 +20,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Burst Lightning"
+          "name": "Monstrous Rage"
         },
         {
           "count": 1,
@@ -28,27 +28,7 @@
         },
         {
           "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
-        },
-        {
-          "count": 2,
-          "name": "Hexing Squelcher"
-        },
-        {
-          "count": 4,
           "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
         },
         {
           "count": 2,
@@ -56,11 +36,7 @@
         },
         {
           "count": 4,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
+          "name": "Kumano Faces Kakkazan"
         },
         {
           "count": 1,
@@ -71,66 +47,74 @@
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 2,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 9,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
+          "count": 4,
+          "name": "Reckless Rage"
         },
         {
           "count": 4,
           "name": "Mutavault"
         },
         {
-          "count": 2,
+          "count": 3,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 1,
           "name": "The Legend of Roku"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 15,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Hexing Squelcher"
         }
       ],
       "sideboard": [
-        {
-          "count": 3,
-          "name": "Flowstone Infusion"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
+          "count": 2,
+          "name": "Flowstone Infusion"
+        },
+        {
+          "count": 3,
+          "name": "Scorching Shot"
+        },
+        {
           "count": 1,
           "name": "Sunspine Lynx"
         },
         {
-          "count": 2,
-          "name": "Ghost Vacuum"
+          "count": 1,
+          "name": "Hexing Squelcher"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Pyroclasm"
         },
         {
           "count": 1,
-          "name": "Sunspine Lynx"
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 2,
+          "name": "Ghost Vacuum"
         }
       ]
     },
@@ -146,16 +130,40 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Blooming Marsh"
+          "count": 1,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 4,
-          "name": "Professor Dellian Fel"
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
           "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Abundance"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 3,
+          "name": "Graveyard Trespasser"
         },
         {
           "count": 4,
@@ -163,43 +171,19 @@
         },
         {
           "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Abundance"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Llanowar Wastes"
         },
         {
           "count": 3,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Wastewood Verge"
+          "name": "Fatal Push"
         },
         {
           "count": 4,
-          "name": "Abrupt Decay"
+          "name": "Professor Dellian Fel"
         },
         {
-          "count": 1,
-          "name": "Culling Ritual"
+          "count": 4,
+          "name": "Blooming Marsh"
         },
         {
           "count": 2,
@@ -207,22 +191,38 @@
         },
         {
           "count": 3,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 2,
           "name": "Swamp"
         },
         {
-          "count": 4,
-          "name": "Llanowar Wastes"
-        },
-        {
           "count": 1,
-          "name": "Forest"
+          "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 1,
           "name": "Tear Asunder"
         },
         {
+          "count": 1,
+          "name": "Abrupt Decay"
+        },
+        {
           "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Wastewood Verge"
+        },
+        {
+          "count": 2,
           "name": "Overgrown Tomb"
         },
         {
@@ -230,30 +230,42 @@
           "name": "Restless Cottage"
         },
         {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
           "count": 1,
-          "name": "The Soul Stone"
+          "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Badgermole Cub"
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
         }
       ],
       "sideboard": [
+        {
+          "count": 1,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Go Blank"
+        },
+        {
+          "count": 3,
+          "name": "Invoke Despair"
+        },
         {
           "count": 2,
           "name": "Ray of Enfeeblement"
         },
         {
           "count": 1,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 3,
-          "name": "Invoke Despair"
+          "name": "Sheoldred's Edict"
         },
         {
           "count": 2,
@@ -266,14 +278,6 @@
         {
           "count": 1,
           "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Go Blank"
-        },
-        {
-          "count": 1,
-          "name": "Sheoldred's Edict"
         }
       ]
     },
