@@ -1920,6 +1920,16 @@ pub enum RestrictionPlayerScope {
     /// the player as the restriction is created (the defending player is fixed
     /// once attackers are declared and does not change for the turn).
     DefendingPlayer,
+    /// CR 109.5 + CR 118.12: The player of the current `player_scope` iteration —
+    /// "each opponent who does can't attack you … during their next turn" (The
+    /// Second Doctor), "each player who does can't attack you …" (City Hall).
+    /// Inside a per-player optional effect, the consequence restriction binds to
+    /// the specific player who performed the optional action. Resolved to
+    /// `SpecificPlayer(ability.scoped_player.unwrap_or(controller))` by
+    /// `add_restriction` at resolution time — the same lower-at-creation contract
+    /// as `TargetedPlayer`/`DefendingPlayer`. Mirrors the existing
+    /// `ControllerRef::ScopedPlayer` / `TargetFilter::ScopedPlayer` siblings.
+    ScopedPlayer,
 }
 
 // ---------------------------------------------------------------------------
