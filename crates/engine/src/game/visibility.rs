@@ -941,7 +941,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: crate::types::game_state::ActivationResidual::None,
         })
     }
 

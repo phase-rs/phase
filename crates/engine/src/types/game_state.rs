@@ -1664,6 +1664,36 @@ pub enum CastPaymentMode {
     Manual,
 }
 
+/// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
+/// non-mana cost last" detour a pending activation took, so
+/// `push_activated_ability_to_stack` knows whether `activation_cost` is the
+/// still-unpaid residual non-mana tail and which interactive sub-cost to
+/// re-surface. Replaces the former `x_residual_activation: bool`.
+///
+/// - `None`: no detour ran (direct path; `activation_cost`, if any, is the full
+///   cost handled by the standard payment fall-through).
+/// - `XMana`: the `{X}`-mana detour (`extract_x_mana_cost`) ran first; the
+///   residual is the non-self DISCARD tail still outstanding after mana payment.
+/// - `ManaLeg`: the non-X mana-leg detour ran first (CR 601.2g window opened on
+///   the intact board); the residual is a non-self battlefield-removal tail
+///   (Sacrifice / battlefield Exile / ReturnToHand) still outstanding after
+///   mana payment.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ActivationResidual {
+    #[default]
+    None,
+    XMana,
+    ManaLeg,
+}
+
+impl ActivationResidual {
+    /// `true` iff no residual detour was taken. Used as the serde
+    /// `skip_serializing_if` predicate so the default does not hit the wire.
+    pub fn is_none(&self) -> bool {
+        matches!(self, ActivationResidual::None)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -1780,17 +1810,17 @@ pub struct PendingCast {
     /// the generic amount they will pay at `finalize_cast`.
     #[serde(default)]
     pub assist_state: AssistState,
-    /// CR 601.2f + CR 601.2h: POSITIVE signal that this pending activation took
-    /// the `{X}`-mana detour (`extract_x_mana_cost` ran first), so its
-    /// `activation_cost` is the RESIDUAL non-mana tail that has NOT yet been
-    /// paid. `push_activated_ability_to_stack` re-surfaces a non-self discard
-    /// sub-cost only when this is set — the discard-FIRST detour leaves it
-    /// `false` because it already paid the discard before resuming. Set ONLY by
-    /// the X-residual detour in `handle_activate_ability`. Skipped on the wire
-    /// only when `false`; serialized when `true` so an activation paused
-    /// mid-payment keeps the signal across a multiplayer save/restore.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub x_residual_activation: bool,
+    /// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
+    /// non-mana cost last" detour this pending activation took, so its
+    /// `activation_cost` residual tail is paid correctly after mana payment. See
+    /// [`ActivationResidual`]. Set ONLY by the X-residual and mana-leg detours in
+    /// `handle_activate_ability`; the discard/sacrifice-FIRST detours leave it
+    /// `None` because they already paid the non-mana cost before resuming.
+    /// Skipped on the wire when `None` (legacy saves deserialize to `None`);
+    /// serialized otherwise so an activation paused mid-payment keeps the signal
+    /// across a multiplayer save/restore.
+    #[serde(default, skip_serializing_if = "ActivationResidual::is_none")]
+    pub activation_residual: ActivationResidual,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1843,7 +1873,7 @@ impl PendingCast {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: ActivationResidual::None,
         }
     }
 
@@ -8467,7 +8497,7 @@ mod tests {
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
-                x_residual_activation: false,
+                activation_residual: ActivationResidual::None,
             })
         }
 
@@ -8806,7 +8836,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: ActivationResidual::None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

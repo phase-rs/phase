@@ -502,13 +502,14 @@ fn emrakul_ai_control_runs_for_controlled_human() {
 }
 
 // ---------------------------------------------------------------------------
-// Claws of Gix dead-end regression (CR 601.2h ordering — sacrifice paid FIRST,
-// {1} LAST). The composite "{1}, Sacrifice a permanent" was over-approved by
-// `costs::can_pay` when the only {1} source (Mox Opal Metalcraft) needed the
-// sacrificed artifact to stay countable — every `SelectCards` candidate then
-// failed `apply_as_current`, leaving an empty scored set and a `fallback_action`
-// debug_assert panic. The supplemental witness check now rejects the activation
-// when no sacrifice preserves the mana source.
+// Claws of Gix dead-end regression (CR 601.2g/601.2h ordering — mana paid FIRST,
+// removal LAST). The composite "{1}, Sacrifice a permanent" used to pay the
+// sacrifice FIRST, so when the only {1} source (Mox Opal Metalcraft) needed the
+// sacrificed artifact to stay countable, the residual {1} became unpayable —
+// every `SelectCards` candidate failed `apply_as_current`, leaving an empty
+// scored set and a `fallback_action` debug_assert panic. The mana-leg detour now
+// pays {1} on the INTACT board (the CR 601.2g window) before the sacrifice, so
+// the activation is legal and the loop completes.
 // ---------------------------------------------------------------------------
 
 /// Build a `{T}: Add {1}` mana ability gated by Metalcraft-style live-eval
@@ -624,15 +625,18 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
     );
 }
 
-/// V3 sibling (no-witness): board with exactly 3 artifacts (Mox + one plain
-/// artifact + Claws — itself an artifact) so EVERY eligible sacrifice drops the
-/// artifact count to 2 → Metalcraft off → no witness preserves the {1}. The AI
-/// must NOT propose the Claws activation (it would dead-end), and the loop must
-/// still complete without panic. The fix makes `choose_action` never surface a
-/// Claws `ActivateAbility` candidate here.
+/// V3 sibling (mana-first, formerly the "no-witness" dead-end): board with
+/// exactly 3 artifacts (Mox + one plain artifact + Claws — itself an artifact),
+/// so EVERY eligible sacrifice would drop the artifact count to 2 → Metalcraft
+/// off. CR 601.2g pays {1} from the Mox on the INTACT 3-artifact board BEFORE the
+/// sacrifice, so the Claws activation is LEGAL and the AI loop completes it
+/// without dead-ending. REVERT-FAILING: reverting the mana-first detour restores
+/// the sacrifice-first ordering, where `can_pay` is rejected (or the activation
+/// dead-ends), so `legal_actions` no longer surfaces the Claws activation and the
+/// pending-cost loop panics at `search.rs` "AI fallback reached during pending
+/// cast (variant PayCost, spell Claws of Gix)" — the baseline seed-19057 abort.
 #[test]
-fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
-    use engine::types::actions::GameAction;
+fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
     let mut scenario = GameScenario::new();
     {
         let mut mox = scenario.add_creature(P0, "Mox Opal", 0, 0);
@@ -641,7 +645,8 @@ fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
     }
     // One plain artifact; with the Mox and the (artifact) Claws this is exactly
     // 3 artifacts. Sacrificing ANY of the three drops the count to 2 → no
-    // Metalcraft → the {1} leg is unpayable on every post-sacrifice board.
+    // Metalcraft → the {1} leg would be unpayable AFTER the sacrifice, but the
+    // mana-first detour pays it on the intact board before that.
     {
         let mut a = scenario.add_creature(P0, "Artifact 0", 0, 1);
         a.as_artifact();
@@ -662,26 +667,14 @@ fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
-    // REVERT-FAILING: with the supplemental check removed, `can_pay` over-approves
-    // this no-witness board, `choose_action` surfaces the Claws activation, the AI
-    // begins it, and the pending-cost loop panics at `search.rs` "AI fallback
-    // reached during pending cast (variant PayCost, spell Claws of Gix)" — exactly
-    // the baseline seed-19057 abort. Driving the full loop is what reproduces that
-    // dead-end (a top-level `choose_action` pass does not), so the assertion is
-    // non-panic plus first-step never being the Claws activation.
-    let first_action = {
-        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(19057);
-        choose_action(runner.state(), P0, &config, &mut rng)
-    };
+    // The activation is now legal because the {1} is paid on the intact board.
     assert!(
-        !matches!(
-            first_action,
-            Some(GameAction::ActivateAbility { source_id, .. }) if source_id == claws
-        ),
-        "AI must not propose the dead-end Claws activation on a no-witness board, got {first_action:?}"
+        activation_legal_for(runner.state(), claws),
+        "mana-first pays {{1}} on the intact 3-artifact board → Claws activation must be legal"
     );
 
+    // Driving the full loop must COMPLETE without reaching the `fallback_action`
+    // dead-end panic.
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
     let mut ai_rng = SmallRng::seed_from_u64(19057);
@@ -695,17 +688,17 @@ fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
     );
     assert!(
         results.len() <= 200,
-        "no-witness board must not dead-end the AI loop"
+        "mana-first board must not dead-end the AI loop"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Battlefield-removal generalization of the Claws-of-Gix witness (CR 601.2h):
-// the same dead-end (the non-mana leg is paid FIRST and shrinks board mana) now
-// also covers Exile-from-battlefield (CR 701.13a, Curie) and ReturnToHand-from-
-// battlefield (plain bounce, Master Transmuter). Each removes a permanent the
-// only {U} source depends on, so over-approving `can_pay` would surface an
-// unactivatable ability and dead-end the AI loop.
+// Battlefield-removal generalization of the Claws-of-Gix mana-first fix
+// (CR 601.2g/601.2h): the same ordering applies to Exile-from-battlefield
+// (CR 701.13a, Curie) and ReturnToHand-from-battlefield (plain bounce, Master
+// Transmuter). Each removal would shrink the board the only {U} source depends
+// on, so paying the mana FIRST (intact board) keeps the activation legal and
+// avoids the dead-end the removal-first ordering produced.
 // ---------------------------------------------------------------------------
 
 /// `{T}: Add {U}` mana ability. When `metalcraft` is set the ability is gated by
@@ -846,18 +839,16 @@ fn activation_legal_for(state: &engine::types::game_state::GameState, id: Object
         .any(|a| matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == id))
 }
 
-/// Curie EXILE dead-end (CR 601.2h / CR 701.13a): exactly 3 artifacts
+/// Curie EXILE mana-first (CR 601.2g / CR 701.13a): exactly 3 artifacts
 /// (Metalcraft blue Mox = sole {U} source, Curie, and the lone exile target) +
-/// a Forest for the generic {1}. Exiling the only legal target drops the
-/// artifact count to 2 → Metalcraft off → no {U} → the `{1}{U}` leg is unpayable
-/// on the post-exile board. REVERT-FAILING: with the Sacrifice-only walker the
-/// exile leg is invisible to the supplemental check, `can_pay` over-approves on
-/// the intact 3-artifact board, and `legal_actions` surfaces the dead-end Curie
-/// activation. The non-vacuity control is `scenario_curie_exile_witness_*`,
-/// where a 4th artifact keeps Metalcraft live and the activation IS legal —
-/// proving the `{1}{U}` leg is payable on the intact board.
+/// a Forest for the generic {1}. The mana-leg detour pays `{1}{U}` FIRST while
+/// all 3 artifacts are intact (Metalcraft holds → the Mox makes {U}); the exile
+/// is paid LAST. So the activation is LEGAL even though exiling afterwards drops
+/// below Metalcraft. REVERT-FAILING: reverting the mana-first detour restores the
+/// exile-first ordering, which dead-ends here, so `legal_actions` would no longer
+/// surface the Curie activation.
 #[test]
-fn scenario_curie_exile_no_witness_board_is_illegal() {
+fn scenario_curie_exile_mana_first_board_is_legal() {
     let mut scenario = GameScenario::new();
     {
         let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
@@ -882,8 +873,8 @@ fn scenario_curie_exile_no_witness_board_is_illegal() {
     put_p0_on_priority(&mut runner);
 
     assert!(
-        !activation_legal_for(runner.state(), curie),
-        "every exile drops below Metalcraft → {{1}}{{U}} unpayable → activation must be illegal"
+        activation_legal_for(runner.state(), curie),
+        "{{1}}{{U}} paid on the intact 3-artifact board before the exile → activation must be legal"
     );
 }
 
@@ -927,17 +918,18 @@ fn scenario_curie_exile_witness_board_is_legal() {
     );
 }
 
-/// Master Transmuter RETURN dead-end (CR 601.2h / CR 118.3): the sole artifact
+/// Master Transmuter RETURN mana-first (CR 601.2g / CR 118.3): the sole artifact
 /// the player controls is the sole {U} source (an unconditional blue Mox), and
 /// it is therefore the only legal "return an artifact you control" target. The
 /// Transmuter source is a NON-artifact creature, so it is not itself a return
-/// target. Returning the Mox is the only witness, and it removes the {U}, so the
-/// `{U}` leg is unpayable on the post-return board. REVERT-FAILING: the
-/// Sacrifice-only walker never recognized a ReturnToHand leg, so `can_pay`
-/// over-approves and `legal_actions` surfaces the dead-end activation. The
-/// non-vacuity control is `scenario_master_transmuter_witness_board_is_legal`.
+/// target. CR 601.2g pays `{U}` by tapping the Mox FIRST (the intact-board mana
+/// window), then the {T} and the return are paid LAST — so the activation is
+/// LEGAL even though the only return target is the {U} source. REVERT-FAILING:
+/// reverting the mana-first detour restores the return-first ordering, where
+/// bouncing the Mox leaves `{U}` unpayable and `legal_actions` drops the
+/// activation.
 #[test]
-fn scenario_master_transmuter_return_no_witness_board_is_illegal() {
+fn scenario_master_transmuter_return_mana_first_board_is_legal() {
     let mut scenario = GameScenario::new();
     {
         let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
@@ -955,8 +947,8 @@ fn scenario_master_transmuter_return_no_witness_board_is_illegal() {
     put_p0_on_priority(&mut runner);
 
     assert!(
-        !activation_legal_for(runner.state(), transmuter),
-        "returning the sole {{U}} source leaves {{U}} unpayable → activation must be illegal"
+        activation_legal_for(runner.state(), transmuter),
+        "{{U}} paid by tapping the Mox before the return → activation must be legal"
     );
 }
 
