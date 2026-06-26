@@ -29,7 +29,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { createMessage } from "./lib/discord.ts";
+import { createMessage, crosspostMessage, discordGet } from "./lib/discord.ts";
 
 interface ChangelogEntry {
   id: number;
@@ -120,10 +120,10 @@ if (!Bun.env.DISCORD_BOT_TOKEN || !channelId) {
   process.exit(0);
 }
 
-let firstMessageId: string | undefined;
+const postedIds: string[] = [];
 for (const content of messages) {
   const posted = await createMessage(channelId, content);
-  firstMessageId ??= posted.id;
+  postedIds.push(posted.id);
 }
 
 // Record the watermark so a re-run is a no-op.
@@ -131,12 +131,25 @@ state.lastPostedId = entry.id;
 writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
 
 // Link the in-app entry back to the announcement (only possible with a guild id).
-if (Bun.env.DISCORD_GUILD_ID && firstMessageId && !entry.discordUrl) {
-  entry.discordUrl = `https://discord.com/channels/${Bun.env.DISCORD_GUILD_ID}/${channelId}/${firstMessageId}`;
+if (Bun.env.DISCORD_GUILD_ID && postedIds[0] && !entry.discordUrl) {
+  entry.discordUrl = `https://discord.com/channels/${Bun.env.DISCORD_GUILD_ID}/${channelId}/${postedIds[0]}`;
   writeFileSync(CHANGELOG_PATH, `${JSON.stringify({ entries }, null, 2)}\n`);
+}
+
+// Auto-publish: an Announcement/News channel (type 5) can crosspost each message
+// to follower servers — the "Share with your followers?" the Discord client
+// prompts for, done automatically. Other channel types have nothing to publish.
+const channel = await discordGet<{ type: number }>(`/channels/${channelId}`);
+let published = 0;
+if (channel.type === 5) {
+  for (const id of postedIds) {
+    await crosspostMessage(channelId, id);
+    published += 1;
+  }
 }
 
 console.log(
   `Posted entry #${entry.id} "${entry.title}" to #announcements as ${messages.length} message(s)` +
+    `${published ? `, published ${published} to followers` : ""}` +
     `${entry.discordUrl ? ` (linked ${entry.discordUrl})` : ""}.`,
 );
