@@ -14,7 +14,7 @@ use super::engine::EngineError;
 use super::engine_stack;
 use super::restrictions;
 use super::triggers;
-use super::{casting, casting_costs};
+use super::{casting, casting_costs, priority};
 
 pub(super) fn handle_ability_mode_choice(
     state: &mut GameState,
@@ -336,8 +336,7 @@ fn handle_activated_mode_choice(
             state, source_id, index, player, events,
         );
     }
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::Priority { player })
 }
 
@@ -534,8 +533,7 @@ fn handle_triggered_mode_choice(
         // the resolved mode and clear `pending_trigger_entry` so the resolver
         // may fire this entry.
         triggers::finalize_pending_trigger_entry(state, &trigger.ability);
-        state.priority_passes.clear();
-        state.priority_pass_count = 0;
+        priority::clear_priority_passes(state);
         // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
         // modal trigger so each independent instance reaches the stack
         // (issue #416).

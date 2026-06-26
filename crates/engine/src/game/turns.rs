@@ -19,6 +19,7 @@ use crate::types::zones::Zone;
 use super::combat;
 use super::combat_damage;
 use super::day_night;
+use super::priority;
 use super::turn_control;
 use super::zones;
 
@@ -418,8 +419,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
 
     // CR 117.3a: Active player receives priority at the beginning of most steps and phases.
     state.priority_player = turn_control::turn_decision_maker(state);
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
@@ -543,8 +543,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // Reset priority
     state.priority_player = turn_control::turn_decision_maker(state);
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     // Reset per-turn counters
     // CR 305.2: Reset per-turn land play count.

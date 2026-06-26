@@ -4953,8 +4953,7 @@ fn apply_action(
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
                 triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
                 // behind this distribute-among trigger so each independent
                 // instance reaches the stack (issue #416).
@@ -5813,8 +5812,7 @@ fn handle_play_land(
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
                     }
-                    state.priority_passes.clear();
-                    state.priority_pass_count = 0;
+                    priority::clear_priority_passes(state);
                     events.push(GameEvent::LandPlayed {
                         object_id,
                         player_id: player,
@@ -5842,8 +5840,7 @@ fn handle_play_land(
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
             }
-            state.priority_passes.clear();
-            state.priority_pass_count = 0;
+            priority::clear_priority_passes(state);
 
             events.push(GameEvent::LandPlayed {
                 object_id,
@@ -5871,8 +5868,7 @@ fn handle_play_land(
     player_data.lands_played_this_turn += 1;
 
     // Reset priority passes (action was taken)
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     events.push(GameEvent::LandPlayed {
         object_id,
@@ -6306,8 +6302,7 @@ fn handle_equip_activation(
         ));
     }
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::EquipTarget {
         player,
         equipment_id,
@@ -6420,8 +6415,7 @@ fn handle_crew_activation(
     }
 
     let _ = events; // No events emitted during activation
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::CrewVehicle {
         player,
         vehicle_id,
@@ -6453,8 +6447,7 @@ fn push_keyword_action(
         },
         events,
     );
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     WaitingFor::Priority { player }
 }
 
@@ -6631,8 +6624,7 @@ fn handle_station_activation(
     }
 
     let _ = events; // No events emitted during activation (cost payment happens at resolution).
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::StationTarget {
         player,
         spacecraft_id,
@@ -6809,8 +6801,7 @@ fn handle_saddle_activation(
     }
 
     let _ = events;
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::SaddleMount {
         player,
         mount_id,
@@ -10002,6 +9993,8 @@ mod tests {
     #[test]
     fn tap_land_for_mana_produces_correct_color() {
         let mut state = setup_game_at_main_phase();
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
 
         let land_id = create_object(
             &mut state,
@@ -10024,6 +10017,8 @@ mod tests {
         .unwrap();
 
         assert!(state.objects[&land_id].tapped);
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+        assert_eq!(state.priority_pass_count, 1);
         assert_eq!(
             state.players[0]
                 .mana_pool

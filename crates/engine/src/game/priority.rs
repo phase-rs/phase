@@ -45,8 +45,7 @@ pub fn handle_priority_pass_with_limit(
 
     if state.priority_passes.len() >= living_count {
         // CR 117.4: All living players have passed consecutively.
-        state.priority_passes.clear();
-        state.priority_pass_count = 0;
+        clear_priority_passes(state);
 
         if state.stack.is_empty() {
             // CR 510.4: The combat damage step's turn-based action runs in two
@@ -142,12 +141,17 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     players::next_player(state, current)
 }
 
-/// CR 117.3a: After resolution, active player receives priority.
-/// Reset priority state: clear passes, set priority to active player.
-pub fn reset_priority(state: &mut GameState) {
-    state.priority_player = state.active_player;
+/// CR 117.4: Clear consecutive priority pass bookkeeping without changing who holds priority.
+pub(crate) fn clear_priority_passes(state: &mut GameState) {
     state.priority_passes.clear();
     state.priority_pass_count = 0;
+}
+
+/// Reset priority bookkeeping and grant priority to the active player.
+/// Callers own the concrete rule that grants priority for their flow.
+pub fn reset_priority(state: &mut GameState) {
+    state.priority_player = state.active_player;
+    clear_priority_passes(state);
 }
 
 #[cfg(test)]
@@ -268,12 +272,29 @@ mod tests {
         state.priority_player = PlayerId(1);
         state.priority_passes.insert(PlayerId(0));
         state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 2;
 
         reset_priority(&mut state);
 
         assert_eq!(state.priority_player, PlayerId(0));
         assert!(state.priority_passes.is_empty());
         assert_eq!(state.priority_pass_count, 0);
+    }
+
+    #[test]
+    fn clear_priority_passes_preserves_priority_player() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(1);
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 2;
+
+        clear_priority_passes(&mut state);
+
+        assert!(state.priority_passes.is_empty());
+        assert_eq!(state.priority_pass_count, 0);
+        assert_eq!(state.priority_player, PlayerId(1));
     }
 
     // --- 3-player N-player priority ---

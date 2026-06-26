@@ -43,6 +43,7 @@ use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
+use super::priority;
 use super::quantity::resolve_quantity;
 use super::restrictions;
 use super::speed::effective_speed;
@@ -13237,8 +13238,7 @@ pub fn handle_activate_ability(
                 player,
                 events,
             );
-            state.priority_passes.clear();
-            state.priority_pass_count = 0;
+            priority::clear_priority_passes(state);
             return Ok(WaitingFor::Priority { player });
         }
 
@@ -13331,8 +13331,7 @@ pub fn handle_activate_ability(
         events,
     );
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
 }
