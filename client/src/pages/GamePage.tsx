@@ -1064,8 +1064,10 @@ function GamePageContent({
 
   const isReconnecting = reconnectState.status !== "idle";
   const topOverlayOffsetPx = reconnectState.status === "idle" ? 0 : 56;
+  const playerRowHeight = "min(0.18 * (100dvh - var(--game-top-overlay-offset, 0px)), 150px)";
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
+    "--player-row-height": playerRowHeight,
   } as CSSProperties;
   const playerZoneRailStyle: ZoneRailStyle = isMobile
     ? { "--card-w": "28px", "--card-h": "39px" }
@@ -1073,7 +1075,6 @@ function GamePageContent({
   const pileSize = isMobile
     ? { width: "38px", height: "53px" }
     : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
-  const playerRowHeight = "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)";
   const showFlowHelpNudge =
     !dismissedFlowHelpNudge &&
     !helpSheetOpen &&
@@ -1244,7 +1245,7 @@ function GamePageContent({
             rather than shoving the hand up. */}
         <div
           className="relative min-w-0 self-end overflow-visible"
-          style={{ height: playerRowHeight }}
+          style={{ height: "var(--player-row-height)" }}
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center">
@@ -1296,7 +1297,7 @@ function GamePageContent({
         className="fixed z-30 flex flex-col items-end gap-1.5"
         style={{
           bottom: isMobile
-            ? `calc(env(safe-area-inset-bottom) + var(--action-btn-bottom) + ${playerRowHeight})`
+            ? `calc(env(safe-area-inset-bottom) + var(--action-btn-bottom) + var(--player-row-height))`
             : "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
           // Anchor box-scale to the docked corner so it grows inward, not off-screen.
