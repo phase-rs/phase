@@ -2592,6 +2592,9 @@ fn parse_enters_with_counters(
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
         .parse(after_additional)
         .map_or(after_additional, |(rest, _)| rest);
+    let after_prefix = tag::<_, _, OracleError<'_>>("additional ")
+        .parse(after_prefix)
+        .map_or(after_prefix, |(rest, _)| rest);
     // CR 107.3 + CR 107.3m + CR 107.1a: Parse the counter count as a full
     // `QuantityExpr`, so "N", "X", "twice X", "three times X", and
     // "half X, rounded up/down" all compose through the same typed arithmetic
@@ -10602,6 +10605,44 @@ mod tests {
                         }
                     ),
                     "count should be Aggregate quantity, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distributive_enters_with_dynamic_additional_counters_normalizes_counter_type() {
+        let def = parse_replacement_line(
+            "Each other creature you control enters with a number of additional +1/+1 counters on it equal to Arwen's toughness.",
+            "Arwen, Weaver of Hope",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            }))
+        );
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(target, &TargetFilter::SelfRef);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
