@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 151,
+      "date": "2026-06-26",
+      "title": "iOS crash fixes, deck folders & Rooms",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Rooms now play both halves — the second door of a Room split card is finally castable (Spiked Corridor // Torture Pit and other Rooms)\n• Curse of Conformity works — it sets the enchanted player's creatures to base 3/3 and strips their other creature types\n• Mad Wizard's Lair (Dungeon of the Mad Mage, room 8) now resolves instead of doing nothing\n\n🛠️ Cards That Now Work Right\n• Octavia, Living Thesis only gets her cost reduction with eight or more instants/sorceries in your graveyard — no more turn-two Octavia from an empty graveyard\n• Court of Cunning now mills every targeted player, not just the first\n• From the Rubble correctly reanimates creatures from your graveyard\n• Well Rested's untap trigger now gives the life gain and card draw to the Aura's controller\n• Braids, Arisen Nightmare no longer runs its life-loss and draw tail when you decline your own sacrifice\n• Sanar Vivid keeps revealed cards in your library for its per-color exile\n• Committing a crime now triggers on damage that doesn't target, such as a Desert ping to an opponent\n• Token copies made \"except it's legendary\" now actually become legendary (Adagia, Windswept Bastion)\n• The Commander 2017 curse cycle now fires its \"whenever the enchanted player is attacked\" abilities (Curse of Bounty, Curse of Disturbance, Curse of Opulence, Curse of Verbosity, Curse of Vitality, Imprison This Insolent Wretch)\n• Equipment and Aura \"whenever equipped creature attacks\" triggers can now target the defending player (Greatsword of Tyr)\n\n⚔️ Combat & Gameplay\n• Lifelink now gains life once when a single source hits multiple targets at once (several blockers, or trample to a blocker plus the player), so \"whenever you gain life\" abilities trigger once instead of several times (Blech, Loafing Pest)\n• Wide boards no longer stall during combat — removed a slowdown that grew sharply with the number of creatures in play\n\n🖥️ Interface\n• New \"What's New\" panel — release notes now live in the app behind the sparkle icon, with search, pagination, and an unread badge\n• Organize your decks into folders in My Decks — create, rename, and assign decks to folders\n• Fixed out-of-memory crashes on iOS — Very Hard AI and large card pools no longer reload the tab on iPhone and iPad\n• Moxfield maybeboard cards are no longer pulled in when importing a deck by URL\n• Board hover tooltips now stay on screen near the edges of the window\n• Fixed a card-art regression where some cached images showed text instead of the picture\n\n🌐 Multiplayer\n• Fixed an out-of-memory crash for the multiplayer host when validating a guest's deck on iOS",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520112115816599743"
+    },
+    {
       "id": 150,
       "date": "2026-06-25",
       "title": "Stability fixes: graveyard-choice softlock & engine panics",

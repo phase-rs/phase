@@ -69,19 +69,38 @@ const channelId =
   args.find((a) => !a.startsWith("-")) ?? Bun.env.ANNOUNCEMENTS_CHANNEL_ID;
 
 /**
- * Pack lines into ≤limit-char chunks without ever splitting a line, so a bullet
- * or section header is never torn across two Discord messages. Changelog lines
- * are short (bullets, section headers), so per-line < limit always holds.
+ * Pack the post into ≤limit-char chunks, preferring to break at blank-line
+ * (section) boundaries so a "✨ Section" header is never stranded at the end of
+ * a message away from its bullets. Sections are packed whole; a single section
+ * larger than the limit falls back to line-packing (still never tearing a line)
+ * so it always fits.
  */
 function chunk(content: string, limit = DISCORD_MAX): string[] {
   const chunks: string[] = [];
   let current = "";
-  for (const line of content.split("\n")) {
-    if (current && current.length + 1 + line.length > limit) {
+
+  // Line-pack a single over-limit section, continuing from `current`.
+  const linePack = (block: string) => {
+    for (const line of block.split("\n")) {
+      if (current && current.length + 1 + line.length > limit) {
+        chunks.push(current);
+        current = line;
+      } else {
+        current = current ? `${current}\n${line}` : line;
+      }
+    }
+  };
+
+  for (const block of content.split("\n\n")) {
+    const sep = current ? 2 : 0; // the "\n\n" rejoining this block to current
+    if (current && current.length + sep + block.length > limit) {
       chunks.push(current);
-      current = line;
+      current = "";
+    }
+    if (block.length > limit) {
+      linePack(block);
     } else {
-      current = current ? `${current}\n${line}` : line;
+      current = current ? `${current}\n\n${block}` : block;
     }
   }
   if (current) chunks.push(current);
