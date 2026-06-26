@@ -137,8 +137,44 @@ export default defineConfig(({ mode }) => ({
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
-        globIgnores: ["**/engine_wasm_bg-*.wasm", "**/draft_wasm_bg-*.wasm"],
+        // changelog{,-meta}.json are committed to public/ but stripped from the
+        // Pages bundle on deploy (manifest-driven rm in deploy.yml/release.yml)
+        // and served from R2. The precache manifest is generated BEFORE that
+        // strip, so without ignoring them Workbox would precache files that 404
+        // at SW-install time. They're fetched at runtime via the rules below.
+        globIgnores: [
+          "**/engine_wasm_bg-*.wasm",
+          "**/draft_wasm_bg-*.wasm",
+          "**/changelog.json",
+          "**/changelog-meta.json",
+        ],
         runtimeCaching: [
+          {
+            // Tiny constant-size "what's new" pointer fetched on every app load
+            // to drive the unread dot. StaleWhileRevalidate serves the cached
+            // copy instantly (and offline) while refreshing in the background,
+            // so the dot reflects the latest deploy on the NEXT load — never
+            // blocking startup on a network round-trip.
+            urlPattern: /changelog-meta\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "changelog-meta",
+              expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Full changelog, lazy-loaded only when the user opens the modal.
+            // NetworkFirst prefers fresh entries but falls back to the cached
+            // copy after a short timeout (slow network) or when offline, so the
+            // modal always renders the last-seen list rather than hanging.
+            urlPattern: /changelog\.json$/,
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "changelog-full",
+              networkTimeoutSeconds: 3,
+              expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
+            },
+          },
           {
             urlPattern: /engine_wasm_bg-.*\.wasm$/,
             handler: "CacheFirst",

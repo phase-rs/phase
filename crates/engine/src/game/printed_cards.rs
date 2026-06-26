@@ -1169,7 +1169,7 @@ fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<Strin
 /// conjure names (a conjured card may itself conjure another) to a fixpoint.
 /// Returns the registry plus every conjure name encountered along the way (used
 /// by the debug-only walker-coverage safety net).
-fn build_conjure_registry(
+pub(crate) fn build_conjure_registry(
     state: &GameState,
     db: &CardDatabase,
 ) -> (HashMap<String, CardFace>, Vec<String>) {

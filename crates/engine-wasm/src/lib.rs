@@ -226,6 +226,32 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
+/// Build a game-scoped AI card-database subset from the loaded full database and
+/// the live game state, serialized as the `AiCardSubsetResult` tagged union
+/// (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
+/// worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
+/// the returned subset so its WASM instances don't each parse the full ~93MB
+/// corpus. Returns `{"kind":"full"}` defensively when the database or game state
+/// is absent (the engine is the single authority for this fallback — see
+/// `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
+/// and restored to the thread-local on every path.
+#[wasm_bindgen]
+pub fn build_ai_card_subset() -> Result<String, JsValue> {
+    let result = CARD_DB.with(|db_cell| {
+        let db_ref = db_cell.borrow();
+        GAME_STATE.with(|gs_cell| {
+            let state_opt = gs_cell.take();
+            let r = engine::game::card_subset::build_ai_card_subset_or_full(
+                state_opt.as_ref(),
+                db_ref.as_ref(),
+            );
+            gs_cell.set(state_opt);
+            r
+        })
+    });
+    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// Look up a card face by name from the loaded card database.
 /// Returns the serialized `CardFace` (keywords, abilities, triggers, static_abilities,
 /// replacements, card_type, oracle_text, etc.) or null if not found.

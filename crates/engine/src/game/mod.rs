@@ -10,6 +10,7 @@ pub mod blitz;
 #[path = "blitz_tests.rs"]
 mod blitz_tests;
 pub mod bracket_estimate;
+pub mod card_subset;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::bracket_lists::{BracketLists, BracketSignals};
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
@@ -138,6 +138,42 @@ impl CardDatabase {
     pub fn get_face_by_name(&self, name: &str) -> Option<&CardFace> {
         let key = self.lookup_key(name);
         self.face_index.get(&key)
+    }
+
+    /// Emit a card-data export JSON containing ONLY the named faces, suitable for
+    /// `from_json_str`. Reconstructs each `CardExportEntry` from the in-memory
+    /// indices. Legalities are intentionally empty: AI workers never run a
+    /// deck-legality check, and the built DB retains only the normalized
+    /// `legalities` form (there is no raw `HashMap<String, String>` source to
+    /// re-emit — see `from_export_entries`).
+    pub fn export_subset_json(&self, names: &std::collections::BTreeSet<String>) -> String {
+        let mut out: HashMap<String, CardExportEntry> = HashMap::with_capacity(names.len());
+        for name in names {
+            let key = self.lookup_key(name);
+            let Some(face) = self.face_index.get(&key) else {
+                continue;
+            };
+            let layout = face
+                .scryfall_oracle_id
+                .as_deref()
+                .and_then(|id| self.layout_index.get(id).copied())
+                .and_then(layout_kind_to_str)
+                .map(str::to_string);
+            let entry = CardExportEntry {
+                face: face.clone(),
+                legalities: HashMap::new(),
+                layout,
+                printings: self.printings_index.get(&key).cloned().unwrap_or_default(),
+                rulings: self.rulings_index.get(&key).cloned().unwrap_or_default(),
+                bracket_signals: self
+                    .bracket_signals_by_name
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_default(),
+            };
+            out.insert(face.name.clone(), entry);
+        }
+        serde_json::to_string(&out).expect("CardExportEntry serialization is infallible")
     }
 
     /// Resolve a face by its Scryfall oracle id. Used as a fallback when a
@@ -438,7 +474,7 @@ fn fold_card_name_key(name: &str) -> String {
     folded
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct CardExportEntry {
     #[serde(flatten)]
     face: CardFace,
@@ -471,6 +507,24 @@ fn layout_kind_requires_multiple_faces(layout_kind: LayoutKind) -> bool {
             | LayoutKind::Omen
             | LayoutKind::Prepare
     )
+}
+
+/// Exhaustive inverse of `map_layout_str`: runtime `LayoutKind` → the MTGJSON
+/// layout string `from_export_entries` expects. `Single` has no string form
+/// (single-face cards carry no layout discriminant). No wildcard arm, so a new
+/// `LayoutKind` variant forces a compile error here until it is mapped.
+fn layout_kind_to_str(kind: LayoutKind) -> Option<&'static str> {
+    match kind {
+        LayoutKind::Modal => Some("modal_dfc"),
+        LayoutKind::Transform => Some("transform"),
+        LayoutKind::Adventure => Some("adventure"),
+        LayoutKind::Meld => Some("meld"),
+        LayoutKind::Split => Some("split"),
+        LayoutKind::Flip => Some("flip"),
+        LayoutKind::Omen => Some("omen"),
+        LayoutKind::Prepare => Some("prepare"),
+        LayoutKind::Single => None,
+    }
 }
 
 /// Convert MTGJSON layout string to runtime `LayoutKind`.

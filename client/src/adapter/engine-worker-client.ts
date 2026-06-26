@@ -112,6 +112,15 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  /**
+   * Build the game-scoped AI card-DB subset for THIS game. Returns the
+   * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
+   * Called ONLY on the MAIN engine client (full CARD_DB + live GAME_STATE).
+   */
+  async buildAiCardSubset(): Promise<string> {
+    return this.request<string>({ type: "buildAiCardSubset" });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,

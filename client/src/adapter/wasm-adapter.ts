@@ -16,6 +16,8 @@ import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstima
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
+import type { AiCardDataMode } from "./card-db-subset";
+import { DEFAULT_AI_CARD_DATA_MODE, loadAiPoolCardDb } from "./card-db-subset";
 /**
  * Flatten the `ClientGameState { state, derived }` wire envelope produced
  * by the engine's WASM getters into the store-side `GameState` shape with
@@ -109,6 +111,11 @@ export class WasmAdapter implements EngineAdapter {
   private aiPool: AiWorkerPool | null = null;
   private aiPoolFailed = false;
 
+  // How the AI worker pool loads its card database. `auto`/`subset` load an
+  // engine-built game-scoped subset (escalating to full for unbounded games
+  // like Momir); `full` loads the entire corpus into every pool worker.
+  private aiCardDataMode: AiCardDataMode = DEFAULT_AI_CARD_DATA_MODE;
+
   // Fallback: direct WASM on main thread (only used if Worker fails)
   private fallback: MainThreadFallback | null = null;
 
@@ -170,9 +177,11 @@ export class WasmAdapter implements EngineAdapter {
           console.log(`Card database loaded: ${count} cards`);
         }
         this.cardDbLoaded = true;
-        // Also load into AI pool if it's already initialized
-        if (this.aiPool && !this.aiPool.isCardDbLoaded) {
-          await this.aiPool.loadCardDb();
+        // Also load into AI pool if it's already initialized. AI-pool workers
+        // get the game-scoped subset (built on the main engine), not the full
+        // corpus, unless the mode is `full` or the universe is unbounded.
+        if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
+          await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
         }
       } catch (err) {
         console.warn("Failed to load card database:", err);
@@ -338,15 +347,22 @@ export class WasmAdapter implements EngineAdapter {
 
 /** Lazy AI pool init — only created on first VeryHard request. */
   private async ensureAiPool(): Promise<AiWorkerPool | null> {
-    if (this.aiPool) return this.aiPool;
+    if (this.aiPool) {
+      // The pool's subset is game-scoped: after `resetGameState` invalidated it,
+      // rebuild this game's subset (the pool instance is preserved across games).
+      if (this.cardDbLoaded && this.engine && !this.aiPool.isCardDbLoaded) {
+        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
+      }
+      return this.aiPool;
+    }
     if (this.aiPoolFailed) return null;
     try {
       const cores = navigator.hardwareConcurrency ?? 0;
       const count = Math.max(2, Math.min(cores - 1, 4));
       this.aiPool = new AiWorkerPool(count);
       await this.aiPool.initialize();
-      if (this.cardDbLoaded) {
-        await this.aiPool.loadCardDb();
+      if (this.cardDbLoaded && this.engine) {
+        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
       }
       return this.aiPool;
     } catch {
@@ -444,13 +460,20 @@ export class WasmAdapter implements EngineAdapter {
   /**
    * Clear the WASM game state without terminating the worker.
    *
-   * Preserves the WASM instance (with V8 TurboFan optimizations), card database,
-   * and AI worker pool. Any in-flight AI computation on the old state will
-   * short-circuit with an error rather than running a full search.
+   * Preserves the WASM instance (with V8 TurboFan optimizations), the main
+   * worker's full card database, and the AI worker pool INSTANCE. In
+   * subset/auto mode the pool's game-scoped subset is invalidated so the next
+   * `ensureAiPool`/`ensureCardDb` rebuilds it for the new game; in full mode the
+   * pool's full DB is preserved (it's game-independent). Any in-flight AI
+   * computation on the old state will short-circuit with an error rather than
+   * running a full search.
    */
   async resetGameState(): Promise<void> {
     if (this.engine) {
       await this.engine.resetGame();
+    }
+    if (this.aiCardDataMode !== "full") {
+      this.aiPool?.invalidateCardDb();
     }
   }
 

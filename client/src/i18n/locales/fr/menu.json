@@ -291,7 +291,8 @@
     "decks": "Decks",
     "alpha": "Alpha",
     "profile": "Profil",
-    "settings": "Réglages"
+    "settings": "Réglages",
+    "whatsNew": "Nouveautés"
   },
   "folder": {
     "actionsMenu": "Options du dossier",
@@ -304,5 +305,30 @@
     "deleteConfirm": "Supprimer le dossier « {{name}} » ? Les decks passeront dans Non classé.",
     "emptyHint": "Ce dossier est vide.",
     "unfiledEmptyHint": "Aucun deck non classé."
+  },
+  "whatsNew": {
+    "title": "Quoi de neuf",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

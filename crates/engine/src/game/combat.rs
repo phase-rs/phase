@@ -1608,19 +1608,9 @@ pub fn compute_combat_tax(
             // and allows Archangel of Tithes' "you or planeswalkers you
             // control" to match attacks against either the defender or one
             // of their planeswalkers.
-            let mut affected_ids: Vec<ObjectId> = Vec::new();
+            let mut affected_indices: Vec<usize> = Vec::with_capacity(creatures.len());
             let ctx = FilterContext::from_source(state, source_id);
-            for (cid, attack_target) in creatures {
-                let creature_matches = match &def.affected {
-                    Some(filter) => matches_target_filter(state, *cid, filter, &ctx),
-                    // No affected filter — treat as "applies to all taxed creatures",
-                    // matching the behavior of `check_static_ability` when `affected`
-                    // is None.
-                    None => true,
-                };
-                if !creature_matches {
-                    continue;
-                }
+            for (index, &(cid, attack_target)) in creatures.iter().enumerate() {
                 if let Some(filter) = defended {
                     if !super::restrictions::attack_target_matches_defended_scope(
                         state,
@@ -1632,9 +1622,19 @@ pub fn compute_combat_tax(
                         continue;
                     }
                 }
-                affected_ids.push(*cid);
+                let creature_matches = match &def.affected {
+                    Some(filter) => matches_target_filter(state, cid, filter, &ctx),
+                    // No affected filter — treat as "applies to all taxed creatures",
+                    // matching the behavior of `check_static_ability` when `affected`
+                    // is None.
+                    None => true,
+                };
+                if !creature_matches {
+                    continue;
+                }
+                affected_indices.push(index);
             }
-            if affected_ids.is_empty() {
+            if affected_indices.is_empty() {
                 continue;
             }
 
@@ -1669,13 +1669,10 @@ pub fn compute_combat_tax(
                         source_id,
                     );
                     let total = base_cost.scaled(n.max(0) as u32);
-                    if let Some(first) = affected_ids.first() {
-                        if let Some((_, slot)) =
-                            per_creature.iter_mut().find(|(cid, _)| cid == first)
-                        {
-                            *slot = slot.plus(&total);
-                            any_tax = true;
-                        }
+                    if let Some(&first_idx) = affected_indices.first() {
+                        let slot = &mut per_creature[first_idx].1;
+                        *slot = slot.plus(&total);
+                        any_tax = true;
                     }
                     continue;
                 }
@@ -1704,7 +1701,8 @@ pub fn compute_combat_tax(
                     // its own counter count. Attribute the resolved cost directly
                     // to each affected creature and continue (skip the shared
                     // per_match_cost distribution below).
-                    for aid in &affected_ids {
+                    for &affected_idx in &affected_indices {
+                        let aid = per_creature[affected_idx].0;
                         let n = crate::game::quantity::resolve_quantity_with_targets_slice(
                             state,
                             &crate::types::ability::QuantityExpr::Ref {
@@ -1712,7 +1710,7 @@ pub fn compute_combat_tax(
                             },
                             source_obj.controller,
                             source_id,
-                            &[crate::types::ability::TargetRef::Object(*aid)],
+                            &[crate::types::ability::TargetRef::Object(aid)],
                         );
                         // CR 107.1b + CR 202.3e: Concretize any `{X}` in base_cost by
                         // substituting the resolved per-attacker quantity. This yields
@@ -1724,21 +1722,18 @@ pub fn compute_combat_tax(
                         if cost.mana_value() == 0 {
                             continue;
                         }
-                        if let Some((_, slot)) = per_creature.iter_mut().find(|(cid, _)| cid == aid)
-                        {
-                            *slot = slot.plus(&cost);
-                            any_tax = true;
-                        }
+                        let slot = &mut per_creature[affected_idx].1;
+                        *slot = slot.plus(&cost);
+                        any_tax = true;
                     }
                     continue;
                 }
             };
 
-            for aid in &affected_ids {
-                if let Some((_, slot)) = per_creature.iter_mut().find(|(cid, _)| cid == aid) {
-                    *slot = slot.plus(&per_match_cost);
-                    any_tax = true;
-                }
+            for &affected_idx in &affected_indices {
+                let slot = &mut per_creature[affected_idx].1;
+                *slot = slot.plus(&per_match_cost);
+                any_tax = true;
             }
         }
     }
@@ -8318,6 +8313,103 @@ mod tests {
         assert!(
             compute_attack_tax(&state, &attacks).is_none(),
             "tapped Archangel must not enforce its tax",
+        );
+    }
+
+    /// Perf gate for issue #4334. Manual benchmark for the residual
+    /// `compute_combat_tax` hot path after #4312/#4329: go-wide attackers
+    /// against several active tax statics. Run explicitly with:
+    ///
+    /// `cargo test -p engine combat_tax_profile_gate_go_wide_board -- --ignored --nocapture`
+    #[test]
+    #[ignore = "perf benchmark; run manually"]
+    fn combat_tax_profile_gate_go_wide_board() {
+        use crate::types::ability::{
+            FilterProp, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let defender = PlayerId(1);
+        let attacker_controller = PlayerId(0);
+
+        let _prison_a = create_ghostly_prison(&mut state, defender);
+        let _prison_b = create_ghostly_prison(&mut state, defender);
+        let _sphere = add_sphere_of_safety(&mut state, defender);
+        let _ench_a = create_enchantment(&mut state, defender, "Bench Aura A");
+        let _ench_b = create_enchantment(&mut state, defender, "Bench Aura B");
+
+        let nils_card_id = CardId(state.next_object_id);
+        let nils = create_object(
+            &mut state,
+            nils_card_id,
+            defender,
+            "Nils, Discipline Enforcer".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let nils_obj = state.objects.get_mut(&nils).unwrap();
+        nils_obj.card_types.core_types.push(CoreType::Creature);
+        let mut nils_def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                }],
+            }))
+            .description("Nils benchmark tax".to_string());
+        nils_def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+            scaling: UnlessPayScaling::PerAffectedWithRef {
+                quantity: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Target,
+                    counter_type: None,
+                },
+            },
+            defended: Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        });
+        nils_obj.static_definitions.push(nils_def);
+
+        let mut attacks = Vec::new();
+        for index in 0..24 {
+            let attacker = create_creature(
+                &mut state,
+                attacker_controller,
+                &format!("Bench Attacker {index}"),
+                2,
+                2,
+            );
+            if index % 3 == 0 {
+                state
+                    .objects
+                    .get_mut(&attacker)
+                    .unwrap()
+                    .counters
+                    .insert(CounterType::Plus1Plus1, (index % 4 + 1) as u32);
+            }
+            attacks.push((attacker, AttackTarget::Player(defender)));
+        }
+
+        let iterations = 20_000;
+        let start = std::time::Instant::now();
+        let mut total_seen = 0;
+        for _ in 0..iterations {
+            let (total, per_creature) =
+                compute_attack_tax(&state, &attacks).expect("benchmark board must be taxed");
+            total_seen += total.mana_value() as usize + per_creature.len();
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "[bench] compute_attack_tax (24 attackers, 4 tax statics, {iterations} iters): {:?} total_seen={total_seen}",
+            elapsed
         );
     }
 

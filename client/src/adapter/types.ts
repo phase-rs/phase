@@ -2276,6 +2276,16 @@ export interface BatchResolveResult {
   total: number;
 }
 
+/**
+ * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
+ * WASM export, serialized as a tagged union). `full` means the game's card
+ * universe is not statically bounded (today: Momir) and AI workers must load the
+ * full database; `subset` carries the minimal card-data JSON for this game.
+ */
+export type AiCardSubsetResult =
+  | { kind: "full" }
+  | { kind: "subset"; json: string; count: number };
+
 export interface EngineAdapter {
   initialize(): Promise<void>;
   initializeGame(
