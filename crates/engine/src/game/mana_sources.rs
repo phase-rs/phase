@@ -266,6 +266,26 @@ pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
 }
 
+/// CR 605.3a + CR 106.12 + CR 107.6: True when paying this mana-ability cost is
+/// conclusively decided by the non-simulating cheap gate, so
+/// `can_activate_mana_ability_now` may skip the full-state legality clone.
+///
+/// Sound only for an infallible production+payment path: no cost (`None`), or a
+/// cost whose every component is the tap/untap symbol. The
+/// `has_tap_component || has_untap_component` anchor documents that the cheap
+/// gate's {T}/{Q} state checks make the skip safe, and guards the degenerate
+/// empty `Composite { costs: [] }`, whose `all()` would otherwise be vacuously
+/// true with no real {T}/{Q} to gate on.
+pub(crate) fn cost_conclusively_payable_by_cheap_gate(cost: &Option<AbilityCost>) -> bool {
+    match cost {
+        None => true,
+        Some(inner) => {
+            (has_tap_component(cost) || has_untap_component(cost))
+                && inner.all_components_cheap_gate_covered()
+        }
+    }
+}
+
 /// CR 701.21: True when paying this ability's cost sacrifices a permanent
 /// (the source itself or another). Matches a bare `Sacrifice` cost and a
 /// `Sacrifice` nested inside a `Composite`, for any target filter.

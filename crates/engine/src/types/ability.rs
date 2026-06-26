@@ -6643,6 +6643,56 @@ pub enum CostCategory {
 }
 
 impl AbilityCost {
+    /// CR 605.3a + CR 106.12 + CR 107.6: True iff every component of this cost is
+    /// conclusively decided by the non-simulating mana-ability cheap gate
+    /// (`mana_ability_ready_without_simulation`) — i.e. the cost is built solely
+    /// from the tap ({T}) and untap ({Q}) symbols. For such costs the production +
+    /// payment path in `resolve_mana_ability_with_selected_choices` is infallible,
+    /// so the legality clone in `can_activate_mana_ability_now` can be skipped.
+    ///
+    /// `Mana`/`ManaDynamic` are deliberately NOT covered: their payability is decided
+    /// by an auto-tap affordability witness with a known remove-then-tap soundness
+    /// gap (CR 601.2g), so they must still simulate. No wildcard arm — a future
+    /// variant must be classified explicitly.
+    pub fn all_components_cheap_gate_covered(&self) -> bool {
+        match self {
+            AbilityCost::Tap | AbilityCost::Untap => true,
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .all(AbilityCost::all_components_cheap_gate_covered),
+            // Every other variant is decided by a path the cheap gate does NOT
+            // conclusively settle (mana affordability witness, interactive object
+            // selection, life/resource availability, effect resolution, etc.), so
+            // it must still simulate.
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::PerCounter { .. }
+            | AbilityCost::Unimplemented { .. } => false,
+        }
+    }
+
     /// CR 702.24a + CR 118.12: True iff this cost can be used as the base
     /// cost for a cumulative-upkeep trigger and then paid by the current
     /// unless-payment pipeline after `PerCounter` expansion.
