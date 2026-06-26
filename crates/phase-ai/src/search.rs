@@ -187,6 +187,22 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 608.2d (hidden information): the guesser has no legal access to the
+    // committed value / chosen-card identity — it is genuinely a guess. The AI
+    // MUST NOT score guess branches via `score_candidates` (eval/search runs on
+    // the UNFILTERED GameState and would read the secret, always guessing
+    // correctly). Uniform random is rules-fair and the information-theoretic
+    // optimum. Parallel to the TributeChoice / SearchChoice / ChooseManaColor
+    // pre-emptions above.
+    if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
+        use rand::seq::IndexedRandom;
+        if let Some(choice) = options.choose(&mut rand::rng()) {
+            return Some(GameAction::ChooseOption {
+                choice: choice.clone(),
+            });
+        }
+    }
+
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
@@ -594,6 +610,15 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Named choice: pick the first option if available.
         WaitingFor::NamedChoice { options, .. } => {
+            options.first().map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+        }
+
+        // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
+        // hidden-info determinization in `choose_action` already pre-empts this
+        // for the live AI; this is only the deadlock-safe escape hatch.
+        WaitingFor::OpponentGuess { options, .. } => {
             options.first().map(|choice| GameAction::ChooseOption {
                 choice: choice.clone(),
             })

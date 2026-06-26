@@ -13787,6 +13787,208 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{CastFrequency, StaticMode};
 
+    // --- Opponent-guess interactive primitive (cluster 38) ---
+
+    /// Walk an ability chain via `sub_ability`, collecting one entry per node.
+    fn collect_guess_chain(ability: &AbilityDefinition) -> Vec<(Effect, Option<AbilityCondition>)> {
+        let mut out = Vec::new();
+        let mut node = Some(ability);
+        while let Some(n) = node {
+            out.push(((*n.effect).clone(), n.condition.clone()));
+            node = n.sub_ability.as_deref();
+        }
+        out
+    }
+
+    #[test]
+    fn the_toymakers_trap_parses_opponent_guess_branches() {
+        // CR 608.2d + CR 609.3: secret commit → opponent guess → branch on
+        // correctness. No Unimplemented; wrong branch gated Guessed{false}, right
+        // branch Guessed{true}; the committed number choice persists and is
+        // DistinctFromSourceHistory; the guess sub is the "If you do" gate.
+        let trigger = parse_trigger_line(
+            "At the beginning of your upkeep, secretly choose a number between 1 and 5 \
+             that hasn't been chosen. If you do, an opponent guesses which number you chose, \
+             then you reveal the number you chose. If they guessed wrong, they lose life equal \
+             to the number they guessed and you draw a card. If they guessed right, sacrifice \
+             this enchantment.",
+            "The Toymaker's Trap",
+        );
+        let chain = collect_guess_chain(trigger.execute.as_deref().expect("execute body"));
+        assert!(
+            !chain
+                .iter()
+                .any(|(e, _)| matches!(e, Effect::Unimplemented { .. })),
+            "no Unimplemented nodes, got {chain:#?}"
+        );
+
+        // Head Choose: persists, DistinctFromSourceHistory domain.
+        match &chain[0].0 {
+            Effect::Choose {
+                choice_type:
+                    crate::types::ability::ChoiceType::NumberRange {
+                        min: 1,
+                        max: 5,
+                        distinctness,
+                    },
+                persist,
+                ..
+            } => {
+                assert!(*persist, "committed numbers must persist for distinctness");
+                assert_eq!(
+                    *distinctness,
+                    crate::types::ability::NumberDistinctness::DistinctFromSourceHistory
+                );
+            }
+            other => panic!("head should be a distinct NumberRange Choose, got {other:?}"),
+        }
+
+        // The guess: an opponent guesses the committed number, gated "If you do".
+        let guess = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::OpponentGuess { .. }))
+            .expect("OpponentGuess node");
+        match &guess.0 {
+            Effect::OpponentGuess { guesser, subject } => {
+                assert_eq!(*guesser, ControllerRef::Opponent);
+                assert!(matches!(
+                    subject.as_ref(),
+                    crate::types::ability::GuessSubject::CommittedChoice {
+                        choice_type: crate::types::ability::ChoiceType::NumberRange {
+                            min: 1,
+                            max: 5,
+                            ..
+                        }
+                    }
+                ));
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            guess.1,
+            Some(AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed
+            }),
+            "guess is gated on the commit (If you do)"
+        );
+
+        // Wrong branch: lose life equal to the guessed number + draw, both gated
+        // Guessed{false}; the lose amount reads the guesser's value (Variable),
+        // NOT QuantityRef::ChosenNumber.
+        let lose = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::LoseLife { .. }))
+            .expect("LoseLife node");
+        match &lose.0 {
+            Effect::LoseLife { amount, .. } => assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ),
+                "lose amount must be a Variable (last_named_choice), got {amount:?}"
+            ),
+            _ => unreachable!(),
+        }
+        let guessed_wrong = AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: false },
+        };
+        assert_eq!(lose.1, Some(guessed_wrong.clone()));
+        let draw = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::Draw { .. }))
+            .expect("Draw node");
+        assert_eq!(
+            draw.1,
+            Some(guessed_wrong),
+            "the 'and you draw a card' continuation must inherit Guessed{{false}}"
+        );
+
+        // Right branch: sacrifice gated Guessed{true}.
+        let sac = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::Sacrifice { .. }))
+            .expect("Sacrifice node");
+        assert_eq!(
+            sac.1,
+            Some(AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: true },
+            })
+        );
+    }
+
+    #[test]
+    fn the_seventh_doctor_parses_defending_player_proposition_guess() {
+        // CR 608.2d: a Proposition guess about a chosen card's mana value vs the
+        // controller's artifact count; the free cast is gated Guessed{false}.
+        let trigger = parse_trigger_line(
+            "Whenever The Seventh Doctor attacks, choose a card in your hand. Defending player \
+             guesses whether that card's mana value is greater than the number of artifacts you \
+             control. If they guessed wrong, you may cast it without paying its mana cost. If you \
+             don't cast a spell this way, investigate.",
+            "The Seventh Doctor",
+        );
+        let chain = collect_guess_chain(trigger.execute.as_deref().expect("execute body"));
+        assert!(
+            !chain
+                .iter()
+                .any(|(e, _)| matches!(e, Effect::Unimplemented { .. })),
+            "no Unimplemented nodes, got {chain:#?}"
+        );
+        let guess = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::OpponentGuess { .. }))
+            .expect("OpponentGuess node");
+        match &guess.0 {
+            Effect::OpponentGuess { guesser, subject } => {
+                assert_eq!(*guesser, ControllerRef::DefendingPlayer);
+                match subject.as_ref() {
+                    crate::types::ability::GuessSubject::Proposition {
+                        lhs,
+                        comparator,
+                        rhs,
+                    } => {
+                        assert_eq!(*comparator, Comparator::GT);
+                        assert!(
+                            matches!(
+                                lhs,
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectManaValue {
+                                        scope: ObjectScope::Target
+                                    }
+                                }
+                            ),
+                            "lhs is the chosen card's mana value, got {lhs:?}"
+                        );
+                        assert!(
+                            matches!(
+                                rhs,
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectCount { .. }
+                                }
+                            ),
+                            "rhs is the artifact count, got {rhs:?}"
+                        );
+                    }
+                    other => panic!("expected Proposition subject, got {other:?}"),
+                }
+            }
+            _ => unreachable!(),
+        }
+        // The free cast is gated on the guess being wrong.
+        let cast = chain
+            .iter()
+            .find(|(e, _)| matches!(e, Effect::CastFromZone { .. }))
+            .expect("CastFromZone node");
+        assert_eq!(
+            cast.1,
+            Some(AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: false },
+            })
+        );
+    }
+
     // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
 
     #[test]

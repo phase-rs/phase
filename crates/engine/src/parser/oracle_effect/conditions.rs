@@ -22,8 +22,8 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DigSource,
-    Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, ObjectScope, ParsedCondition, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -641,6 +641,32 @@ fn strip_reflexive_conditional_body_separator(input: &str) -> &str {
     .parse(input)
     .map(|(rest, _)| rest)
     .unwrap_or(input)
+}
+
+/// CR 608.2d: Strip a leading "if they guessed wrong/right, " head into the
+/// typed `EffectOutcomeSignal::Guessed { correct }` outcome condition for an
+/// `Effect::OpponentGuess` branch. Both polarities are positive tests: "wrong"
+/// → `correct: false`, "right" → `correct: true`.
+pub(super) fn strip_guess_outcome_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_ascii_lowercase();
+    let parsed: Result<(&str, bool), nom::Err<()>> = alt((
+        value(false, tag::<_, _, ()>("if they guessed wrong, ")),
+        value(false, tag::<_, _, ()>("if they guess wrong, ")),
+        value(true, tag::<_, _, ()>("if they guessed right, ")),
+        value(true, tag::<_, _, ()>("if they guess right, ")),
+    ))
+    .parse(lower.as_str());
+    if let Ok((rest, correct)) = parsed {
+        let consumed = lower.len() - rest.len();
+        let body = text[consumed..].trim_start().to_string();
+        return (
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::Guessed { correct },
+            }),
+            body,
+        );
+    }
+    (None, text.to_string())
 }
 
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {

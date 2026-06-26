@@ -458,6 +458,7 @@ fn redundancy_delta(
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

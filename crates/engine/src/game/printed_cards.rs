@@ -1022,6 +1022,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

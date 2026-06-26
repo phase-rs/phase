@@ -172,6 +172,11 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "OpponentGuess":
+      // CR 608.2d: the guesser picks one of the offered options. Display-only —
+      // reuses the generic option picker; the engine computes correctness.
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
     case "DamageSourceChoice":
       if (!canActForWaitingState) return null;
       return <DamageSourceModal data={waitingFor.data} />;

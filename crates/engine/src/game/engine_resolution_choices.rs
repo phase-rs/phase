@@ -119,6 +119,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
@@ -3424,6 +3425,77 @@ pub(super) fn handle_resolution_choice(
             } else {
                 effects::drain_pending_continuation(state, events);
             }
+            state.last_named_choice = None;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 608.2d + CR 608.2e: an opponent / the defending player answered the
+        // guess. Compute correctness against the UNFILTERED state, record the
+        // guessed value for downstream reads, stamp the outcome onto the stashed
+        // branch chain, then drain it synchronously under the source controller.
+        (
+            WaitingFor::OpponentGuess {
+                player: guesser,
+                options,
+                choice_type,
+                source_id,
+                proposition_truth,
+            },
+            GameAction::ChooseOption { choice },
+        ) => {
+            // (a) Validate the guess is a legal option.
+            if !options.contains(&choice) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid guess '{}', must be one of: {:?}",
+                    choice, options
+                )));
+            }
+
+            // (b) Correctness, resolved against the unfiltered GameState.
+            let correct = effects::opponent_guess::guess_is_correct(
+                state,
+                source_id,
+                &options,
+                &choice,
+                proposition_truth,
+            );
+
+            // (c) Record the guessed value WITHOUT persisting it to the source.
+            // "they lose life equal to the number they guessed" reads the
+            // guesser's value via `QuantityRef::Variable` -> `last_named_choice`;
+            // `source_id: None` sets `last_named_choice` without pushing a
+            // `ChosenAttribute::Number` (bind_named_choice gates the push on
+            // source_id.is_some()), keeping the source's committed-number history
+            // (which drives BOTH the DistinctFromSourceHistory exclusion AND the
+            // last-committed read) guesser-free. Only meaningful for a committed
+            // number guess; propositions carry no downstream guessed-value read.
+            if proposition_truth.is_none() {
+                effects::choose::bind_named_choice(state, &choice_type, &choice, None);
+            }
+
+            // (d) Stamp the outcome across the stashed continuation chain so each
+            // branch head re-evaluates `Guessed { correct }` against it on drain.
+            // Also expose the guesser as a front player target so a "they lose
+            // life ..." `ParentTarget` anaphor in a branch resolves to them
+            // (CR 608.2d — the guesser is the player the branch acts on).
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_guess_outcome_recursive(Some(correct));
+                cont.chain.push_front_player_target_recursive(guesser);
+            }
+
+            // (e) Priority to the source CONTROLLER (the player resolving this
+            // ability), not the guesser — the guesser only answered a sub-prompt;
+            // the resolution continues under the controller (e.g. Seventh
+            // Doctor's "you may cast it" CastOffer is to the controller). This
+            // also clears the OpponentGuess wait so the drain's guard passes.
+            let controller = state
+                .objects
+                .get(&source_id)
+                .map(|o| o.controller)
+                .unwrap_or(state.active_player);
+            set_priority(state, controller);
+            effects::drain_pending_continuation(state, events);
+            // Cleared ONLY after the synchronous drain (mirrors NamedChoice), so
+            // the wrong/right branch's "number they guessed" read sees it.
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }

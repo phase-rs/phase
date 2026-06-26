@@ -138,6 +138,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
+pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
 pub mod paradigm;
@@ -1677,6 +1678,12 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::NamedChoice { .. }
+            // CR 608.2d + CR 608.2e: an opponent's guess is a deferred outcome —
+            // the answer arrives via a `WaitingFor` round-trip, so the
+            // `Guessed`-gated branch chain must auto-stash here and re-evaluate on
+            // drain once the outcome is stamped (the same deferred pattern as
+            // `NamedChoice` / Scry "If you do, Y").
+            | WaitingFor::OpponentGuess { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::ReplacementChoice { .. }
@@ -2053,7 +2060,12 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
             | AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+                signal:
+                    EffectOutcomeSignal::CurrentScopeSucceeded
+                    // CR 608.2d: a `Guessed` gate is a positive guess-outcome
+                    // branch, not an optional-decline alternative — declining an
+                    // optional effect never selects it.
+                    | EffectOutcomeSignal::Guessed { .. },
             },
         ) => false,
     }
@@ -2830,6 +2842,7 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::OpponentGuess { .. } => opponent_guess::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Unsuspect { .. } => suspect::resolve_unsuspect(state, ability, events),
@@ -6867,6 +6880,14 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::CurrentScopeSucceeded,
         } => !state.cost_payment_failed_flag,
+        // CR 608.2d: "if they guessed right/wrong" reads the just-resolved
+        // `Effect::OpponentGuess` outcome (a choice made by a player during
+        // resolution, processed in written order per CR 608.2c). CR 609.3: when
+        // no guess happened (impossible commit / empty hand) `guess_outcome` is
+        // `None`, so BOTH polarities are false and NEITHER rider fires.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::Guessed { correct },
+        } => ability.context.guess_outcome == Some(*correct),
         AbilityCondition::EventOutcomeWon => state
             .current_trigger_event
             .as_ref()

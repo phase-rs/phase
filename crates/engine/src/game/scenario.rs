@@ -1510,6 +1510,7 @@ impl GameRunner {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
