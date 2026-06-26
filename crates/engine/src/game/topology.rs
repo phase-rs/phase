@@ -65,6 +65,17 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
         .unwrap_or(player)
 }
 
+/// CR 117.6 + CR 805.5b: In shared-team-turn multiplayer games, teams rather
+/// than individual players have priority; when no player on a team acts, that
+/// team passes.
+pub(crate) fn priority_pass_representative(state: &GameState, player: PlayerId) -> PlayerId {
+    if !state.format_config.topology().has_shared_team_turns() {
+        return player;
+    }
+
+    normalize_shared_turn_recipient(state, player)
+}
+
 /// CR 805.4: In shared-team-turn formats, each team takes turns rather than
 /// each player.
 pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> PlayerId {
@@ -93,5 +104,52 @@ pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> 
 }
 
 pub(crate) fn priority_pass_participants(state: &GameState) -> Vec<PlayerId> {
-    super::players::apnap_order(state)
+    let participants = super::players::apnap_order(state);
+    if !state.format_config.topology().has_shared_team_turns() {
+        return participants;
+    }
+
+    participants
+        .into_iter()
+        .map(|player| priority_pass_representative(state, player))
+        .fold(Vec::new(), |mut reps, rep| {
+            if !reps.contains(&rep) {
+                reps.push(rep);
+            }
+            reps
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::format::FormatConfig;
+
+    #[test]
+    fn two_hg_priority_pass_participants_are_team_representatives() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+
+        assert_eq!(
+            priority_pass_participants(&state),
+            vec![PlayerId(0), PlayerId(2)]
+        );
+    }
+
+    #[test]
+    fn two_hg_priority_pass_representative_uses_living_teammate() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.players[0].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(0));
+
+        assert_eq!(
+            priority_pass_representative(&state, PlayerId(0)),
+            PlayerId(1)
+        );
+        assert_eq!(
+            priority_pass_participants(&state),
+            vec![PlayerId(1), PlayerId(2)]
+        );
+    }
 }

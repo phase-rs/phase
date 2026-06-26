@@ -7,9 +7,10 @@ use super::turns;
 
 /// Handle a priority pass from the current priority player (CR 117.4).
 ///
-/// Uses a BTreeSet (priority_passes) to track which players have passed consecutively.
-/// CR 117.4: When all players pass in succession, the top object on the stack resolves
-/// (or the phase advances if the stack is empty).
+/// Uses a BTreeSet (priority_passes) to track which players or shared-turn
+/// team representatives have passed consecutively. CR 117.4 + CR 117.6 +
+/// CR 805.5b: When all players/teams pass in succession, the top object on the
+/// stack resolves (or the phase advances if the stack is empty).
 /// Any non-pass action clears the set (handled by callers via `reset_priority`).
 /// `current_seat` is the player who *holds* priority (the semantic seat), which
 /// the caller must supply — it is NOT necessarily `state.priority_player`. Under
@@ -34,8 +35,12 @@ pub fn handle_priority_pass_with_limit(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> WaitingFor {
-    // Record this seat's pass (CR 117.4).
-    state.priority_passes.insert(current_seat);
+    let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
+
+    // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: In shared-team
+    // turn games, teams rather than individual players have priority, so the
+    // tracked pass seat is the team's representative.
+    state.priority_passes.insert(canonical_seat);
 
     // Also maintain legacy counter for transition period
     state.priority_pass_count += 1;
@@ -103,11 +108,13 @@ pub fn handle_priority_pass_with_limit(
             }
         }
     } else {
-        // CR 117.3d: Player passed; priority moves to next player in turn order.
-        // Advance from the semantic seat that just passed (`current_seat`), not
-        // from `priority_player` — under CR 723 turn-control the latter is the
-        // controller, which would mis-seat the cursor.
-        let next = next_priority_player(state, current_seat);
+        // CR 117.3d + CR 117.6 + CR 805.5b: The player/team passed; priority
+        // moves to the next player/team in turn order. Advance from the
+        // semantic seat that just passed, canonicalized to its priority
+        // representative, not from `priority_player` — under CR 723
+        // turn-control the latter is the controller, which would mis-seat the
+        // cursor.
+        let next = next_priority_player(state, canonical_seat);
         state.priority_player = next;
 
         events.push(GameEvent::PriorityPassed { player_id: next });
@@ -124,12 +131,13 @@ pub fn handle_priority_pass_with_limit(
 /// seat, not the submitter.
 ///
 /// For non-team formats: next living player in seat order after `current`.
-/// For team-based formats (2HG): CR 101.4 APNAP within teams — active team members first,
-/// then opponent team members.
+/// For shared-team-turn formats: CR 117.6 + CR 805.5b make priority and pass
+/// bookkeeping team-level, ordered by each team's representative.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
+    let canonical_current = super::topology::priority_pass_representative(state, current);
     let participants = super::topology::priority_pass_participants(state);
-    let Some(current_idx) = participants.iter().position(|&id| id == current) else {
-        return players::next_player(state, current);
+    let Some(current_idx) = participants.iter().position(|&id| id == canonical_current) else {
+        return players::next_player(state, canonical_current);
     };
     for offset in 1..=participants.len() {
         let idx = (current_idx + offset) % participants.len();
@@ -138,7 +146,7 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
             return candidate;
         }
     }
-    players::next_player(state, current)
+    players::next_player(state, canonical_current)
 }
 
 /// CR 117.4: Clear consecutive priority pass bookkeeping without changing who holds priority.
@@ -407,7 +415,7 @@ mod tests {
     // --- 2HG team-based priority ---
 
     #[test]
-    fn two_hg_priority_uses_apnap_order() {
+    fn two_hg_priority_uses_team_apnap_order() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -419,18 +427,21 @@ mod tests {
         // P0 (active team member) passes
         let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
-        // In APNAP order with P0 active: P0, P1 (teammate), P2, P3
-        // Next should be P1 (teammate on active team)
+        // CR 117.6 + CR 805.5b: priority is team-level in 2HG, so the active
+        // team pass moves directly to the opposing team's representative.
         assert!(matches!(
             result,
             WaitingFor::Priority {
-                player: PlayerId(1)
+                player: PlayerId(2)
             }
         ));
+        assert_eq!(state.priority_player, PlayerId(2));
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
     #[test]
-    fn two_hg_all_four_pass_resolves() {
+    fn two_hg_two_team_passes_advance_empty_stack() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -439,15 +450,33 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
-        // All 4 pass in APNAP order
-        handle_priority_pass(state.priority_player, &mut state, &mut events); // P0
-        handle_priority_pass(state.priority_player, &mut state, &mut events); // P1
-        handle_priority_pass(state.priority_player, &mut state, &mut events); // P2
-        let result = handle_priority_pass(state.priority_player, &mut state, &mut events); // P3
+        handle_priority_pass(state.priority_player, &mut state, &mut events); // active team
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events); // opposing team
 
-        // All passed, should advance
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert!(state.priority_passes.is_empty());
+    }
+
+    #[test]
+    fn two_hg_stale_teammate_pass_canonicalizes_to_team_representative() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(1);
+        state.priority_passes.clear();
+        let mut events = Vec::new();
+
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
+
+        assert_eq!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
     #[test]

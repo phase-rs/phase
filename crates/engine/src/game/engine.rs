@@ -7279,6 +7279,19 @@ mod tests {
         )
     }
 
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
     #[test]
     fn cards_revealed_events_are_remembered_publicly() {
         let mut state = GameState::new_two_player(42);
@@ -9880,6 +9893,80 @@ mod tests {
     }
 
     #[test]
+    fn two_hg_empty_stack_two_team_passes_advance_and_return_priority() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert_ne!(state.phase, Phase::PreCombatMain);
+        assert!(state.priority_passes.is_empty());
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn two_hg_non_empty_stack_two_team_passes_resolve_top_object() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.push_back(no_op_stack_entry(1, PlayerId(0)));
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert!(state.stack.is_empty());
+        assert!(second
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
     fn two_hg_controlled_team_turn_routes_teammate_priority_to_controller() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 2;
@@ -9898,30 +9985,30 @@ mod tests {
         assert_eq!(
             result.waiting_for,
             WaitingFor::Priority {
-                player: PlayerId(1)
+                player: PlayerId(2)
             }
         );
         assert_eq!(
             turn_control::authorized_submitter(&state),
             Some(PlayerId(2)),
-            "CR 805.8 routes the active-team teammate through the turn controller"
+            "CR 117.6 + CR 805.5b move priority from the active team to the opposing team representative"
         );
         assert_eq!(
             state.priority_player,
             PlayerId(2),
-            "public submitter should stay on the controller while P1 is the semantic seat"
+            "public submitter should be the opposing team representative after the active team passes"
         );
 
         let teammate_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
         assert!(
             matches!(teammate_result, Err(EngineError::WrongPlayer)),
-            "teammate must not submit for themselves during a controlled team turn: {teammate_result:?}"
+            "active-team teammate must not submit after team-level priority has moved to P2: {teammate_result:?}"
         );
 
         let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
         assert!(
             controller_result.is_ok(),
-            "turn controller should submit for the teammate's priority: {controller_result:?}"
+            "opposing representative should submit for their team's priority: {controller_result:?}"
         );
     }
 
