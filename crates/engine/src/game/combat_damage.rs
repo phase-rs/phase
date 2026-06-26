@@ -987,10 +987,16 @@ pub(crate) fn apply_combat_damage(
     // CR 119.3 + CR 702.15b: apply each source's lifelink as ONE life-gain event
     // for its whole batch. A deferred life-gain replacement (CR 614.7) can't pause
     // combat, so the deferred portion is dropped — mirrors the per-assignment
-    // behavior this replaced (DamageResult::NeedsChoice => 0 above).
+    // behavior this replaced (DamageResult::NeedsChoice => 0 above). apply_life_gain
+    // sets state.waiting_for when it defers; snapshot and restore it so a dropped
+    // lifelink replacement never leaves combat paused on a choice nothing answers.
+    let waiting_before = state.waiting_for.clone();
     for (_source_id, controller, total) in lifelink_by_source {
-        if total > 0 {
-            let _ = crate::game::effects::life::apply_life_gain(state, controller, total, &mut events);
+        if total > 0
+            && crate::game::effects::life::apply_life_gain(state, controller, total, &mut events)
+                .is_err()
+        {
+            state.waiting_for = waiting_before.clone();
         }
     }
 
