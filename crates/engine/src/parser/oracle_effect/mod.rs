@@ -45738,6 +45738,69 @@ mod tests {
         assert_eq!(d.enters_under, None);
     }
 
+    /// CR 110.2a + CR 708.3 + CR 614.1: order-independent entry-riders trailing
+    /// the control clause ("under your control face down and tapped" — Missy)
+    /// are picked up by the rider scanner, not just the legacy contiguous table
+    /// rows. Both `face_down` and `enter_tapped` must be set.
+    #[test]
+    fn return_destination_face_down_and_tapped_after_control() {
+        let (target_text, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "it to the battlefield under your control face down and tapped",
+        );
+        assert_eq!(target_text, "it");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert_eq!(d.enters_under, Some(ControllerRef::You));
+        assert!(d.face_down, "face down rider must be captured");
+        assert!(d.enter_tapped, "tapped rider must be captured");
+        assert!(!d.transformed);
+        assert!(!d.enters_attacking);
+        assert_eq!(remainder, "", "all riders consumed, nothing left over");
+    }
+
+    /// The rider scan is all-or-nothing per iteration: a non-rider tail after a
+    /// connector (", then draw a card") consumes nothing, leaving the remainder
+    /// intact for the caller and setting no spurious flags.
+    #[test]
+    fn return_destination_rider_scan_stops_at_non_rider() {
+        let (target_text, dest, remainder) =
+            strip_return_destination_ext_with_remainder("it to the battlefield, then draw a card");
+        assert_eq!(target_text, "it");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert!(!d.face_down);
+        assert!(!d.enter_tapped);
+        assert_eq!(remainder, ", then draw a card");
+    }
+
+    /// Regression: a single contiguous "tapped" rider (already a table row) still
+    /// yields `enter_tapped` and no other flags after the rider scan runs.
+    #[test]
+    fn return_destination_single_tapped_unchanged() {
+        let (_, dest) = strip_return_destination_ext("target creature to the battlefield tapped");
+        let d = dest.expect("should parse destination");
+        assert!(d.enter_tapped);
+        assert!(!d.face_down);
+        assert!(!d.transformed);
+        assert!(!d.enters_attacking);
+    }
+
+    /// CR 708.3: the pre-existing "face down" splice (face down BEFORE the
+    /// control clause, Yedora-style) keeps working alongside the new trailing
+    /// rider scan.
+    #[test]
+    fn return_destination_face_down_before_control_splice() {
+        let (_, dest) = strip_return_destination_ext(
+            "it to the battlefield face down under its owner's control",
+        );
+        let d = dest.expect("should parse destination");
+        assert!(d.face_down);
+        assert_eq!(
+            d.enters_under, None,
+            "owner's control must not set a controller override"
+        );
+    }
+
     /// CR 508.4: "return target creature card from your graveyard to the
     /// battlefield tapped and attacking" (Dauntless Avenger / Yore-Tiller
     /// Nephilim) must lower to `Effect::ChangeZone` with `enters_attacking: true`.
