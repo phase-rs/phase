@@ -3331,6 +3331,27 @@ pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> O
     })
 }
 
+/// CR 508.5 + CR 508.5a: Single authority for resolving the defending player a
+/// `ControllerRef::DefendingPlayer` reference points at, given the ability's source
+/// object. Per CR 508.5, when an ability refers to both an attacking creature and a
+/// defending player, the defending player is the one *that attacking creature* is
+/// attacking.
+///
+/// For a creature whose own attack trigger refers to "defending player", the ability
+/// source IS the attacker, so [`defending_player_for_attacker`] resolves it directly.
+/// For an Equipment, Aura, or any other permanent whose attack trigger references the
+/// defending player of a *different* creature (Greatsword of Tyr — "Whenever equipped
+/// creature attacks, ... tap up to one target creature defending player controls"), the
+/// source is not the attacker; fall back to the attacker carried by the current
+/// triggering event and resolve *its* defending player individually (CR 508.5a — the
+/// defending player is determined per attacking creature, not as a single batch value).
+pub fn resolve_defending_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    defending_player_for_attacker(state, source_id).or_else(|| {
+        crate::game::quantity::triggering_event_source_object(state)
+            .and_then(|attacker| defending_player_for_attacker(state, attacker))
+    })
+}
+
 /// Return the next defending player who still needs to declare blockers.
 pub fn next_defending_player_to_declare_blockers(state: &GameState) -> Option<PlayerId> {
     let declared: HashSet<PlayerId> = state

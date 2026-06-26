@@ -1093,6 +1093,22 @@ pub(crate) fn triggering_event_target_object(state: &GameState) -> Option<Object
         .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
 }
 
+/// CR 508.5 + CR 603.2: Resolve the *attacking object* identified by the current
+/// triggering event — the "source" counterpart to [`triggering_event_target_object`].
+/// Used to anchor a `ControllerRef::DefendingPlayer` reference when the ability's own
+/// source object is not the attacker (an Equipment's or Aura's "whenever equipped
+/// creature attacks, ... defending player ..." trigger). Same dual-time (resolution
+/// `current_trigger_event` + detection-time thread-local) fallback as
+/// `triggering_event_player` / `triggering_event_target_object`.
+pub(crate) fn triggering_event_source_object(state: &GameState) -> Option<ObjectId> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .cloned()
+        .or_else(detection_trigger_event)
+        .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
+}
+
 /// CR 603.4 + CR 109.3: Recursively check whether a `TargetFilter` carries
 /// `FilterProp::OtherThanTriggerObject` anywhere in its property tree. Used
 /// by the `ObjectCount` resolver to decide whether to subtract the triggering
@@ -2914,7 +2930,7 @@ fn resolve_ref(
                             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
                             .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
-                            crate::game::combat::defending_player_for_attacker(state, ctx.source)
+                            crate::game::combat::resolve_defending_player(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 613.1: Attachment controlled by the source's chosen player.
@@ -2987,7 +3003,7 @@ fn damage_source_controller_matches(
             .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
-            crate::game::combat::defending_player_for_attacker(state, ctx.source)
+            crate::game::combat::resolve_defending_player(state, ctx.source)
                 .is_some_and(|player| actual == player)
         }
         // CR 613.1: Damage source controlled by the source's chosen player.
@@ -4199,7 +4215,12 @@ fn defending_player_for_quantity_context(
     state: &GameState,
     ctx: QuantityContext,
 ) -> Option<PlayerId> {
-    crate::game::combat::defending_player_for_attacker(state, ctx.source)
+    // CR 508.5: prefer the single authority, which resolves the defending player of
+    // the source's own attack or — for an Equipment/Aura whose source is not the
+    // attacker — the attacker carried by the triggering event (CR 508.5a, per-attacker).
+    crate::game::combat::resolve_defending_player(state, ctx.source)
+        // CR 508.5a 1v1 fallback: a batched multi-attacker trigger event has no single
+        // attacking object to resolve individually, so use the event's defending player.
         .or_else(|| defending_player_from_event(state.current_trigger_event.as_ref(), ctx.source))
         .or_else(|| defending_player_from_event(detection_trigger_event().as_ref(), ctx.source))
 }
