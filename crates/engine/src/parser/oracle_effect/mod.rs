@@ -12042,10 +12042,10 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// - First subject: `you` → `OriginalController` (player axis), or `~` →
 ///   `SelfRef` (object axis — the ability source, e.g. Gogo).
 /// - Second subject: `that player` → `ScopedPlayer` (the iterated voter for
-///   `PlayerFilter::VotedFor`); `target opponent` / `target player` → `Player`
-///   (the chosen target player, Bloodroot Apothecary class); or `that creature`
-///   → `ParentTarget` (CR 115.1: the parent-ability target slot, e.g. the
-///   creature Gogo copied).
+///   `PlayerFilter::VotedFor`); `target opponent` → an opponent-scoped player
+///   target; `target player` → `Player` (the chosen target player, Bloodroot
+///   Apothecary class); or `that creature` → `ParentTarget` (CR 115.1: the
+///   parent-ability target slot, e.g. the creature Gogo copied).
 ///
 /// Player-axis exemplar: "For each player who chose <choice>, you and that
 /// player each <body>" (Council's-dilemma vote effects, Master of Ceremonies).
@@ -12147,7 +12147,10 @@ fn parse_static_compound_subject_prefix(
                 TargetFilter::ScopedPlayer,
                 tag::<_, _, OracleError<'_>>("that player each "),
             ),
-            value(TargetFilter::Player, tag("target opponent each ")),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("target opponent each "),
+            ),
             value(TargetFilter::Player, tag("target player each ")),
             value(TargetFilter::ParentTarget, tag("that creature each ")),
         )),

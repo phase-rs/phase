@@ -1576,6 +1576,8 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// - "that player each" — the player-axis form (Council's-dilemma "for each
 ///   player who chose <choice>" body).
 /// - "target opponent each" / "target player each" — targeted player-axis forms.
+///   The parser binds their exact player scope after the splitter preserves the
+///   full clause.
 /// - "that creature each" — the object-axis form (CR 115.1 parent-target
 ///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
 ///   +2/+0 and gain haste ... and attack this turn if able").
