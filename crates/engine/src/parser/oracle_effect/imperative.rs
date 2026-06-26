@@ -6458,8 +6458,27 @@ pub(super) fn parse_exile_ast(
     // Excise the consumed clause so the debug-only compound-remainder assert
     // below does not flag it.
     let rem_lower = rem.to_ascii_lowercase();
-    let (enter_with_counters, counters_offset) =
+    let (mut enter_with_counters, counters_offset) =
         super::parse_with_counters_suffix_spanned(&rem_lower);
+    // CR 122.1 + CR 702.62b: An anaphoric exile target ("that card" / "it" /
+    // "those cards") greedily absorbs the trailing counter instruction —
+    // `parse_target` returns `ParentTarget`/`SelfRef` with an EMPTY remainder —
+    // so the counters would be silently dropped (Sibylline Soothsayer: "Exile
+    // that card with three time counters on it"). When the post-target
+    // remainder yielded none AND the target is a bare anaphor (which cannot
+    // carry a "with N counters" FILTER — that reading only applies to
+    // descriptive targets like "exile each creature with a +1/+1 counter on
+    // it"), recover the enter-with-counters suffix from the full clause. The
+    // `rem` is already empty in this case, so `counters_offset` stays `None`.
+    if enter_with_counters.is_empty()
+        && matches!(
+            parsed_target,
+            TargetFilter::ParentTarget | TargetFilter::SelfRef
+        )
+    {
+        let rest_lower_full = rest_text.to_ascii_lowercase();
+        enter_with_counters = super::parse_with_counters_suffix(&rest_lower_full);
+    }
     let _rem = match counters_offset {
         Some(off) => &rem[..off],
         None => rem,

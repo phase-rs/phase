@@ -1167,6 +1167,59 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
     }
 
+    // CR 508.1d + CR 509.1a + CR 205.1b: A one-shot combat trick that leads with
+    // a movement restriction and then a type/stat change — "can't block this
+    // turn and becomes a Coward in addition to its other types" (Coward); the
+    // generalized class is "can't <restriction> [this turn] and <continuous
+    // mod>". The trailing change conjunct (becomes/gets/gains/has …) is already
+    // recovered by the dedicated scans above and below; recover the LEADING
+    // restriction conjunct here so it is not silently dropped. Anchored on
+    // " and <change-verb>" so a "can't attack, block, or crew" restriction list
+    // (separated by ", or "/", "/" or ") is never split mid-list.
+    // `parse_restriction_modes` itself gates on the "can't"/"cannot" prefix and
+    // is `all_consuming`, so a non-restriction prefix yields `None`. The
+    // grant-propagation dedup mirrors the base-PT restriction block above.
+    if let Some((restriction_prefix, _)) =
+        nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
+            (
+                tag("and "),
+                alt((
+                    tag("becomes "),
+                    tag("become "),
+                    tag("gets "),
+                    tag("get "),
+                    tag("gains "),
+                    tag("gain "),
+                    tag("has "),
+                    tag("have "),
+                )),
+            )
+                .parse(i)
+        })
+    {
+        // Strip the embedded " this turn" duration off the restriction chunk
+        // ("can't block this turn" → "can't block") via the shared combinator
+        // duration grammar before delegating dispatch to
+        // `parse_restriction_modes`; the bare CantBlock/CantAttack atoms do not
+        // themselves consume a trailing " this turn" (unlike "be blocked").
+        let (restriction_prefix, _) = strip_trailing_duration(restriction_prefix.trim());
+        if let Some(modes) = parse_restriction_modes(restriction_prefix) {
+            for mode in modes {
+                if static_mode_needs_grant_propagation(&mode)
+                    && !modifications.iter().any(|existing| {
+                        matches!(
+                            existing,
+                            ContinuousModification::AddStaticMode { mode: existing_mode }
+                                if *existing_mode == mode
+                        )
+                    })
+                {
+                    modifications.push(ContinuousModification::AddStaticMode { mode });
+                }
+            }
+        }
+    }
+
     for modification in parse_quoted_ability_modifications(text_stripped) {
         modifications.push(modification);
     }

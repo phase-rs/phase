@@ -1236,6 +1236,25 @@ fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
         .any(|qualifier| last_word.eq_ignore_ascii_case(qualifier))
 }
 
+/// CR 205.1b + CR 201.5: A subtype-word card name immediately followed by
+/// "in addition to its other types" is the creature TYPE being added to a
+/// permanent ("becomes a Coward in addition to its other types" — Coward),
+/// NOT a self-reference. Keep that occurrence literal so the type-change
+/// parser reads it as `AddSubtype(<name>)`; other occurrences of the same word
+/// (e.g. a genuine "When Coward dies" self-reference) still normalize to `~`.
+/// This is the per-occurrence analogue of the card-level
+/// `subtype_in_type_change_context` suppression on the "of"-based short-name
+/// path. `end` is the byte index just past the matched word.
+fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
+    // allow-noncombinator: normalization-layer prefix probe (pre-parse text
+    // munging, not parsing dispatch); mirrors the raw string ops in
+    // `follows_subtype_status_qualifier`.
+    haystack[end..]
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("in addition to its other types")
+}
+
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
     haystack: &str,
     needle: &str,
@@ -1254,6 +1273,7 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
             && at_word_end
             && pos >= last_end
             && !follows_subtype_status_qualifier(haystack, pos)
+            && !precedes_type_addition_clause(haystack, end)
         {
             result.push_str(&haystack[last_end..pos]);
             result.push_str(replacement);
@@ -3186,5 +3206,35 @@ mod tests {
         let (before, after) = tp.split_around(" \u{2014} ").unwrap();
         assert_eq!(before.original, "Choose one");
         assert_eq!(after.original, "Effect text");
+    }
+
+    /// CR 205.1b + CR 201.5: A card whose single-word name IS a creature subtype
+    /// (Coward) must NOT normalize that word to `~` when it is the type being
+    /// added — "becomes a Coward in addition to its other types" denotes the
+    /// creature TYPE, not a self-reference. Other occurrences (a genuine "When
+    /// Coward dies" self-reference) still normalize.
+    #[test]
+    fn normalize_subtype_name_in_type_addition_stays_literal() {
+        let out = normalize_card_name_refs(
+            "Target creature can't block this turn and becomes a Coward in addition to its other types until end of turn.",
+            "Coward",
+        );
+        assert!(
+            out.contains("becomes a Coward in addition to its other types"),
+            "subtype-in-type-addition must stay literal, got: {out}"
+        );
+        // A real self-reference of the same subtype-word name still normalizes.
+        let out2 = normalize_card_name_refs(
+            "When Coward dies, target creature becomes a Coward in addition to its other types.",
+            "Coward",
+        );
+        assert!(
+            out2.contains("When ~ dies"),
+            "self-reference occurrence must normalize to ~, got: {out2}"
+        );
+        assert!(
+            out2.contains("becomes a Coward in addition to its other types"),
+            "subtype occurrence must stay literal, got: {out2}"
+        );
     }
 }

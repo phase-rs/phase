@@ -7649,8 +7649,33 @@ fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str>
 
 /// Match a disjunction separator at the head of `input`: `", or "` / `", "` /
 /// `" or "` (longest first so `", or "` wins over `", "` and `" or "`).
+///
+/// CR 701.20a + CR 107.1: A bare `" or "` separates two distinct disjunct
+/// filters ("a creature or land card"), but it must NOT be treated as a
+/// disjunction boundary when it continues a postfix integer-comparator phrase —
+/// e.g. "nonland card with mana value 3 **or greater**", "creature with power 2
+/// **or less**". There the `"or <comparator>"` belongs to the preceding numeric
+/// constraint and must stay attached so `parse_target` lowers it to a single
+/// `FilterProp::Cmc`/P-T `Comparator` (Sibylline Soothsayer class). Without this
+/// guard the splitter shears "3 or greater" into ["… value 3", "greater"],
+/// yielding a bogus `Or { Cmc(EQ, 3), Any }` filter.
 fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-    alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    alt((
+        tag(", or "),
+        tag(", "),
+        terminated(
+            tag(" or "),
+            not(alt((
+                tag("greater"),
+                tag("less"),
+                tag("more"),
+                tag("fewer"),
+                tag("higher"),
+                tag("lower"),
+            ))),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Split a comma-and-`or` disjunctive reveal-until filter phrase into its
@@ -48447,6 +48472,139 @@ mod tests {
                 filter
             );
         }
+    }
+
+    /// CR 701.20a + CR 107.1: "until you reveal a nonland card with mana value 3
+    /// or greater" must lower the postfix comparator into a single
+    /// `FilterProp::Cmc { GE, 3 }` filter — NOT shear "3 or greater" on the bare
+    /// " or " into a bogus `Or { Cmc(EQ, 3), Any }` (Sibylline Soothsayer
+    /// regression). The `Any` disjunct would otherwise make the dig stop on the
+    /// very first card revealed. Building-block scope: every reveal-until card
+    /// whose match filter ends in a "N or greater/less/more/fewer" comparator.
+    #[test]
+    fn reveal_until_nonland_mana_value_comparator_not_split() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a nonland card with mana value 3 or greater.",
+            AbilityKind::Spell,
+        );
+        let Effect::RevealUntil { filter, .. } = &*def.effect else {
+            panic!("expected RevealUntil, got: {:?}", def.effect);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a single Typed filter (no Or), got: {filter:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
+            "expected NonLand type filter, got: {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 }
+                }
+            )),
+            "expected Cmc {{ GE, 3 }}, got: {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 508.1d/509.1a + CR 205.1b + CR 701.56a: Coward — "Target creature
+    /// can't block this turn and becomes a Coward in addition to its other types
+    /// until end of turn. Time travel." The compound combat trick must keep BOTH
+    /// conjuncts (CantBlock static + AddSubtype) in one `GenericEffect`, and the
+    /// `Time travel.` sentence rides as a `TimeTravel` sibling — no
+    /// `Unimplemented`. Building block: every "can't <restriction> and becomes a
+    /// [subtype]" one-shot grant.
+    #[test]
+    fn coward_cant_block_and_becomes_subtype_compound_keeps_both() {
+        let def = parse_effect_chain(
+            "Target creature can't block this turn and becomes a Coward in addition to its other types until end of turn.\nTime travel.",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected GenericEffect(UntilEndOfTurn), got: {:?}",
+                def.effect
+            );
+        };
+        let mods = &static_abilities[0].modifications;
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBlock
+                }
+            )),
+            "expected AddStaticMode(CantBlock), got: {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Coward"
+            )),
+            "expected AddSubtype(Coward), got: {mods:?}"
+        );
+        // "Time travel." rides as a sibling, and nothing is Unimplemented.
+        let time_travel = def
+            .sub_ability
+            .as_ref()
+            .expect("expected TimeTravel sibling");
+        assert!(
+            matches!(&*time_travel.effect, Effect::TimeTravel),
+            "expected TimeTravel sibling, got: {:?}",
+            time_travel.effect
+        );
+        fn no_unimplemented(d: &AbilityDefinition) {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { .. }),
+                "unexpected Unimplemented: {:?}",
+                d.effect
+            );
+            if let Some(sub) = &d.sub_ability {
+                no_unimplemented(sub);
+            }
+        }
+        no_unimplemented(&def);
+    }
+
+    /// CR 122.1 + CR 702.62b: "Exile that card with three time counters on it."
+    /// must carry the time counters onto the exile move's `enter_with_counters`
+    /// (Sibylline Soothsayer / The Tenth Doctor suspend-dig class). The anaphoric
+    /// "that card" target must not swallow the counter instruction. Building
+    /// block: every "exile <anaphor> with N <type> counters on it" clause.
+    #[test]
+    fn exile_anaphor_with_time_counters_lifts_to_enter_with_counters() {
+        let def = parse_effect_chain(
+            "Exile that card with three time counters on it.",
+            AbilityKind::Spell,
+        );
+        let Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            enter_with_counters,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected ChangeZone->Exile(ParentTarget), got: {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(
+            enter_with_counters.as_slice(),
+            &[(CounterType::Time, QuantityExpr::Fixed { value: 3 })],
+            "expected (Time, 3) enter_with_counters, got: {enter_with_counters:?}"
+        );
     }
 
     /// CR 701.20a: Passive form without inline exile — Blessed Reincarnation pattern.
