@@ -3112,6 +3112,14 @@ pub(super) fn apply_clause_continuation(
                     | Effect::Manifest {
                         profile: fdp @ Some(_),
                         ..
+                    }
+                    // CR 708.2a: "Turn target creature face down" seeds a vanilla
+                    // 2/2 profile; overwrite it with the parsed "It's a 2/2
+                    // Cyberman artifact creature." characteristics (Cyber
+                    // Conversion).
+                    | Effect::TurnFaceDown {
+                        profile: fdp @ Some(_),
+                        ..
                     } => {
                         *fdp = Some(profile);
                         break;
@@ -4295,7 +4303,12 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// CR 708.2a + CR 205.1a: Parse the singular "It's a/an <characteristics>
 /// <core-type-noun>." face-down characteristic clause for a permanent put onto
 /// the battlefield face down (Yedora, Grave Gardener: "It's a Forest land.").
-/// Returns `None` when the sentence is not an it's-characteristics clause.
+/// Also accepts the "It becomes a/an ..." copula variant used after a
+/// turn-face-down effect (Mondassian Colony Ship: "Turn target creature face
+/// down. It becomes a 2/2 Cyberman artifact creature."); both copulas describe
+/// the same CR 205.1a characteristic-setting and refine the same face-down
+/// profile via the `FaceDownProfileSpec` continuation. Returns `None` when the
+/// sentence is not an it's/it-becomes-characteristics clause.
 ///
 /// Built entirely from typed combinators (no card-named hardcode), mirroring
 /// `parse_theyre_face_down_profile` for the plural creature form: optional N/M
@@ -4305,12 +4318,17 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
 /// type explicit and no power/toughness (CR 208.1).
 pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
-    // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
+    // CR 205.1a: "It's a / It is a / It becomes a <characteristics> <core-type>."
+    // The "becomes" copula is the turn-face-down variant (Mondassian Colony
+    // Ship); it sets the same characteristics as the "is" copula (Cyber
+    // Conversion).
     let (mut rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it is an "),
         tag("it is a "),
+        tag("it becomes an "),
+        tag("it becomes a "),
     ))
     .parse(lower)
     .ok()?;
@@ -4334,21 +4352,15 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
     let mut subtypes: Vec<String> = Vec::new();
     loop {
         rest = rest.trim_start();
-        // Terminator: a core-type noun then optional ".". The terminal noun maps
-        // directly to its `CoreType` — Creature is the only one that yields a
-        // creature body; every other core type ("land", "artifact", ...)
-        // terminates a non-creature body whose core types come from the effect.
-        if let Ok((after, terminal)) = alt((
-            value(
-                CoreType::Creature,
-                alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
-            ),
-            value(CoreType::Land, tag("land")),
-            value(CoreType::Artifact, tag("artifact")),
-            value(CoreType::Enchantment, tag("enchantment")),
-            value(CoreType::Planeswalker, tag("planeswalker")),
-        ))
-        .parse(rest)
+        // CR 708.2a sentence 1: "... creature(s)." terminator → creature body,
+        // P/T defaulting to 2/2. Checked FIRST (before the non-creature
+        // core-type words) so that a non-creature word acting as an adjective
+        // ("artifact creature") is treated as an extra core type rather than a
+        // terminal — mirroring `parse_theyre_face_down_profile`. This lets the
+        // singular Cyberman body ("It's a 2/2 Cyberman artifact creature.")
+        // parse, not just the plural form.
+        if let Ok((after, _)) =
+            alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))).parse(rest)
         {
             let after = after.trim_start();
             let after = opt(tag::<_, _, OracleError<'_>>("."))
@@ -4357,54 +4369,67 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
             if !after.trim().is_empty() {
                 return None;
             }
-            return match terminal {
-                // "... creature(s)." — creature body, P/T defaults to 2/2.
-                CoreType::Creature => Some(FaceDownProfile {
-                    power,
-                    toughness,
-                    body: FaceDownBody::Creature,
-                    extra_core_types,
-                    subtypes,
-                    ward: None,
-                }),
-                // "... land/artifact/enchantment/planeswalker." — non-creature
-                // body whose core type is the terminal noun; no implicit
-                // Creature, no power/toughness.
-                ct => {
+            return Some(FaceDownProfile {
+                power,
+                toughness,
+                body: FaceDownBody::Creature,
+                extra_core_types,
+                subtypes,
+                ward: None,
+            });
+        }
+        // CR 708.2a sentence 2 / CR 205.1a: a non-creature core-type word. It is
+        // the TERMINAL noun (a non-creature body — Yedora's "It's a Forest
+        // land.") only when it ENDS the clause; when followed by more text it is
+        // an adjective extra core type ("artifact creature") and the loop
+        // continues to the "creature" terminator above.
+        if let Ok((after, ct)) = alt((
+            value(CoreType::Land, tag::<_, _, OracleError<'_>>("land")),
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(rest)
+        {
+            // Word-boundary guard: don't match a prefix of a longer word; allow a
+            // following space, period, or end-of-input as the boundary.
+            let boundary_ok =
+                after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '.');
+            if boundary_ok {
+                let ends = {
+                    let t = after.trim_start();
+                    opt(tag::<_, _, OracleError<'_>>("."))
+                        .parse(t)
+                        .map_or(t, |(r, _)| r)
+                        .trim()
+                        .is_empty()
+                };
+                if ends {
+                    // CR 208.1: a non-creature body has no power/toughness, so a
+                    // stray P/T ("It's a 2/2 land.") is not a valid clause.
                     if power.is_some() || toughness.is_some() {
                         return None;
                     }
                     if !extra_core_types.contains(&ct) {
                         extra_core_types.push(ct);
                     }
-                    Some(FaceDownProfile {
+                    return Some(FaceDownProfile {
                         power: None,
                         toughness: None,
                         body: FaceDownBody::Noncreature,
                         extra_core_types,
                         subtypes,
                         ward: None,
-                    })
+                    });
                 }
-            };
-        }
-        // Non-terminal extra core type word (e.g. "artifact creature").
-        if let Ok((after, ct)) = alt((
-            value(
-                CoreType::Artifact,
-                tag::<_, _, OracleError<'_>>("artifact "),
-            ),
-            value(CoreType::Enchantment, tag("enchantment ")),
-            value(CoreType::Land, tag("land ")),
-            value(CoreType::Planeswalker, tag("planeswalker ")),
-        ))
-        .parse(rest)
-        {
-            if !extra_core_types.contains(&ct) {
-                extra_core_types.push(ct);
+                // Adjective use — an extra core type before the creature
+                // terminator (e.g. the "artifact" in "artifact creature").
+                if !extra_core_types.contains(&ct) {
+                    extra_core_types.push(ct);
+                }
+                rest = after;
+                continue;
             }
-            rest = after;
-            continue;
         }
         // Subtype (land type "Forest", creature type "Spirit", ...).
         if let Some((canonical, consumed)) = crate::parser::oracle_util::parse_subtype(rest) {
@@ -4465,6 +4490,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
+        // CR 708.2a: turning a permanent face down is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceDown { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
@@ -5322,6 +5350,11 @@ pub(super) fn parse_followup_continuation_ast(
         // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
         // artifact creatures." spec refines that seed via the back-walk patcher.
         | Effect::Manifest { profile: Some(_), .. }
+        // CR 708.2a + CR 205.1a: "Turn target creature face down. It's a 2/2
+        // Cyberman artifact creature." (Cyber Conversion) — the seeded vanilla
+        // 2/2 profile on the preceding `TurnFaceDown` is refined by this spec
+        // sentence via the back-walk patcher.
+        | Effect::TurnFaceDown { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -7738,9 +7771,36 @@ mod tests {
         assert_eq!(creature.power, Some(3));
         assert_eq!(creature.toughness, Some(3));
 
+        // CR 708.2a + CR 205.1a: Cyber Conversion's singular creature body with an
+        // extra core type AND a subtype — "It's a 2/2 Cyberman artifact creature."
+        // The non-creature word "artifact" is an adjective here (extra core type),
+        // not the terminal noun; "creature" terminates the creature body.
+        let cyberman =
+            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature.").unwrap();
+        assert_eq!(cyberman.body, FaceDownBody::Creature);
+        assert_eq!(cyberman.power, Some(2));
+        assert_eq!(cyberman.toughness, Some(2));
+        assert_eq!(cyberman.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(cyberman.subtypes, vec!["Cyberman".to_string()]);
+
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).
         assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
+
+        // CR 205.1a: the "It becomes a/an ..." copula (Mondassian Colony Ship)
+        // sets the same characteristics as the "It's a ..." copula, so the same
+        // Cyberman creature body parses from the "becomes" lead-in.
+        let becomes_cyberman =
+            parse_its_face_down_profile("it becomes a 2/2 cyberman artifact creature.").unwrap();
+        assert_eq!(becomes_cyberman.body, FaceDownBody::Creature);
+        assert_eq!(becomes_cyberman.power, Some(2));
+        assert_eq!(becomes_cyberman.toughness, Some(2));
+        assert_eq!(becomes_cyberman.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(becomes_cyberman.subtypes, vec!["Cyberman".to_string()]);
+        // Sibling "becomes an" article proves class coverage, not Cyberman-specific.
+        let becomes_artifact = parse_its_face_down_profile("it becomes an artifact.").unwrap();
+        assert_eq!(becomes_artifact.body, FaceDownBody::Noncreature);
+        assert_eq!(becomes_artifact.extra_core_types, vec![CoreType::Artifact]);
 
         // Not an it's-characteristics clause → None.
         assert!(parse_its_face_down_profile("draw a card.").is_none());
