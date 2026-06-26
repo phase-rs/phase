@@ -1073,6 +1073,7 @@ function GamePageContent({
   const pileSize = isMobile
     ? { width: "38px", height: "53px" }
     : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
+  const playerRowHeight = "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)";
   const showFlowHelpNudge =
     !dismissedFlowHelpNudge &&
     !helpSheetOpen &&
@@ -1243,7 +1244,7 @@ function GamePageContent({
             rather than shoving the hand up. */}
         <div
           className="relative min-w-0 self-end overflow-visible"
-          style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
+          style={{ height: playerRowHeight }}
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center">
@@ -1294,7 +1295,9 @@ function GamePageContent({
         resizeCorner="bl"
         className="fixed z-30 flex flex-col items-end gap-1.5"
         style={{
-          bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
+          bottom: isMobile
+            ? `calc(env(safe-area-inset-bottom) + var(--action-btn-bottom) + ${playerRowHeight})`
+            : "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
           // Anchor box-scale to the docked corner so it grows inward, not off-screen.
           transformOrigin: "bottom right",
