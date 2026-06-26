@@ -85,6 +85,7 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
 
 fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_they_scoped_player_conditions,
         parse_turn_conditions,
         // CR 208.1 + CR 603.4 + CR 109.3: Superlative-comparison gate
         // ("if its power is greater than each other creature's power" /
@@ -2396,6 +2397,76 @@ fn parse_you_have_typed_cards_in_your_graveyard(input: &str) -> OracleResult<'_,
         )));
     }
     Ok((rest, type_filters))
+}
+
+/// Parse "they have exactly N [or exactly M ...] cards in hand" and
+/// "they control N or more [type]" for scoped-player unless/if gates
+/// (Skullcage, Furnace Punisher class). "They" binds to
+/// `PlayerScope::ScopedPlayer` — the relative-player slot established by
+/// trigger `relative_player_scope` / event-player context for per-player
+/// damage and punishment riders.
+fn parse_they_scoped_player_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_they_hand_size_exact_disjunction,
+        parse_they_control_count_ge,
+    ))
+    .parse(input)
+}
+
+fn parse_they_hand_size_exact_disjunction(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("they have ").parse(input)?;
+    let (rest, first_n) = preceded(tag("exactly "), parse_number).parse(rest)?;
+    let mut counts = vec![first_n];
+    let mut rest = rest;
+    while let Ok((next, n)) = preceded(tag(" or exactly "), parse_number).parse(rest) {
+        counts.push(n);
+        rest = next;
+    }
+    let (rest, _) = tag(" cards in hand").parse(rest)?;
+    let player = PlayerScope::ScopedPlayer;
+    let conditions: Vec<StaticCondition> = counts
+        .into_iter()
+        .map(|n| StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: player.clone(),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        })
+        .collect();
+    let condition = if conditions.len() == 1 {
+        conditions.into_iter().next().expect("one count")
+    } else {
+        StaticCondition::Or { conditions }
+    };
+    Ok((rest, condition))
+}
+
+fn parse_they_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("they control ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let filter = inject_controller(filter, ControllerRef::ScopedPlayer);
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 /// Parse "that player has" / "that opponent has" quantity conditions.
@@ -10488,6 +10559,26 @@ mod tests {
             matches!(c, StaticCondition::UnlessPay { .. }),
             "expected raw UnlessPay (not Not-wrapped), got {c:?}"
         );
+    }
+
+    #[test]
+    fn test_they_hand_size_exact_disjunction() {
+        let (rest, c) =
+            parse_inner_condition("they have exactly three or exactly four cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::Or { conditions } => {
+                assert_eq!(conditions.len(), 2);
+            }
+            other => panic!("expected Or of exact hand sizes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_they_control_two_or_more_basic_lands() {
+        let (rest, c) = parse_inner_condition("they control two or more basic lands").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::QuantityComparison { .. }));
     }
 
     // -- Source power/toughness comparison conditions --

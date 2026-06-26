@@ -169,9 +169,14 @@ fn extra_blockers_static_splits_from_keyword_grant() {
     );
     let extra = defs
         .iter()
-        .find(|d| matches!(d.mode, StaticMode::ExtraBlockers { .. }))
-        .expect("expected an ExtraBlockers static def");
-    assert_eq!(extra.mode, StaticMode::ExtraBlockers { count: Some(1) });
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::ExtraBlockers { count: Some(1) },
+                })
+        })
+        .expect("expected an AddStaticMode ExtraBlockers carrier");
+    assert_eq!(extra.mode, StaticMode::Continuous);
     match &extra.affected {
         Some(TargetFilter::Typed(tf)) => {
             assert_eq!(tf.controller, Some(ControllerRef::You));
@@ -191,6 +196,101 @@ fn extra_blockers_static_splits_from_keyword_grant() {
 fn extra_blockers_static_self_reference_stays_selfref() {
     let def = parse_static_line("~ can block an additional creature.").expect("static def");
     assert_eq!(def.mode, StaticMode::ExtraBlockers { count: Some(1) });
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn extra_blockers_count_phrase_handles_hyphenated_and_any() {
+    assert_eq!(
+        super::evasion::parse_extra_blockers_count_phrase("any number of creatures").unwrap(),
+        ("", None)
+    );
+    assert_eq!(
+        super::evasion::parse_extra_blockers_count_phrase("an additional creature").unwrap(),
+        ("", Some(1))
+    );
+    assert_eq!(
+        super::evasion::parse_extra_blockers_count_phrase("two additional creatures").unwrap(),
+        ("", Some(2))
+    );
+    assert_eq!(
+        super::evasion::parse_extra_blockers_count_phrase("ninety-nine additional creatures")
+            .unwrap(),
+        ("", Some(99))
+    );
+    assert_eq!(
+        super::evasion::parse_extra_blockers_count_phrase("an additional ninety-nine creatures")
+            .unwrap(),
+        ("", Some(99))
+    );
+}
+
+#[test]
+fn brave_current_oracle_extra_blockers_is_granted_to_creatures() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Creatures you control have vigilance.\nEach creature you control can block an additional creature each combat.",
+        "Brave the Sands",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let extra = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::ExtraBlockers { count: Some(1) },
+                })
+        })
+        .expect("Brave must grant ExtraBlockers through a continuous carrier");
+    assert_eq!(extra.mode, StaticMode::Continuous);
+    match &extra.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "extra-block grant must affect creatures, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("ExtraBlockers carrier must affect creatures you control, got {other:?}"),
+    }
+}
+
+#[test]
+fn hundred_handed_one_monstrous_compound_preserves_conditioned_self_extra_blockers() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Vigilance\n{3}{W}{W}{W}: Monstrosity 3.\nAs long as Hundred-Handed One is monstrous, it has reach and can block an additional ninety-nine creatures each combat.",
+        "Hundred-Handed One",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let extra = parsed
+        .statics
+        .iter()
+        .find(|d| d.mode == (StaticMode::ExtraBlockers { count: Some(99) }))
+        .expect("monstrous static must grant ninety-nine extra blockers");
+    assert_eq!(extra.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(extra.condition, Some(StaticCondition::SourceIsMonstrous));
+    assert!(
+        parsed.statics.iter().any(|d| {
+            d.condition == Some(StaticCondition::SourceIsMonstrous)
+                && d.modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Reach,
+                    })
+        }),
+        "monstrous compound must preserve the reach grant, got {:?}",
+        parsed.statics
+    );
+}
+
+#[test]
+fn self_can_block_any_number_stays_direct_extra_blockers() {
+    let def = parse_static_line("~ can block any number of creatures.").expect("static def");
+    assert_eq!(def.mode, StaticMode::ExtraBlockers { count: None });
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
@@ -20398,5 +20498,60 @@ fn static_creatures_enchanted_player_controls_attack_each_combat_if_able() {
         Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::EnchantedPlayer)
         ))
+    );
+}
+
+#[test]
+fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_types() {
+    // Curse of Conformity: "Nonlegendary creatures enchanted player controls
+    // have base power and toughness 3/3 and lose all creature types."
+    // CR 613.4b (layer 7b base P/T), CR 205.1a (creature type removal),
+    // CR 303.4b (enchanted player scope).
+    let def = parse_static_line(
+        "Nonlegendary creatures enchanted player controls have base power and toughness 3/3 \
+         and lose all creature types.",
+    )
+    .expect("Curse of Conformity oracle must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    // Filter: nonlegendary creatures enchanted player controls.
+    let tf = match &def.affected {
+        Some(TargetFilter::Typed(tf)) => tf,
+        other => panic!("expected Typed filter, got {other:?}"),
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "must filter on Creature"
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::EnchantedPlayer),
+        "must scope to enchanted player"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::NotSupertype {
+            value: Supertype::Legendary,
+        }),
+        "must exclude legendary creatures"
+    );
+    // Modifications: SetPower{3}, SetToughness{3}, RemoveAllSubtypes{Creature}.
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetPower { value: 3 }),
+        "must set power to 3, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetToughness { value: 3 }),
+        "must set toughness to 3, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }),
+        "must remove all creature types, got {:?}",
+        def.modifications
     );
 }

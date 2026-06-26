@@ -14025,6 +14025,9 @@ pub enum AbilityCondition {
     /// CR 702.131c: "if you have the city's blessing" is true when the ability
     /// controller has the city's blessing designation.
     HasCityBlessing,
+    /// CR 701.54a: True when the ability's source permanent is its controller's
+    /// Ring-bearer. For "unless ~ is your Ring-bearer", wrap with `Not`.
+    IsRingBearer,
     /// CR 608.2e: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.

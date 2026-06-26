@@ -134,9 +134,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               <img
                 src={renderedSrc}
                 alt={cardName}
-                // Load via CORS (Scryfall returns ACAO:*) so art survives a future
-                // COEP: require-corp cross-origin-isolation switch on the app host.
-                crossOrigin="anonymous"
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover"
               />

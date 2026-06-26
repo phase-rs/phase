@@ -994,17 +994,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
-        } else if unless_pay.is_none()
-            && scan_contains(&effect_for_parse_lower, "unless")
-            && !has_later_sentence_if(&effect_for_parse_lower)
-        {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported unless clause".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
         } else {
             try_parse_exile_top_each_library_with_collection_counter(
                 &effect_for_parse,

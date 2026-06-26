@@ -2609,20 +2609,9 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "can block an additional creature" / "can block any number" (CR 509.1b) ---
-    if nom_primitives::scan_contains(tp.lower, "can block any number") {
-        return Some(
-            StaticDefinition::new(StaticMode::ExtraBlockers { count: None })
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "can block an additional") {
-        return Some(
-            StaticDefinition::new(StaticMode::ExtraBlockers { count: Some(1) })
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+    // --- "can block an additional creature" / "can block any number" ---
+    if let Some(def) = parse_extra_blockers_static(&text) {
+        return Some(def);
     }
 
     // --- "play an additional land" / "play two additional lands" ---

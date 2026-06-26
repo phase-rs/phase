@@ -7,6 +7,7 @@ import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { RichLabel } from "../mana/RichLabel.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -100,7 +101,7 @@ export function CardImage({
         <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{cardName}</div>
         {resolvedOracleText && (
           <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-            {resolvedOracleText}
+            <RichLabel text={resolvedOracleText} size="xs" />
           </div>
         )}
       </div>
@@ -115,9 +116,6 @@ export function CardImage({
       <img
         src={renderedSrc}
         alt={renderedAlt}
-        // Load via CORS (Scryfall returns ACAO:*) so card art survives a future
-        // COEP: require-corp cross-origin-isolation switch on the app host.
-        crossOrigin="anonymous"
         draggable={false}
         onError={() => setImageError(true)}
         className={`${baseClasses} shadow-lg object-cover`}

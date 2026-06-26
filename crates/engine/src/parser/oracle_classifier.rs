@@ -294,8 +294,6 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // quote is required: scan_contains only matches at word starts, and "legend"
     // is glued to its opening quote ("legend) in the Oracle text.
     "\"legend rule\" doesn't apply",
-    "can block an additional",
-    "can block any number",
     "play an additional land",
     "play two additional lands",
     "triggers an additional time",
@@ -441,6 +439,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
+        return true;
+    }
+
+    if super::oracle_static::is_extra_blockers_static_candidate(lower) {
         return true;
     }
 
