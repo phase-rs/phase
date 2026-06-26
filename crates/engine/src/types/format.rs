@@ -296,15 +296,9 @@ impl GameFormat {
 
     /// Authoritative list of user-selectable formats. The frontend consumes
     /// this (via the `get_format_registry` WASM export) to render format
-    /// pickers, default configs, and badges. `TwoHeadedGiant` is intentionally
-    /// omitted — the CR 810 team-play rules (shared life/poison, per-teammate
-    /// land drops and draws, team-combined combat) are implemented and
-    /// covered by tests, but the format is held back from end users until
-    /// the surrounding surfaces catch up: `client/src/data/formatRegistry.ts`
-    /// has no 2HG entry, `server-core`/`lobby-broker` have no team-seat
-    /// assignment in the multiplayer protocol, and `phase-ai` has no
-    /// teammate-awareness (it would misplay against/around its own
-    /// teammate). Re-add the `FormatMetadata` entry here once those land.
+    /// pickers, default configs, and badges. Surface-specific callers may
+    /// filter this list when a format is not appropriate for that entry point
+    /// (for example deck-construction or solo-AI setup).
     pub fn registry() -> Vec<FormatMetadata> {
         vec![
             FormatMetadata {
@@ -442,6 +436,14 @@ impl GameFormat {
                 description: "3\u{2013}6 player battle royale",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::free_for_all(),
+            },
+            FormatMetadata {
+                format: GameFormat::TwoHeadedGiant,
+                label: "Two-Headed Giant",
+                short_label: "2HG",
+                description: "4 players, two teams of two",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::two_headed_giant(),
             },
             FormatMetadata {
                 format: GameFormat::Limited,
@@ -890,16 +892,22 @@ mod tests {
     }
 
     #[test]
-    fn format_registry_still_omits_two_headed_giant() {
-        let formats: Vec<GameFormat> = GameFormat::registry()
-            .into_iter()
-            .map(|metadata| metadata.format)
-            .collect();
+    fn format_registry_includes_two_headed_giant() {
+        let registry = GameFormat::registry();
+        let metadata = registry
+            .iter()
+            .find(|metadata| metadata.format == GameFormat::TwoHeadedGiant)
+            .expect("Two-Headed Giant should be user-selectable");
 
-        assert!(formats.contains(&GameFormat::Standard));
-        assert!(formats.contains(&GameFormat::FreeForAll));
-        assert!(formats.contains(&GameFormat::Momir));
-        assert!(!formats.contains(&GameFormat::TwoHeadedGiant));
+        assert_eq!(metadata.label, "Two-Headed Giant");
+        assert_eq!(metadata.short_label, "2HG");
+        assert_eq!(metadata.description, "4 players, two teams of two");
+        assert_eq!(metadata.group, FormatGroup::Multiplayer);
+        assert_eq!(metadata.default_config.min_players, 4);
+        assert_eq!(metadata.default_config.max_players, 4);
+        assert_eq!(metadata.default_config.starting_life, 30);
+        assert!(metadata.default_config.team_based);
+        assert!(!metadata.default_config.supplies_fixed_deck);
     }
 
     #[test]

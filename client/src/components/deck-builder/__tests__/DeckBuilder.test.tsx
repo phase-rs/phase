@@ -224,6 +224,34 @@ describe("DeckBuilder", () => {
     });
   });
 
+  it("does not restore Two-Headed Giant as a persisted deck-builder format", async () => {
+    const onFormatChange = vi.fn();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Team Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "TwoHeadedGiant",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={onFormatChange}
+        initialDeckName="Team Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Deck name" })).toHaveValue("Team Deck"),
+    );
+    expect(onFormatChange).not.toHaveBeenCalled();
+  });
+
   it("preserves folder and star membership across a rename", async () => {
     const user = userEvent.setup();
     localStorage.setItem(

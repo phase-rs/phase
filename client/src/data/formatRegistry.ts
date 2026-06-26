@@ -381,6 +381,28 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "TwoHeadedGiant",
+    label: "Two-Headed Giant",
+    short_label: "2HG",
+    description: "4 players, two teams of two",
+    group: "Multiplayer",
+    default_config: {
+      format: "TwoHeadedGiant",
+      starting_life: 30,
+      min_players: 4,
+      max_players: 4,
+      deck_size: 60,
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: true,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "Limited",
     label: "Limited",
     short_label: "LIM",
@@ -429,6 +451,18 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
   return FORMAT_REGISTRY.find((m) => m.format === format);
 }
+
+export function isSoloSetupFormat(metadata: FormatMetadata): boolean {
+  return !metadata.default_config.team_based;
+}
+
+export const SOLO_SETUP_FORMATS = FORMAT_REGISTRY.filter(isSoloSetupFormat);
+
+export function isDeckConstructionFormat(metadata: FormatMetadata): boolean {
+  return metadata.group !== "Multiplayer";
+}
+
+export const DECK_CONSTRUCTION_FORMATS = FORMAT_REGISTRY.filter(isDeckConstructionFormat);
 
 /**
  * Whether the format's deck is fixed by the format rules and supplied

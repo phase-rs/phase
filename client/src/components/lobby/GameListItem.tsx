@@ -34,8 +34,7 @@ const GROUP_BADGE_CLASSES: Record<FormatGroup, string> = {
   Multiplayer: "bg-amber-500/20 text-amber-300",
 };
 
-// Fallback styling for formats not in the registry (currently TwoHeadedGiant),
-// which the lobby can still receive as a legal GameFormat value on the wire.
+// Fallback styling for future wire formats not yet mirrored in the registry.
 const UNKNOWN_FORMAT_BADGE = "bg-slate-500/20 text-slate-300";
 
 function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string {

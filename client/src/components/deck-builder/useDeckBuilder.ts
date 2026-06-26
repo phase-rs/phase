@@ -25,7 +25,7 @@ import type { CardSearchFilters } from "./CardSearch";
 import { hasSearchCriteria } from "./searchFilters";
 import type { GroupMode } from "./deckGrouping";
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS, formatMetadata } from "../../data/formatRegistry";
 import type { CommanderBracket } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
@@ -539,7 +539,7 @@ export function useDeckBuilder({
     setActiveSurface("deck");
     setDirty(false);
     if (persisted.format) {
-      const match = FORMAT_REGISTRY.find(
+      const match = DECK_CONSTRUCTION_FORMATS.find(
         (m) => m.format.toLowerCase() === persisted.format!.toLowerCase(),
       );
       if (match) onFormatChange(match.format);

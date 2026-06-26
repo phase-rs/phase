@@ -2758,8 +2758,9 @@ pub enum WaitingFor {
     /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
     /// `finish_mulligans`.
     ///
-    /// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled
-    /// (the format lacks team semantics).
+    /// CR 103.5d + CR 805.3a + CR 810.2: shared-team-turn mulligans are
+    /// represented in the same simultaneous-decision model; every player
+    /// remains independently pending until their own keep/mulligan decision.
     MulliganDecision {
         pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a

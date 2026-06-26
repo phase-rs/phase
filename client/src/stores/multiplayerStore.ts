@@ -70,6 +70,11 @@ function aiSeatDeckChoice(deckName: string | null): DeckChoice {
   }
   return { type: "Named", data: deckName };
 }
+
+function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
+  return settings.formatConfig.team_based ? [] : settings.aiSeats;
+}
+
 // Prevents onclose from clearing session token after GameStarted
 let gameStartedFired = false;
 // Reconnection state for the hosting WebSocket
@@ -462,30 +467,10 @@ export function isServerCompatible(info: ServerInfo | null): boolean {
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
 // Adding a user-selectable format only needs a registry entry; its default
-// config flows here automatically. TwoHeadedGiant isn't in the registry
-// (not user-selectable yet) but the enum variant is still valid and callers
-// may look it up, so it's appended explicitly.
-const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
-  format: "TwoHeadedGiant",
-  starting_life: 30,
-  min_players: 4,
-  max_players: 4,
-  deck_size: 60,
-  singleton: false,
-  command_zone: false,
-  commander_damage_threshold: null,
-  range_of_influence: null,
-  team_based: true,
-  uses_commander: false,
-  allow_debug_actions: false,
-};
-
-export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
-  ...(Object.fromEntries(
-    FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
-  ) as Record<Exclude<GameFormat, "TwoHeadedGiant">, FormatConfig>),
-  TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
-};
+// config flows here automatically.
+export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = Object.fromEntries(
+  FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
+) as Record<GameFormat, FormatConfig>;
 
 /**
  * Canonical official lobby URL, mirroring `DEFAULT_SERVER` in serverDetection.
@@ -610,6 +595,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setLatency: (ms) => set({ latencyMs: ms }),
 
       startHosting: (settings, deck) => {
+        const aiSeats = effectiveAiSeats(settings);
         // Clean up any existing hosting session (server or P2P).
         closeHostWebSocket();
         disposeActiveP2PHost();
@@ -818,7 +804,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               player_count: settings.formatConfig.max_players,
               match_config: { match_type: settings.matchType },
               format_config: settings.formatConfig,
-              ai_seats: settings.aiSeats,
+              ai_seats: aiSeats,
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,
@@ -886,6 +872,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        const aiSeats = effectiveAiSeats(settings);
         closeHostWebSocket();
         clearWsSession();
         gameStartedFired = false;
@@ -943,7 +930,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               playerCount: settings.formatConfig.max_players,
               matchConfig: { match_type: settings.matchType },
               formatConfig: settings.formatConfig,
-              aiSeats: [],
+              aiSeats,
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
@@ -1021,7 +1008,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             serverInfo: null,
           });
 
-          for (const seat of settings.aiSeats) {
+          for (const seat of aiSeats) {
             await adapter.applySeatMutation({
               type: "SetKind",
               data: {

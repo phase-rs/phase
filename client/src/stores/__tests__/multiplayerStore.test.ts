@@ -1,7 +1,9 @@
+import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlayerSlot } from "../../multiplayer/seatTypes";
-import { useMultiplayerStore } from "../multiplayerStore";
+import { formatMetadata } from "../../data/formatRegistry";
+import { FORMAT_DEFAULTS, type HostingSettings, useMultiplayerStore } from "../multiplayerStore";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -11,6 +13,10 @@ const p2pMocks = vi.hoisted(() => ({
   startPregameGame: vi.fn(async () => undefined),
   getPlayerSlots: vi.fn(() => []),
   dispose: vi.fn(),
+}));
+
+const socketMocks = vi.hoisted(() => ({
+  send: vi.fn(),
 }));
 
 vi.mock("../../network/connection", () => ({
@@ -36,6 +42,46 @@ vi.mock("../../adapter/p2p-adapter", () => ({
   }),
 }));
 
+vi.mock("../../services/openPhaseSocket", () => ({
+  HandshakeError: class HandshakeError extends Error {
+    kind: string;
+
+    constructor(message: string, kind: string) {
+      super(message);
+      this.kind = kind;
+    }
+  },
+  openPhaseSocket: vi.fn(async () => ({
+    serverInfo: { mode: "Full", protocolVersion: 1 },
+    ws: {
+      send: socketMocks.send,
+      close: vi.fn(),
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+    },
+  })),
+  withReconnect: vi.fn(),
+}));
+
+function hostingSettings(
+  overrides: Partial<HostingSettings> = {},
+): HostingSettings {
+  return {
+    displayName: "Host",
+    public: true,
+    password: "",
+    timerSeconds: null,
+    formatConfig: FORMAT_DEFAULTS.Commander,
+    matchType: "Bo1",
+    aiSeats: [],
+    startWhenFull: false,
+    ranked: false,
+    roomName: "Test room",
+    ...overrides,
+  };
+}
+
 describe("multiplayerStore", () => {
   beforeEach(() => {
     useMultiplayerStore.getState().cancelHosting();
@@ -45,6 +91,7 @@ describe("multiplayerStore", () => {
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
+      serverAddress: "ws://localhost:8787",
     });
   });
 
@@ -74,36 +121,63 @@ describe("multiplayerStore", () => {
     expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
   });
 
+  it("derives Two-Headed Giant defaults from the registry metadata", () => {
+    expect(FORMAT_DEFAULTS.TwoHeadedGiant).toBe(
+      formatMetadata("TwoHeadedGiant")?.default_config,
+    );
+    for (const metadata of Object.values(FORMAT_DEFAULTS)) {
+      expect(FORMAT_DEFAULTS[metadata.format]).toBe(
+        formatMetadata(metadata.format)?.default_config,
+      );
+    }
+  });
+
+  it("strips AI seats from team-based server host settings", async () => {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        formatConfig: FORMAT_DEFAULTS.TwoHeadedGiant,
+        aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null }],
+      }),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: [],
+      },
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: { ai_seats: unknown[] };
+    };
+    expect(frame.data.ai_seats).toEqual([]);
+  });
+
+  it("passes AI seats through for non-team server host settings", async () => {
+    const aiSeats = [{ seatIndex: 1, difficulty: "Hard", deckName: null }];
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({ aiSeats }),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: { ai_seats: unknown[] };
+    };
+    expect(frame.data.ai_seats).toEqual(aiSeats);
+  });
+
   it("applies setup-time AI seats when starting a P2P host session", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
-      {
-        displayName: "Host",
-        public: true,
-        password: "",
-        timerSeconds: null,
-        formatConfig: {
-          format: "Commander",
-          starting_life: 40,
-          min_players: 2,
-          max_players: 4,
-          deck_size: 100,
-          singleton: true,
-          command_zone: true,
-          commander_damage_threshold: 21,
-          range_of_influence: null,
-          team_based: false,
-          uses_commander: true,
-          allow_debug_actions: false,
-        },
-        matchType: "Bo1",
+      hostingSettings({
         aiSeats: [
           { seatIndex: 1, difficulty: "Hard", deckName: null },
           { seatIndex: 3, difficulty: "Easy", deckName: "My Deck" },
         ],
-        startWhenFull: false,
-        ranked: false,
-        roomName: "Test room",
-      },
+      }),
       {
         main_deck: ["Forest"],
         sideboard: [],
@@ -135,33 +209,27 @@ describe("multiplayerStore", () => {
     });
   });
 
+  it("does not apply setup-time AI seats when starting a team-based P2P host session", async () => {
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings({
+        formatConfig: FORMAT_DEFAULTS.TwoHeadedGiant,
+        aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null }],
+      }),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: [],
+      },
+      { useBroker: false },
+    );
+
+    expect(ok).toBe(true);
+    expect(p2pMocks.applySeatMutation).not.toHaveBeenCalled();
+  });
+
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
-      {
-        displayName: "Host",
-        public: true,
-        password: "",
-        timerSeconds: null,
-        formatConfig: {
-          format: "Commander",
-          starting_life: 40,
-          min_players: 2,
-          max_players: 4,
-          deck_size: 100,
-          singleton: true,
-          command_zone: true,
-          commander_damage_threshold: 21,
-          range_of_influence: null,
-          team_based: false,
-          uses_commander: true,
-          allow_debug_actions: false,
-        },
-        matchType: "Bo1",
-        aiSeats: [],
-        startWhenFull: false,
-        ranked: false,
-        roomName: "Test room",
-      },
+      hostingSettings(),
       {
         main_deck: ["Forest"],
         sideboard: [],
