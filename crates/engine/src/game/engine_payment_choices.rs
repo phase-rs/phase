@@ -1042,9 +1042,34 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Reveal { .. }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
-            | AbilityCost::NinjutsuFamily { .. }
-            | AbilityCost::EffectCost { .. }
-            | AbilityCost::Unimplemented { .. } => {
+            | AbilityCost::NinjutsuFamily { .. } => {
+                payment_failed = true;
+            }
+            // CR 118.12a: "unless [target's controller] has [~] deal N damage to
+            // them" — the payer takes damage from the ability source instead of
+            // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage { .. } => {
+                    let mut damage_ability = pending_effect.as_ref().clone();
+                    damage_ability.effect = *effect.clone();
+                    damage_ability.targets = vec![TargetRef::Player(player)];
+                    damage_ability.unless_pay = None;
+                    damage_ability.sub_ability = None;
+                    if let Err(e) =
+                        effects::deal_damage::resolve(state, &damage_ability, events)
+                    {
+                        return Err(EngineError::InvalidAction(format!("{e:?}")));
+                    }
+                    if matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+                _ => payment_failed = true,
+            },
+            AbilityCost::Unimplemented { .. } => {
                 payment_failed = true;
             }
         }

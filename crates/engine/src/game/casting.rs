@@ -11,9 +11,9 @@ use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
-    CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast, SneakPlacement,
-    SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
+    ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
+    ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
+    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -11735,24 +11735,6 @@ fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
     }
 }
 
-/// Walk a cost tree and return the first static `AbilityCost::Mana` leg's
-/// `ManaCost`, if any. Mirrors `find_waterbend_cost` /
-/// `find_non_self_sacrifice_cost`.
-///
-/// Deliberate scope limit (CR 118.4): only `AbilityCost::Mana` (a fully static
-/// `ManaCost`) is matched. `AbilityCost::ManaDynamic` (X-cost) returns `None`,
-/// so an X-cost composite falls through to the unchanged over-approximation in
-/// `can_pay`'s supplemental witness check — no regression, intentional. For a
-/// composite with multiple `Mana` legs, `find_map` returns the first; no
-/// in-scope conditional-mana card has two independent static `Mana` legs.
-pub(super) fn composite_mana_leg(cost: &AbilityCost) -> Option<&ManaCost> {
-    match cost {
-        AbilityCost::Mana { cost } => Some(cost),
-        AbilityCost::Composite { costs } => costs.iter().find_map(composite_mana_leg),
-        _ => None,
-    }
-}
-
 /// Walk a cost tree and return the first non-SelfRef sacrifice `(count, filter)`
 /// found, if any. The `count` is honored so multi-permanent sacrifice costs
 /// ("Sacrifice two creatures:") are modeled correctly.
@@ -11769,18 +11751,21 @@ pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &
 
 /// Which battlefield-removing non-mana cost leg a composite carries. Each is a
 /// distinct CR keyword action / zone change but all remove a permanent from the
-/// battlefield (CR 701.21a Sacrifice / CR 701.13a Exile / plain bounce), so one
-/// MutationWitness models all three.
+/// battlefield (CR 701.21a Sacrifice / CR 701.13a Exile / plain bounce), so the
+/// mana-leg detour in `handle_activate_ability` treats all three uniformly:
+/// gate the CR 601.2g mana-first hoist when any is present.
 pub(super) enum RemovalKind {
     Sacrifice,
     Exile,
     ReturnToHand,
 }
 
-/// CR 601.2h: first non-self battlefield-removing leg of `cost`, by kind
-/// priority (Sacrifice > Exile > ReturnToHand). Composes the existing per-kind
-/// cost walkers. Returns at most ONE leg (single-leg limit documented at the
-/// `can_pay` call site).
+/// CR 601.2g + CR 601.2h: first non-self battlefield-removing leg of `cost`, by
+/// kind priority (Sacrifice > Exile > ReturnToHand). Composes the existing
+/// per-kind cost walkers. Returns at most ONE leg; it gates the mana-first
+/// detour in `handle_activate_ability` (presence check) — the kind it returns is
+/// not used there because `push_activated_ability_to_stack` re-dispatches on each
+/// per-kind walker after mana payment.
 pub(super) fn find_non_self_battlefield_removal_cost(
     cost: &AbilityCost,
 ) -> Option<(u32, &TargetFilter, RemovalKind)> {
@@ -11810,7 +11795,7 @@ pub(super) fn find_non_self_battlefield_removal_cost(
 /// payable hand-exile composite). A `None` filter is out of scope. The
 /// `SelfRef`-first arm is required: a SelfRef filter may be permanent-implying
 /// and would otherwise pass the battlefield gate.
-fn find_battlefield_exile_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+pub(super) fn find_battlefield_exile_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     match cost {
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
@@ -12037,7 +12022,7 @@ fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     }
 }
 
-fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
+pub(super) fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
         // battlefield-source shape (`from_zone: None`) and its explicit
@@ -12860,9 +12845,36 @@ pub fn handle_activate_ability(
             // `push_activated_ability_to_stack` must re-surface a non-self discard
             // sub-cost. Only THIS path sets it; the discard-first detour below
             // already pays the discard and resumes with the flag unset.
-            pending_x.x_residual_activation = true;
+            pending_x.activation_residual = ActivationResidual::XMana;
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
+        }
+
+        // CR 601.2g + CR 601.2h + CR 602.2b: A NON-X mana leg combined with a
+        // non-self battlefield-removal cost (Sacrifice / battlefield Exile /
+        // ReturnToHand) must pay the mana FIRST so the CR 601.2g mana-ability
+        // window opens on the INTACT board — the removal (which can shrink
+        // board-derived mana: Metalcraft/affinity/devotion) is paid LAST. Hoist
+        // the mana leg through `enter_payment_step` and leave the removal tail as
+        // the `ManaLeg` residual, which `push_activated_ability_to_stack`
+        // re-surfaces after mana payment. This MUST run before the
+        // Sacrifice/Exile/ReturnToHand pre-payment detours below, which pay the
+        // removal FIRST (the pre-fix CR 601.2h ordering bug). The gate is
+        // mana-leg-AND-removal: a bare `{N}` or `{N},{T}` has no removal leg
+        // (`find_non_self_battlefield_removal_cost` → None) and a bare
+        // `Sacrifice`/`Exile`/`Return` has no mana leg (`extract_mana_leg` → None);
+        // both fall through to the unchanged paths. SelfRef removal is excluded by
+        // the walkers. `{X}`-mana removals were already caught by the X detour
+        // above, so any mana leg seen here is non-X (mutually exclusive residuals).
+        if find_non_self_battlefield_removal_cost(cost).is_some() {
+            if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
+                let mut pending_leg = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
+                pending_leg.activation_cost = remaining;
+                pending_leg.activation_ability_index = Some(ability_index);
+                pending_leg.activation_residual = ActivationResidual::ManaLeg;
+                state.pending_cast = Some(Box::new(pending_leg));
+                return casting_costs::enter_payment_step(state, player, None, events);
+            }
         }
 
         if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
@@ -28049,6 +28061,390 @@ mod tests {
             }
             other => panic!("expected PayCost ReturnToHand, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 601.2g + CR 601.2h + CR 602.2b: the non-X mana-leg detour pays the mana
+    // leg FIRST (opening the mana-ability window on the INTACT board), then
+    // re-surfaces the non-self battlefield-removal cost (Sacrifice / battlefield
+    // Exile / ReturnToHand) as the residual. These drive `handle_activate_ability`
+    // (the production entry point) with a pre-filled mana pool so the {N} leg
+    // auto-pays, then assert the removal prompt surfaces AFTER the mana is spent.
+    // -----------------------------------------------------------------------
+
+    fn gain_one_life_effect() -> Effect {
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    }
+
+    /// Claws-of-Gix shape (`{1}, Sacrifice a permanent`). REVERT-FAILING (§4):
+    /// without the mana-leg detour the sacrifice prompt surfaces with the {1} pool
+    /// still full. REVERT-FAILING (§2 Sacrifice arm): without the arm the residual
+    /// sacrifice is silently swallowed by the fall-through and no PayCost surfaces.
+    #[test]
+    fn mana_leg_sacrifice_pays_mana_before_sacrifice_prompt() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let fodder = create_object(
+            &mut state,
+            CardId(810),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fodder)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let claws = create_object(
+            &mut state,
+            CardId(811),
+            PlayerId(0),
+            "Claws of Gix".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&claws).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, gain_one_life_effect()).cost(
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            AbilityCost::Sacrifice(SacrificeCost::count(
+                                TargetFilter::Typed(TypedFilter::permanent()),
+                                1,
+                            )),
+                        ],
+                    },
+                ),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), claws, 0, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "{{1}} must be paid before the sacrifice prompt"
+        );
+        assert!(
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Sacrifice,
+                    ..
+                }
+            ),
+            "sacrifice prompt must surface after mana payment, got {waiting:?}"
+        );
+        state.waiting_for = waiting;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![fodder],
+            },
+        )
+        .unwrap();
+        assert!(
+            !state.battlefield.contains(&fodder),
+            "fodder must be sacrificed once selected"
+        );
+    }
+
+    /// Curie shape (`{1}{U}, Exile another artifact you control`). The exile leg
+    /// has `zone: None` + a permanent-implying filter, so it resolves to the
+    /// battlefield (CR 701.13a) and routes to `PayCostKind::ExilePermanent`.
+    /// REVERT-FAILING (§2 battlefield-Exile arm): without the arm the residual
+    /// exile is a silent no-op in the fall-through and the target is never exiled.
+    #[test]
+    fn mana_leg_battlefield_exile_pays_mana_before_exile_prompt() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let fodder = create_object(
+            &mut state,
+            CardId(820),
+            PlayerId(0),
+            "Artifact Servo".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fodder)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let curie = create_object(
+            &mut state,
+            CardId(821),
+            PlayerId(0),
+            "Curie".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&curie).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, gain_one_life_effect()).cost(
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::Cost {
+                                    shards: vec![ManaCostShard::Blue],
+                                    generic: 1,
+                                },
+                            },
+                            AbilityCost::Exile {
+                                count: 1,
+                                zone: None,
+                                filter: Some(TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Artifact)
+                                        .controller(ControllerRef::You)
+                                        .properties(vec![FilterProp::Another]),
+                                )),
+                            },
+                        ],
+                    },
+                ),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), curie, 0, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "{{1}}{{U}} must be paid before the exile prompt"
+        );
+        assert!(
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::ExilePermanent { .. },
+                    ..
+                }
+            ),
+            "battlefield-exile prompt must surface after mana payment, got {waiting:?}"
+        );
+        state.waiting_for = waiting;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![fodder],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&fodder].zone,
+            Zone::Exile,
+            "selected artifact must be exiled, not the source"
+        );
+    }
+
+    /// Master Transmuter shape (`{U}, {T}, Return an artifact you control`). The
+    /// residual is `Composite[Tap, ReturnToHand]`: the {U} leg is paid first, the
+    /// interactive return surfaces, and the trailing `{T}` is paid by
+    /// `handle_return_to_hand_for_cost`. REVERT-FAILING (§2 ReturnToHand arm):
+    /// without the arm the return is a silent no-op and the artifact is never
+    /// bounced; the source's `{T}` is also never reached as a paid residual.
+    #[test]
+    fn mana_leg_tap_return_pays_mana_then_taps_source_on_return() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let mox = create_object(
+            &mut state,
+            CardId(830),
+            PlayerId(0),
+            "Blue Mox".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&mox)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        // Non-artifact source: it is not itself a return target.
+        let transmuter = create_object(
+            &mut state,
+            CardId(831),
+            PlayerId(0),
+            "Master Transmuter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&transmuter).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, gain_one_life_effect()).cost(
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::Cost {
+                                    shards: vec![ManaCostShard::Blue],
+                                    generic: 0,
+                                },
+                            },
+                            AbilityCost::Tap,
+                            AbilityCost::ReturnToHand {
+                                count: 1,
+                                filter: Some(TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Artifact)
+                                        .controller(ControllerRef::You),
+                                )),
+                                from_zone: None,
+                            },
+                        ],
+                    },
+                ),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), transmuter, 0, &mut Vec::new())
+                .unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "{{U}} must be paid before the return prompt"
+        );
+        assert!(
+            !state.objects[&transmuter].tapped,
+            "the source's {{T}} is a residual leg, not paid until the return resolves"
+        );
+        assert!(
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::ReturnToHand,
+                    ..
+                }
+            ),
+            "return prompt must surface after mana payment, got {waiting:?}"
+        );
+        state.waiting_for = waiting;
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![mox] }).unwrap();
+        assert!(
+            state.players[0].hand.contains(&mox),
+            "selected artifact must be returned to hand"
+        );
+        assert!(
+            state.objects[&transmuter].tapped,
+            "the trailing {{T}} must be paid by the return-cost handler"
+        );
+    }
+
+    /// Hostile negative: a bare `{1}, {T}` (mana + tap, NO battlefield removal)
+    /// must NOT trip the mana-leg detour — `find_non_self_battlefield_removal_cost`
+    /// returns None, so the activation stays on the unchanged direct path. No
+    /// `PayCost` is surfaced; the source taps for `{T}` and the ability is pushed.
+    #[test]
+    fn mana_leg_detour_skips_vanilla_mana_tap_cost() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let source = create_object(
+            &mut state,
+            CardId(840),
+            PlayerId(0),
+            "Vanilla Tapper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, gain_one_life_effect()).cost(
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            AbilityCost::Tap,
+                        ],
+                    },
+                ),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        assert!(
+            !matches!(waiting, WaitingFor::PayCost { .. }),
+            "bare mana+tap must not be intercepted by the mana-leg detour, got {waiting:?}"
+        );
+        assert!(
+            state.objects[&source].tapped,
+            "the {{T}} leg must tap the source on the direct path"
+        );
+        assert_eq!(
+            state
+                .activated_abilities_this_turn
+                .get(&(source, 0))
+                .copied(),
+            Some(1),
+            "the ability must be pushed on the unchanged direct path"
+        );
+    }
+
+    /// Hostile negative: a `{1}, Sacrifice this` (SelfRef) must NOT trip the
+    /// mana-leg detour — the SelfRef exclusion in
+    /// `find_non_self_battlefield_removal_cost` returns None, so no
+    /// `PayCostKind::Sacrifice` is surfaced; the self-sacrifice is paid on the
+    /// unchanged direct path.
+    #[test]
+    fn mana_leg_detour_skips_self_ref_sacrifice_cost() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let source = create_object(
+            &mut state,
+            CardId(850),
+            PlayerId(0),
+            "Self Sacker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, gain_one_life_effect()).cost(
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                        ],
+                    },
+                ),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        assert!(
+            !matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Sacrifice,
+                    ..
+                }
+            ),
+            "self-ref sacrifice must not be intercepted by the mana-leg detour, got {waiting:?}"
+        );
+        assert!(
+            !state.battlefield.contains(&source),
+            "the self-sacrifice must be paid on the direct path"
+        );
     }
 
     #[test]
