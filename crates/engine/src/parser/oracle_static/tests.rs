@@ -152,6 +152,59 @@ fn permanent_subject_protection_still_continuous() {
     );
 }
 
+/// CR 305.1 + CR 611.3a: Limited Resources — "Players can't play lands as long
+/// as ten or more lands are on the battlefield." must gate the CantPlayLand
+/// prohibition on a count condition (lands on battlefield >= 10) rather than
+/// dropping it and prohibiting land plays unconditionally.
+#[test]
+fn limited_resources_cant_play_land_gated_on_ten_lands() {
+    let defs = parse_static_line_multi(
+        "Players can't play lands as long as ten or more lands are on the battlefield.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand"))
+        .expect("expected a CantPlayLand static");
+    let Some(StaticCondition::QuantityComparison {
+        lhs,
+        comparator,
+        rhs,
+    }) = &cant.condition
+    else {
+        panic!(
+            "expected a QuantityComparison gate, got {:?}",
+            cant.condition
+        );
+    };
+    assert_eq!(*comparator, Comparator::GE);
+    assert_eq!(*rhs, QuantityExpr::Fixed { value: 10 });
+    let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = lhs
+    else {
+        panic!("expected ObjectCount lhs, got {lhs:?}");
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed land filter, got {filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+}
+
+/// CR 305.1: An "as long as <unrecognized condition>" rider on "can't play
+/// lands" must NOT collapse to an unconditionally-enforced CantPlayLand — the
+/// line stays unsupported (honest) rather than prohibiting land plays always.
+#[test]
+fn cant_play_land_unrecognized_gate_stays_unsupported() {
+    let defs = parse_static_line_multi("Players can't play lands as long as the sky is green.");
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")),
+        "an unrecognized gate must not produce an unconditional CantPlayLand, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.

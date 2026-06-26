@@ -18169,7 +18169,32 @@ fn try_parse_repeat_process_directive(
 /// case when reached via [`parse_oracle_text`] or any of the wrapper parsers
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
+/// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
+/// ("Until end of turn, creatures you control gain protection from white if you
+/// control a Plains, ..., and from green if you control a Forest" — Dominaria's
+/// Judgment) — handle the FULL clause here, before the chain's trailing-condition
+/// stripper peels the final clause's "if ..." and re-applies it across the whole
+/// grant. Each color keeps its own land condition, so no spurious outer condition
+/// is created.
+fn try_parse_conditional_protection_grant_ability(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<AbilityDefinition> {
+    let clause = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
+    let mut def = AbilityDefinition::new(kind, clause.effect);
+    if let Some(duration) = clause.duration {
+        def = def.duration(duration);
+    }
+    Some(def)
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    if let Some(def) =
+        try_parse_conditional_protection_grant_ability(text, kind, &mut ParseContext::default())
+    {
+        return def;
+    }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
@@ -18200,6 +18225,9 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
+    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
+        return def;
+    }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
@@ -21901,6 +21929,11 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
             return Some(cost);
         }
     }
+    // CR 118.12a: "unless [target's controller] has [~] deal N damage to them"
+    // (Molten Influence and other counter spells with damage alternatives).
+    if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless) {
+        return Some(cost);
+    }
     // CR 118.12 / CR 119.4 / CR 608.2c: non-mana alternative costs — "pays N
     // life", "sacrifices a [filter]", "discards a card", and `or`-disjunctions
     // thereof. Normalize the counter subject to the "they" pronoun the shared
@@ -22008,12 +22041,15 @@ fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
 }
 
 /// CR 118.12a: "unless [that object's|its] controller has [~] deal N damage to
-/// them" (Blazing Salvo, Lava Blister) — the controller may take the damage
-/// instead of the primary effect.
+/// them" (Blazing Salvo, Lava Blister, Molten Influence) — the controller may
+/// take the damage instead of the primary effect.
 fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that creature's controller has "),
         tag("its controller has "),
+        tag("that permanent's controller has "),
+        tag("that land's controller has "),
+        tag("that spell's controller has "),
     ))
     .parse(after_unless)
     .ok()?;
@@ -28263,6 +28299,35 @@ mod tests {
                     ..
                 } => {}
                 other => panic!("expected DealDamage 6 to payer, got {other:?}"),
+            },
+            other => panic!("expected EffectCost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn molten_influence_unless_have_deal_damage() {
+        let def = parse_effect_chain(
+            "Counter target instant or sorcery spell unless that spell's controller has Molten Influence deal 4 damage to them.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Counter { .. }),
+            "primary should counter the spell, got {:?}",
+            def.effect
+        );
+        let unless_pay = def
+            .unless_pay
+            .as_ref()
+            .expect("Molten Influence must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        match &unless_pay.cost {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Player,
+                    ..
+                } => {}
+                other => panic!("expected DealDamage 4 to payer, got {other:?}"),
             },
             other => panic!("expected EffectCost, got {other:?}"),
         }
@@ -45808,6 +45873,69 @@ mod tests {
         assert!(d.enters_attacking);
         assert!(!d.transformed);
         assert_eq!(d.enters_under, None);
+    }
+
+    /// CR 110.2a + CR 708.3 + CR 614.1: order-independent entry-riders trailing
+    /// the control clause ("under your control face down and tapped" — Missy)
+    /// are picked up by the rider scanner, not just the legacy contiguous table
+    /// rows. Both `face_down` and `enter_tapped` must be set.
+    #[test]
+    fn return_destination_face_down_and_tapped_after_control() {
+        let (target_text, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "it to the battlefield under your control face down and tapped",
+        );
+        assert_eq!(target_text, "it");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert_eq!(d.enters_under, Some(ControllerRef::You));
+        assert!(d.face_down, "face down rider must be captured");
+        assert!(d.enter_tapped, "tapped rider must be captured");
+        assert!(!d.transformed);
+        assert!(!d.enters_attacking);
+        assert_eq!(remainder, "", "all riders consumed, nothing left over");
+    }
+
+    /// The rider scan is all-or-nothing per iteration: a non-rider tail after a
+    /// connector (", then draw a card") consumes nothing, leaving the remainder
+    /// intact for the caller and setting no spurious flags.
+    #[test]
+    fn return_destination_rider_scan_stops_at_non_rider() {
+        let (target_text, dest, remainder) =
+            strip_return_destination_ext_with_remainder("it to the battlefield, then draw a card");
+        assert_eq!(target_text, "it");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert!(!d.face_down);
+        assert!(!d.enter_tapped);
+        assert_eq!(remainder, ", then draw a card");
+    }
+
+    /// Regression: a single contiguous "tapped" rider (already a table row) still
+    /// yields `enter_tapped` and no other flags after the rider scan runs.
+    #[test]
+    fn return_destination_single_tapped_unchanged() {
+        let (_, dest) = strip_return_destination_ext("target creature to the battlefield tapped");
+        let d = dest.expect("should parse destination");
+        assert!(d.enter_tapped);
+        assert!(!d.face_down);
+        assert!(!d.transformed);
+        assert!(!d.enters_attacking);
+    }
+
+    /// CR 708.3: the pre-existing "face down" splice (face down BEFORE the
+    /// control clause, Yedora-style) keeps working alongside the new trailing
+    /// rider scan.
+    #[test]
+    fn return_destination_face_down_before_control_splice() {
+        let (_, dest) = strip_return_destination_ext(
+            "it to the battlefield face down under its owner's control",
+        );
+        let d = dest.expect("should parse destination");
+        assert!(d.face_down);
+        assert_eq!(
+            d.enters_under, None,
+            "owner's control must not set a controller override"
+        );
     }
 
     /// CR 508.4: "return target creature card from your graveyard to the

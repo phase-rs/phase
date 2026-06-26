@@ -3693,6 +3693,40 @@ fn resolve_mana_symbols_in_mana_cost(
 /// Single authority for `Power { scope }` / `Toughness { scope }` resolution
 /// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
 /// returns the same property from a Last Known Information snapshot.
+/// Read an object's power/toughness by id, preferring live battlefield state but
+/// falling back to last known information when the object has left the
+/// battlefield.
+///
+/// CR 608.2h: when the effect requires information from a specific object and
+/// that object is no longer in the zone it was expected to be in, the effect
+/// uses the object's last known information. CR 113.7a: an ability that left its
+/// source's zone uses LKI for that source. CR 603.10a: a leaves-the-battlefield
+/// / dies / sacrifice trigger looks back in time at the source as it last
+/// existed on the battlefield. The live object now sits in its new zone with
+/// layer-7 P/T already reverted to base by `revert_layered_characteristics_to_base`
+/// (game_object.rs), so a bare live read under-reports a buffed creature's
+/// power/toughness — prefer LKI when the object is off the battlefield. The
+/// final live fallback covers graveyard/exile *cards* that never had a
+/// battlefield LKI snapshot (e.g. Scavenge reading a card in the graveyard).
+/// Identical guard ordering to the `ObjectScope::Target` arm of
+/// `resolve_object_pt`.
+fn read_object_pt_by_id<F, G>(
+    state: &GameState,
+    id: ObjectId,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    let live = state.objects.get(&id);
+    live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+        .and_then(obj_extract)
+        .or_else(|| state.lki_cache.get(&id).and_then(lki_extract))
+        .or_else(|| live.and_then(obj_extract))
+}
+
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -3707,12 +3741,44 @@ where
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
     match scope {
-        ObjectScope::Source => state
-            .objects
-            .get(&ctx.source)
-            .and_then(&obj_extract)
-            .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
-            .unwrap_or(0),
+        // CR 608.2h: a source's P/T is read from the zone the ability EXPECTS it
+        // in. The expected zone differs by how the ability reached the stack:
+        //
+        //   * A triggered leaves-the-battlefield / dies ability (Nested
+        //     Shambler's "this creature's power") looks back at the battlefield
+        //     (CR 603.10a). The source has since moved to the graveyard and its
+        //     live layer-7 P/T was reverted to base by
+        //     `revert_layered_characteristics_to_base`, so prefer the buffed
+        //     battlefield LKI snapshot.
+        //   * An activated ability that functions from the graveyard or exile
+        //     (e.g. Scavenge's "this card's power", read while the card is in the
+        //     graveyard) expects the source in its CURRENT zone. Reading a stale
+        //     same-step battlefield LKI snapshot — left over from the card dying
+        //     earlier this step (`zones.rs` inserts it on leaving the
+        //     battlefield; it persists until step transition) — would wrongly
+        //     report the buffed battlefield P/T instead of the live graveyard
+        //     card's P/T. Read the live source in its current zone, falling back
+        //     to LKI only if the object has left the game entirely.
+        //
+        // `source_incarnation` is set exactly for triggered abilities (whose
+        // source can change zones between firing and resolution) and `None` for
+        // activated abilities and casts, so it distinguishes the battlefield
+        // look-back case from the current-zone case. A bare `resolve_quantity`
+        // call with no ability (statics, whose source is on the battlefield, and
+        // direct unit reads) defaults to the look-back read.
+        ObjectScope::Source => {
+            let expects_battlefield = ability.is_none_or(|a| a.source_incarnation.is_some());
+            if expects_battlefield {
+                read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            } else {
+                state
+                    .objects
+                    .get(&ctx.source)
+                    .and_then(&obj_extract)
+                    .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
+                    .unwrap_or(0)
+            }
+        }
         // CR 608.2h: once a targeted object has left the battlefield, its power
         // and toughness survive only as last known information. The object now
         // in its new zone has had +1/+1 counters and continuous modifiers
@@ -3727,46 +3793,36 @@ where
                 TargetRef::Object(id) => Some(*id),
                 _ => None,
             })
-            .map(|id| {
-                let live = state.objects.get(&id);
-                live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-                    .and_then(&obj_extract)
-                    .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
-                    .or_else(|| live.and_then(&obj_extract))
-                    .unwrap_or(0)
-            })
+            .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             .unwrap_or(0),
-        ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
-            .and_then(&obj_extract)
+        // CR 608.2h: the recipient ("that creature") may have left the
+        // battlefield before resolution; prefer its buffed LKI over a base-only
+        // live read via the shared guarded read.
+        ObjectScope::Recipient => object_id_for_scope(state, ObjectScope::Recipient, ctx, targets)
+            .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             .unwrap_or(0),
+        // CR 608.2h + CR 603.10a: the triggering-event source ("this creature
+        // dies, ... its power"). When the source has left the battlefield, prefer
+        // its buffed LKI over a base-only live read via the shared guarded read.
         ObjectScope::EventSource => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
             else {
                 return 0;
             };
-            state
-                .objects
-                .get(&object_id)
-                .and_then(&obj_extract)
-                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
-                .unwrap_or(0)
+            read_object_pt_by_id(state, object_id, &obj_extract, &lki_extract).unwrap_or(0)
         }
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
-        // the triggering damage ("that creature's toughness"). Same live-then-LKI
-        // resolution as `EventSource`, keyed on the recipient object.
+        // the triggering damage ("that creature's toughness"). Same guarded
+        // live-then-LKI resolution as `EventSource`, keyed on the recipient
+        // object (CR 608.2h).
         ObjectScope::EventTarget => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
             else {
                 return 0;
             };
-            state
-                .objects
-                .get(&object_id)
-                .and_then(&obj_extract)
-                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
-                .unwrap_or(0)
+            read_object_pt_by_id(state, object_id, &obj_extract, &lki_extract).unwrap_or(0)
         }
         // CR 608.2k: An ability's effect referring to a specific untargeted
         // object previously referred to by that ability's cost OR trigger
@@ -3798,13 +3854,11 @@ where
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
-                    state
-                        .objects
-                        .get(&id)
-                        .and_then(&obj_extract)
-                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
-                })
+                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
+                // read so a buffed source that left the battlefield reports its
+                // last-known P/T. Slots 1 and 3 (snapshot-only) are unchanged.
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             })
             .or_else(|| {
                 ability
@@ -3824,13 +3878,10 @@ where
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
-                    state
-                        .objects
-                        .get(&id)
-                        .and_then(&obj_extract)
-                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
-                })
+                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
+                // read. Slots 1 and 3 (snapshot-only) are unchanged.
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             })
             .or_else(|| {
                 ability
@@ -3846,13 +3897,11 @@ where
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
-                    state
-                        .objects
-                        .get(&id)
-                        .and_then(&obj_extract)
-                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
-                })
+                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
+                // read so "its power" on a dies trigger reads the buffed value.
+                // Slots 1 and 3 (snapshot-only) are unchanged.
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             })
             .or_else(|| {
                 ability
@@ -3883,11 +3932,11 @@ where
                     return None;
                 }
                 targets.iter().find_map(|t| match t {
-                    TargetRef::Object(id) => state
-                        .objects
-                        .get(id)
-                        .and_then(&obj_extract)
-                        .or_else(|| state.lki_cache.get(id).and_then(&lki_extract)),
+                    // CR 608.2h: guarded live-then-LKI read so a fight source
+                    // that has left the battlefield still reports its P/T.
+                    TargetRef::Object(id) => {
+                        read_object_pt_by_id(state, *id, &obj_extract, &lki_extract)
+                    }
                     _ => None,
                 })
             })
@@ -9485,6 +9534,266 @@ mod tests {
             resolve_quantity_with_targets(&state, &expr, &ability),
             5,
             "live battlefield target must win over same-step LKI from an earlier incarnation"
+        );
+    }
+
+    /// CR 608.2h + CR 603.10a: #4269 Nested Shambler. "This creature's power"
+    /// parses to `Power { scope: Source }`. After the source dies and its live
+    /// graveyard P/T has been reverted to base by
+    /// `revert_layered_characteristics_to_base`, the buffed LKI must win.
+    /// Revert-failing: without the zone guard in `read_object_pt_by_id`, the
+    /// base graveyard power (1) wins and the token count is wrong.
+    #[test]
+    fn resolve_source_power_prefers_lki_when_source_left_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        // The dying creature is now in the graveyard with base (reverted) P/T.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nested Shambler".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1); // layer-7 already reverted to base on exit
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        // Buffed last-known-information from while it was on the battlefield (3/3).
+        let mut lki = state.objects[&source].snapshot_public_characteristics();
+        lki.power = Some(3);
+        lki.toughness = Some(3);
+        state.lki_cache.insert(source, lki);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &power, PlayerId(0), source),
+            3,
+            "buffed LKI power must win when the source has left the battlefield (token count = 3, not 1)"
+        );
+
+        let toughness = QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &toughness, PlayerId(0), source),
+            3,
+            "toughness sibling: buffed LKI toughness must win for off-battlefield source"
+        );
+    }
+
+    /// CR 608.2h: a `Power { Source }` read of an object STILL on the battlefield
+    /// must prefer its live (buffed) value over any stale same-step LKI — proving
+    /// the zone guard reads live while on-battlefield and only falls back to LKI
+    /// off-battlefield.
+    #[test]
+    fn resolve_source_power_prefers_live_when_on_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Buffed Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut stale_lki = state.objects[&source].snapshot_public_characteristics();
+        stale_lki.power = Some(1);
+        stale_lki.toughness = Some(1);
+        state.lki_cache.insert(source, stale_lki);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &power, PlayerId(0), source),
+            4,
+            "live battlefield power must win over stale LKI for an on-battlefield source"
+        );
+    }
+
+    /// CR 608.2h: an ACTIVATED ability that functions from the graveyard (e.g.
+    /// Scavenge's "this card's power", read while the card is in the graveyard)
+    /// expects its source in its current zone. It must read the live graveyard
+    /// card's (base) P/T, NOT a stale battlefield LKI snapshot left over from the
+    /// creature dying earlier this step. This is the counterpart to
+    /// `resolve_source_power_prefers_lki_when_source_left_battlefield`: same
+    /// off-battlefield source with a buffed LKI, but because the ability is
+    /// activated (`source_incarnation == None`) the live current-zone value wins.
+    /// Revert-failing: without the `expects_battlefield` gate the buffed LKI (3)
+    /// leaks through and the activated graveyard ability over-reports.
+    #[test]
+    fn resolve_source_power_reads_live_current_zone_for_activated_graveyard_ability() {
+        let mut state = GameState::new_two_player(42);
+        // The card sits in the graveyard with its (base) graveyard P/T.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scavenger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        // Stale buffed battlefield LKI from when the creature died earlier this step.
+        let mut lki = state.objects[&source].snapshot_public_characteristics();
+        lki.power = Some(3);
+        lki.toughness = Some(3);
+        state.lki_cache.insert(source, lki);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        };
+        // An activated ability has no `source_incarnation` — it functions from
+        // the current (graveyard) zone, so the live base power must win.
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: power.clone(),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert!(
+            ability.source_incarnation.is_none(),
+            "activated-ability fixture must have no source incarnation"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &ability),
+            1,
+            "activated graveyard-source ability must read live graveyard power (1), not buffed battlefield LKI (3)"
+        );
+    }
+
+    /// CR 608.2h + CR 603.10a: `Power { EventSource }` for a dies trigger. The
+    /// trigger-event source has moved to the graveyard with base P/T; its buffed
+    /// LKI must win. Revert-failing: bare live read returns base (1).
+    #[test]
+    fn resolve_event_source_power_prefers_lki_when_source_left_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dying Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut lki = state.objects[&source].snapshot_public_characteristics();
+        lki.power = Some(5);
+        lki.toughness = Some(5);
+        state.lki_cache.insert(source, lki);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                source,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &power, PlayerId(0), source),
+            5,
+            "buffed LKI power must win for the dies-trigger event source after it left the battlefield"
+        );
+    }
+
+    /// CR 608.2h + CR 608.2c: `Power { Anaphoric }` ("its power") falling through
+    /// to the trigger-event source (slot 2) for a dies trigger. Off-battlefield
+    /// source → buffed LKI wins. Revert-failing: bare live read of slot 2
+    /// returns base (1).
+    #[test]
+    fn resolve_anaphoric_power_prefers_lki_via_event_source_slot() {
+        use crate::types::ability::ResolvedAbility;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dying Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(1);
+            obj.power = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut lki = state.objects[&source].snapshot_public_characteristics();
+        lki.power = Some(6);
+        state.lki_cache.insert(source, lki);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                source,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        // No effect_context_object and no cost_paid_object → Anaphoric falls to
+        // slot 2 (trigger-event source).
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: expr.clone(),
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            6,
+            "Anaphoric 'its power' must read the buffed LKI of the off-battlefield trigger source"
         );
     }
 

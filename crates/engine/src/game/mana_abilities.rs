@@ -1109,6 +1109,16 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
+    // CR 605.3a + CR 106.12 + CR 107.6: When the cheap gate already conclusively
+    // decides payability (no cost, or a {T}/{Q}-only cost whose production +
+    // payment path is infallible), skip the full-state-clone legality
+    // simulation. Eliminates the mana-display board-sweep clone-storm (Cryptolith
+    // Rite granting bare `{T}: Add` to ~700 tokens => ~700 clones/sweep). Mana/
+    // resource/composite costs still simulate — the auto-tap affordability
+    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE.
+    if mana_sources::cost_conclusively_payable_by_cheap_gate(&ability_def.cost) {
+        return true;
+    }
     can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
 }
 
@@ -4887,6 +4897,217 @@ mod tests {
             N,
             "all six Treasures each produced one red"
         );
+    }
+
+    /// CR 106.12: A tapped `{T}: Add` source can't pay its tap cost, so the cheap
+    /// gate (`mana_ability_ready_without_simulation`) rejects it BEFORE the skip
+    /// shortcut and before any legality clone — A(a).
+    #[test]
+    fn cheap_gate_rejects_tapped_tap_mana_source_without_clone() {
+        let mut state = GameState::new_two_player(42);
+        let dork = make_tap_any_color_creature(&mut state, 9300, PlayerId(0), false);
+        state.objects.get_mut(&dork).unwrap().tapped = true;
+        let def = state.objects.get(&dork).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), dork, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            !activatable,
+            "a tapped {{T}} mana source can't pay its tap cost (CR 106.12)"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "cheap gate rejects before any legality clone"
+        );
+    }
+
+    /// CR 601.2g: A `Composite{{Tap, Sacrifice}}` mana cost (Treasure) is NOT
+    /// conclusively decided by the cheap gate, so it must still simulate — the
+    /// must-simulate path is preserved (clone >= 1) even though it is activatable.
+    /// A(b). The self-sacrifice is always a legal target, so this does NOT build a
+    /// cost that passes `is_payable` yet fails simulation.
+    #[test]
+    fn composite_tap_sacrifice_still_simulates() {
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9301, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "an untapped Treasure with a legal self-sacrifice is activatable"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "a Composite with a Sacrifice component must still simulate (CR 601.2g)"
+        );
+    }
+
+    /// CR 605.3a + CR 106.12: A ready plain `{T}: Add` source is activatable and
+    /// its `{T}`-only cost is conclusively payable by the cheap gate, so NO
+    /// legality clone is taken — B (revert-failing: pre-fix takes one clone here).
+    #[test]
+    fn plain_tap_mana_source_skips_legality_clone() {
+        let mut state = GameState::new_two_player(42);
+        let dork = make_tap_any_color_creature(&mut state, 9302, PlayerId(0), false);
+        let def = state.objects.get(&dork).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), dork, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(activatable, "a ready {{T}}: Add source is activatable");
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a {{T}}-only mana cost is conclusively payable by the cheap gate — no clone"
+        );
+    }
+
+    /// CR 601.2g: A filter land's `Composite{{Mana, Tap}}` cost still simulates —
+    /// the cheap-gate skip must not apply to mana sub-costs. Affordable pool keeps
+    /// it activatable (behavior preserved). C — behavior-preservation only, so we
+    /// do NOT assert a zero clone count.
+    #[test]
+    fn filter_land_composite_still_activatable_via_simulation() {
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), ruins, 0, &ability);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "an affordable filter land remains activatable (behavior preserved)"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "a Composite{{Mana, Tap}} cost must still simulate (CR 601.2g)"
+        );
+    }
+
+    /// CR 605.3a: The board-wide mana-display sweep over N untapped `{T}: Add`
+    /// sources takes ZERO legality clones — the headline regression. Pre-fix every
+    /// source cloned + simulated (N clones, the Cryptolith-Rite clone-storm). D.
+    #[test]
+    fn mana_display_sweep_is_clone_free_for_tap_only_sources() {
+        const N: usize = 8;
+        let mut state = GameState::new_two_player(42);
+        for i in 0..N {
+            make_tap_any_color_creature(&mut state, 9400 + i as u64, PlayerId(0), false);
+        }
+        assert_eq!(
+            state.battlefield.len(),
+            N,
+            "board has exactly N {{T}}: Add sources"
+        );
+
+        crate::game::public_state::mark_mana_display_dirty(&mut state);
+        crate::game::perf_counters::reset();
+        crate::game::derived::derive_display_state(&mut state);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            snap.mana_display_sweeps, 1,
+            "exactly one board-wide mana sweep"
+        );
+        assert_eq!(
+            snap.mana_display_swept_objects, N as u64,
+            "the sweep visited all N battlefield objects"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "no per-source legality clone for {{T}}-only sources (revert-failing: pre-fix = N clones)"
+        );
+    }
+
+    /// Direct classifier unit tests for `AbilityCost::all_components_cheap_gate_covered`
+    /// and the `cost_conclusively_payable_by_cheap_gate` wrapper anchor guard.
+    #[test]
+    fn cheap_gate_cost_classification_units() {
+        assert!(AbilityCost::Tap.all_components_cheap_gate_covered());
+        assert!(AbilityCost::Untap.all_components_cheap_gate_covered());
+        assert!(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Untap]
+        }
+        .all_components_cheap_gate_covered());
+        assert!(!AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1)
+                }
+            ]
+        }
+        .all_components_cheap_gate_covered());
+        assert!(!AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }
+        .all_components_cheap_gate_covered());
+        // Empty composite is vacuously all()-true at the classifier level...
+        assert!(AbilityCost::Composite { costs: vec![] }.all_components_cheap_gate_covered());
+
+        // ...but the wrapper's {T}/{Q} anchor guards the degenerate empty
+        // Composite, and a None cost is conclusively payable (no cost to pay).
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(&None));
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &Some(AbilityCost::Composite { costs: vec![] })
+        ));
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &Some(AbilityCost::Tap)
+        ));
+    }
+
+    /// Hostile classifier coverage: costs whose every component is NOT a
+    /// tap/untap symbol must NOT be skipped (the wrapper returns false, so the
+    /// caller falls through to full simulation). Mill needs a populated library
+    /// and EffectCost an arbitrary effect, so these are asserted at the
+    /// classifier/wrapper level rather than as full runtime cards; the runtime
+    /// "falls through to simulate" path itself is exercised by
+    /// `composite_tap_sacrifice_still_simulates` (A(b)) and
+    /// `filter_land_composite_still_activatable_via_simulation` (C).
+    #[test]
+    fn cheap_gate_hostile_costs_must_simulate() {
+        let tap_mill = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &tap_mill
+        ));
+
+        let effect_cost = Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }),
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &effect_cost
+        ));
+
+        // Bare Mana-only cost (no {T}) — the wrapper's anchor requires a {T}/{Q}
+        // component, so a mana-only cost is never skipped.
+        let mana_only = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &mana_only
+        ));
+
+        // None cost is conclusively payable (covered above too) — sanity anchor.
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(&None));
     }
 
     /// CR 302.6 / CR 702.10: A summoning-sick creature's `{T}` mana ability is not a
