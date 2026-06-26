@@ -32,6 +32,9 @@ export function ManaSymbol({
     <img
       src={`${SCRYFALL_SVG_BASE}/${code}.svg`}
       alt={shard}
+      // Load via CORS (svgs.scryfall.io returns ACAO:*) so symbols survive a future
+      // COEP: require-corp cross-origin-isolation switch on the app host.
+      crossOrigin="anonymous"
       className={`inline-block ${SIZE_CLASSES[size]} ${className}`}
       draggable={false}
     />
