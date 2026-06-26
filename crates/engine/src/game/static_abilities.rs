@@ -662,6 +662,10 @@ pub fn check_static_ability(
     mode: StaticMode,
     context: &StaticCheckContext,
 ) -> bool {
+    // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
+    // loops hoist an existence gate in front of (see
+    // `functioning_abilities::any_functioning_static_mode`).
+    crate::game::perf_counters::record_static_full_scan();
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.

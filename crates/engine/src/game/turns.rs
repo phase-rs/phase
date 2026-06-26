@@ -831,6 +831,14 @@ pub fn execute_untap_with_choices(
     // SpecificObject transients; this loop covers the printed-static and
     // filter-scoped-transient classes so the actual untap agrees with the
     // cap-prompt group built by `untap_excluded_ids`.
+    // CR 502.3 + CR 604.1: hoist the CantUntap existence gate once before the
+    // per-permanent scan so the O(N) `check_static_ability` re-scan is skipped
+    // for every permanent when no functioning CantUntap static exists
+    // (O(N^2) -> O(N) on the every-turn untap step).
+    let has_cant_untap_static =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CantUntap)
+        });
     let intrinsic_cant_untap: HashSet<ObjectId> = state
         .battlefield
         .iter()
@@ -840,18 +848,20 @@ pub fn execute_untap_with_choices(
                 .objects
                 .get(id)
                 .is_some_and(|obj| obj.controller == active)
-                && (super::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantUntap,
-                    &super::static_abilities::StaticCheckContext {
-                        target_id: Some(*id),
-                        ..Default::default()
-                    },
-                ) || super::static_abilities::transient_grants_static_mode_to_object(
-                    state,
-                    *id,
-                    &StaticMode::CantUntap,
-                ))
+                && ((has_cant_untap_static
+                    && super::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantUntap,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    ))
+                    || super::static_abilities::transient_grants_static_mode_to_object(
+                        state,
+                        *id,
+                        &StaticMode::CantUntap,
+                    ))
         })
         .collect();
 
@@ -1047,6 +1057,13 @@ pub fn max_untap_subset_prompt(
     player: PlayerId,
     chosen_not_to_untap: &HashSet<ObjectId>,
 ) -> Option<(Vec<ObjectId>, usize)> {
+    // CR 502.3: with no `MaxUntapPerType` cap in play there is nothing to prompt,
+    // so bail before the O(N) `untap_excluded_ids` CantUntap scan — the common
+    // every-turn case has no cap and would otherwise pay for a scan whose result
+    // is discarded.
+    if max_untap_restrictions(state).is_empty() {
+        return None;
+    }
     let cant_untap = untap_excluded_ids(state, player);
     for (filter, max) in max_untap_restrictions(state) {
         let group =
@@ -1085,6 +1102,12 @@ fn untap_excluded_ids(state: &GameState, player: PlayerId) -> HashSet<ObjectId> 
             }
         })
         .collect();
+    // CR 502.3 + CR 604.1: hoist the CantUntap existence gate once before the
+    // per-permanent scan (O(N^2) -> O(N) when no functioning CantUntap exists).
+    let has_cant_untap_static =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CantUntap)
+        });
     for id in state.battlefield.iter().copied() {
         let Some(obj) = state.objects.get(&id) else {
             continue;
@@ -1094,14 +1117,15 @@ fn untap_excluded_ids(state: &GameState, player: PlayerId) -> HashSet<ObjectId> 
         }
         // CR 502.3 + CR 604.1: permanent-sourced printed/static CantUntap
         // (including attached-subject Aura restrictions).
-        let intrinsic = super::static_abilities::check_static_ability(
-            state,
-            StaticMode::CantUntap,
-            &super::static_abilities::StaticCheckContext {
-                target_id: Some(id),
-                ..Default::default()
-            },
-        );
+        let intrinsic = has_cant_untap_static
+            && super::static_abilities::check_static_ability(
+                state,
+                StaticMode::CantUntap,
+                &super::static_abilities::StaticCheckContext {
+                    target_id: Some(id),
+                    ..Default::default()
+                },
+            );
         // CR 502.3 + CR 611.1: filter-scoped transient CantUntap (a spell/effect
         // installing "creatures don't untap …" by typed/filter target rather
         // than a single SpecificObject). Build for the whole class so any such
@@ -3853,7 +3877,13 @@ mod tests {
         attach_to(&mut state, aura, host);
 
         let mut events = Vec::new();
+        // CR 604.1: a functioning CantUntap static IS present, so the hoisted
+        // existence gate is true and the per-permanent `check_static_ability`
+        // scan MUST still run — proving the gate does not suppress real scans on
+        // the gate=true path.
+        crate::game::perf_counters::reset();
         execute_untap(&mut state, &mut events);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
 
         assert!(
             state.objects[&host].tapped,
@@ -3864,6 +3894,10 @@ mod tests {
                 matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == host)
             }),
             "skipped untap must not emit PermanentUntapped"
+        );
+        assert!(
+            scans > 0,
+            "gate=true path must still run the real per-permanent CantUntap scan"
         );
     }
 
@@ -3901,6 +3935,88 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.tapped = true;
         id
+    }
+
+    /// CR 502.3 + CR 604.1: GAP-1 guard. The every-turn untap of K tapped
+    /// active-player permanents on a restriction-free board must NOT perform any
+    /// whole-battlefield `check_static_ability` scan — the hoisted CantUntap
+    /// existence gate is false, so the per-permanent scan is skipped. Reverting
+    /// the gate restores O(K) scans, failing the `== 0` assertion. Drives the
+    /// production `execute_untap`, not the prompt helper.
+    #[test]
+    fn execute_untap_no_static_scan_on_vanilla_board() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let ids: Vec<ObjectId> = (0..8)
+            .map(|i| create_tapped_creature(&mut state, 100 + i, &format!("Bear {i}")))
+            .collect();
+
+        crate::game::perf_counters::reset();
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        for id in &ids {
+            assert!(!state.objects[id].tapped, "vanilla permanent must untap");
+        }
+        assert_eq!(
+            scans, 0,
+            "no static-ability whole-board scan on a vanilla untap"
+        );
+    }
+
+    /// CR 502.3 + CR 604.1: with a `MaxUntapPerType` cap present but no
+    /// functioning CantUntap static, `max_untap_subset_prompt` reaches
+    /// `untap_excluded_ids`, whose per-permanent CantUntap scan is gated off by
+    /// the hoisted existence flag — so building the over-cap group costs zero
+    /// whole-board scans even though it does NOT bail early.
+    #[test]
+    fn max_untap_subset_prompt_no_cant_untap_scan_with_cap() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let smoke = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Smoke".to_string(),
+            Zone::Battlefield,
+        );
+        install_max_untap_one_creature_static(&mut state, smoke);
+        create_tapped_creature(&mut state, 2, "Bear A");
+        create_tapped_creature(&mut state, 3, "Bear B");
+
+        crate::game::perf_counters::reset();
+        let prompt = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new());
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            prompt.is_some(),
+            "two tapped creatures exceed the cap of one"
+        );
+        assert_eq!(
+            scans, 0,
+            "no CantUntap whole-board scan when no such static exists"
+        );
+    }
+
+    /// CR 502.3: with no `MaxUntapPerType` cap in play, `max_untap_subset_prompt`
+    /// bails before the `untap_excluded_ids` CantUntap scan — proving the
+    /// early-return short-circuit. Reverting the bail makes the scan run over the
+    /// tapped board, raising `static_full_scans` above zero.
+    #[test]
+    fn max_untap_subset_prompt_bails_without_cap_no_scan() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        for i in 0..8 {
+            create_tapped_creature(&mut state, 200 + i, &format!("Bear {i}"));
+        }
+
+        crate::game::perf_counters::reset();
+        let prompt = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new());
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(prompt.is_none(), "no cap means nothing to prompt");
+        assert_eq!(scans, 0, "bail short-circuits before any whole-board scan");
     }
 
     /// CR 502.3: With a Smoke-class cap of one creature and two tapped

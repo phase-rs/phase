@@ -3,6 +3,7 @@ use std::cell::Cell;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
     pub state_clone_for_legality: u64,
+    pub static_full_scans: u64,
     pub layers_full_eval: u64,
     pub layers_incremental: u64,
     pub layers_escalated: u64,
@@ -30,6 +31,7 @@ thread_local! {
     /// `AtomicU64`: that reintroduces the parallel-test flakiness this replaces.
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
         state_clone_for_legality: 0,
+        static_full_scans: 0,
         layers_full_eval: 0,
         layers_incremental: 0,
         layers_escalated: 0,
@@ -54,6 +56,14 @@ fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
 
 pub fn record_state_clone_for_legality() {
     with_mut(|s| s.state_clone_for_legality += 1);
+}
+
+/// Counts every whole-battlefield / command-zone static sweep done for legality
+/// (each `check_static_ability` call). Combat/untap legality loops hoist a
+/// once-computed existence gate to drive this toward zero, collapsing O(N^2)
+/// per-loop scans to O(N).
+pub fn record_static_full_scan() {
+    with_mut(|s| s.static_full_scans += 1);
 }
 
 pub fn record_layers_full_eval() {
