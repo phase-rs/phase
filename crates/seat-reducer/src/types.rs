@@ -1,4 +1,4 @@
-use engine::types::format::FormatConfig;
+use engine::types::format::{FormatConfig, FormatTopology};
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,45 @@ pub enum DeckChoice {
     Random,
     Named(String),
     DeckList(Box<engine::starter_decks::DeckData>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatTeamInfo {
+    pub team_index: u8,
+    pub position_in_team: u8,
+}
+
+pub fn seat_team_info(format: &FormatConfig, seat_index: u8) -> Option<SeatTeamInfo> {
+    match format.topology() {
+        FormatTopology::IndividualSeats => None,
+        FormatTopology::FixedTeams {
+            team_size,
+            team_count,
+            ..
+        } => {
+            let seat_count = team_size * team_count;
+            if seat_index >= seat_count {
+                return None;
+            }
+            Some(SeatTeamInfo {
+                team_index: seat_index / team_size,
+                position_in_team: seat_index % team_size,
+            })
+        }
+    }
+}
+
+pub fn seat_team_info_for_seats(
+    format: &FormatConfig,
+    seat_count: usize,
+) -> Vec<Option<SeatTeamInfo>> {
+    match format.topology() {
+        FormatTopology::IndividualSeats => Vec::new(),
+        FormatTopology::FixedTeams { .. } => (0..seat_count)
+            .map(|seat_index| seat_team_info(format, seat_index as u8))
+            .collect(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +106,7 @@ impl SeatState {
         SeatView {
             seats: self.seats.clone(),
             format: self.format.clone(),
+            team_info: seat_team_info_for_seats(&self.format, self.seats.len()),
             is_full: self.is_full(),
             game_started: self.game_started,
         }
@@ -79,6 +119,8 @@ impl SeatState {
 pub struct SeatView {
     pub seats: Vec<SeatKind>,
     pub format: FormatConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_info: Vec<Option<SeatTeamInfo>>,
     pub is_full: bool,
     /// Binary internal predicate — documented exception to the no-bool-flags rule.
     pub game_started: bool,

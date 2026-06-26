@@ -14,10 +14,16 @@ export type SeatKind =
   | { type: "WaitingHuman" }
   | { type: "Ai"; data: { difficulty: string; deck: DeckChoice } };
 
+export interface SeatTeamInfo {
+  teamIndex: number;
+  positionInTeam: number;
+}
+
 export interface PlayerSlot {
   playerId: number;
   name: string;
   kind: SeatKind;
+  teamInfo?: SeatTeamInfo | null;
   reserved?: boolean;
   reservationExpiresAtMs?: number | null;
 }
@@ -37,6 +43,7 @@ export interface SeatState {
 export interface SeatView {
   seats: SeatKind[];
   format: FormatConfig;
+  teamInfo?: Array<SeatTeamInfo | null>;
   isFull: boolean;
   gameStarted: boolean;
 }

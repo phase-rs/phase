@@ -1404,6 +1404,15 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
     }
 }
 
+/// Project an authoritative seat view from Rust so frontend transports do not
+/// need to understand format topology details.
+#[wasm_bindgen]
+pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
+    let state: SeatState = serde_json::from_str(state_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
+    Ok(to_js(&state.to_view()))
+}
+
 #[cfg(test)]
 mod bracket_estimate_tests {
     use super::*;

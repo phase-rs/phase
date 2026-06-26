@@ -23,6 +23,7 @@ import init, {
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   apply_seat_mutation,
+  project_seat_view,
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
@@ -80,6 +81,7 @@ type EngineRequest =
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
+  | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
   | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest };
 
@@ -367,6 +369,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "applySeatMutation": {
         const delta = apply_seat_mutation(msg.stateJson, msg.mutationJson);
         result(msg.id, delta ?? null);
+        break;
+      }
+
+      case "projectSeatView": {
+        const view = project_seat_view(msg.stateJson);
+        result(msg.id, view ?? null);
         break;
       }
 

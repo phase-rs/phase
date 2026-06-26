@@ -50,7 +50,7 @@ pub struct AiSeatRequest {
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
 pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
 
-pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatView};
+pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
 
 /// Info about a single player slot in a waiting room, sent to all connected players.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +59,8 @@ pub struct PlayerSlotInfo {
     pub player_id: u8,
     pub name: String,
     pub kind: SeatKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_info: Option<SeatTeamInfo>,
     #[serde(default)]
     pub reserved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
