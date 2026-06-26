@@ -26,10 +26,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
     CastFromZoneDriver, CastingPermission, Comparator, ContinuousModification, ControllerRef,
     DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -2659,6 +2659,16 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         // for the dispatcher — ordering invariant, not a defensive escape.
         tag("who doesn't"),
         tag("who does not"),
+        // CR 118.12 + CR 608.2d + CR 109.5: Reserve the positive relative clause
+        // "who does" for the subject-only OPTIONAL-ACCEPT consequence-tail
+        // dispatcher (`strip_each_scope_who_does_subject` in
+        // `parse_effect_clause_inner` — The Second Doctor, City Hall). The
+        // "who doesn't" / "who does not" tags above already reserve the decline
+        // forms; this arm reserves the accept form. Every arm of this `alt`
+        // returns the same `(None, full_text)` reservation, so listing order is
+        // for readability, not correctness — but `who does` is listed AFTER the
+        // longer `who doesn't`/`who does not` tags to mirror the grammar.
+        tag("who does"),
         // CR 119.3 + CR 701.55a: "each opponent who lost N or more life this
         // turn faces a villainous choice" is a restricted chooser phrase, not
         // a normal per-player imperative. Preserve the full subject so the
@@ -2749,6 +2759,46 @@ pub(super) fn strip_each_scope_who_doesnt_subject(text: &str) -> Option<(PlayerF
         ))
         .parse(i)?;
         let (i, _) = alt((tag("doesn't"), tag("does not"))).parse(i)?;
+        let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        Ok((i, scope))
+    })
+    .map(|(scope, rest)| (scope, rest.to_string()))
+}
+
+/// CR 118.12 + CR 608.2d + CR 109.5: Strip a leading "each <scope> who does,
+/// <body>" subject-only OPTIONAL-ACCEPT consequence tail. Returns the player
+/// scope and the body text. The body's recipient must be rebound
+/// Controller/ParentTargetedPlayer → ScopedPlayer by the caller; the body's
+/// condition must be stamped `effect_performed()` (the CR 118.12 "does" accept
+/// branch reading OptionalEffectPerformed); the preceding clause's boundary must
+/// be retargeted Sentence → Then. Caller responsibilities — this combinator only
+/// does subject + scope detection.
+///
+/// POSITIVE/ACCEPT TWIN of `strip_each_scope_who_doesnt_subject` (subject-only +
+/// optional-decline): this fills the subject-only + optional-ACCEPT cell of the
+/// decline matrix (The Second Doctor: "each player may draw a card. Each opponent
+/// who does can't attack you …"; City Hall: "each player may create two tapped
+/// Treasure tokens. Each player who does can't attack you …"; Step Between
+/// Worlds: "Each player may shuffle …. Each player who does draws seven cards.").
+///
+/// SELF-CORRECT against the negative cells: "does" is a strict prefix of
+/// "doesn't"/"does not", so an `not(alt((tag("n't"), tag(" not"))))` word-boundary
+/// guard rejects those forms in isolation — correctness does NOT depend on
+/// dispatch-arm ordering (the `who doesn't` arm running first is defense-in-depth,
+/// not a requirement).
+pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFilter, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        let (i, scope) = alt((
+            value(PlayerFilter::Opponent, tag("each other player who ")),
+            value(PlayerFilter::Opponent, tag("each opponent who ")),
+            value(PlayerFilter::All, tag("each player who ")),
+        ))
+        .parse(i)?;
+        // CR 118.12 accept branch: match "does" only when it is NOT the prefix of
+        // "doesn't" / "does not" (those are the decline cell, owned by
+        // `strip_each_scope_who_doesnt_subject`).
+        let (i, _) = terminated(tag("does"), not(alt((tag("n't"), tag(" not"))))).parse(i)?;
         let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
         Ok((i, scope))
     })
@@ -2890,6 +2940,26 @@ pub(super) fn rebind_subject_only_body_recipient(effect: &mut Effect) {
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
+        // CR 109.5: inside "each <scope> who does, <body>", an AddRestriction
+        // consequence ("can't attack you … during their next turn" — The Second
+        // Doctor, City Hall) affects the SCOPED player. The shared body recognizer
+        // (`try_parse_that_player_cant_attack_prohibition`) emits the parent-target
+        // placeholder; rebind it to `ScopedPlayer` so it resolves to the
+        // per-iteration player, not a (nonexistent) parent target.
+        Effect::AddRestriction {
+            restriction:
+                GameRestriction::ProhibitActivity {
+                    affected_players, ..
+                },
+        } => {
+            if matches!(
+                affected_players,
+                RestrictionPlayerScope::ParentTargetedPlayer
+                    | RestrictionPlayerScope::TargetedPlayer
+            ) {
+                *affected_players = RestrictionPlayerScope::ScopedPlayer;
+            }
+        }
         _ => {}
     }
 }

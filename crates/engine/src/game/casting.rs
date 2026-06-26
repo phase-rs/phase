@@ -380,6 +380,12 @@ fn restriction_scope_matches_player(
             );
             false
         }
+        RestrictionPlayerScope::ScopedPlayer => {
+            // CR 109.5: resolved to `SpecificPlayer` by `add_restriction` when
+            // the restriction is created, so an unresolved scope here is a bug.
+            debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }

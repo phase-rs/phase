@@ -43,13 +43,14 @@ use lower::{
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
     split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
-    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
-    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
-    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_each_scope_who_cant_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_return_destination_ext,
+    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
+    strip_repeat_count_suffix, strip_return_destination_ext,
+    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
+    try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -20053,6 +20054,46 @@ pub(crate) fn parse_effect_chain_ir(
                     }),
                     DeclineDispatch::SubjectOnly,
                 )
+            } else if let Some((scope, body)) = strip_each_scope_who_does_subject(&text) {
+                // CR 118.12 + CR 608.2d + CR 109.5: subject-only OPTIONAL-ACCEPT
+                // consequence tail ("each player may draw a card. Each opponent
+                // who does can't attack you or permanents you control during their
+                // next turn." — The Second Doctor; "each player may create two
+                // tapped Treasure tokens. Each player who does can't attack you …"
+                // — City Hall; "Each player may shuffle …. Each player who does
+                // draws seven cards." — Step Between Worlds). POSITIVE TWIN of the
+                // `who doesn't` arm above: the parent is OPTIONAL ("may"), so the
+                // per-iteration gate is the BARE performed signal `effect_performed()`
+                // (OptionalEffectPerformed) — the inverse of the `who doesn't` arm's
+                // `Not{effect_performed()}`.
+                //
+                // The `ScopedPlayerMatches { filter: scope }` conjunct is the
+                // CROSS-SCOPE fix (The Second Doctor: parent iterates `All`,
+                // consequence filters `Opponent`; without it the controller, who
+                // may also have drawn, would self-restrict — CR 109.5). For
+                // same-scope cards (City Hall, Step Between Worlds: scope = `All`)
+                // the conjunct is trivially true for every iteration and acts as a
+                // no-op, so this is uniformly safe for the whole class — exactly
+                // mirroring the `who can't` arm's cross-scope handling.
+                //
+                // Do NOT stamp `player_scope`: the body inherits the parent's
+                // per-player iteration via `sub_ability` attachment. Retarget the
+                // preceding Sentence boundary → Then so the body lowers as a
+                // within-action ContinuationStep that stays inside the scoped
+                // template (no-op when the boundary is already Then, e.g. Turtles
+                // in Time's "…, then each player who does draws seven cards").
+                if let Some(prev) = clauses.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                let condition = AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::effect_performed(),
+                        AbilityCondition::ScopedPlayerMatches { filter: scope },
+                    ],
+                };
+                (body, Some(condition), DeclineDispatch::SubjectOnly)
             } else {
                 (text, condition, DeclineDispatch::None)
             };
@@ -42521,6 +42562,68 @@ mod tests {
         );
     }
 
+    /// CR 118.12 + CR 608.2d + CR 109.5: `strip_each_scope_who_does_subject`
+    /// covers the full subject-only × scope × positive-"does" matrix (The Second
+    /// Doctor: "each opponent who does can't attack you …"; Step Between Worlds:
+    /// "each player who does draws seven cards").
+    #[test]
+    fn strip_each_scope_who_does_subject_matrix() {
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each opponent who does can't attack you")
+                .expect("each opponent who does");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "can't attack you");
+
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each other player who does, loses 1 life")
+                .expect("each other player who does");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "loses 1 life");
+
+        let (scope, body) =
+            strip_each_scope_who_does_subject("each player who does draws seven cards")
+                .expect("each player who does");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "draws seven cards");
+
+        // Case insensitivity via the nom_on_lower bridge.
+        let (scope, body) =
+            strip_each_scope_who_does_subject("Each Player Who Does draws seven cards")
+                .expect("case insensitivity");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "draws seven cards");
+    }
+
+    /// Self-correctness: `strip_each_scope_who_does_subject` MUST return None for
+    /// the negative cells ("doesn't" / "does not") even in isolation — "does" is a
+    /// strict prefix of those, and the `not(alt((tag("n't"), tag(" not"))))`
+    /// word-boundary guard rejects them WITHOUT relying on dispatch-arm order.
+    /// Parallel to `strip_each_scope_who_cant_subject_rejects_non_matches`.
+    #[test]
+    fn strip_each_scope_who_does_subject_rejects_non_matches() {
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who doesn't loses 1 life").is_none(),
+            "doesn't is the decline arm — the boundary guard must reject it"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who does not draw").is_none(),
+            "does not is the decline arm — the boundary guard must reject it"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("each opponent who can't attack you").is_none(),
+            "can't is the mandatory-impossible arm, not the positive-accept arm"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("target opponent draws a card").is_none(),
+            "target-phrased subject is not a relative-clause consequence tail"
+        );
+        assert!(
+            strip_each_scope_who_does_subject("for each opponent who does, you create a Treasure")
+                .is_none(),
+            "prepositional shape (recipient = controller) is a separate cluster"
+        );
+    }
+
     /// Issue #2423 — Deadly Brew: sacrifice rider + optional graveyard return.
     #[test]
     fn deadly_brew_sacrifice_planeswalker_return_condition() {
@@ -44298,6 +44401,216 @@ mod tests {
                 );
             }
             other => panic!("expected LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 508.1c + CR 109.5: The Second Doctor — subject-only
+    /// OPTIONAL-ACCEPT consequence with a CROSS-SCOPE AddRestriction body.
+    /// "each player may draw a card. Each opponent who does can't attack you or
+    /// permanents you control during their next turn." must lower clause 2 as an
+    /// `And{[effect_performed(), ScopedPlayerMatches{Opponent}]}`-gated
+    /// `ContinuationStep` sub-ability of the optional `Effect::Draw`
+    /// (player_scope: All). The restriction's affected player is rebound
+    /// ParentTargetedPlayer → ScopedPlayer, the defended scope is the
+    /// "you or permanents you control" `PlayerOrPermanents`, and the pre-armed
+    /// `UntilEndOfNextTurnOf` duration survives lowering into the gated sub.
+    #[test]
+    fn second_doctor_subject_only_who_does_lowers_cross_scope_restriction() {
+        use crate::types::ability::SubAbilityLink;
+        use crate::types::triggers::AttackTargetFilter;
+        let def = parse_effect_chain(
+            "each player may draw a card. Each opponent who does can't attack you \
+             or permanents you control during their next turn.",
+            AbilityKind::Spell,
+        );
+        // Root: each player's OPTIONAL draw — player_scope: All.
+        assert!(matches!(*def.effect, Effect::Draw { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional draw iterates per player"
+        );
+        assert!(def.optional, "\"each player may draw a card\" is optional");
+
+        let restriction = def
+            .sub_ability
+            .as_ref()
+            .expect("the optional draw chains to the who-does consequence body");
+        // CROSS-SCOPE gate: accept signal AND scoped player is an Opponent.
+        assert_eq!(
+            restriction.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::Opponent
+                    },
+                ],
+            }),
+            "the body runs only for an OPPONENT who DID draw — controller never self-restricts"
+        );
+        assert_eq!(
+            restriction.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "must be a within-action ContinuationStep, not a SequentialSibling"
+        );
+        assert_eq!(
+            restriction.player_scope, None,
+            "the body inherits player_scope from the parent — it does not set its own"
+        );
+        // The expiry correctness hinges on this duration surviving lowering.
+        assert_eq!(
+            restriction.duration,
+            Some(Duration::UntilEndOfNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller
+            }),
+            "pre-armed end-of-next-turn anchor must survive into the gated sub"
+        );
+        match &*restriction.effect {
+            Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        affected_players,
+                        activity,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    *affected_players,
+                    RestrictionPlayerScope::ScopedPlayer,
+                    "the per-iteration opponent is restricted (rebound ParentTargetedPlayer → ScopedPlayer)"
+                );
+                assert_eq!(
+                    *activity,
+                    ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents
+                    },
+                    "\"you or permanents you control\" defends player + permanents"
+                );
+            }
+            other => panic!("expected AddRestriction, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 508.1c + CR 109.5: City Hall — STRENGTHENING the restriction
+    /// path with a SAME-SCOPE (All), player-only defended scope. Proves the
+    /// building block generalizes across (a) defended scope ("you" → `Player` vs
+    /// The Second Doctor's `PlayerOrPermanents`) and (b) consequence filter (All vs
+    /// Opponent), i.e. "build for the class, not the card".
+    #[test]
+    fn city_hall_subject_only_who_does_lowers_same_scope_restriction() {
+        use crate::types::ability::SubAbilityLink;
+        use crate::types::triggers::AttackTargetFilter;
+        let def = parse_effect_chain(
+            "each player may create two tapped Treasure tokens. Each player who \
+             does can't attack you during their next turn.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional token creation iterates per player"
+        );
+        assert!(def.optional, "\"each player may create\" is optional");
+
+        let restriction = def
+            .sub_ability
+            .as_ref()
+            .expect("the optional token creation chains to the who-does consequence");
+        assert_eq!(
+            restriction.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::All
+                    },
+                ],
+            }),
+            "same-scope: the ScopedPlayerMatches{{All}} conjunct is a trivial no-op"
+        );
+        assert_eq!(restriction.sub_link, SubAbilityLink::ContinuationStep);
+        match &*restriction.effect {
+            Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        affected_players,
+                        activity,
+                        ..
+                    },
+            } => {
+                assert_eq!(*affected_players, RestrictionPlayerScope::ScopedPlayer);
+                assert_eq!(
+                    *activity,
+                    ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::Player
+                    },
+                    "bare \"you\" defends the player only"
+                );
+            }
+            other => panic!("expected AddRestriction, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12 + CR 109.5: Step Between Worlds — generalization across a
+    /// NON-restriction effect. "Each player may shuffle their hand and graveyard
+    /// into their library. Each player who does draws seven cards." must lower
+    /// clause 2 as an `effect_performed()`-gated `Draw` whose recipient is rebound
+    /// Controller → ScopedPlayer, proving the SubjectOnly recipient rebind carries
+    /// the consequence to the scoped player beyond the AddRestriction cards.
+    #[test]
+    fn step_between_worlds_subject_only_who_does_lowers_draw() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "Each player may shuffle their hand and graveyard into their library. \
+             Each player who does draws seven cards.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the optional shuffle iterates per player"
+        );
+        assert!(def.optional, "\"each player may shuffle\" is optional");
+
+        // The compound shuffle parent ("shuffle their hand and graveyard into
+        // their library") lowers into a 3-step chain (ChangeZoneAll Hand→Library,
+        // ChangeZoneAll Graveyard→Library, Shuffle); the who-does Draw consequence
+        // is the leaf sub-ability. Walk to the Draw node.
+        let mut node = def
+            .sub_ability
+            .as_deref()
+            .expect("the optional shuffle chains onward");
+        while !matches!(*node.effect, Effect::Draw { .. }) {
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("the chain reaches the who-does Draw consequence");
+        }
+        let draw = node;
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::effect_performed(),
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::All
+                    },
+                ],
+            }),
+            "the draw runs only for a player who DID shuffle"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
+        match &*draw.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 7 });
+                assert_eq!(
+                    target,
+                    &TargetFilter::ScopedPlayer,
+                    "the shuffling player draws (rebound Controller → ScopedPlayer)"
+                );
+            }
+            other => panic!("expected Draw, got {other:?}"),
         }
     }
 
