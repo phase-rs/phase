@@ -1024,17 +1024,20 @@ fn pay_ability_cost_inner(
 }
 
 /// A minimal board mutation modeled on a throwaway clone by the activation-time
-/// supplemental affordability check (`composite_sacrifice_mana_witness_exists`).
+/// supplemental affordability check (`composite_removal_mana_witness_exists`).
 ///
 /// Each variant names a concrete way the live cost-payment path mutates the
 /// board *before* the residual mana leg is paid, so the affordability oracle can
 /// re-derive remaining-board mana on the post-mutation state instead of the
 /// (over-approximating) intact board.
 enum MutationWitness {
-    /// CR 701.21a: Sacrifice the carried permanent(s) — each is removed from the
-    /// battlefield to its owner's graveyard. The `(ObjectId, PlayerId)` pairs are
-    /// the witness object and its owner.
-    Sacrifice(Vec<(ObjectId, PlayerId)>),
+    /// Remove the carried permanent(s) from the battlefield. Models every
+    /// battlefield-removing non-mana cost leg — CR 701.21a Sacrifice (→ owner's
+    /// graveyard), CR 701.13a Exile (→ exile), or a plain bounce (→ owner's
+    /// hand) — since only the battlefield removal affects the remaining-board
+    /// mana the oracle re-derives; the destination zone is irrelevant. The
+    /// `(ObjectId, PlayerId)` pairs are the witness object and its owner.
+    RemoveFromBattlefield(Vec<(ObjectId, PlayerId)>),
 }
 
 /// Apply a [`MutationWitness`] to a throwaway clone.
@@ -1047,11 +1050,11 @@ enum MutationWitness {
 /// does NOT mark layers dirty, so `layers::mark_layers_full` is mandatory here.
 fn apply_mutation_witness(sim: &mut GameState, witness: &MutationWitness) {
     match witness {
-        MutationWitness::Sacrifice(removals) => {
-            // CR 701.21a: battlefield → graveyard. The graveyard add is
-            // intentionally omitted — the destination zone is irrelevant to the
-            // remaining-board mana the oracle re-derives below; only the
-            // battlefield removal matters.
+        MutationWitness::RemoveFromBattlefield(removals) => {
+            // CR 701.21a / CR 701.13a / plain bounce: remove from the
+            // battlefield. The destination-zone add is intentionally omitted —
+            // the destination is irrelevant to the remaining-board mana the
+            // oracle re-derives below; only the battlefield removal matters.
             for &(id, owner) in removals {
                 super::zones::remove_from_zone(sim, id, Zone::Battlefield, owner);
             }
@@ -1064,11 +1067,13 @@ fn apply_mutation_witness(sim: &mut GameState, witness: &MutationWitness) {
 }
 
 /// Enumerate the single-witness mutation set for the supplemental affordability
-/// check. Gated on a non-self single-permanent sacrifice leg
-/// (`find_non_self_sacrifice_cost`): for `count == 1`, emit one singleton
-/// `Sacrifice` witness per eligible permanent (the existential candidates).
+/// check. Gated on a non-self single-permanent battlefield-removing leg
+/// (`find_non_self_battlefield_removal_cost` — Sacrifice / Exile-from-bf /
+/// ReturnToHand-from-bf): for `count == 1`, emit one singleton
+/// `RemoveFromBattlefield` witness per eligible permanent (the existential
+/// candidates).
 ///
-/// For `count > 1` (or no non-self sacrifice leg) this returns an empty `Vec` —
+/// For `count > 1` (or no non-self removal leg) this returns an empty `Vec` —
 /// the caller MUST treat an empty set as "out of scope, do not reject" rather
 /// than feeding it into `.any()` (which would wrongly yield `false`). See the
 /// wiring in [`can_pay`].
@@ -1078,31 +1083,59 @@ fn mutation_witness_set(
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> Vec<MutationWitness> {
-    let Some((count, filter)) = super::casting::find_non_self_sacrifice_cost(cost) else {
+    use super::casting::RemovalKind;
+    let Some((count, filter, kind)) = super::casting::find_non_self_battlefield_removal_cost(cost)
+    else {
         return Vec::new();
     };
     if count != 1 {
+        // count > 1 deferred (AMENDMENT 1).
         return Vec::new();
     }
-    super::casting::find_eligible_sacrifice_targets(state, payer, source_id, filter)
-        .into_iter()
+    // Exhaustive match (no wildcard): a future removal kind must force a
+    // deliberate arm here.
+    let ids = match kind {
+        RemovalKind::Sacrifice => {
+            super::casting::find_eligible_sacrifice_targets(state, payer, source_id, filter)
+        }
+        RemovalKind::ReturnToHand => super::casting::find_eligible_return_to_hand_targets(
+            state,
+            payer,
+            source_id,
+            Some(filter),
+        ),
+        // For `Zone::Battlefield` the `count` arg to `eligible_exile_cost_objects`
+        // is ignored (only the Library arm uses `take(count)`), so this
+        // enumerates ALL eligible battlefield objects; passing `1` does not cap
+        // the existential search.
+        RemovalKind::Exile => super::cost_payability::eligible_exile_cost_objects(
+            state,
+            payer,
+            source_id,
+            Zone::Battlefield,
+            Some(filter),
+            1,
+        ),
+    };
+    ids.into_iter()
         .filter_map(|id| {
             state
                 .objects
                 .get(&id)
-                .map(|obj| MutationWitness::Sacrifice(vec![(id, obj.owner)]))
+                .map(|obj| MutationWitness::RemoveFromBattlefield(vec![(id, obj.owner)]))
         })
         .collect()
 }
 
 /// CR 601.2h: single-witness monotonic existential affordability check for the
-/// "conditional static mana leg + non-self single-sacrifice" composite shape.
+/// "conditional static mana leg + non-self single battlefield-removal" composite
+/// shape (Sacrifice / Exile-from-bf / ReturnToHand-from-bf).
 ///
-/// The composite is genuinely payable iff THERE EXISTS one eligible sacrifice
-/// whose removal (applied on a throwaway clone) leaves the static mana leg
-/// payable. First-success early-return: `.any()` stops at the first witness that
-/// keeps the mana payable.
-fn composite_sacrifice_mana_witness_exists(
+/// The composite is genuinely payable iff THERE EXISTS one eligible removal
+/// whose application (on a throwaway clone) leaves the static mana leg payable.
+/// First-success early-return: `.any()` stops at the first witness that keeps
+/// the mana payable.
+fn composite_removal_mana_witness_exists(
     state: &GameState,
     payer: PlayerId,
     source_id: ObjectId,
@@ -1186,26 +1219,30 @@ pub(crate) fn can_pay(
             }
             // CR 601.2f / CR 602.2b: an activated ability's activation cost is the
             // analog of a spell's mana cost, so the CR 601.2h ordering applies.
-            // CR 601.2h: the live path pays the sacrifice FIRST and the mana
-            // LAST. The dry-run above pays mana first (board intact) and no-ops a
-            // non-self sacrifice, so it over-approves a "{N}, Sacrifice a
-            // permanent" cost whose only {N} source is gated on the sacrificed
-            // board (Mox Opal Metalcraft / affinity-style reductions). CR 118.3:
-            // supplement the dry run with a single-witness monotonic existence
-            // check for that exact shape — does ANY eligible sacrifice leave the
-            // mana leg payable on the post-sacrifice board?
-            if let (Some(mana), Some((count, _))) = (
+            // CR 601.2h: the live path pays the non-mana leg FIRST and mana LAST;
+            // the dry-run above no-ops the leg, over-approving whenever the leg
+            // shrinks board mana (Metalcraft/affinity/devotion). Supplement with
+            // a single-witness existence check across Sacrifice / Exile-from-bf /
+            // ReturnToHand-from-bf.
+            //
+            // SINGLE-LEG LIMIT: find_non_self_battlefield_removal_cost returns at
+            // most ONE removal leg. A Composite carrying TWO removal legs
+            // (Sacrifice + Exile) is modeled as removing only one — fewer
+            // removals over-approximate remaining mana, so this can only
+            // false-APPROVE (preserves the no-new-dead-end direction). The
+            // shipped Sacrifice version had the same single-leg limit.
+            if let (Some(mana), Some((count, _, _))) = (
                 super::casting::composite_mana_leg(cost),
-                super::casting::find_non_self_sacrifice_cost(cost),
+                super::casting::find_non_self_battlefield_removal_cost(cost),
             ) {
                 if count == 1 {
-                    return composite_sacrifice_mana_witness_exists(
+                    return composite_removal_mana_witness_exists(
                         state, payer, source_id, cost, mana,
                     );
                 }
                 // AMENDMENT 1: count > 1 is OUT OF SCOPE — fall through to the
                 // unchanged `true` below (preserves today's over-approximation;
-                // a count >= 2 conditional-mana-base sacrifice is a vanishingly
+                // a count >= 2 conditional-mana-base removal is a vanishingly
                 // rare tracked follow-up). MUST NOT reject count > 1 here.
             }
             true
@@ -1908,7 +1945,7 @@ mod tests {
     /// path. Three CONSTANT clones, none scaling with the eligible-set size K:
     ///   1. the existing `can_pay` dry-run clone;
     ///   2. the first (and, via first-success early-return, ONLY) witness clone in
-    ///      `composite_sacrifice_mana_witness_exists`;
+    ///      `composite_removal_mana_witness_exists`;
     ///   3. one mana-ability simulation clone
     ///      (`can_activate_mana_ability_by_simulation`) when that single witness's
     ///      `can_pay_effect_mana_cost_after_auto_tap` evaluates the Mox's tap mana
@@ -2211,6 +2248,141 @@ mod tests {
         assert!(
             !can_pay_activation(&scenario.state, claws, &claws_cost()),
             "sacrifice drops to 2 artifacts → layer reflush removes granted {{1}} → unpayable"
+        );
+    }
+
+    /// BLOCKER-1 regression (CR 117.1 + CR 701.13a): a `Composite[{N}, Exile a
+    /// CARD]` whose exile leg has `zone: None` and a NON-permanent filter must
+    /// classify to `Zone::Hand`, so the battlefield-removal walker returns
+    /// `None` and the supplemental witness block is SKIPPED — the composite keeps
+    /// the unchanged dry-run verdict (payable) and is NOT falsely rejected. If
+    /// `find_battlefield_exile_cost` wrongly routed a hand-exile here, the
+    /// witness set (battlefield objects matching the card filter, excluding the
+    /// source) would be empty and `can_pay` would flip to `false`.
+    #[test]
+    fn hand_exile_composite_not_routed_to_battlefield_removal() {
+        use crate::types::ability::TypeFilter;
+        let card_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Card));
+        // Classifier: a `zone: None` + non-permanent (Card) filter is Hand, not
+        // Battlefield — the exact false-reject guard documented at the walker.
+        assert_eq!(
+            crate::game::cost_payability::exile_cost_effective_zone(None, Some(&card_filter)),
+            Zone::Hand,
+            "zone:None + Card filter must classify to Hand"
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::NoCost,
+                },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
+                    filter: Some(card_filter),
+                },
+            ],
+        };
+        // The battlefield-removal walker must NOT match a hand-exile leg.
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "hand-exile leg must not be treated as a battlefield removal"
+        );
+        // can_pay keeps the dry-run verdict: NoCost mana + no-op activation-scope
+        // exile → payable, and the skipped witness block must not reject it.
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Jhoira", 0, 1).id();
+        scenario.add_card_to_hand(P0, "Some Card");
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// Row 4 (count > 1 exile fall-through, AMENDMENT 1): a
+    /// `Composite[{1}, Exile TWO artifacts from the battlefield]` on a board where
+    /// the only `{1}` source is Metalcraft-gated must NOT be rejected — count > 1
+    /// is out of scope and falls through to the unchanged `true`. Mirrors the
+    /// count==2 sacrifice guard (`claws_sacrifice_two_count_gt_one_not_rejected`).
+    #[test]
+    fn exile_two_count_gt_one_not_rejected() {
+        use crate::types::ability::TypeFilter;
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let src = plain_artifact(&mut scenario, "Exiler");
+        let cost_two = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Exile {
+                    count: 2,
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+                },
+            ],
+        };
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost_two),
+            "count > 1 exile composite falls through to today's over-approximation (true)"
+        );
+    }
+
+    /// Row 5 (Discard excluded): a `Composite[{1}, Discard a card]` is NOT a
+    /// battlefield removal — discard shrinks the hand, never the board, so it can
+    /// never change board-derived mana. The walker must return `None` (proven
+    /// no-op, deliberately out of scope).
+    #[test]
+    fn discard_leg_is_not_battlefield_removal() {
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "Discard must not be treated as a battlefield removal"
+        );
+    }
+
+    /// Row 6 (self-ref excluded): a self-referential Exile or Sacrifice leg
+    /// (Scavenge/Suspend-style self-exile, "Sacrifice this") is the source's own
+    /// removal, not a board-shrinking non-mana leg in the CR 601.2h ordering
+    /// sense — the walker must return `None` for both. The SelfRef-first arm in
+    /// `find_battlefield_exile_cost` exists precisely because a SelfRef filter can
+    /// be permanent-implying and would otherwise pass the battlefield gate.
+    #[test]
+    fn self_ref_removal_legs_are_out_of_scope() {
+        let self_exile = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_exile).is_none(),
+            "self-exile leg must not be treated as a battlefield removal"
+        );
+        let self_sacrifice = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_sacrifice).is_none(),
+            "self-sacrifice leg must not be treated as a battlefield removal"
+        );
+        let self_return = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_return).is_none(),
+            "self-bounce leg must not be treated as a battlefield removal"
         );
     }
 

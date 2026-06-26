@@ -7328,6 +7328,9 @@ pub enum RevealUntilDisposition {
     /// revealed card goes to `rest_destination` (CR 401.4 random bottom when
     /// `rest_destination == Library`).
     ChooseAnyNumber,
+    /// CR 701.20b: Reveal without changing zones — cards stay in the library
+    /// for a downstream per-color exile (Sanar's Vivid).
+    RevealOnly,
 }
 
 impl RevealUntilDisposition {

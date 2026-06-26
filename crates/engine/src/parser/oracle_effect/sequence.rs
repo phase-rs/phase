@@ -355,6 +355,32 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
     }
 }
 
+/// CR 701.20b + CR 608.2c: When a `RevealUntil` chains into library-scoped
+/// `ForEachCategoryExile` (Sanar's Vivid), the reveal step must not route hits
+/// to hand — the per-color exile reads from among cards still in the library.
+pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        patch_reveal_until_for_library_category_exile(sub);
+        if let (
+            Effect::RevealUntil {
+                matched_disposition,
+                kept_destination,
+                rest_destination,
+                ..
+            },
+            Effect::ForEachCategoryExile {
+                zone: Zone::Library,
+                ..
+            },
+        ) = (&mut *def.effect, &*sub.effect)
+        {
+            *matched_disposition = RevealUntilDisposition::RevealOnly;
+            *kept_destination = Zone::Library;
+            *rest_destination = Zone::Library;
+        }
+    }
+}
+
 fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     let mut cursor = ability;
     while let Some(sub) = cursor.sub_ability.as_deref() {

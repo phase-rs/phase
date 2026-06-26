@@ -18106,6 +18106,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
+    sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
     def
 }
@@ -18135,6 +18136,7 @@ pub(crate) fn parse_effect_chain_with_context(
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
+    sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
     def
 }
@@ -23216,11 +23218,11 @@ mod tests {
         AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
         Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-        DoublePTMode, Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution,
-        ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-        PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter,
-        ZoneRef,
+        DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition, LinkedExileScope,
+        ManaContribution, ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee,
+        PlayerFilter, PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+        QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -48938,6 +48940,49 @@ mod tests {
         assert!(
             matches!(&type_filters[..], [TypeFilter::Non(inner)] if matches!(**inner, TypeFilter::Land)),
             "filter must be nonland, got {type_filters:?}"
+        );
+    }
+
+    /// CR 701.20b + CR 608.2c: Sanar's full Vivid tail — reveal-until must keep
+    /// the pile in the library for the per-color exile loop.
+    #[test]
+    fn sanar_vivid_reveal_until_keeps_library_pile_for_per_color_exile() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal X nonland cards, \
+             where X is the number of colors among permanents you control. \
+             For each of those colors, you may exile a card of that color from among the revealed cards. \
+             Then shuffle. You may cast the exiled cards this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    matched_disposition: RevealUntilDisposition::RevealOnly,
+                    kept_destination: Zone::Library,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "Sanar reveal-until must stay reveal-only in the library, got {:?}",
+            def.effect
+        );
+        let exile = def
+            .sub_ability
+            .as_ref()
+            .expect("Sanar must chain into per-color exile");
+        assert!(
+            matches!(
+                exile.effect.as_ref(),
+                Effect::ForEachCategoryExile {
+                    category: IterationCategory::Color,
+                    zone: Zone::Library,
+                    up_to: true,
+                    ..
+                }
+            ),
+            "expected ForEachCategoryExile, got {:?}",
+            exile.effect
         );
     }
 

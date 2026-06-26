@@ -115,6 +115,9 @@ export function CardImage({
       <img
         src={renderedSrc}
         alt={renderedAlt}
+        // Load via CORS (Scryfall returns ACAO:*) so card art survives a future
+        // COEP: require-corp cross-origin-isolation switch on the app host.
+        crossOrigin="anonymous"
         draggable={false}
         onError={() => setImageError(true)}
         className={`${baseClasses} shadow-lg object-cover`}

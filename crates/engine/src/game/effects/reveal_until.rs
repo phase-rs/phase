@@ -153,6 +153,16 @@ pub fn resolve(
     // Store revealed IDs for downstream reference.
     state.last_revealed_ids = all_revealed;
 
+    // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
+    // Vivid draws nothing to hand before per-color exile from the library).
+    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — when
     // the kept destination is a controller choice and a hit was found, pause for
     // `WaitingFor::RevealUntilKeptChoice`. The choice handler routes the hit card,

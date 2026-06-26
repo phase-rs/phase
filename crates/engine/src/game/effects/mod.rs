@@ -12,9 +12,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
     EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetRef, ThisWayCause,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -3423,6 +3423,19 @@ fn affected_objects_from_events(
         // card ids for downstream "from among the revealed cards"
         // `ChooseFromZone` continuations (Atraxa, Grand Unifier class).
         Effect::RevealTop { .. } | Effect::RevealHand { .. } | Effect::Clash => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
+                _ => None,
+            })
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
+        // CR 701.20b: reveal-only RevealUntil (Sanar) publishes the full revealed
+        // pile from `CardsRevealed` — no zone changes occurred.
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),

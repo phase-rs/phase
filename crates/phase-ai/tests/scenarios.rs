@@ -698,3 +698,295 @@ fn scenario_claws_of_gix_no_witness_board_never_proposes_activation() {
         "no-witness board must not dead-end the AI loop"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Battlefield-removal generalization of the Claws-of-Gix witness (CR 601.2h):
+// the same dead-end (the non-mana leg is paid FIRST and shrinks board mana) now
+// also covers Exile-from-battlefield (CR 701.13a, Curie) and ReturnToHand-from-
+// battlefield (plain bounce, Master Transmuter). Each removes a permanent the
+// only {U} source depends on, so over-approving `can_pay` would surface an
+// unactivatable ability and dead-end the AI loop.
+// ---------------------------------------------------------------------------
+
+/// `{T}: Add {U}` mana ability. When `metalcraft` is set the ability is gated by
+/// a live-eval "control 3+ artifacts" `ActivationRestriction::RequiresCondition`
+/// (the Mox-Opal model); otherwise it is unconditional.
+fn blue_mox_def(metalcraft: bool) -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
+        ControllerRef, ParsedCondition, QuantityRef, TypeFilter, TypedFilter,
+    };
+    use engine::types::mana::ManaColor;
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: engine::types::ManaProduction::Fixed {
+                colors: vec![ManaColor::Blue],
+                contribution: engine::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap);
+    if metalcraft {
+        def.activation_restrictions
+            .push(ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Artifact)
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+            });
+    }
+    def
+}
+
+/// Curie-style activated ability: `{1}{U}, Exile another nontoken artifact you
+/// control: gain 1 life` (effect stubbed to GainLife). The exile leg has
+/// `zone: None` + an artifact (permanent-implying) filter, so the live zone
+/// classifier resolves it to the battlefield (CR 701.13a). The building block
+/// under test is "exile-from-battlefield as a cost shrinks board mana"; the
+/// scenario fixtures are pure artifacts (the builder's `as_artifact` drops the
+/// creature type), so the filter matches "another nontoken artifact" rather than
+/// Curie's printed "artifact creature" — the witness mechanic is identical.
+fn curie_def() -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, FilterProp, TypeFilter,
+        TypedFilter,
+    };
+    use engine::types::mana::{ManaCost, ManaCostShard};
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 1,
+                },
+            },
+            AbilityCost::Exile {
+                count: 1,
+                zone: None,
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another, FilterProp::NonToken]),
+                )),
+            },
+        ],
+    })
+}
+
+/// Master Transmuter's activated ability: `{U}, {T}, Return an artifact you
+/// control to its owner's hand: gain 1 life` (effect stubbed to GainLife). The
+/// return leg has `from_zone: None` (battlefield bounce, CR 118.3).
+fn master_transmuter_def() -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, TypeFilter, TypedFilter,
+    };
+    use engine::types::mana::{ManaCost, ManaCostShard};
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Tap,
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                )),
+                from_zone: None,
+            },
+        ],
+    })
+}
+
+/// Set the runner into a P0-priority main-phase decision point (mirrors the
+/// Claws scenarios).
+fn put_p0_on_priority(runner: &mut engine::game::scenario::GameRunner) {
+    let state = runner.state_mut();
+    state.phase = Phase::PreCombatMain;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+}
+
+/// Whether `legal_actions` surfaces an `ActivateAbility` whose source is `id`.
+fn activation_legal_for(state: &engine::types::game_state::GameState, id: ObjectId) -> bool {
+    use engine::types::actions::GameAction;
+    engine::ai_support::legal_actions(state)
+        .iter()
+        .any(|a| matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == id))
+}
+
+/// Curie EXILE dead-end (CR 601.2h / CR 701.13a): exactly 3 artifacts
+/// (Metalcraft blue Mox = sole {U} source, Curie, and the lone exile target) +
+/// a Forest for the generic {1}. Exiling the only legal target drops the
+/// artifact count to 2 → Metalcraft off → no {U} → the `{1}{U}` leg is unpayable
+/// on the post-exile board. REVERT-FAILING: with the Sacrifice-only walker the
+/// exile leg is invisible to the supplemental check, `can_pay` over-approves on
+/// the intact 3-artifact board, and `legal_actions` surfaces the dead-end Curie
+/// activation. The non-vacuity control is `scenario_curie_exile_witness_*`,
+/// where a 4th artifact keeps Metalcraft live and the activation IS legal —
+/// proving the `{1}{U}` leg is payable on the intact board.
+#[test]
+fn scenario_curie_exile_no_witness_board_is_illegal() {
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(blue_mox_def(true));
+    }
+    // The lone exile target: another nontoken artifact.
+    {
+        let mut tgt = scenario.add_creature(P0, "Artifact Servo", 1, 1);
+        tgt.as_artifact();
+    }
+    // A Forest pays the generic {1}; it is NOT a {U} source.
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    let curie = {
+        let mut curie = scenario.add_creature(P0, "Curie", 2, 2);
+        curie.as_artifact();
+        curie.with_ability_definition(curie_def());
+        curie.id()
+    };
+
+    let mut runner = scenario.build();
+    put_p0_on_priority(&mut runner);
+
+    assert!(
+        !activation_legal_for(runner.state(), curie),
+        "every exile drops below Metalcraft → {{1}}{{U}} unpayable → activation must be illegal"
+    );
+}
+
+/// Curie EXILE witness control (non-vacuity): same board as the dead-end test
+/// plus a 4th artifact, so exiling the target leaves 3 artifacts → Metalcraft
+/// stays live → the Mox keeps making {U} → a witness exists → the activation is
+/// legal. This proves the `{1}{U}` leg is payable on the intact board, so the
+/// dead-end test's illegality is the removal-shrink discriminator, not a vacuous
+/// unpayable cost.
+#[test]
+fn scenario_curie_exile_witness_board_is_legal() {
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(blue_mox_def(true));
+    }
+    {
+        let mut tgt = scenario.add_creature(P0, "Artifact Servo", 1, 1);
+        tgt.as_artifact();
+    }
+    // A 4th artifact keeps Metalcraft live after any single exile.
+    {
+        let mut filler = scenario.add_creature(P0, "Artifact Filler", 0, 1);
+        filler.as_artifact();
+    }
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    let curie = {
+        let mut curie = scenario.add_creature(P0, "Curie", 2, 2);
+        curie.as_artifact();
+        curie.with_ability_definition(curie_def());
+        curie.id()
+    };
+
+    let mut runner = scenario.build();
+    put_p0_on_priority(&mut runner);
+
+    assert!(
+        activation_legal_for(runner.state(), curie),
+        "exiling the target leaves 3 artifacts → Metalcraft holds → activation must be legal"
+    );
+}
+
+/// Master Transmuter RETURN dead-end (CR 601.2h / CR 118.3): the sole artifact
+/// the player controls is the sole {U} source (an unconditional blue Mox), and
+/// it is therefore the only legal "return an artifact you control" target. The
+/// Transmuter source is a NON-artifact creature, so it is not itself a return
+/// target. Returning the Mox is the only witness, and it removes the {U}, so the
+/// `{U}` leg is unpayable on the post-return board. REVERT-FAILING: the
+/// Sacrifice-only walker never recognized a ReturnToHand leg, so `can_pay`
+/// over-approves and `legal_actions` surfaces the dead-end activation. The
+/// non-vacuity control is `scenario_master_transmuter_witness_board_is_legal`.
+#[test]
+fn scenario_master_transmuter_return_no_witness_board_is_illegal() {
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(blue_mox_def(false));
+    }
+    // Non-artifact source carrying the ability → not a return target itself.
+    let transmuter = {
+        let mut t = scenario.add_creature(P0, "Master Transmuter", 1, 1);
+        t.with_ability_definition(master_transmuter_def());
+        t.id()
+    };
+
+    let mut runner = scenario.build();
+    put_p0_on_priority(&mut runner);
+
+    assert!(
+        !activation_legal_for(runner.state(), transmuter),
+        "returning the sole {{U}} source leaves {{U}} unpayable → activation must be illegal"
+    );
+}
+
+/// Master Transmuter RETURN witness control (non-vacuity): same board plus a
+/// basic Island (an unconditional {U} source that is NOT an artifact, so it is
+/// not a return target). Returning the Mox still leaves the Island's {U}, so a
+/// witness exists and the activation is legal — proving the `{U}` leg is payable
+/// on the intact board and the dead-end test's illegality is the removal-shrink
+/// discriminator.
+#[test]
+fn scenario_master_transmuter_witness_board_is_legal() {
+    let mut scenario = GameScenario::new();
+    {
+        let mut mox = scenario.add_creature(P0, "Blue Mox", 0, 0);
+        mox.as_artifact();
+        mox.with_ability_definition(blue_mox_def(false));
+    }
+    // A second, non-artifact {U} source that survives returning the Mox.
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    let transmuter = {
+        let mut t = scenario.add_creature(P0, "Master Transmuter", 1, 1);
+        t.with_ability_definition(master_transmuter_def());
+        t.id()
+    };
+
+    let mut runner = scenario.build();
+    put_p0_on_priority(&mut runner);
+
+    assert!(
+        activation_legal_for(runner.state(), transmuter),
+        "the Island keeps {{U}} available after the return → activation must be legal"
+    );
+}
