@@ -31,6 +31,15 @@ fn static_granted_keyword() {
 }
 
 #[test]
+fn static_extra_blockers_group_grant() {
+    let def = parse_static_line(
+        "Each creature you control can block an additional creature each combat.",
+    )
+    .unwrap();
+    insta::assert_json_snapshot!("static_extra_blockers_group_grant", &def);
+}
+
+#[test]
 fn static_tiered_enters_with_additional_counters() {
     let defs = parse_static_line_multi(
         "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.",

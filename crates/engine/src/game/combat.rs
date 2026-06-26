@@ -6275,6 +6275,110 @@ mod tests {
     }
 
     #[test]
+    fn brave_the_sands_extra_blockers_grant_tracks_controller() {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_static::parse_static_line_multi;
+
+        let mut state = setup();
+        let brave_card_id = CardId(state.next_object_id);
+        let brave = create_object(
+            &mut state,
+            brave_card_id,
+            PlayerId(1),
+            "Brave the Sands".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        for def in parse_static_line_multi(
+            "Each creature you control can block an additional creature each combat.",
+        ) {
+            let obj = state.objects.get_mut(&brave).unwrap();
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        let p0_attacker1 = create_creature(&mut state, PlayerId(0), "P0 Bear A", 2, 2);
+        let p0_attacker2 = create_creature(&mut state, PlayerId(0), "P0 Bear B", 2, 2);
+        let p1_attacker1 = create_creature(&mut state, PlayerId(1), "P1 Bear A", 2, 2);
+        let p1_attacker2 = create_creature(&mut state, PlayerId(1), "P1 Bear B", 2, 2);
+        let p1_blocker = create_creature(&mut state, PlayerId(1), "P1 Guard", 1, 4);
+        let p0_blocker = create_creature(&mut state, PlayerId(0), "P0 Guard", 1, 4);
+
+        evaluate_layers(&mut state);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(p0_attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(p0_attacker2, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        assert!(
+            validate_blockers(
+                &state,
+                &[(p1_blocker, p0_attacker1), (p1_blocker, p0_attacker2)]
+            )
+            .is_ok(),
+            "Brave controlled by player 1 must grant their creature one extra block"
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(p1_attacker1, PlayerId(0)),
+                AttackerInfo::attacking_player(p1_attacker2, PlayerId(0)),
+            ],
+            ..Default::default()
+        });
+        assert!(
+            validate_blockers(
+                &state,
+                &[(p0_blocker, p1_attacker1), (p0_blocker, p1_attacker2)]
+            )
+            .is_err(),
+            "Brave controlled by player 1 must not grant player 0's creature"
+        );
+
+        let mut state = setup();
+        let brave_card_id = CardId(state.next_object_id);
+        let brave = create_object(
+            &mut state,
+            brave_card_id,
+            PlayerId(0),
+            "Brave the Sands".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        for def in parse_static_line_multi(
+            "Each creature you control can block an additional creature each combat.",
+        ) {
+            let obj = state.objects.get_mut(&brave).unwrap();
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        let p1_attacker1 = create_creature(&mut state, PlayerId(1), "P1 Bear A", 2, 2);
+        let p1_attacker2 = create_creature(&mut state, PlayerId(1), "P1 Bear B", 2, 2);
+        let p0_blocker = create_creature(&mut state, PlayerId(0), "P0 Guard", 1, 4);
+
+        evaluate_layers(&mut state);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(p1_attacker1, PlayerId(0)),
+                AttackerInfo::attacking_player(p1_attacker2, PlayerId(0)),
+            ],
+            ..Default::default()
+        });
+        assert!(
+            validate_blockers_for_player(
+                &state,
+                PlayerId(0),
+                &[(p0_blocker, p1_attacker1), (p0_blocker, p1_attacker2)]
+            )
+            .is_ok(),
+            "Brave controlled by player 0 must grant their creature one extra block"
+        );
+    }
+
+    #[test]
     fn max_blockers_each_combat_counts_previous_defending_players() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         state.turn_number = 2;
