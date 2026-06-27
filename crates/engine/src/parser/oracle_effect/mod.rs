@@ -93,11 +93,11 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControllerRef, CopyRetargetPermission, DamageModification,
-    DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
-    GameRestriction, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, OriginConstraint,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime, DoubleTarget, Duration, Effect,
+    EffectScope, FilterProp, GameRestriction, IntensityScope, IterationKindBinding,
+    LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, OriginConstraint, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
     RoundingMode, SharedQuality, SharedQualityRelation, SkipScope, StaticCondition,
     StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
@@ -792,6 +792,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -826,6 +827,7 @@ fn build_when_next_delayed_trigger(
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -908,6 +910,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -972,6 +975,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -1915,6 +1919,123 @@ fn try_parse_cast_this_way_enters_with_counter(lower: &str) -> Option<Effect> {
     })
 }
 
+/// CR 603.6 + CR 702.26a: One self-referential event verb of a delayed-trigger
+/// condition, mapped to the `TriggerMode` it fires on. The subject ("~") is
+/// stripped by the caller's word-boundary scan, so this matches only the bare
+/// verb phrase. Composed as a chained `alt` of leaf event verbs — adding a new
+/// self-event verb extends the disjunction class without enumerating
+/// permutations.
+fn parse_self_event_verb(input: &str) -> OracleResult<'_, crate::types::triggers::TriggerMode> {
+    use crate::types::triggers::TriggerMode;
+    alt((
+        // CR 702.26a context: "~ becomes untapped" (The Pandorica).
+        value(
+            TriggerMode::Untaps,
+            alt((
+                tag("becomes untapped"),
+                tag("become untapped"),
+                tag("untaps"),
+            )),
+        ),
+        // CR 603.6c: "~ leaves the battlefield".
+        value(
+            TriggerMode::LeavesBattlefield,
+            alt((
+                tag("leaves the battlefield"),
+                tag("leave the battlefield"),
+                tag("leaves"),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6 + CR 603.7c: Build a self-referential `TriggerDefinition` from one
+/// disjunct of a delayed-trigger condition by scanning for a recognized
+/// self-event verb at any word boundary (so the leading "~" subject — present
+/// on the first disjunct, elided on the rest — is skipped). `valid_card`
+/// is `SelfRef` so the trigger fires only on the source's own event.
+fn scan_self_event_trigger(segment: &str) -> Option<crate::types::ability::TriggerDefinition> {
+    let mode = nom_primitives::scan_at_word_boundaries(segment, parse_self_event_verb)?;
+    Some(crate::types::ability::TriggerDefinition::new(mode).valid_card(TargetFilter::SelfRef))
+}
+
+/// CR 603.6 + CR 603.7c: Recognize a self-referential *disjunctive* delayed-trigger
+/// condition — "~ <eventA> or <eventB>" (The Pandorica: "When ~ becomes untapped
+/// or leaves the battlefield, …"). Returns the two embedded `TriggerDefinition`s
+/// for a `WhenNextEvent { trigger, or_trigger }`. Without this, the single-event
+/// `scan_delayed_condition_kind` path silently drops the second disjunct.
+///
+/// Generality: covers the whole "when ~ <eventA> or <eventB>" class built from
+/// the verbs in [`parse_self_event_verb`]; only fires when the subject is the
+/// source itself (`SelfRef`) and BOTH sides resolve to a recognized self-event
+/// verb, so single-event and non-self conditions fall through untouched.
+fn parse_self_disjunctive_event_trigger(
+    condition_text: &str,
+) -> Option<(
+    crate::types::ability::TriggerDefinition,
+    crate::types::ability::TriggerDefinition,
+)> {
+    // The condition must describe the source object itself.
+    if !matches!(
+        scan_delayed_subject(condition_text),
+        Some(TargetFilter::SelfRef)
+    ) {
+        return None;
+    }
+    // Split on the first " or " via a combinator (not string dispatch): the left
+    // side carries the subject + first verb, the right side the second verb.
+    use nom::bytes::complete::take_until;
+    let (right, left) = take_until::<_, _, OracleError<'_>>(" or ")
+        .parse(condition_text)
+        .ok()?;
+    let (right, _) = tag::<_, _, OracleError<'_>>(" or ").parse(right).ok()?;
+    // CR 603.7c: `WhenNextEvent` carries exactly two event slots (`trigger` +
+    // `or_trigger`). A three-or-more-way self-event disjunction ("A or B or C")
+    // can't be represented without silently dropping the tail, so reject it here
+    // rather than capturing only the first two — no current card pairs three
+    // self-events. The recognized self-event verbs never contain an inner " or ",
+    // so a residual " or " in `right` reliably marks a dropped third disjunct.
+    if take_until::<_, _, OracleError<'_>>(" or ")
+        .parse(right)
+        .is_ok()
+    {
+        return None;
+    }
+    let trigger = scan_self_event_trigger(left)?;
+    let or_trigger = scan_self_event_trigger(right)?;
+    Some((trigger, or_trigger))
+}
+
+/// CR 603.7c: In a self-referential disjunctive `WhenNextEvent` delayed trigger
+/// ("when ~ <eventA> or <eventB>, that permanent …"), the inner demonstrative
+/// ("that permanent") refers to the PARENT ability's chosen target — the
+/// permanent the parent ability acted on — never to the trigger source (~). The
+/// subject parser resolves that demonstrative through the trigger-subject anaphor
+/// path to `TriggeringSource`; rewrite it to `ParentTarget` so the
+/// `CreateDelayedTrigger` resolver snapshots the parent target at creation
+/// (CR 603.7c) instead of re-resolving the source object at firing time.
+///
+/// Build-for-the-class: the rebind walks *every* target-bearing effect arm via
+/// the shared [`each_target_filter_mut`] walker (not just the two phasing
+/// effects), so a future card pairing this condition with a non-phasing effect
+/// ("when ~ becomes untapped or leaves the battlefield, that permanent <X>")
+/// rebinds the inner demonstrative correctly. The Pandorica's `PhaseIn` is the
+/// only current instance.
+fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
+    each_target_filter_mut(ability.effect.as_mut(), &mut |target| {
+        if *target == TargetFilter::TriggeringSource {
+            *target = TargetFilter::ParentTarget;
+        }
+    });
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rebind_triggering_source_to_parent_target(sub);
+    }
+    if let Some(els) = ability.else_ability.as_deref_mut() {
+        rebind_triggering_source_to_parent_target(els);
+    }
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(
@@ -1933,12 +2054,35 @@ fn try_parse_inline_delayed_trigger(
     let condition_text = &tp.lower["when ".len()..comma];
     let effect_text = &tp.original[comma + 2..];
 
+    // CR 603.6 + CR 603.7c: A self-referential disjunctive condition ("when ~
+    // <eventA> or <eventB>, …") embeds two triggers; the demonstrative inner
+    // subject binds to the parent target (rebound below). Detect it before the
+    // single-event `scan_delayed_condition_kind` path, which would otherwise
+    // drop the second disjunct.
+    let mut self_disjunction = false;
     let condition = if let Some(trigger) =
         parse_dealt_damage_this_way_dies_trigger(condition_text, ctx)
     {
         DelayedTriggerCondition::WhenNextEvent {
             trigger: Box::new(trigger),
             or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        }
+    } else if let Some((trigger, or_trigger)) = parse_self_disjunctive_event_trigger(condition_text)
+    {
+        self_disjunction = true;
+        // CR 603.7b: A self-referential disjunctive re-entry clause ("when ~
+        // becomes untapped or leaves the battlefield, …", The Pandorica) is an
+        // open-ended delayed trigger with no stated duration — per CR 603.7b it
+        // "will trigger only once—the next time its trigger event occurs"—and
+        // carries NO "this turn" limit, so the qualifying event (the source's
+        // untap / departure) typically occurs on a later turn. Mark it
+        // `Persistent` so end-of-turn cleanup does not prune it before it can
+        // fire.
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(trigger),
+            or_trigger: Some(Box::new(or_trigger)),
+            lifetime: DelayedTriggerLifetime::Persistent,
         }
     } else {
         match scan_delayed_condition_kind(condition_text) {
@@ -1980,7 +2124,18 @@ fn try_parse_inline_delayed_trigger(
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => Some(filter.clone()),
         _ => None,
     };
-    let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    // CR 603.7c: For a self-referential disjunctive trigger, route the inner
+    // demonstrative ("that permanent") through the anaphor path (it resolves to
+    // `TriggeringSource`), then rebind to `ParentTarget` — the trigger source (~)
+    // is never the inner referent.
+    if self_disjunction {
+        inner_ctx.subject = Some(TargetFilter::SelfRef);
+    }
+    let mut inner =
+        parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    if self_disjunction {
+        rebind_triggering_source_to_parent_target(&mut inner);
+    }
 
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
@@ -12818,6 +12973,11 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut; route its
+        // target through parent-anaphor replacement too so a future
+        // parent-bound PhaseIn ("untap target permanent, then phase it in")
+        // is not silently skipped.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
@@ -17216,6 +17376,9 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn mirrors PhaseOut; expose its target to tracked-set
+        // rewrites for symmetry so a parent-bound PhaseIn is not skipped.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
@@ -17450,6 +17613,10 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut above; expose
+        // its target filter too so generic anaphor/scope rewrites and the
+        // self-disjunctive delayed-trigger rebind (CR 603.7c) reach it.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
@@ -37979,6 +38146,62 @@ mod tests {
         );
     }
 
+    /// CR 603.6 + CR 603.7c + CR 702.26a: A self-referential *disjunctive* inline
+    /// delayed trigger ("when ~ <eventA> or <eventB>, that permanent …") must
+    /// capture BOTH disjuncts in `WhenNextEvent { trigger, or_trigger }` (the
+    /// single-event path silently dropped the second), with each disjunct scoped
+    /// to the source (`valid_card: SelfRef`), and bind the inner demonstrative
+    /// ("that permanent") to `ParentTarget` so the delayed trigger snapshots the
+    /// parent ability's target — not the trigger source. Building block for The
+    /// Pandorica's untap/leave re-entry clause.
+    #[test]
+    fn self_disjunctive_delayed_trigger_binds_both_events_and_parent_target() {
+        use crate::types::triggers::TriggerMode;
+        let e = parse_effect(
+            "When ~ becomes untapped or leaves the battlefield, that permanent phases in",
+        );
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &e
+        else {
+            panic!("Expected CreateDelayedTrigger, got {e:?}");
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            lifetime,
+        } = condition
+        else {
+            panic!("Expected WhenNextEvent condition, got {condition:?}");
+        };
+        // CR 603.7b: the re-entry trigger has no stated "this turn" duration, so
+        // per CR 603.7b it "will trigger only once—the next time its trigger
+        // event occurs" and must persist across turns; end-of-turn cleanup does
+        // not prune it before the source's later-turn untap / departure.
+        assert_eq!(
+            *lifetime,
+            DelayedTriggerLifetime::Persistent,
+            "open-ended re-entry trigger must be Persistent, not pruned at cleanup"
+        );
+        assert_eq!(trigger.mode, TriggerMode::Untaps);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let or_trigger = or_trigger
+            .as_ref()
+            .expect("the second disjunct must be captured");
+        assert_eq!(or_trigger.mode, TriggerMode::LeavesBattlefield);
+        assert_eq!(or_trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            matches!(
+                effect.effect.as_ref(),
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "inner phase-in must bind ParentTarget, got {:?}",
+            effect.effect
+        );
+    }
+
     /// Player-phasing parser plumbing: "you phase out" lifts the bare-pronoun
     /// "you" subject to `TargetFilter::Controller` so the resolver phases out
     /// the ability's controller player. This is the parser-side foundation
@@ -52006,6 +52229,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);
@@ -52052,6 +52276,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);
@@ -52105,6 +52330,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);
