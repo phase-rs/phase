@@ -76,8 +76,9 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
-    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_target_with_syntax,
-    parse_type_phrase, parse_type_phrase_with_ctx, TargetSyntax,
+    parse_event_context_ref, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase,
+    parse_type_phrase_with_ctx, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_mana_symbols,
@@ -8736,6 +8737,118 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     def.player_scope = Some(PlayerFilter::All);
     def.sub_ability = Some(Box::new(put_counter));
     Some(def)
+}
+
+/// CR 702.138a + CR 601.2f / CR 601.2g / CR 601.2h: a targeted/triggered one-shot
+/// grant of a graveyard-cast keyword whose granted cost is described by a SEPARATE
+/// following continuation sentence in the COMPOUND form ("…cost is equal to its
+/// mana cost plus exile N other cards from your graveyard"). This is the
+/// imperative twin of the static `try_parse_graveyard_keyword_static_with_continuation`
+/// (Underworld Breach's "Each … has escape. The escape cost is equal to…").
+///
+/// Confession Dial ("{T}: Target legendary creature card in your graveyard gains
+/// escape until end of turn. The escape cost is equal to its mana cost plus exile
+/// three other cards from your graveyard.") and Desdemona, Freedom's Edge (the
+/// triggered form, exile two) are the class.
+///
+/// CR 702.138a: escape's granted cost here is COMPOUND (a mana sub-cost plus an
+/// exile residual), unlike the self-mana-cost graveyard keywords flashback /
+/// embalm / harmonize (CR 702.34a / CR 702.128a / CR 702.180a). Those are mapped
+/// by `map_self_cost_graveyard_keyword` and their redundant cost-clarification
+/// sentence is absorbed downstream, so this front door is gated (step 5) to the
+/// compound-cost subclass and must decline them. Widening to a future
+/// compound-cost graveyard keyword is a one-line change to that gate.
+///
+/// CR 611.2c: the grant is a resolution-created continuous effect — the affected
+/// object (the chosen graveyard card) is fixed when the effect begins; the
+/// per-target `affected: ParentTarget` binding is done by `register_transient_effect`.
+/// CR 608.2c: the second sentence modifies the first (it supplies the exile count),
+/// so both sentences are read together. CR 113.6: escape functions while the card
+/// is in the graveyard, a non-battlefield zone.
+///
+/// Fail-closed at every step: non-matching text returns `None`, the input falls
+/// through to the normal pipeline, and an unrecognized cost surfaces as an honest
+/// `Unimplemented` rather than a cost-free (and thus illegal) escape grant.
+pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let stripped = super::oracle_util::strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+
+    // 1. Split the grant sentence from the cost-continuation sentence.
+    let (grant_sentence, cost_sentence) =
+        super::oracle_nom::bridge::split_once_on_lower(&stripped, &lower, ". ")?;
+
+    // 2. Require the targeted-subject prefix ("target …"); decline the static
+    //    `each … has` form owned by `try_parse_graveyard_keyword_static_with_continuation`.
+    let gs_lower = grant_sentence.to_lowercase();
+    nom_on_lower(grant_sentence, &gs_lower, |i| {
+        value((), tag("target ")).parse(i)
+    })?;
+
+    // 3. Isolate the targeted subject and the "<keyword> until end of turn" tail.
+    let (subject, kw_and_dur) =
+        super::oracle_nom::bridge::split_once_on_lower(grant_sentence, &gs_lower, " gains ")
+            .or_else(|| {
+                super::oracle_nom::bridge::split_once_on_lower(grant_sentence, &gs_lower, " gain ")
+            })?;
+
+    // 4. "<keyword> until end of turn" → (keyword text, duration); require EOT.
+    let (kw_text, duration) = strip_trailing_duration(kw_and_dur);
+    if duration != Some(Duration::UntilEndOfTurn) {
+        return None;
+    }
+    let kw_text = kw_text.trim();
+
+    // 5. keyword word → kind, then gate to the compound-cost (Escape) subclass.
+    let kw_lower = kw_text.to_lowercase();
+    let (keyword_kind, _) = nom_on_lower(
+        kw_text,
+        &kw_lower,
+        crate::parser::oracle_static::parse_graveyard_granted_keyword_kind,
+    )?;
+    if !matches!(
+        keyword_kind,
+        crate::parser::oracle_static::GraveyardGrantedKeywordKind::Escape
+    ) {
+        return None;
+    }
+
+    // 6. Parse the targeted subject; require it consume fully and resolve to a
+    //    "your graveyard" filter (CR 113.6 — escape's functional zone).
+    //    `parse_target_with_disjunctive_restriction` additionally absorbs a
+    //    trailing heterogeneous relative-clause disjunction ("that's an artifact
+    //    or that has mana value 3 or less", Desdemona, Freedom's Edge) by
+    //    distributing it over the typed graveyard filter as `TargetFilter::Or`
+    //    (CR 115.1 + CR 608.2c). `target_filter_is_your_graveyard` already
+    //    recurses through `Or`, so every leg keeps the graveyard gate.
+    let (target_filter, rest) = parse_target_with_disjunctive_restriction(subject);
+    if !rest.trim().is_empty()
+        || !crate::parser::oracle_static::target_filter_is_your_graveyard(&target_filter)
+    {
+        return None;
+    }
+
+    // 7. Build the granted compound escape cost via the single continuation
+    //    authority (reused from the static path); reject a kind mismatch loudly.
+    let keyword = super::oracle::parse_graveyard_keyword_continuation(cost_sentence, keyword_kind)?;
+    if !keyword_kind.matches_keyword(&keyword) {
+        return None;
+    }
+
+    // 8. Assemble the byte-identical shape produced by the self-cost siblings
+    //    (Cursecloth Wrappings etc.), swapping in the Escape keyword. The inner
+    //    `duration` drives `register_transient_effect` (effect.rs::resolve).
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+            .description(format!("gain {kw_text}"))],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: Some(target_filter),
+    };
+    Some(AbilityDefinition::new(kind, effect))
 }
 
 /// The two equalization verbs Balance / Restore Balance / Balancing Act use.
@@ -18251,6 +18364,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
+        return def;
+    }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
@@ -18282,6 +18398,9 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
         return def;
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
@@ -33271,6 +33390,193 @@ mod tests {
                 "cost clarification must be absorbed for {text:?}, got {:?}",
                 def.sub_ability
             );
+        }
+    }
+
+    /// CR 702.138a + CR 601.2f–h: the targeted/triggered one-shot grant of a
+    /// COMPOUND-cost graveyard keyword (escape: "mana cost plus exile N other
+    /// cards from your graveyard") is the compound-cost twin of the self-mana-cost
+    /// graveyard-keyword grant. Confession Dial's `{T}` ability and Desdemona's
+    /// attack trigger are the class. Build the escape `AddKeyword` grant with the
+    /// compound cost (parameterized over exile count), `affected: ParentTarget`,
+    /// and no leftover `Unimplemented` sub-ability. Builds for the class.
+    #[test]
+    fn effect_target_graveyard_card_gains_escape_compound_cost() {
+        use crate::types::keywords::{EscapeCost, Keyword};
+
+        fn expected_escape(count: u32) -> Keyword {
+            Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::SelfManaCost,
+                    },
+                    AbilityCost::Exile {
+                        count,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
+            }))
+        }
+
+        // Assert the escape `AddKeyword` grant + compound cost is built and no
+        // `Unimplemented` sub-ability leaks, independent of the target's filter
+        // shape. Returns the parsed target so each case asserts its own filter.
+        let assert_escape_grant = |text: &str, count: u32| -> TargetFilter {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target: Some(target),
+            } = &*def.effect
+            else {
+                panic!(
+                    "expected GenericEffect with a target for {text:?}, got {:?}",
+                    def.effect
+                );
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            let grant = static_abilities
+                .iter()
+                .find(|s| {
+                    s.modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: expected_escape(count),
+                        })
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing escape grant for {text:?}: {static_abilities:?}")
+                });
+            assert_eq!(grant.affected, Some(TargetFilter::ParentTarget));
+            assert!(
+                def.sub_ability.is_none(),
+                "compound escape cost must be absorbed for {text:?}, got {:?}",
+                def.sub_ability
+            );
+            target.clone()
+        };
+
+        // Confession Dial's `{T}` ability: "Target legendary creature card in
+        // your graveyard gains escape ... exile three other cards ...". A single
+        // typed filter (no relative-clause disjunction).
+        let target = assert_escape_grant(
+            "target legendary creature card in your graveyard gains escape until end of turn. The escape cost is equal to its mana cost plus exile three other cards from your graveyard.",
+            3,
+        );
+        let TargetFilter::Typed(tf) = &target else {
+            panic!("Confession Dial expects a typed target, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(tf.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }));
+
+        // Desdemona, Freedom's Edge — VERBATIM Oracle subject. The heterogeneous
+        // disjunction "that's an artifact or that has mana value 3 or less"
+        // (card type OR mana-value bound) distributes over the typed graveyard
+        // filter as `TargetFilter::Or` (CR 115.1 + CR 608.2c). Exercising the
+        // verbatim subject is load-bearing: the simplified text used previously
+        // hid the production misparse this change fixes.
+        let target = assert_escape_grant(
+            "target creature card in your graveyard that's an artifact or that has mana value 3 or less gains escape until end of turn. The escape cost is equal to its mana cost plus exile two other cards from your graveyard.",
+            2,
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("Desdemona expects a disjunctive (Or) target, got {target:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "Desdemona disjunction has two legs: {filters:?}"
+        );
+        // Every leg is a creature card in your graveyard.
+        for leg in filters {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("Desdemona leg must be a typed filter, got {leg:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "leg missing creature type: {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "leg missing graveyard filter: {tf:?}"
+            );
+        }
+        // One leg restricts to artifacts, the other to mana value 3 or less.
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Artifact)
+            )),
+            "Desdemona missing artifact leg: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc { comparator: Comparator::LE, .. }
+                ))
+            )),
+            "Desdemona missing mana-value leg: {filters:?}"
+        );
+    }
+
+    /// The compound-cost front door must DECLINE the self-mana-cost siblings
+    /// (flashback/embalm/harmonize) so they keep flowing through their existing
+    /// absorber — the two mechanisms partition the class by cost shape.
+    #[test]
+    fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
+        assert!(
+            try_parse_grant_graveyard_keyword_to_target(
+                "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
+                AbilityKind::Spell,
+            )
+            .is_none(),
+            "flashback (self-mana-cost) must not be claimed by the compound-cost front door"
+        );
+        assert!(
+            try_parse_grant_graveyard_keyword_to_target(
+                "target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost.",
+                AbilityKind::Spell,
+            )
+            .is_none(),
+            "embalm (self-mana-cost) must not be claimed by the compound-cost front door"
+        );
+        // The declined sibling still lowers correctly through the normal pipeline.
+        let def = parse_effect_chain(
+            "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::GenericEffect { .. }));
+        assert!(def.sub_ability.is_none());
+    }
+
+    /// The extracted keyword-word → kind combinator (deduplicated with the static
+    /// `each … has <kw>` clause) recognizes every graveyard-cast keyword.
+    #[test]
+    fn parse_graveyard_granted_keyword_kind_recognizes_all_members() {
+        use crate::parser::oracle_static::{
+            parse_graveyard_granted_keyword_kind, GraveyardGrantedKeywordKind,
+        };
+        for (word, expected) in [
+            ("flashback", GraveyardGrantedKeywordKind::Flashback),
+            ("escape", GraveyardGrantedKeywordKind::Escape),
+            ("mayhem", GraveyardGrantedKeywordKind::Mayhem),
+            ("scavenge", GraveyardGrantedKeywordKind::Scavenge),
+            ("encore", GraveyardGrantedKeywordKind::Encore),
+        ] {
+            let (_, kind) = parse_graveyard_granted_keyword_kind(word)
+                .unwrap_or_else(|_| panic!("combinator failed on {word:?}"));
+            assert_eq!(kind, expected);
         }
     }
 

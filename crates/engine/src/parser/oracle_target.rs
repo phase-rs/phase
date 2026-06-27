@@ -197,6 +197,151 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     parse_target_with_ctx(text, &mut ParseContext::default())
 }
 
+/// Parse a target noun phrase, additionally consuming an optional trailing
+/// heterogeneous relative-clause disjunction that the base grammar cannot fold
+/// into one typed filter — a card type ("that's an artifact") OR a mana-value
+/// bound ("that has mana value 3 or less"). Desdemona, Freedom's Edge: "target
+/// creature card in your graveyard that's an artifact or that has mana value 3
+/// or less".
+///
+/// CR 115.1 + CR 608.2c: a card type lives in `type_filters` and a mana-value
+/// bound lives in `properties` — both AND-combined within a single
+/// `TypedFilter` — so an "or" *between* the two layers cannot collapse into one
+/// `FilterProp::AnyOf`. Instead the disjunction distributes over the whole typed
+/// filter as `TargetFilter::Or`, one leg per disjunct: each leg is the base
+/// filter plus that disjunct's restriction. A lone (non-"or") relative clause
+/// collapses to a single restricted `TypedFilter`.
+///
+/// Returns the base filter and remainder unchanged when the base is not a single
+/// typed filter or no such relative clause follows — every existing call shape
+/// is preserved.
+pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFilter, &str) {
+    let (base, rest) = parse_target(text);
+    let TargetFilter::Typed(base_typed) = &base else {
+        return (base, rest);
+    };
+    // The relative clause is case-insensitive; lowercasing is byte-length
+    // preserving for the ASCII relative-clause grammar, so `consumed` maps
+    // directly back onto `rest`.
+    let rest_lower = rest.to_lowercase();
+    let Some((restrictions, consumed)) = parse_disjunctive_relative_restriction(&rest_lower) else {
+        return (base, rest);
+    };
+    let filter = if restrictions.len() == 1 {
+        TargetFilter::Typed(restrictions[0].apply(base_typed))
+    } else {
+        TargetFilter::Or {
+            filters: restrictions
+                .iter()
+                .map(|r| TargetFilter::Typed(r.apply(base_typed)))
+                .collect(),
+        }
+    };
+    (filter, &rest[consumed..])
+}
+
+/// One disjunct of a heterogeneous relative-clause restriction (see
+/// `parse_target_with_disjunctive_restriction`).
+#[derive(Debug, Clone)]
+enum DisjunctRestriction {
+    /// "that's an artifact" — an additional card type AND-merged into the leg's
+    /// `type_filters`.
+    CardType(TypeFilter),
+    /// "that has mana value 3 or less" — a `FilterProp::Cmc` bound AND-merged
+    /// into the leg's `properties` (CR 202.3).
+    ManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
+}
+
+impl DisjunctRestriction {
+    /// Build a leg by cloning the base typed filter and applying this disjunct's
+    /// restriction at its native layer (type vs property).
+    fn apply(&self, base: &TypedFilter) -> TypedFilter {
+        let mut leg = base.clone();
+        match self {
+            DisjunctRestriction::CardType(tf) => leg.type_filters.push(tf.clone()),
+            DisjunctRestriction::ManaValue { comparator, value } => {
+                leg.properties.push(FilterProp::Cmc {
+                    comparator: *comparator,
+                    value: value.clone(),
+                });
+            }
+        }
+        leg
+    }
+}
+
+/// Parse `that('s|is|has|have) <disjunct> [ or that(...) <disjunct> ]*` from
+/// already-lowercased text, returning the disjuncts and the bytes consumed
+/// (including any leading whitespace). Returns `None` when the text does not
+/// open a recognized relative-clause disjunct.
+fn parse_disjunctive_relative_restriction(
+    input: &str,
+) -> Option<(Vec<DisjunctRestriction>, usize)> {
+    let trimmed = input.trim_start();
+    let leading_ws = input.len() - trimmed.len();
+    let (mut remaining, first) = parse_disjunct_restriction(trimmed).ok()?;
+    let mut restrictions = vec![first];
+    while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remaining) {
+        match parse_disjunct_restriction(after_or) {
+            Ok((rest, next)) => {
+                restrictions.push(next);
+                remaining = rest;
+            }
+            // A non-relative-clause "or" (e.g. "or a Goblin you control") ends
+            // the disjunction; leave it for the caller to reject as leftover.
+            Err(_) => break,
+        }
+    }
+    Some((restrictions, leading_ws + (trimmed.len() - remaining.len())))
+}
+
+/// Parse a single "that('s|is|has|have) <card type | mana value bound>" disjunct.
+fn parse_disjunct_restriction(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_intro, _) = alt((
+        tag::<_, _, OracleError<'_>>("that's "),
+        tag("that is "),
+        tag("that has "),
+        tag("that have "),
+    ))
+    .parse(input)?;
+    alt((parse_disjunct_card_type, parse_disjunct_mana_value)).parse(after_intro)
+}
+
+/// "an artifact" / "a creature" → a card-type restriction.
+fn parse_disjunct_card_type(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_article, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(input)?;
+    let (rest, tf) = nom_target::parse_type_filter_word(after_article)?;
+    Ok((rest, DisjunctRestriction::CardType(tf)))
+}
+
+/// "mana value 3 or less" / "mana value 5 or greater" → a `Cmc` bound (CR 202.3).
+fn parse_disjunct_mana_value(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_mv, _) = tag::<_, _, OracleError<'_>>("mana value ").parse(input)?;
+    let (after_num, mv) = nom_quantity::parse_quantity_expr_number(after_mv)?;
+    let after_num = after_num.trim_start();
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>("or less")),
+        value(Comparator::GE, tag("or greater")),
+    ))
+    .parse(after_num)?;
+    Ok((
+        rest,
+        DisjunctRestriction::ManaValue {
+            comparator,
+            value: mv,
+        },
+    ))
+}
+
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
 /// accumulated on `ctx.diagnostics` instead of being silently lost.
 ///
