@@ -29,7 +29,7 @@
 //! ("resolve_trigger", "apply_damage") here is out of scope; this is a
 //! structural legality pipeline, not a rules engine.
 
-use crate::game::engine::apply_as_current;
+use crate::game::engine::apply_as_current_for_legality;
 use crate::types::game_state::GameState;
 
 use super::CandidateAction;
@@ -110,7 +110,9 @@ impl CandidateFilter for SimulationFilter {
         }
         crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
-        apply_as_current(&mut sim, candidate.action.clone()).is_ok()
+        // Legality-only probe: `sim` is discarded, so skip display derivation
+        // (the O(N^2) mana-availability board sweep on go-wide token boards).
+        apply_as_current_for_legality(&mut sim, candidate.action.clone()).is_ok()
     }
 }
 
