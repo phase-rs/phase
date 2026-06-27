@@ -4871,6 +4871,32 @@ mod tests {
         assert_eq!(strip_trailing_additive_adverb("also"), "also");
     }
 
+    /// CR 509.1g (issue #4233): "Each creature your opponents control blocks this
+    /// turn if able" (Predatory Rampage) is a non-targeted mass requirement — it
+    /// must lower to a `ForceBlock` whose `target` filter selects every opponent
+    /// creature, with NO target prompt (so it does not ask the caster to pick one
+    /// creature). The resolver then expands the filter at resolution.
+    #[test]
+    fn each_opponent_creature_blocks_if_able_is_non_targeted_mass_force_block() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Each creature your opponents control blocks this turn if able.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.target_prompt.is_none(),
+            "mass force-block must not request a target, got {:?}",
+            def.target_prompt
+        );
+        let Effect::ForceBlock { target } = &*def.effect else {
+            panic!("expected ForceBlock, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected a typed mass filter, got {target:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    }
+
     /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
     /// shape the sequence splitter can leave behind ("this turn" optional, both
     /// "it"/"they" pronoun forms, optional trailing period) and rejects unrelated
