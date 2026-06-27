@@ -3094,82 +3094,41 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // CR 207.2c + CR 401.5 + CR 601.1a + CR 603.12 + CR 111.10: an
-        // (optionally ability-word-prefixed) top-of-library play/cast permission
-        // carrying a reflexive "When you do, <effect>" rider (The Fourth
-        // Doctor). Emits the permission static AND a reflexive PlayCard trigger
-        // gated to the library origin AND to the permission's own object class
-        // (its `affected` filter), so the rider fires only on plays this
-        // permission could authorize — not on any top-of-library play. Mirrors
-        // the exert reflexive-rider handler above. Must precede Priority 7 (the
-        // static-only path would drop the rider) and Priority 8 (the literal
-        // "would" in the ability word would otherwise misroute this line to the
-        // replacement parser).
-        //
-        // CR 603.12 LIMITATION (documented, deferred): a global PlayCard trigger
-        // cannot distinguish WHICH permission authorized a given play. With
-        // another historic-from-library permission also present (e.g. Bolas's
-        // Citadel), a play it authorizes would also fire this rider. Fully
-        // scoping the reflexive trigger to this permission's exercise would
-        // require the casting/land-play pipeline to record the authorizing
-        // permission — a larger engine change outside this parser-only cluster.
-        // Approximation accepted; not asserted correct in the multi-permission
-        // case.
+        // CR 207.2c + CR 401.5 + CR 601.1a + CR 603.12: an (optionally
+        // ability-word-prefixed) top-of-library play/cast permission carrying a
+        // reflexive "When you do, <effect>" rider (The Fourth Doctor). Emits
+        // the permission static so play-from-library works, and marks the rider
+        // as an honest unsupported gap (TriggerMode::Unknown) — the reflexive
+        // trigger cannot be correctly scoped until the casting/land-play
+        // pipeline records which permission authorized each play (CR 603.12
+        // provenance limitation: a global PlayCard trigger cannot distinguish
+        // WHICH permission authorized a given play). Must precede Priority 7
+        // (the static-only path would silently drop the rider, hiding the gap).
         {
             let permission_line = strip_ability_word(&line).unwrap_or_else(|| line.clone());
             let permission_lower = permission_line.to_lowercase();
-            if scan_contains(&permission_lower, "from the top of your library") {
-                if let Some((perm_text, rider_text)) =
-                    split_once_on_lower(&permission_line, &permission_lower, ". when you do, ")
+            if let Some((perm_text, _)) =
+                split_once_on_lower(&permission_line, &permission_lower, ". when you do, ")
+            {
+                let perm_lower = perm_text.to_lowercase();
+                if let Some(static_def) =
+                    try_parse_top_of_library_cast_permission(perm_text, &perm_lower)
                 {
-                    let perm_lower = perm_text.to_lowercase();
-                    if let Some(static_def) =
-                        try_parse_top_of_library_cast_permission(perm_text, &perm_lower)
-                    {
-                        // CR 603.12: reflexive trigger body — parse with a
-                        // neutral subject so it resolves as its own ability.
-                        ctx.subject = None;
-                        ctx.actor = None;
-                        let rider_def = parse_effect_chain_with_context(
-                            rider_text.trim(),
-                            AbilityKind::Spell,
-                            &mut ctx,
-                        );
-                        // Decline (leave the gap visibly Unimplemented) rather
-                        // than drop a payoff we cannot model.
-                        if !has_unimplemented(&rider_def) {
-                            // CR 601.1a + CR 305.1 + CR 400.1: "play a historic
-                            // land or cast a historic spell from the top of your
-                            // library" → one PlayCard trigger gated to the
-                            // library origin (fires on LandPlayed{Library} or
-                            // SpellCast-from-Library via match_play_card). The
-                            // library is one zone (CR 400.1); "top" is a position
-                            // within it, so Equals(Library) is the event origin.
-                            let mut trigger = TriggerDefinition::new(TriggerMode::PlayCard)
-                                .valid_target(TargetFilter::Controller)
-                                .spell_cast_origin(crate::types::ability::OriginConstraint::Equals(
-                                    Zone::Library,
-                                ))
-                                .execute(rider_def)
-                                .description(line.to_string());
-                            // CR 603.12 (partial scoping): restrict the rider to
-                            // the same object class the permission authorizes
-                            // (historic land / historic spell). Reusing the
-                            // permission's own `affected` filter keeps the
-                            // trigger scope identical to the permission's
-                            // eligibility by construction, so a non-historic
-                            // top-of-library play does not fire.
-                            if let Some(affected) = static_def.affected.clone() {
-                                trigger = trigger.valid_card(affected);
-                            }
-                            result
-                                .statics
-                                .push(static_def.description(line.to_string()));
-                            result.triggers.push(trigger);
-                            i += 1;
-                            continue;
-                        }
-                    }
+                    // CR 603.12 (deferred): emit TriggerMode::Unknown so the
+                    // rider gap is visible in coverage instead of approximating
+                    // incorrect provenance with a rules-incorrect PlayCard
+                    // trigger. No context mutation: we do not parse the rider
+                    // body here (avoids ctx.subject/actor leakage into
+                    // subsequent lines).
+                    let rider_gap =
+                        TriggerDefinition::new(TriggerMode::Unknown("when you do".to_string()))
+                            .description(line.to_string());
+                    result
+                        .statics
+                        .push(static_def.description(line.to_string()));
+                    result.triggers.push(rider_gap);
+                    i += 1;
+                    continue;
                 }
             }
         }

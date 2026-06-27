@@ -18214,15 +18214,20 @@ fn top_of_library_cast_permission_once_per_turn_disjunctive() {
     assert_historic_land_or_card_disjunction(&affected);
 }
 
-/// CR 207.2c + CR 601.1a + CR 603.12 + CR 111.10: The Fourth Doctor — the full
-/// card must parse with no Unimplemented effect, the look-at-top static, the
+/// CR 207.2c + CR 601.1a + CR 603.12: The Fourth Doctor — the full card must
+/// parse with no Unimplemented ability, the look-at-top static, the
 /// once-per-turn disjunctive top-of-library permission, and exactly one
-/// reflexive `PlayCard` trigger gated to the library origin and to the SAME
-/// historic filter the permission authorizes, executing "create a Food token".
+/// `TriggerMode::Unknown` gap marker for the reflexive "When you do" rider.
+///
+/// The rider is deferred (honest unsupported gap) rather than emitted as a
+/// rules-incorrect `PlayCard` trigger: a global PlayCard trigger cannot
+/// distinguish which permission authorized each play (CR 603.12 provenance
+/// limitation), so it would fire even when a different top-of-library
+/// permission authorized the play. The Unknown trigger keeps the gap visible
+/// in coverage until the casting/land-play pipeline gains provenance tracking.
 #[test]
 fn the_fourth_doctor_full_card_parse() {
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::OriginConstraint;
     use crate::types::triggers::TriggerMode;
 
     let text = "You may look at the top card of your library any time.\n\
@@ -18237,7 +18242,7 @@ fn the_fourth_doctor_full_card_parse() {
         &["Time Lord".to_string(), "Doctor".to_string()],
     );
 
-    // No effect should fall through to Unimplemented.
+    // No activation/spell ability should fall through to Unimplemented.
     assert!(
         parsed
             .abilities
@@ -18281,46 +18286,22 @@ fn the_fourth_doctor_full_card_parse() {
         .expect("permission affected set");
     assert_historic_land_or_card_disjunction(&affected);
 
-    // The reflexive "When you do, create a Food token" rider → one PlayCard trigger.
+    // The reflexive "When you do" rider is an honest TriggerMode::Unknown gap —
+    // the rider cannot be correctly scoped until the engine records permission
+    // provenance (CR 603.12). Coverage will show this gap; a follow-up can
+    // promote it to a real trigger once the provenance seam exists.
     assert_eq!(
         parsed.triggers.len(),
         1,
-        "expected exactly one reflexive trigger, got {:?}",
+        "expected exactly one trigger (Unknown gap marker for rider), got {:?}",
         parsed.triggers
     );
     let trigger = &parsed.triggers[0];
-    assert_eq!(trigger.mode, TriggerMode::PlayCard);
-    assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
-    assert_eq!(
-        trigger.spell_cast_origin,
-        OriginConstraint::Equals(Zone::Library)
+    assert!(
+        matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "expected TriggerMode::Unknown (deferred rider gap), got {:?}",
+        trigger.mode
     );
-    // Over-trigger guard: the trigger scope MUST equal the permission's
-    // eligibility filter so a non-historic top-of-library play cannot fire it.
-    assert_eq!(
-        trigger.valid_card, permission.affected,
-        "trigger valid_card must equal the permission's affected filter"
-    );
-    assert_ne!(
-        trigger.valid_card,
-        Some(TargetFilter::Any),
-        "trigger valid_card must not be the board-wide Any filter"
-    );
-    // The rider executes "create a Food token".
-    let execute = trigger.execute.as_ref().expect("trigger execute set");
-    match &*execute.effect {
-        Effect::Token {
-            name, types, count, ..
-        } => {
-            assert_eq!(name, "Food");
-            assert!(
-                types.iter().any(|t| t == "Food"),
-                "expected Food token type, got {types:?}"
-            );
-            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
-        }
-        other => panic!("expected Effect::Token (Food), got {other:?}"),
-    }
 }
 
 /// Regression: a riderless top-of-library permission (Realmwalker class) must

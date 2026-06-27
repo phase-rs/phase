@@ -2281,15 +2281,16 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     // turn, …" (Assemble the Players, The Fourth Doctor) and the longer "Once
     // during each of your turns, …" synonym both lower to OncePerTurn; absence
     // keeps the Unlimited shape (Realmwalker, Future Sight, Crystal Skull).
-    // A prefix strip removes nothing from the end, so the suffix of `text`
-    // (original case) stays aligned with the post-strip `lower`; the
-    // `text`-based alt-cost/condition rider scans below remain correct.
-    let (lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
+    // Strip both `text` and `lower` in lockstep so downstream helpers
+    // (alt-cost rider, condition parser, description) see aligned slices from
+    // the same character offset.
+    let (text, lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
         .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
     {
-        (r, CastFrequency::OncePerTurn)
+        let stripped_len = lower.len() - r.len();
+        (&text[stripped_len..], r, CastFrequency::OncePerTurn)
     } else {
-        (lower, CastFrequency::Unlimited)
+        (text, lower, CastFrequency::Unlimited)
     };
 
     // Compound Bolas's Citadel form first — "you may play lands and cast

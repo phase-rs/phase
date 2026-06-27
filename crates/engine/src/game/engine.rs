@@ -5420,6 +5420,31 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
     state.exile_play_permissions_used.insert(source_id);
 }
 
+/// CR 401.5 + CR 601.2a: Consume the per-turn slot when a `OncePerTurn`
+/// `TopOfLibraryCastPermission { play_mode: Play }` authorizes a land play from
+/// the library. Mirrors how `finalize_cast` (casting_costs.rs) records
+/// `top_of_library_cast_permissions_used` for spell casts. `Unlimited`
+/// permissions (Future Sight, Bolas's Citadel) do not spend a slot.
+fn record_top_of_library_land_permission(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) {
+    let Some((top_id, src_id, frequency, _)) = super::casting::top_of_library_permission_source(
+        state,
+        player,
+        Some(crate::types::ability::CardPlayMode::Play),
+    ) else {
+        return;
+    };
+    if top_id != object_id {
+        return;
+    }
+    if matches!(frequency, crate::types::statics::CastFrequency::OncePerTurn) {
+        state.top_of_library_cast_permissions_used.insert(src_id);
+    }
+}
+
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.played_from_zone = Some(zone);
@@ -5770,6 +5795,11 @@ fn handle_play_land(
                     record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
+                    // CR 401.5 + CR 601.2a: consume the once-per-turn library
+                    // play slot when applicable (mirrors spell-cast recording).
+                    if in_library_with_permission {
+                        record_top_of_library_land_permission(state, player, object_id);
+                    }
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
                     }
@@ -5799,6 +5829,11 @@ fn handle_play_land(
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
+            // CR 401.5 + CR 601.2a: consume the once-per-turn library play
+            // slot when applicable (mirrors spell-cast recording).
+            if in_library_with_permission {
+                record_top_of_library_land_permission(state, player, object_id);
+            }
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
             }
@@ -5823,6 +5858,11 @@ fn handle_play_land(
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
+    // CR 401.5 + CR 601.2a: consume the once-per-turn library play slot
+    // when applicable (mirrors spell-cast recording in finalize_cast).
+    if in_library_with_permission {
+        record_top_of_library_land_permission(state, player, object_id);
+    }
     let player_data = state
         .players
         .iter_mut()
