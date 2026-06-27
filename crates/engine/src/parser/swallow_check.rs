@@ -4135,6 +4135,33 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — leading-if attacking-creature count
+    /// gate on the {U} alternative casting cost must not report Condition_If.
+    #[test]
+    fn condition_if_accepts_lethargy_trap_alt_cost_gate() {
+        let parsed = parse_named(
+            "If three or more creatures are attacking, you may pay {U} rather than pay \
+this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
+            "Lethargy Trap",
+            &["Instant"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "alt-cost attacking-creature gate must bind to casting_options: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(
+            parsed.casting_options.len(),
+            1,
+            "expected one alternative casting option, got {:?}",
+            parsed.casting_options
+        );
+        assert!(
+            parsed.casting_options[0].condition.is_some(),
+            "alt-cost must carry the attacking-creature count gate"
+        );
+    }
+
     /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
     /// to `ChangeTargets { scope: All }` with the full `you may choose new
     /// targets` surface preserved — not `def.optional`.

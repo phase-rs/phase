@@ -107,6 +107,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
+        // CR 508.1 + CR 118.9: "N or more creatures are attacking" — must precede
+        // `parse_control_conditions` so the bare count phrase is not mis-read as
+        // "you control N or more creatures".
+        parse_creatures_are_attacking_count_ge,
         parse_control_conditions,
         parse_remaining_state_presence_conditions,
     ))
@@ -2842,6 +2846,30 @@ fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition
         rest,
         StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
+/// CR 508.1 + CR 118.9: Parse "N or more creatures are attacking" →
+/// `QuantityComparison(ObjectCount(creature + Attacking) >= N)`.
+///
+/// Lethargy Trap: "If three or more creatures are attacking, you may pay {U}
+/// rather than pay this spell's mana cost." Reuses `parse_ge_threshold` so
+/// "at least three creatures are attacking" shares the same parse path.
+fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    let (rest, _) = tag("creatures are attacking").parse(rest.trim_start())?;
+    let filter = TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+    );
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
 }
@@ -7892,6 +7920,37 @@ mod tests {
                 ..
             } => assert_eq!(comparator, Comparator::GE),
             other => panic!("expected QuantityComparison GE 3, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// gates the alternative casting cost.
+    #[test]
+    fn test_creatures_are_attacking_count_ge() {
+        let (rest, c) = parse_inner_condition("three or more creatures are attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
         }
     }
 

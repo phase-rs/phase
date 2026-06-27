@@ -5398,6 +5398,65 @@ mod tests {
     }
 
     #[test]
+    fn commander_accepts_ten_slime_against_humanity_copies() {
+        // Issue #1138: "A deck can have any number of cards named Slime Against
+        // Humanity" must override the Commander singleton default.
+        let db_json = serde_json::json!({
+            "slime against humanity": {
+                "name": "Slime Against Humanity",
+                "mana_cost": { "type": "Cost", "shards": ["Green"], "generic": 2 },
+                "card_type": { "supertypes": [], "core_types": ["Sorcery"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": "Create a 0/0 green Ooze creature token with trample. Put X +1/+1 counters on it, where X is two plus the total number of cards you own in exile and in your graveyard that are Oozes or are named Slime Against Humanity.\nA deck can have any number of cards named Slime Against Humanity.",
+                "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": ["Green"], "scryfall_oracle_id": null,
+                "deck_copy_limit": { "type": "Unlimited" },
+                "legalities": { "commander": "legal" }
+            },
+            "legal commander": {
+                "name": "Legal Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": ["Green"], "scryfall_oracle_id": null,
+                "legalities": { "commander": "legal" }
+            },
+            "forest": {
+                "name": "Forest",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "commander": "legal" }
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+        let mut main = expand("Slime Against Humanity", 10);
+        main.extend(expand("Forest", 89));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Commander),
+            selected_match_type: None,
+            summary_only: false,
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected compatible, got reasons: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    #[test]
     fn commander_sideboard_policy_accepts_maybeboard_entries() {
         // CR 903.5e: Phase's deck builder reuses the sideboard slot as a
         // builder-only "Maybeboard" for Commander-style formats. The

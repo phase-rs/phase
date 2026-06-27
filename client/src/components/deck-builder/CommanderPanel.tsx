@@ -4,8 +4,6 @@ import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
 import {
   getCombinedColorIdentity,
-  getColorIdentityViolations,
-  getSingletonViolations,
 } from "./commanderUtils";
 import { mouseHoverPreview } from "./hoverPreview";
 
@@ -28,8 +26,8 @@ interface CommanderPanelProps {
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
-  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. */
-  getEffectiveCap: (name: string) => number;
+  /** Engine evaluateDeckCompatibility reasons for the active format. */
+  formatValidationReasons?: string[];
 }
 
 
@@ -42,12 +40,10 @@ export function CommanderPanel({
   onSetCommander,
   onRemoveCommander,
   onCardHover,
-  getEffectiveCap,
+  formatValidationReasons = [],
 }: CommanderPanelProps) {
   const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
-  const colorViolations = getColorIdentityViolations(deck, commanders, cardDataCache);
-  const singletonViolations = getSingletonViolations(deck, cardDataCache, getEffectiveCap);
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
   // Cards in deck that could become a commander. The handler decides whether
@@ -136,16 +132,11 @@ export function CommanderPanel({
         >
           {t("commanderPanel.cardCount", { count: totalCards, expected: expectedDeckSize })}
         </div>
-        {singletonViolations.length > 0 && (
-          <div className="text-xs text-red-400">
-            {t("commanderPanel.singletonViolations", { cards: singletonViolations.join(", ") })}
+        {formatValidationReasons.map((reason) => (
+          <div key={reason} className="text-xs text-red-400">
+            {reason}
           </div>
-        )}
-        {colorViolations.length > 0 && (
-          <div className="text-xs text-red-400">
-            {t("commanderPanel.colorViolations", { cards: colorViolations.join(", ") })}
-          </div>
-        )}
+        ))}
       </div>
     </div>
   );

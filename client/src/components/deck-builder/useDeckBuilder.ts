@@ -17,7 +17,6 @@ import {
   setDeckFolder,
   stampDeckMeta,
 } from "../../constants/storage";
-import { BASIC_LAND_NAMES } from "../../constants/game";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
@@ -31,12 +30,7 @@ import { getPreconBracket } from "../../data/preconBrackets";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import {
-  getColorIdentityViolations,
-  getSingletonViolations,
-} from "./commanderUtils";
-import {
   commanderPartnerCandidates,
-  deckCopyLimit,
   isCardCommanderEligibleForFormat,
 } from "../../services/engineRuntime";
 
@@ -97,10 +91,6 @@ export function useDeckBuilder({
 
   const [compatibility, setCompatibility] = useState<DeckCompatibilityResult | null>(null);
   const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string>>(new Set());
-  // CR 100.2a / CR 903.5b: per-card deck-construction copy-limit overrides, keyed
-  // by card name. `Infinity` = "any number"; a finite cap = "up to N" / singleton.
-  // Populated from the engine — never inferred from Oracle text client-side.
-  const [deckCopyLimits, setDeckCopyLimits] = useState<Map<string, number>>(new Map());
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
@@ -165,19 +155,18 @@ export function useDeckBuilder({
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      evaluateDeckCompatibility(currentDeck).then((result) => {
+      evaluateDeckCompatibility(currentDeck, { selectedFormat: format }).then((result) => {
         if (!cancelled) setCompatibility(result);
       }).catch(() => {
         // WASM may not be loaded yet; silently ignore
       });
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [currentDeck, deckKey]);
+  }, [currentDeck, deckKey, format]);
 
   const formatConfig = formatMetadata(format)?.default_config;
   const isCommander = formatConfig?.command_zone ?? false;
   const expectedDeckSize = formatConfig?.deck_size ?? 60;
-  const maxCopies = formatConfig?.singleton ? 1 : 4;
 
   useEffect(() => {
     if (!isCommander) {
@@ -207,63 +196,6 @@ export function useDeckBuilder({
       cancelled = true;
     };
   }, [deck.main, format, isCommander]);
-
-  // Names whose copy-limit override has already been requested (in flight or
-  // resolved). A card's copy limit is static per name, so once queried it never
-  // needs re-querying — this keeps deck edits and repeated searches from
-  // re-issuing WASM calls for every card in the deck.
-  const queriedCopyLimitNamesRef = useRef<Set<string>>(new Set());
-
-  const prefetchDeckCopyLimits = useCallback((names: string[]) => {
-    const unique = Array.from(new Set(names)).filter(
-      (name) => !queriedCopyLimitNamesRef.current.has(name),
-    );
-    if (unique.length === 0) return;
-    for (const name of unique) {
-      queriedCopyLimitNamesRef.current.add(name);
-    }
-    Promise.all(
-      unique.map(async (name) => [name, await deckCopyLimit(name)] as const),
-    )
-      .then((results) => {
-        // No cancellation guard: limits are static per name, so a resolved
-        // batch is never stale — merging is always safe.
-        setDeckCopyLimits((prev) => {
-          const next = new Map(prev);
-          for (const [name, limit] of results) {
-            if (!limit) continue;
-            next.set(name, limit.type === "Unlimited" ? Infinity : limit.data);
-          }
-          return next;
-        });
-      })
-      .catch(() => {
-        // Retain previously resolved overrides and allow this batch to be
-        // retried after a transient WASM failure.
-        for (const name of unique) {
-          queriedCopyLimitNamesRef.current.delete(name);
-        }
-      });
-  }, []);
-
-  // CR 100.2a / CR 903.5b: resolve per-card copy-limit overrides for every card
-  // referenced anywhere in the deck. The engine is the single authority — the
-  // frontend never re-parses Oracle text. Limits are static per card name, so
-  // the resolved map is a monotonic cache: merged into, never cleared.
-  useEffect(() => {
-    prefetchDeckCopyLimits([
-      ...deck.main.map((e) => e.name),
-      ...deck.sideboard.map((e) => e.name),
-      ...commanders,
-    ]);
-  }, [deck.main, deck.sideboard, commanders, prefetchDeckCopyLimits]);
-
-  // Synchronous per-card effective copy cap: the override when present, else the
-  // format default (4 constructed / 1 singleton).
-  const effectiveCap = useCallback(
-    (name: string) => deckCopyLimits.get(name) ?? maxCopies,
-    [deckCopyLimits, maxCopies],
-  );
 
   const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
     deck,
@@ -307,9 +239,8 @@ export function useDeckBuilder({
       }
       setSearchResults(cards);
       cacheCards(cards);
-      prefetchDeckCopyLimits(cards.map((card) => card.name));
     },
-    [cacheCards, initialDeckName, prefetchDeckCopyLimits, searchFilters],
+    [cacheCards, initialDeckName, searchFilters],
   );
 
   const handleSearchTrigger = useCallback(() => {
@@ -322,10 +253,6 @@ export function useDeckBuilder({
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
-      if (existing && existing.count >= effectiveCap(card.name) && !BASIC_LAND_NAMES.has(card.name)) {
-        return prev;
-      }
-
       if (existing) {
         return {
           ...prev,
@@ -339,7 +266,7 @@ export function useDeckBuilder({
         main: [...prev.main, { count: 1, name: card.name }],
       };
     });
-  }, [cacheCards, effectiveCap]);
+  }, [cacheCards]);
 
   const handleAddCardByName = useCallback((name: string) => {
     const card = cardDataCache.get(name);
@@ -383,14 +310,6 @@ export function useDeckBuilder({
         if (!sourceEntry) return prev;
 
         const targetEntry = target.find((e) => e.name === name);
-        if (
-          to === "main" &&
-          targetEntry &&
-          targetEntry.count >= effectiveCap(name) &&
-          !BASIC_LAND_NAMES.has(name)
-        ) {
-          return prev;
-        }
 
         const nextSource =
           sourceEntry.count <= 1
@@ -412,7 +331,7 @@ export function useDeckBuilder({
         };
       });
     },
-    [effectiveCap],
+    [],
   );
 
   const applyDeckToEditor = useCallback((next: ParsedDeck) => {
@@ -662,30 +581,11 @@ export function useDeckBuilder({
     cardCounts.set(commander, (cardCounts.get(commander) ?? 0) + 1);
   }
 
-  // Compute validation warnings
-  const warnings: string[] = [];
-  if (isCommander) {
-    const totalCards = deck.main.reduce((s, e) => s + e.count, 0) + commanders.length;
-    if (totalCards > 0 && totalCards !== expectedDeckSize) {
-      warnings.push(t("warnings.commanderCount", { count: totalCards, expected: expectedDeckSize }));
-    }
-    for (const name of getSingletonViolations(deck.main, cardDataCache, effectiveCap)) {
-      warnings.push(t("warnings.singleton", { name }));
-    }
-    for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
-      warnings.push(t("warnings.colorIdentity", { name }));
-    }
-  } else {
-    const mainTotal = deck.main.reduce((s, e) => s + e.count, 0);
-    if (mainTotal > 0 && mainTotal < 60) {
-      warnings.push(t("warnings.minimumCount", { count: mainTotal }));
-    }
-    for (const entry of deck.main) {
-      if (entry.count > effectiveCap(entry.name) && !BASIC_LAND_NAMES.has(entry.name)) {
-        warnings.push(t("warnings.maxCopies", { name: entry.name, count: entry.count }));
-      }
-    }
-  }
+  // Engine-driven validation — duplicate legality, color identity, and deck size
+  // all come from evaluateDeckCompatibility (selected_format_reasons).
+  const warnings: string[] = [
+    ...(compatibility?.selected_format_reasons ?? []),
+  ];
   // CR 702.139a: Warn if a companion card is also in the main deck (likely import error)
   if (deck.companion && deck.main.some((e) => e.name === deck.companion)) {
     warnings.push(t("warnings.companionInMain", { name: deck.companion }));
@@ -746,6 +646,5 @@ export function useDeckBuilder({
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
-    effectiveCap,
   };
 }
