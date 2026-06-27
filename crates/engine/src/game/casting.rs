@@ -42605,6 +42605,168 @@ mod tests {
                 other => panic!("expected AlternativeCastChoice(Emerge), got {other:?}"),
             }
         }
+
+        /// Oracle text for Adipose Offspring (WHO). The ETB trigger's parent
+        /// branch makes one token; the `instead` sub-branch (gated on the emerge
+        /// cost having been paid) makes X tokens, where X is the sacrificed
+        /// creature's toughness.
+        const ADIPOSE_OFFSPRING_ORACLE: &str = "Emerge {5}{W} (You may cast this spell by sacrificing a creature and paying the emerge cost reduced by that creature's mana value.)\nWhen this creature enters, create a 2/2 white Alien creature token. If this creature's emerge cost was paid, instead create X of those tokens, where X is the sacrificed creature's toughness.";
+
+        /// Count tokens a player controls on the battlefield.
+        fn token_count(runner: &crate::game::scenario::GameRunner, player: PlayerId) -> usize {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|o| o.zone == Zone::Battlefield && o.controller == player && o.is_token)
+                .count()
+        }
+
+        /// CR 702.119a + CR 400.7d — Adipose Offspring full emerge chain. Casting
+        /// the real parsed card via emerge (sacrificing a toughness-3 creature)
+        /// must drive the entire pipeline end to end: the emerge sacrifice stamps
+        /// the cost-paid object, the cast-link snapshot restores it onto the
+        /// entering permanent, `cast_variant_paid` is set to `Emerge`, the ETB
+        /// trigger's `instead` branch is selected, and `X` resolves to the
+        /// sacrificed creature's toughness (via `Toughness { CostPaidObject }`
+        /// LKI per CR 400.7d). The result is exactly 3 Alien tokens, not 1.
+        #[test]
+        fn adipose_offspring_emerge_creates_sacrificed_toughness_tokens() {
+            use crate::game::scenario::{GameScenario, P0};
+
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            // Adipose Offspring in hand with its real Emerge keyword + ETB trigger
+            // parsed from Oracle text. Printed cost {3}{W}.
+            let adipose = {
+                let mut builder = scenario.add_creature_to_hand(P0, "Adipose Offspring", 2, 2);
+                builder.from_oracle_text_with_keywords(&["Emerge"], ADIPOSE_OFFSPRING_ORACLE);
+                builder.with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 3,
+                });
+                builder.id()
+            };
+            // The creature sacrificed to emerge: mana value 5 (reduces emerge
+            // {5}{W} to {W}) and toughness 3 (the eventual token count). Power 1
+            // keeps the three relevant numbers distinct so the token count can
+            // only come from toughness.
+            let sacrifice = scenario
+                .add_creature(P0, "Fat Tribute", 1, 3)
+                .with_mana_cost(ManaCost::generic(5))
+                .id();
+
+            let mut runner = scenario.build();
+            // Exactly one white: pays the reduced emerge cost {W} but cannot cover
+            // the printed {3}{W}, so emerge is the only affordable cast.
+            add_mana(runner.state_mut(), PlayerId(0), ManaType::White, 1);
+
+            let card_id = runner.state().objects[&adipose].card_id;
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(runner.state_mut(), P0, adipose, card_id, &mut events)
+                .expect("emerge-only cast should enter sacrifice payment");
+            assert!(
+                matches!(
+                    &wf,
+                    WaitingFor::PayCost {
+                        kind: PayCostKind::Sacrifice,
+                        resume: CostResume::SpellCost {
+                            source: SpellCostSource::Emerge,
+                            ..
+                        },
+                        ..
+                    }
+                ),
+                "expected Emerge PayCost(Sacrifice), got {wf:?}"
+            );
+            runner.state_mut().waiting_for = wf;
+            apply_as_current(
+                runner.state_mut(),
+                GameAction::SelectCards {
+                    cards: vec![sacrifice],
+                },
+            )
+            .expect("sacrificing the creature should complete the emerge cast");
+
+            assert_eq!(
+                runner.state().objects[&sacrifice].zone,
+                Zone::Graveyard,
+                "the emerge sacrifice must move the creature to the graveyard"
+            );
+            assert_eq!(
+                runner.state().objects[&adipose].zone,
+                Zone::Stack,
+                "the emerge-cast spell must be on the stack"
+            );
+
+            // Resolve the spell (Adipose enters) and its ETB trigger.
+            runner.advance_until_stack_empty();
+
+            assert_eq!(
+                runner.state().objects[&adipose].zone,
+                Zone::Battlefield,
+                "Adipose Offspring should have resolved onto the battlefield"
+            );
+            assert_eq!(
+                token_count(&runner, P0),
+                3,
+                "CR 400.7d: the emerge `instead` branch must create X = sacrificed \
+                 creature's toughness (3) Alien tokens, not the parent branch's 1"
+            );
+        }
+
+        /// CR 702.119a — Adipose Offspring hard-cast control case. Cast for its
+        /// printed cost (no emerge, no sacrifice): `cast_variant_paid` is not
+        /// `Emerge`, the ETB `instead` condition is false, and the parent branch
+        /// makes exactly one Alien token.
+        #[test]
+        fn adipose_offspring_hard_cast_creates_single_token() {
+            use crate::game::scenario::{GameScenario, P0};
+
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let adipose = {
+                let mut builder = scenario.add_creature_to_hand(P0, "Adipose Offspring", 2, 2);
+                builder.from_oracle_text_with_keywords(&["Emerge"], ADIPOSE_OFFSPRING_ORACLE);
+                builder.with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 3,
+                });
+                builder.id()
+            };
+
+            let mut runner = scenario.build();
+            // No creature to sacrifice means emerge is unavailable; fund the
+            // printed {3}{W} so the only cast is the normal one.
+            add_mana(runner.state_mut(), PlayerId(0), ManaType::White, 1);
+            add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 3);
+
+            let card_id = runner.state().objects[&adipose].card_id;
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(runner.state_mut(), P0, adipose, card_id, &mut events)
+                .expect("hard cast should commit without an emerge prompt");
+            runner.state_mut().waiting_for = wf;
+
+            assert_eq!(
+                runner.state().objects[&adipose].zone,
+                Zone::Stack,
+                "the hard-cast spell must be on the stack"
+            );
+
+            runner.advance_until_stack_empty();
+
+            assert_eq!(
+                runner.state().objects[&adipose].zone,
+                Zone::Battlefield,
+                "Adipose Offspring should have resolved onto the battlefield"
+            );
+            assert_eq!(
+                token_count(&runner, P0),
+                1,
+                "without the emerge cost paid, the ETB parent branch creates a \
+                 single Alien token"
+            );
+        }
     }
 
     /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.

@@ -4852,18 +4852,29 @@ fn parse_cast_using_variant_intervening_if(input: &str) -> OracleResult<'_, Trig
     ))
 }
 
+/// Single source of truth for the "<variant> cost was paid" intervening-if /
+/// instead phrases. Consumed by both the trigger-condition extractor below and
+/// the instead-clause recognizer (`parse_cast_variant_cost_paid_condition` in
+/// `oracle_effect/conditions.rs`); each call site filters to the membership it
+/// needs (the instead route accepts only `Emerge`). Sharing the pairs keeps the
+/// recognized strings from drifting between the two consumers. Per-variant CR
+/// cites: Surge CR 702.117a, Spectacle CR 702.137a, Prowl CR 702.76a, Emerge
+/// CR 702.119a.
+pub(crate) const CAST_VARIANT_COST_PAID_PHRASES: &[(&str, CastVariantPaid)] = &[
+    ("sneak cost was paid", CastVariantPaid::Sneak),
+    ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
+    ("surge cost was paid", CastVariantPaid::Surge),
+    ("spectacle cost was paid", CastVariantPaid::Spectacle),
+    ("prowl cost was paid", CastVariantPaid::Prowl),
+    ("emerge cost was paid", CastVariantPaid::Emerge),
+];
+
 fn try_extract_cast_variant_paid_condition(
     tp: &TextPair<'_>,
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    for (keyword, variant) in &[
-        ("sneak cost was paid", CastVariantPaid::Sneak),
-        ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
-        ("surge cost was paid", CastVariantPaid::Surge), // CR 702.117a
-        ("spectacle cost was paid", CastVariantPaid::Spectacle), // CR 702.137a
-        ("prowl cost was paid", CastVariantPaid::Prowl), // CR 702.76a
-    ] {
+    for (keyword, variant) in CAST_VARIANT_COST_PAID_PHRASES {
         if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
             let kw_pos = tp.find(keyword)?;
