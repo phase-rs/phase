@@ -7683,6 +7683,7 @@ fn resolve_grant_next_spell_ability(
             player,
             modifier,
             spell_filter,
+            source_id: Some(ability.source_id),
         });
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::GrantNextSpellAbility,

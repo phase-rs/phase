@@ -3176,11 +3176,12 @@ fn spell_matches_pending_next_spell_filter(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-    spell_filter: &Option<TargetFilter>,
+    entry: &crate::types::game_state::PendingNextSpellModifier,
 ) -> bool {
-    spell_filter
-        .as_ref()
-        .is_none_or(|filter| spell_matches_cost_filter(state, caster, spell_id, filter, spell_id))
+    let filter_source_id = entry.source_id.unwrap_or(spell_id);
+    entry.spell_filter.as_ref().is_none_or(|filter| {
+        spell_matches_cost_filter(state, caster, spell_id, filter, filter_source_id)
+    })
 }
 
 /// CR 601.2f: First pending next-spell modifier index matching `caster`, `spell_id`, and `predicate`.
@@ -3192,7 +3193,7 @@ fn pending_next_spell_modifier_index(
 ) -> Option<usize> {
     state.pending_next_spell_modifiers.iter().position(|entry| {
         entry.player == caster
-            && spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter)
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry)
             && predicate(&entry.modifier)
     })
 }
@@ -3209,7 +3210,7 @@ fn apply_pending_next_spell_keyword_grants(
         if entry.player != caster {
             continue;
         }
-        if !spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter) {
+        if !spell_matches_pending_next_spell_filter(state, caster, spell_id, entry) {
             continue;
         }
         match &entry.modifier {
@@ -3232,7 +3233,7 @@ pub(super) fn apply_pending_next_spell_stack_grants(
 ) {
     let stamp_cant_be_countered = state.pending_next_spell_modifiers.iter().any(|entry| {
         entry.player == caster
-            && spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter)
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry)
             && matches!(entry.modifier, NextSpellModifier::CantBeCountered)
     });
     if stamp_cant_be_countered {
@@ -3261,12 +3262,7 @@ pub(super) fn consume_pending_next_spell_modifiers(
         .enumerate()
         .filter_map(|(idx, entry)| {
             (entry.player == caster
-                && spell_matches_pending_next_spell_filter(
-                    state,
-                    caster,
-                    spell_id,
-                    &entry.spell_filter,
-                ))
+                && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry))
             .then_some(idx)
         })
         .collect();
@@ -14565,6 +14561,7 @@ mod tests {
                 player: PlayerId(0),
                 modifier: NextSpellModifier::WithoutPayingManaCost,
                 spell_filter: None,
+                source_id: None,
             },
         );
         let prepared = prepare_spell_cast(&state, PlayerId(0), spell_id).unwrap();
@@ -14582,6 +14579,7 @@ mod tests {
                     keyword: Keyword::Convoke,
                 },
                 spell_filter: None,
+                source_id: None,
             },
         );
         let keywords = effective_spell_keywords(&state, PlayerId(0), spell_id);
@@ -14597,6 +14595,7 @@ mod tests {
                 player: PlayerId(0),
                 modifier: NextSpellModifier::CantBeCountered,
                 spell_filter: None,
+                source_id: None,
             },
         );
         super::apply_pending_next_spell_stack_grants(&mut state, PlayerId(0), spell_id);
@@ -14641,6 +14640,7 @@ mod tests {
                 spell_filter: Some(TargetFilter::Typed(
                     TypedFilter::default().with_type(TypeFilter::Creature),
                 )),
+                source_id: None,
             },
         );
 
@@ -14653,6 +14653,107 @@ mod tests {
 
         let creature_prepared = prepare_spell_cast(&state, PlayerId(0), creature_id).unwrap();
         assert!(matches!(creature_prepared.mana_cost, ManaCost::NoCost));
+    }
+
+    #[test]
+    fn pending_next_spell_chosen_creature_type_flash_uses_grant_source() {
+        let mut state = setup_game_at_main_phase();
+        let icon_id = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Progenitor's Icon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let icon = state.objects.get_mut(&icon_id).unwrap();
+            icon.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Goblin".to_string()));
+        }
+
+        let goblin_spell_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&goblin_spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.mana_cost = ManaCost::generic(2);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Creature".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let elf_spell_id = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Elf Warrior".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&elf_spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.mana_cost = ManaCost::generic(2);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Creature".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::CastAsThoughFlash,
+                spell_filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                )),
+                source_id: Some(icon_id),
+            },
+        );
+
+        let goblin_keywords = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
+        assert!(
+            goblin_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
+            "Goblin spell matching Icon's chosen type must gain flash"
+        );
+
+        let elf_keywords = effective_spell_keywords(&state, PlayerId(0), elf_spell_id);
+        assert!(
+            !elf_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
+            "Elf spell not matching Icon's chosen type must not gain flash"
+        );
+
+        state.pending_next_spell_modifiers.clear();
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::CastAsThoughFlash,
+                spell_filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                )),
+                source_id: None,
+            },
+        );
+        let goblin_without_source = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
+        assert!(
+            !goblin_without_source
+                .iter()
+                .any(|k| matches!(k, Keyword::Flash)),
+            "chosen-type filter without grant source must not match the cast spell"
+        );
     }
 
     #[test]
@@ -41220,6 +41321,7 @@ mod tests {
                     player: PlayerId(0),
                     modifier: NextSpellModifier::WithoutPayingManaCost,
                     spell_filter: None,
+                    source_id: None,
                 },
             );
 

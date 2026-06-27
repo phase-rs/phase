@@ -2056,17 +2056,50 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
 /// ability targets. The two `Controller` arms come first so `ReduceNextSpellCost`
 /// and every existing "you cast" grant continue to parse under
 /// `PlayerScope::Controller`.
-fn parse_next_spell_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+fn parse_next_spell_subject(input: &str) -> OracleResult<'_, (PlayerScope, bool)> {
     alt((
-        value(PlayerScope::Controller, tag("you cast this turn ")),
+        value((PlayerScope::Controller, false), tag("you cast this turn ")),
         value(
-            PlayerScope::Controller,
+            (PlayerScope::Controller, true),
             tag("of the chosen type you cast this turn "),
         ),
-        value(PlayerScope::Target, tag("they cast this turn ")),
-        value(PlayerScope::Target, tag("that player casts this turn ")),
+        value((PlayerScope::Target, false), tag("they cast this turn ")),
+        value(
+            (PlayerScope::Target, false),
+            tag("that player casts this turn "),
+        ),
     ))
     .parse(input)
+}
+
+/// CR 205.3m + CR 607.2d + CR 609.4 / CR 601.3b: Attach the chosen-type
+/// discriminator stripped from "the next [type] spell of the chosen type you
+/// cast this turn" grants (Progenitor's Icon). Mirrors
+/// `oracle_static::static_helpers` cost-mod pairing: a creature-typed prefix
+/// uses `IsChosenCreatureType`; other typed prefixes use `IsChosenCardType`; a
+/// bare "spell of the chosen type" uses `IsChosenCreatureType` for
+/// creature-type-choice sources (Progenitor's Icon).
+fn compose_chosen_type_next_spell_filter(
+    type_prefix: Option<TargetFilter>,
+    chosen_type_subject: bool,
+) -> Option<TargetFilter> {
+    if !chosen_type_subject {
+        return type_prefix;
+    }
+    Some(match type_prefix {
+        Some(TargetFilter::Typed(mut tf)) if tf.type_filters.contains(&TypeFilter::Creature) => {
+            tf.properties.push(FilterProp::IsChosenCreatureType);
+            TargetFilter::Typed(tf)
+        }
+        Some(TargetFilter::Typed(mut tf)) => {
+            tf.properties.push(FilterProp::IsChosenCardType);
+            TargetFilter::Typed(tf)
+        }
+        None => TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+        ),
+        Some(filter) => filter,
+    })
 }
 
 /// CR 601.2f: Parse "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
@@ -2099,7 +2132,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     // subject (you = Controller, they/that player = Target). `pair` keeps BOTH
     // the `take_until` slice and the `parse_next_spell_subject` output — unlike
     // `terminated`, which would discard the subject scope.
-    let (ability_text, (filter_text, scope)) = nom::sequence::pair(
+    let (ability_text, (filter_text, (scope, chosen_type_subject))) = nom::sequence::pair(
         take_until::<_, _, OracleError<'_>>("spell"),
         preceded(
             tag::<_, _, OracleError<'_>>("spell "),
@@ -2109,15 +2142,18 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     .parse(rest)
     .ok()?;
 
-    let mut spell_filter = None;
     let filter_text = filter_text.trim();
-    if !filter_text.is_empty() {
-        // Parse the filter: "creature", "instant or sorcery", "noncreature", etc.
+    let type_prefix = if filter_text.is_empty() {
+        None
+    } else {
         let (filter, _) = parse_type_phrase(filter_text);
-        if !matches!(filter, TargetFilter::Any) {
-            spell_filter = Some(filter);
+        if matches!(filter, TargetFilter::Any) {
+            None
+        } else {
+            Some(filter)
         }
-    }
+    };
+    let spell_filter = compose_chosen_type_next_spell_filter(type_prefix, chosen_type_subject);
 
     // Now parse the ability: "can't be countered", "has convoke", "can be cast as though it had flash"
     // CR 601.2f: "can't be countered"
@@ -51119,6 +51155,37 @@ mod tests {
             "Expected GrantNextSpellAbility(CastAsThoughFlash), got {:?}",
             def.effect
         );
+    }
+
+    #[test]
+    fn progenitors_icon_next_spell_of_chosen_type_carries_creature_type_filter() {
+        let def = parse_effect_chain(
+            "The next spell of the chosen type you cast this turn can be cast as though it had flash",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::GrantNextSpellAbility {
+                modifier: crate::types::game_state::NextSpellModifier::CastAsThoughFlash,
+                player,
+                spell_filter,
+            } => {
+                assert_eq!(*player, PlayerScope::Controller);
+                let TargetFilter::Typed(tf) = spell_filter
+                    .as_ref()
+                    .expect("Progenitor's Icon must carry a chosen-type spell filter")
+                else {
+                    panic!("expected Typed spell_filter, got {spell_filter:?}");
+                };
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::IsChosenCreatureType)),
+                    "expected IsChosenCreatureType, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected GrantNextSpellAbility, got {other:?}"),
+        }
     }
 
     #[test]

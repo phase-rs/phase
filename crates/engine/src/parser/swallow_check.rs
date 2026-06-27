@@ -4140,6 +4140,27 @@ mod tests {
         }
     }
 
+    /// CR 601.2f + CR 607.2d: Progenitor's Icon's chosen-type next-spell flash
+    /// grant must parse without swallowing the "of the chosen type" qualifier.
+    #[test]
+    fn progenitors_icon_chosen_type_next_spell_flash_do_not_swallow() {
+        let parsed = parse_named(
+            "As this artifact enters, choose a creature type.\n\
+             {T}: Add one mana of any color.\n\
+             {T}: The next spell of the chosen type you cast this turn can be cast as though it had flash.",
+            "Progenitor's Icon",
+            &["Artifact"],
+        );
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| { !matches!(warning, OracleDiagnostic::SwallowedClause { .. }) }),
+            "Progenitor's Icon must not trigger swallowed clause warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// CR 508.1 + CR 118.9: Lethargy Trap — leading-if attacking-creature count
     /// gate on the {U} alternative casting cost must not report Condition_If.
     #[test]

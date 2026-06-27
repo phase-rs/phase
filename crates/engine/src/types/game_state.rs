@@ -366,6 +366,10 @@ pub struct PendingNextSpellModifier {
     /// Optional filter for which spells this applies to (None = any spell).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spell_filter: Option<TargetFilter>,
+    /// Permanent that granted this modifier. Required for source-dependent spell
+    /// filters such as `IsChosenCreatureType` (CR 607.2d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
 }
 
 /// CR 601.2f: The kind of modification to apply to the next qualifying spell.
