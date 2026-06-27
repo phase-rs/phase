@@ -2848,6 +2848,15 @@ fn expand_granted_activated_abilities(
     let mut out = Vec::new();
     let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
     provider_ids.sort_unstable_by_key(|id| id.0);
+    // CR 109.5: the provider `source` filter resolves through a context built
+    // purely from the (constant) host id and the recipient's controller — the
+    // recipient id is NOT part of it. So the matching-provider set is identical
+    // for every recipient sharing a controller. Memoize it per controller so
+    // the O(recipients × objects) filter sweep collapses to O(controllers ×
+    // objects). The recipient-equality self-skip stays per-recipient at
+    // emission (CR 613.1f), keeping the emitted set byte-identical.
+    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
+        std::collections::HashMap::new();
     for &recipient_id in &state.battlefield {
         if !crate::game::filter::matches_target_filter(
             state,
@@ -2874,21 +2883,30 @@ fn expand_granted_activated_abilities(
         // (Agatha's Soul Cauldron grants creatures-you-control the abilities of
         // *its own* exiled creature cards) only the host id finds the exile
         // links while "you" still tracks the recipient's controller.
-        let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
-            host_source_id,
-            recipient_controller,
-        );
+        let matching = providers_by_controller
+            .entry(recipient_controller)
+            .or_insert_with(|| {
+                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    host_source_id,
+                    recipient_controller,
+                );
+                provider_ids
+                    .iter()
+                    .copied()
+                    .filter(|&provider_id| {
+                        crate::game::perf_counters::record_granted_ability_provider_scan();
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            provider_id,
+                            source,
+                            &provider_ctx,
+                        )
+                    })
+                    .collect()
+            });
         let mut next_mod_index = 0usize;
-        for &provider_id in &provider_ids {
+        for &provider_id in matching.iter() {
             if provider_id == recipient_id {
-                continue;
-            }
-            if !crate::game::filter::matches_target_filter(
-                state,
-                provider_id,
-                source,
-                &provider_ctx,
-            ) {
                 continue;
             }
             let Some(provider) = state.objects.get(&provider_id) else {
@@ -9394,6 +9412,205 @@ mod tests {
             "hand provider must NOT donate: expected 1 grant (from bf_provider), \
              got {grant_count} (hand_provider donated a duplicate)"
         );
+    }
+
+    /// CR 109.5 + CR 604.1: `expand_granted_activated_abilities` memoizes the
+    /// matching-provider set per recipient controller. With K recipients sharing
+    /// ONE controller, the provider filter sweep runs exactly once (M scans, one
+    /// per object), and every recipient still gains each provider's activated
+    /// ability. Reverting the per-controller cache restores the K×M sweep,
+    /// flipping the `granted_ability_provider_scans == M` assertion.
+    #[test]
+    fn granted_activated_abilities_scan_providers_once_per_controller() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host cauldron-like artifact (NOT a creature, so not a recipient of its
+        // own grant) carrying "creatures you control have all activated abilities
+        // of all cards exiled with this".
+        let host = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Soul Cauldron".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::ExiledBySource,
+                }])]
+            .into();
+        }
+
+        // K=8 recipient creatures, all controlled by player 0.
+        let recipients: Vec<ObjectId> = (0..8)
+            .map(|i| make_creature(&mut state, &format!("Recipient {i}"), 1, 1, PlayerId(0)))
+            .collect();
+
+        // Two exiled provider cards, each carrying one distinct activated ability,
+        // both tracked by the host.
+        let mut provider_abilities = Vec::new();
+        for i in 0..2 {
+            let provider = create_object(
+                &mut state,
+                CardId(810 + i),
+                PlayerId(0),
+                format!("Exiled Source {i}"),
+                Zone::Exile,
+            );
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed {
+                        value: 2 + i as i32,
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            Arc::make_mut(&mut state.objects.get_mut(&provider).unwrap().abilities)
+                .push(ability.clone());
+            state.exile_links.push(ExileLink {
+                exiled_id: provider,
+                source_id: host,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+            provider_abilities.push(ability);
+        }
+
+        let m = state.objects.len() as u64;
+        let affected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let source = TargetFilter::ExiledBySource;
+
+        // Single deterministic invocation of the seam so the per-pass scan count
+        // is unambiguous (evaluate_layers re-runs the expansion each pass; this
+        // isolates one pass). Single controller ⟹ exactly M provider scans.
+        crate::game::perf_counters::reset();
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
+        assert_eq!(
+            scans, m,
+            "single controller must scan the provider set exactly once (M objects)"
+        );
+        // 8 recipients × 2 provider abilities = 16 grant effects.
+        assert_eq!(
+            effects.len(),
+            16,
+            "every recipient gains both provider abilities"
+        );
+
+        // Behavioral equivalence through the production entry point.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for &recipient in &recipients {
+            let obj = state.objects.get(&recipient).unwrap();
+            for ability in &provider_abilities {
+                assert!(
+                    obj.abilities.iter().any(|a| a == ability),
+                    "each recipient must gain every exiled provider's activated ability"
+                );
+            }
+        }
+    }
+
+    /// CR 109.5: the provider cache is keyed per controller, not over-collapsed.
+    /// Two recipients with DIFFERENT controllers force TWO full provider sweeps
+    /// (2×M scans), and each still receives the controller-independent
+    /// `ExiledBySource` provider abilities. Reverting the cache key to a single
+    /// shared entry would under-count to M.
+    #[test]
+    fn granted_activated_abilities_scan_per_distinct_controller() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host grants to ALL creatures (no controller restriction) so recipients
+        // of either controller match the affected filter.
+        let host = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Soul Cauldron".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::ExiledBySource,
+                }])]
+            .into();
+        }
+
+        // One recipient per controller.
+        let recipient_p0 = make_creature(&mut state, "Recipient P0", 1, 1, PlayerId(0));
+        let recipient_p1 = make_creature(&mut state, "Recipient P1", 1, 1, PlayerId(1));
+
+        let provider = create_object(
+            &mut state,
+            CardId(810),
+            PlayerId(0),
+            "Exiled Source".to_string(),
+            Zone::Exile,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&provider).unwrap().abilities)
+            .push(ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: provider,
+            source_id: host,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let m = state.objects.len() as u64;
+        let affected = TargetFilter::Typed(TypedFilter::creature());
+        let source = TargetFilter::ExiledBySource;
+
+        // Single deterministic invocation: two distinct recipient controllers ⟹
+        // two cache entries ⟹ two full provider sweeps (2×M scans).
+        crate::game::perf_counters::reset();
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
+        assert_eq!(
+            scans,
+            2 * m,
+            "two distinct controllers must each trigger one full provider sweep"
+        );
+        // 2 recipients × 1 provider ability = 2 grant effects.
+        assert_eq!(
+            effects.len(),
+            2,
+            "each controller's recipient gains the provider ability"
+        );
+
+        // Behavioral equivalence through the production entry point.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for recipient in [recipient_p0, recipient_p1] {
+            let obj = state.objects.get(&recipient).unwrap();
+            assert!(
+                obj.abilities.iter().any(|a| a == &ability),
+                "each controller's recipient must gain the exiled provider's ability"
+            );
+        }
     }
 
     #[test]

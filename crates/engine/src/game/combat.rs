@@ -907,6 +907,7 @@ fn attacker_has_must_be_blocked_by_all_from_precomputed(
 /// from the blocker, and remote affected filters are resolved through the shared
 /// static-ability checker.
 fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
+    crate::game::perf_counters::record_combat_shadow_block_scan();
     super::functioning_abilities::active_static_definitions(state, blocker)
         .any(|sd| sd.mode == StaticMode::CanBlockShadow)
         || crate::game::static_abilities::check_static_ability(
@@ -917,6 +918,20 @@ fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
                 ..Default::default()
             },
         )
+}
+
+// CR 604.1: static abilities are continuously "on"; if NO functioning
+// CanBlockShadow static exists anywhere (the loop-invariant existence gate),
+// both the blocker's intrinsic static scan and the remote check_static_ability
+// sweep return false, so this is byte-identical to the full predicate while
+// skipping the O(N) per-blocker sweep. CR 509.1b/609.4/702.28b: a CanBlockShadow
+// static lifts the shadow block restriction for the affected blocker.
+fn blocker_can_block_shadow_gated(
+    state: &GameState,
+    blocker: &GameObject,
+    can_block_shadow_exists: bool,
+) -> bool {
+    can_block_shadow_exists && blocker_can_block_shadow(state, blocker)
 }
 
 /// Validate blocker declarations per CR 509.1.
@@ -978,6 +993,14 @@ pub fn validate_blockers_for_player(
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
     let must_be_blocked = collect_must_be_blocked_statics(state);
+    // CR 604.1: loop-invariant existence gate for the shadow block-lift (CR
+    // 509.1b/609.4/702.28b). Hoisted once so the per-blocker shadow scan below
+    // and every `can_block_pair_with_precomputed` call skip the O(N)
+    // `check_static_ability` sweep when no `CanBlockShadow` static exists.
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
 
     // Group assignments by attacker for menace validation and by blocker for
     // per-creature block-capacity checks.
@@ -1152,7 +1175,10 @@ pub fn validate_blockers_for_player(
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
         // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
         // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
-        if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
+        if attacker_has_shadow
+            && !blocker_has_shadow
+            && !blocker_can_block_shadow_gated(state, blocker, can_block_shadow_exists)
+        {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow can only be blocked by shadow)",
                 blocker_id, attacker_id
@@ -1362,6 +1388,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
             });
 
@@ -1416,6 +1443,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
                 {
                     return false;
@@ -1500,6 +1528,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
             });
             if can_block_any {
@@ -1570,6 +1599,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
                 {
                     return Err(format!(
@@ -3089,6 +3119,11 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     let blocker_restriction = collect_blocker_restriction_statics(state);
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b).
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
     can_block_pair_with_precomputed(
         state,
         blocker_id,
@@ -3096,6 +3131,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         &blocker_restriction,
         &block_restriction,
         &blocker_allowed,
+        can_block_shadow_exists,
     )
 }
 
@@ -3113,6 +3149,7 @@ pub fn can_block_pair_with_precomputed(
     blocker_restriction: &[(ObjectId, StaticDefinition)],
     block_restriction: &[(ObjectId, StaticDefinition)],
     blocker_allowed: &[(ObjectId, StaticDefinition)],
+    can_block_shadow_exists: bool,
 ) -> bool {
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
@@ -3184,7 +3221,10 @@ pub fn can_block_pair_with_precomputed(
     let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
     // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
     // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
-    if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
+    if attacker_has_shadow
+        && !blocker_has_shadow
+        && !blocker_can_block_shadow_gated(state, blocker, can_block_shadow_exists)
+    {
         return false;
     }
     if !attacker_has_shadow && blocker_has_shadow {
@@ -3277,6 +3317,12 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
     let blocker_restriction = collect_blocker_restriction_statics(state);
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
+    // hoisted once for the whole O(blockers × attackers) sweep.
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
 
     let mut result = HashMap::new();
     for &blocker_id in &valid_blockers {
@@ -3299,6 +3345,7 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
                     &blocker_restriction,
                     &block_restriction,
                     &blocker_allowed,
+                    can_block_shadow_exists,
                 )
             })
             .map(|a| a.object_id)
@@ -5425,6 +5472,93 @@ mod tests {
             .keywords
             .push(Keyword::Shadow);
         assert!(validate_blockers(&state, &[(shadow_blocker, normal_attacker)]).is_err());
+    }
+
+    /// CR 604.1 + CR 509.1b/609.4/702.28b: with NO functioning `CanBlockShadow`
+    /// static anywhere, the hoisted existence gate short-circuits every
+    /// per-blocker shadow scan, so a shadow attacker facing K non-shadow blockers
+    /// costs ZERO `blocker_can_block_shadow` full-body executions while remaining
+    /// byte-identical (no non-shadow creature can block the shadow attacker).
+    /// Reverting the gate restores the O(K) per-blocker `check_static_ability`
+    /// sweep, flipping the `combat_shadow_block_scans == 0` assertion to K.
+    #[test]
+    fn get_valid_block_targets_no_shadow_scan_when_no_can_block_shadow_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow Strider", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        // K=8 non-shadow defending creatures (PlayerId(1)).
+        for i in 0..8 {
+            create_creature(&mut state, PlayerId(1), &format!("Bear {i}"), 2, 2);
+        }
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        crate::game::perf_counters::reset();
+        let targets = get_valid_block_targets(&state);
+        let scans = crate::game::perf_counters::snapshot().combat_shadow_block_scans;
+
+        assert_eq!(
+            scans, 0,
+            "no CanBlockShadow static exists, so the gate must skip every per-blocker shadow scan"
+        );
+        assert!(
+            targets.is_empty(),
+            "no non-shadow creature can legally block the shadow attacker; got {targets:?}"
+        );
+    }
+
+    /// CR 604.1 + CR 509.1b/609.4/702.28b equivalence: when a functioning
+    /// `CanBlockShadow` static DOES exist, the gate is true and the full
+    /// predicate runs, so the affected non-shadow creature is a legal blocker for
+    /// the shadow attacker while plain non-shadow creatures are not. This proves
+    /// the gate-true path preserves the shadow-lift (the gate is a pure
+    /// existence short-circuit, not a behavior change).
+    #[test]
+    fn get_valid_block_targets_honors_can_block_shadow_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow Strider", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        let plain = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let dryad = create_creature(&mut state, PlayerId(1), "Heartwood Dryad", 2, 2);
+        state
+            .objects
+            .get_mut(&dryad)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::SelfRef),
+            );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let targets = get_valid_block_targets(&state);
+        assert_eq!(
+            targets.get(&dryad).map(Vec::as_slice),
+            Some([attacker].as_slice()),
+            "the CanBlockShadow creature must be able to block the shadow attacker"
+        );
+        assert!(
+            !targets.contains_key(&plain),
+            "a plain non-shadow creature still cannot block the shadow attacker; got {targets:?}"
+        );
     }
 
     #[test]
@@ -8012,6 +8146,8 @@ mod tests {
             "collect_blocker_allowed_statics must capture the flying-only BlockRestriction"
         );
 
+        // No CanBlockShadow static on this board, so the shadow-lift gate is false.
+        let can_block_shadow_exists = false;
         let precomputed_ground = can_block_pair_with_precomputed(
             &state,
             drone,
@@ -8019,6 +8155,7 @@ mod tests {
             &blocker_restriction,
             &block_restriction,
             &blocker_allowed,
+            can_block_shadow_exists,
         );
         let precomputed_flyer = can_block_pair_with_precomputed(
             &state,
@@ -8027,6 +8164,7 @@ mod tests {
             &blocker_restriction,
             &block_restriction,
             &blocker_allowed,
+            can_block_shadow_exists,
         );
 
         assert!(
@@ -8100,6 +8238,8 @@ mod tests {
                 &blocker_restriction,
                 &block_restriction,
                 &blocker_allowed,
+                // No CanBlockShadow static on this board.
+                false,
             ),
             "precomputed pair check must reject a blocker under CantBlock"
         );

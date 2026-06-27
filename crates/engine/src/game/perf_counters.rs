@@ -19,6 +19,8 @@ pub struct PerfCounterSnapshot {
     pub mana_aura_trigger_scans: u64,
     pub crew_eligibility_scans: u64,
     pub attackable_player_sweeps: u64,
+    pub combat_shadow_block_scans: u64,
+    pub granted_ability_provider_scans: u64,
 }
 
 thread_local! {
@@ -51,6 +53,8 @@ thread_local! {
         mana_aura_trigger_scans: 0,
         crew_eligibility_scans: 0,
         attackable_player_sweeps: 0,
+        combat_shadow_block_scans: 0,
+        granted_ability_provider_scans: 0,
     }) };
 }
 
@@ -72,6 +76,24 @@ pub fn record_state_clone_for_legality() {
 /// per-loop scans to O(N).
 pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
+}
+
+/// Counts every full-body execution of `blocker_can_block_shadow` (each a
+/// whole-battlefield `check_static_ability(CanBlockShadow)` sweep). The combat
+/// block-legality loops hoist a once-computed `CanBlockShadow` existence gate to
+/// drive this toward zero, collapsing the O(attackers×blockers×N) per-blocker
+/// scan to O(N) when no such static exists.
+pub fn record_combat_shadow_block_scan() {
+    with_mut(|s| s.combat_shadow_block_scans += 1);
+}
+
+/// Counts every per-provider `matches_target_filter` evaluation done while
+/// populating the per-controller provider cache in
+/// `expand_granted_activated_abilities`. Memoizing the matching-provider set by
+/// recipient controller collapses the O(recipients×objects) filter sweep to
+/// O(controllers×objects).
+pub fn record_granted_ability_provider_scan() {
+    with_mut(|s| s.granted_ability_provider_scans += 1);
 }
 
 pub fn record_layers_full_eval() {

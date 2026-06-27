@@ -28,6 +28,9 @@ pub(crate) struct BlockLegalitySlices {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
     block_restriction: Vec<(ObjectId, StaticDefinition)>,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
+    // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
+    can_block_shadow_exists: bool,
 }
 
 impl BlockLegalitySlices {
@@ -36,6 +39,10 @@ impl BlockLegalitySlices {
             blocker_restriction: collect_blocker_restriction_statics(state),
             block_restriction: collect_block_restriction_statics(state),
             blocker_allowed: collect_blocker_allowed_statics(state),
+            can_block_shadow_exists:
+                engine::game::functioning_abilities::any_functioning_static_mode(state, |m| {
+                    matches!(m, StaticMode::CanBlockShadow)
+                }),
         }
     }
 
@@ -53,6 +60,7 @@ impl BlockLegalitySlices {
             &self.blocker_restriction,
             &self.block_restriction,
             &self.blocker_allowed,
+            self.can_block_shadow_exists,
         )
     }
 }
