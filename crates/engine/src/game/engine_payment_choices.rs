@@ -1042,9 +1042,53 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Reveal { .. }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
-            | AbilityCost::NinjutsuFamily { .. }
-            | AbilityCost::EffectCost { .. }
-            | AbilityCost::Unimplemented { .. } => {
+            | AbilityCost::NinjutsuFamily { .. } => {
+                payment_failed = true;
+            }
+            // CR 118.12a: "unless [target's controller] has [~] deal N damage to
+            // them" — the payer takes damage from the ability source instead of
+            // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage { .. } => {
+                    let mut damage_ability = pending_effect.as_ref().clone();
+                    damage_ability.effect = *effect.clone();
+                    damage_ability.targets = vec![TargetRef::Player(player)];
+                    damage_ability.unless_pay = None;
+                    damage_ability.sub_ability = None;
+                    if let Err(e) =
+                        effects::deal_damage::resolve(state, &damage_ability, events)
+                    {
+                        return Err(EngineError::InvalidAction(format!("{e:?}")));
+                    }
+                    if matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+                // CR 118.12a + CR 121.3a: "unless its controller has you draw a
+                // card" (Decoy Gambit) — the payer has the spell's controller
+                // draw instead of the primary bounce. `OriginalController` on
+                // the inner `Draw` target survives via `pending_effect`.
+                Effect::Draw { .. } => {
+                    let mut draw_ability = pending_effect.as_ref().clone();
+                    draw_ability.effect = *effect.clone();
+                    draw_ability.unless_pay = None;
+                    draw_ability.sub_ability = None;
+                    if let Err(e) = effects::draw::resolve(state, &draw_ability, events) {
+                        return Err(EngineError::InvalidAction(format!("{e:?}")));
+                    }
+                    if matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+                _ => payment_failed = true,
+            },
+            AbilityCost::Unimplemented { .. } => {
                 payment_failed = true;
             }
         }
@@ -1256,7 +1300,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         ));
     };
 
-    handle_tap_land_for_mana(state, object_id, events)?;
+    handle_tap_land_for_mana(state, player, object_id, events)?;
     state
         .lands_tapped_for_mana
         .entry(player)
@@ -1904,6 +1948,76 @@ mod tests {
             .expect("unless-pay-life should resolve");
         // Player paid 3 life — life total drops by 3, gain-life effect skipped.
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a + CR 121.3a: "unless its controller has you draw a card"
+    /// routes the draw to the spell's original controller and suppresses the
+    /// primary bounce when the cost is paid.
+    #[test]
+    fn unless_have_you_draw_cost_resolves_for_original_controller() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let _library_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Library Top".to_string(),
+            Zone::Library,
+        );
+
+        let mut pending = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+                selection: Default::default(),
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        pending.set_original_controller_recursive(PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::OriginalController,
+                }),
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-have-you-draw should resolve");
+
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "paying the unless cost must suppress the bounce"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "paying the unless cost must draw for the spell's original controller"
+        );
+        assert!(
+            state
+                .objects
+                .values()
+                .any(|obj| obj.zone == Zone::Hand && obj.name == "Library Top"),
+            "the drawn card must come from the caster's library"
+        );
     }
 
     /// CR 118.12a + CR 701.21: Unless-sacrifice costs are payer-relative.

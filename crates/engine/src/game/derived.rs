@@ -77,6 +77,11 @@ pub fn derive_display_state(state: &mut GameState) {
     if dirty.mana_display_dirty || dirty.all_objects_dirty {
         let battlefield_ids: Vec<_> = state.battlefield.iter().copied().collect();
         crate::game::perf_counters::record_mana_display_sweep(battlefield_ids.len());
+        // CR 604.1: hoist the activation-prohibition existence gates ONCE before
+        // the per-source readiness checks. Without this, each of the (up to N)
+        // mana sources re-scans the whole battlefield for City-of-Solitude-class
+        // statics, making this sweep O(N^2) on go-wide mana boards.
+        let activation_gates = mana_abilities::ManaActivationGates::compute(state);
         let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
             battlefield_ids
                 .into_iter()
@@ -88,12 +93,13 @@ pub fn derive_display_state(state: &mut GameState) {
                         .enumerate()
                         .find(|(idx, ability)| {
                             mana_abilities::is_mana_ability(ability)
-                                && mana_abilities::can_activate_mana_ability_now(
+                                && mana_abilities::can_activate_mana_ability_now_gated(
                                     state,
                                     obj.controller,
                                     obj.id,
                                     *idx,
                                     ability,
+                                    &activation_gates,
                                 )
                         })
                         .map(|(idx, _)| idx);

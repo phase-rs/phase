@@ -108,14 +108,16 @@ fn stamp_for_as_long_as_controlled_gate(
 }
 
 /// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
-/// much damage plus X" replacement at activation time. The parser emits
-/// `DamageModification::Plus { value: 0 }` as a placeholder (the `u32`-typed
-/// modification cannot carry a symbolic X); here the announced X (held on the
-/// activating ability as `chosen_x`) replaces the placeholder so the replacement
-/// applies the locked-in value for the rest of the turn (Taii Wakeen's second
-/// ability). The `chosen_x.is_some()` guard ensures a genuine literal "plus 0"
-/// (no X in the cost) is never clobbered. (CR 107.3a: an activated ability's X
-/// equals its announced value while on the stack and beyond.)
+/// much damage plus X" replacement at activation time. The parser emits the
+/// bare-"plus x" form (no "where X is" binding) as
+/// `DamageModification::Plus { value: QuantityExpr::Fixed { value: 0 } }`
+/// placeholder; here the announced X (held on the activating ability as
+/// `chosen_x`) replaces the placeholder so the replacement applies the
+/// locked-in value for the rest of the turn (Taii Wakeen's second ability). The
+/// `Fixed { value: 0 }` guard ensures a genuine literal "plus 0" (no X) or a
+/// where-bound dynamic offset (`Ref`, e.g. Hawkeye) is never clobbered. (CR
+/// 107.3a: an activated ability's X equals its announced value while on the
+/// stack and beyond.)
 fn freeze_damage_modification_x(
     replacement: &mut ReplacementDefinition,
     ability: &ResolvedAbility,
@@ -123,8 +125,13 @@ fn freeze_damage_modification_x(
     if let (Some(crate::types::ability::DamageModification::Plus { value }), Some(chosen_x)) =
         (replacement.damage_modification.as_mut(), ability.chosen_x)
     {
-        if *value == 0 {
-            *value = chosen_x;
+        if matches!(
+            value,
+            crate::types::ability::QuantityExpr::Fixed { value: 0 }
+        ) {
+            *value = crate::types::ability::QuantityExpr::Fixed {
+                value: chosen_x as i32,
+            };
         }
     }
 }
@@ -536,7 +543,9 @@ mod tests {
         // of truth.
         let mut state = GameState::new_two_player(42);
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_modification(DamageModification::Plus {
+                value: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            })
             .damage_source_filter(TargetFilter::Typed(
                 crate::types::ability::TypedFilter::default()
                     .controller(crate::types::ability::ControllerRef::You),
@@ -604,7 +613,9 @@ mod tests {
         );
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_modification(DamageModification::Plus {
+                value: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            })
             .damage_source_filter(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
             ));

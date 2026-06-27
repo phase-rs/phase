@@ -37,7 +37,6 @@ describe("CommanderPanel", () => {
         isCommanderEligible={() => true}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={() => 1}
       />,
     );
 

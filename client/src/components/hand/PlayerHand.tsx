@@ -24,6 +24,8 @@ import {
   computeGapPx,
   flankingHandIndices,
 } from "./handInsertionSlot.ts";
+import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
+import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
 // card leftward over the previous one. Tightens continuously as the hand grows
@@ -56,6 +58,41 @@ function getArcCoefficient(handSize: number): number {
   // Keep max arc lift (at the edges) roughly constant at ~54px.
   const maxDist = (handSize - 1) / 2;
   return 54 / (maxDist * maxDist);
+}
+
+// Continue the hand's fan curve into the castable graveyard/exile "wings".
+//
+// A card at virtual fan index `vi` lies exactly on the curve the hand already
+// defines: vi in [0, H) are the real hand cards (rendered untouched by
+// getCardRotation/arcOffset), vi < 0 are exile wing cards extending left, and
+// vi >= H are graveyard wing cards extending right. Reusing the hand's own
+// per-card rotation delta and arc coefficient — derived from HAND size only —
+// makes the wings perfectly continuous with the hand without altering a single
+// hand-card line, so the drag-to-reorder system (which only ever sees hand
+// cards) is completely undisturbed. Mirrors getCardRotation/getArcCoefficient:
+// rotation(i) === getCardRotation(i, H) and arc(i) === the hand's arcOffset.
+function handFanCurve(handSize: number) {
+  const center = (handSize - 1) / 2;
+  // Derive the fan SHAPE (per-card tilt + arc) from at least two cards so the
+  // wings still fan when the hand is empty or holds a single card (a raw delta
+  // of 0 would render them flat). `center` stays at the TRUE hand center, so for
+  // handSize >= 2 this is identical to before and the wing curve stays
+  // continuous with getCardRotation(i, handSize) at the seam.
+  const shapeSize = Math.max(2, handSize);
+  const delta = Math.min(6, 36 / (shapeSize - 1));
+  const arcCoeff = getArcCoefficient(shapeSize);
+  // The arc is a DOWNWARD parabola (edges drop, center rides highest). Past the
+  // hand's own edge a naive continuation would sink the wings below the band and
+  // clip them, so clamp wing lift to the outermost hand card's drop: wings rest
+  // level with the hand's edge cards while their rotation keeps sweeping.
+  const edgeLift = center * center * arcCoeff;
+  return {
+    rotation: (vi: number) => (vi - center) * delta,
+    arc: (vi: number) => {
+      const d = vi - center;
+      return Math.min(d * d * arcCoeff, edgeLift);
+    },
+  };
 }
 
 // Rendered size (px) of the bouncing drop-arrow's square box. Fixed (not
@@ -99,6 +136,14 @@ export function PlayerHand() {
   const playableObjectIds = useMemo(() => {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
+
+  // Castable graveyard/exile cards, rendered as colored "wings" continuing the
+  // hand fan (engine authority — see useCastableZoneObjects). These are NOT
+  // hand cards: they carry no `data-card-hover`, so the reorder DOM sweep never
+  // sees them and they can never be dragged into the middle of the hand. Their
+  // only drag gesture is flick-up-to-cast.
+  const exileCards = useCastableZoneObjects("exile", playerId);
+  const graveyardCards = useCastableZoneObjects("graveyard", playerId);
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -382,6 +427,15 @@ export function PlayerHand() {
     .map((id) => objects[id])
     .filter((obj) => obj && obj.id !== pendingObjectId);
 
+  // Wing geometry shares the hand's curve so exile (left) and graveyard (right)
+  // sit on one continuous arc. `wingOverlap` matches the hand's internal
+  // overlap; the first card of each wing gets margin 0, leaving a hairline seam
+  // that visually groups the colored wing apart from the white hand cards.
+  const handSize = handObjects.length;
+  const fanCurve = handFanCurve(handSize);
+  const wingOverlap = getHandOverlap(handSize);
+  const exileCount = exileCards.length;
+
   return (
     <div
       ref={handContainerRef}
@@ -410,6 +464,32 @@ export function PlayerHand() {
         transition={{ duration: 0.25 }}
       >
         <AnimatePresence>
+          {/* Exile wing (left): virtual fan indices -E .. -1 continue the curve
+              leftward. Cast-only — never reorder targets. */}
+          {exileCards.map((obj, j) => {
+            const vi = j - exileCount;
+            return (
+              <ZoneFanCard
+                key={obj.id}
+                objectId={obj.id}
+                cardName={obj.name}
+                manaCost={obj.mana_cost}
+                unimplementedMechanics={obj.unimplemented_mechanics}
+                rotation={fanCurve.rotation(vi)}
+                arcOffset={fanCurve.arc(vi)}
+                marginLeft={j === 0 ? 0 : wingOverlap}
+                zIndex={vi}
+                theme={ZONE_THEME.exile}
+                hasPriority={hasPriority}
+                isSelected={selectedCardId === obj.id}
+                onPlay={playCard}
+                onClick={handleCardClick}
+                onDoubleClick={handleCardDoubleClick}
+                onMouseEnter={handleMouseEnter}
+                onMouseLeave={handleMouseLeave}
+              />
+            );
+          })}
           {handObjects.map((obj, i) => {
           const rotation = getCardRotation(i, handObjects.length);
           const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
@@ -443,6 +523,32 @@ export function PlayerHand() {
             />
           );
         })}
+          {/* Graveyard wing (right): virtual fan indices H .. H+G-1 continue the
+              curve rightward. Cast-only — never reorder targets. */}
+          {graveyardCards.map((obj, j) => {
+            const vi = handSize + j;
+            return (
+              <ZoneFanCard
+                key={obj.id}
+                objectId={obj.id}
+                cardName={obj.name}
+                manaCost={obj.mana_cost}
+                unimplementedMechanics={obj.unimplemented_mechanics}
+                rotation={fanCurve.rotation(vi)}
+                arcOffset={fanCurve.arc(vi)}
+                marginLeft={j === 0 ? 0 : wingOverlap}
+                zIndex={vi}
+                theme={ZONE_THEME.graveyard}
+                hasPriority={hasPriority}
+                isSelected={selectedCardId === obj.id}
+                onPlay={playCard}
+                onClick={handleCardClick}
+                onDoubleClick={handleCardDoubleClick}
+                onMouseEnter={handleMouseEnter}
+                onMouseLeave={handleMouseLeave}
+              />
+            );
+          })}
         </AnimatePresence>
       </motion.div>
       {/* Drop-position arrow: a single glowing arrow that bounces over the slot
@@ -608,7 +714,7 @@ const HandCard = memo(function HandCard({
   const glowClass = hasPriority
     ? isPlayable
       ? "shadow-[0_0_16px_4px_rgba(34,211,238,0.6)] ring-2 ring-cyan-400"
-      : "opacity-60"
+      : "opacity-90"
     : "";
 
   // Quadratic arc: cards further from center drop more, forming a natural parabola.
@@ -700,6 +806,129 @@ const HandCard = memo(function HandCard({
         />
         <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
       </motion.div>
+    </motion.div>
+  );
+});
+
+interface ZoneFanCardProps {
+  objectId: number;
+  cardName: string;
+  manaCost: ManaCost;
+  unimplementedMechanics?: string[];
+  rotation: number;
+  arcOffset: number;
+  marginLeft: string | number;
+  zIndex: number;
+  theme: ZoneTheme;
+  hasPriority: boolean;
+  isSelected: boolean;
+  onPlay: (objectId: number) => void;
+  onClick: (objectId: number, e?: React.MouseEvent) => void;
+  onDoubleClick: (objectId: number) => void;
+  onMouseEnter: (id: number) => void;
+  onMouseLeave: () => void;
+}
+
+// A castable graveyard/exile card sitting in the hand fan's wing. It mirrors
+// HandCard's resting animation (arc + tilt + hover lift) for visual continuity
+// but is deliberately NOT part of the reorder system: no `data-card-hover`, no
+// insertion-slot wiring, no displacement spring. Its sole drag gesture is
+// flick-up-to-cast (CR-agnostic UI gating, same DRAG_PLAY_THRESHOLD as the hand
+// and the commander zone). Per-source drag policy lives here — a zone card can
+// be flung up to cast but can never be dropped into the middle of the hand.
+const ZoneFanCard = memo(function ZoneFanCard({
+  objectId,
+  cardName,
+  manaCost,
+  unimplementedMechanics,
+  rotation,
+  arcOffset,
+  marginLeft,
+  zIndex,
+  theme,
+  hasPriority,
+  isSelected,
+  onPlay,
+  onClick,
+  onDoubleClick,
+  onMouseEnter,
+  onMouseLeave,
+}: ZoneFanCardProps) {
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const setDragging = useUiStore((s) => s.setDragging);
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
+    inspectObject(objectId);
+    setPreviewSticky(true);
+  });
+
+  const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
+  const displayCost = effectiveCost ?? manaCost;
+  const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
+    && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
+  // Suppress dragSnapToOrigin only when the flick actually cast the card, so a
+  // short/sideways drag springs back into the wing instead of flying off.
+  const playedRef = useRef(false);
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 40 }}
+      animate={{ opacity: 1, y: 30 + arcOffset, rotate: rotation }}
+      exit={{ opacity: 0, scale: 0.8 }}
+      whileHover={{ y: 20 + arcOffset, scale: 1.08, zIndex: 30 }}
+      whileDrag={{ scale: 1.05, zIndex: 9999 }}
+      transition={{ duration: 0.25, layout: { duration: 0.15, delay: 0 } }}
+      drag
+      dragConstraints={false}
+      dragElastic={0}
+      dragSnapToOrigin={!playedRef.current}
+      onDragStart={() => {
+        playedRef.current = false;
+        setDragging(true);
+        inspectObject(null);
+      }}
+      onDragEnd={(_event, info: PanInfo) => {
+        setDragging(false);
+        // Cast-only: flick up past the threshold while holding priority. There
+        // is no reorder branch, so this card can never land in the hand.
+        if (hasPriority && info.offset.y < DRAG_PLAY_THRESHOLD) {
+          playedRef.current = true;
+          onPlay(objectId);
+        }
+      }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (longPressFired.current) { longPressFired.current = false; return; }
+        onClick(objectId, e);
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        onDoubleClick(objectId);
+      }}
+      onMouseEnter={() => onMouseEnter(objectId)}
+      onMouseLeave={onMouseLeave}
+      className="relative cursor-pointer leading-[0] select-none"
+      style={{ marginLeft, zIndex }}
+      {...longPressHandlers}
+    >
+      <div
+        className={`relative overflow-hidden rounded-lg border ${theme.cardBorder} ${
+          isSelected ? "ring-2 ring-cyan-400" : ""
+        }`}
+      >
+        <CardImage
+          cardName={cardName}
+          size="normal"
+          unimplementedMechanics={unimplementedMechanics}
+          className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
+        />
+        {/* Per-zone translucent wash marking "castable from elsewhere". */}
+        <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
+      </div>
+      {/* Per-zone castable glow ring (sibling of the clipped image so it isn't cropped). */}
+      <div className={`pointer-events-none absolute inset-0 rounded-lg ${theme.ring}`} />
+      <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
     </motion.div>
   );
 });

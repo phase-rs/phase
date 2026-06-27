@@ -85,6 +85,7 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
 
 fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_they_scoped_player_conditions,
         parse_turn_conditions,
         // CR 208.1 + CR 603.4 + CR 109.3: Superlative-comparison gate
         // ("if its power is greater than each other creature's power" /
@@ -106,6 +107,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
+        // CR 508.1 + CR 118.9: "N or more creatures are attacking" — must precede
+        // `parse_control_conditions` so the bare count phrase is not mis-read as
+        // "you control N or more creatures".
+        parse_creatures_are_attacking_count_ge,
         parse_control_conditions,
         parse_remaining_state_presence_conditions,
     ))
@@ -2059,7 +2064,7 @@ fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCon
 }
 
 /// Parse a superlative adjective into its corresponding `AggregateFunction`.
-fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
     alt((
         value(AggregateFunction::Max, tag("greatest")),
         value(AggregateFunction::Max, tag("highest")),
@@ -2070,7 +2075,7 @@ fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunctio
 }
 
 /// Property keyword parser — used by both LHS and RHS of the comparison.
-fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
     alt((
         value(ObjectProperty::Power, tag("power")),
         value(ObjectProperty::Toughness, tag("toughness")),
@@ -2194,6 +2199,72 @@ fn build_superlative_comparison(
             },
         },
     }
+}
+
+/// CR 608.2c: Spell-target gate "[least|greatest] <property> among <filter>"
+/// (Wretched Banquet body). Uses `ObjectScope::Target` on the LHS and a
+/// population aggregate without `OtherThanTriggerObject` — distinct from the
+/// trigger-anchored `build_superlative_comparison` form.
+pub(crate) fn parse_spell_target_has_superlative(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, aggregate) = parse_superlative_adjective(input)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
+    let (rest, property) = parse_property_keyword(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(remainder));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    let lhs_qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(rest)),
+    };
+    // "Has the least/greatest" allows ties — use LE/GE, not strict LT/GT.
+    let comparator = match aggregate {
+        AggregateFunction::Min => Comparator::LE,
+        AggregateFunction::Max => Comparator::GE,
+        AggregateFunction::Sum => return Err(oracle_err(rest)),
+    };
+    Ok((
+        remainder,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref { qty: lhs_qty },
+            comparator,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: aggregate,
+                    property,
+                    filter,
+                },
+            },
+        },
+    ))
+}
+
+/// Suffix connector for spell-target superlative gates: "it has the …" /
+/// "they have the …" (CR 608.2c).
+pub(crate) fn parse_spell_target_superlative_suffix(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("it has the "),
+            tag("they have the "),
+        )),
+        parse_spell_target_has_superlative,
+    )
+    .parse(input)
 }
 
 /// Attach `FilterProp::OtherThanTriggerObject` to a `TargetFilter`'s property
@@ -2396,6 +2467,76 @@ fn parse_you_have_typed_cards_in_your_graveyard(input: &str) -> OracleResult<'_,
         )));
     }
     Ok((rest, type_filters))
+}
+
+/// Parse "they have exactly N [or exactly M ...] cards in hand" and
+/// "they control N or more [type]" for scoped-player unless/if gates
+/// (Skullcage, Furnace Punisher class). "They" binds to
+/// `PlayerScope::ScopedPlayer` — the relative-player slot established by
+/// trigger `relative_player_scope` / event-player context for per-player
+/// damage and punishment riders.
+fn parse_they_scoped_player_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_they_hand_size_exact_disjunction,
+        parse_they_control_count_ge,
+    ))
+    .parse(input)
+}
+
+fn parse_they_hand_size_exact_disjunction(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("they have ").parse(input)?;
+    let (rest, first_n) = preceded(tag("exactly "), parse_number).parse(rest)?;
+    let mut counts = vec![first_n];
+    let mut rest = rest;
+    while let Ok((next, n)) = preceded(tag(" or exactly "), parse_number).parse(rest) {
+        counts.push(n);
+        rest = next;
+    }
+    let (rest, _) = tag(" cards in hand").parse(rest)?;
+    let player = PlayerScope::ScopedPlayer;
+    let conditions: Vec<StaticCondition> = counts
+        .into_iter()
+        .map(|n| StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: player.clone(),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        })
+        .collect();
+    let condition = if conditions.len() == 1 {
+        conditions.into_iter().next().expect("one count")
+    } else {
+        StaticCondition::Or { conditions }
+    };
+    Ok((rest, condition))
+}
+
+fn parse_they_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("they control ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let filter = inject_controller(filter, ControllerRef::ScopedPlayer);
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 /// Parse "that player has" / "that opponent has" quantity conditions.
@@ -2771,6 +2912,30 @@ fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition
         rest,
         StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
+/// CR 508.1 + CR 118.9: Parse "N or more creatures are attacking" →
+/// `QuantityComparison(ObjectCount(creature + Attacking) >= N)`.
+///
+/// Lethargy Trap: "If three or more creatures are attacking, you may pay {U}
+/// rather than pay this spell's mana cost." Reuses `parse_ge_threshold` so
+/// "at least three creatures are attacking" shares the same parse path.
+fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    let (rest, _) = tag("creatures are attacking").parse(rest.trim_start())?;
+    let filter = TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+    );
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
 }
@@ -7889,6 +8054,37 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// gates the alternative casting cost.
+    #[test]
+    fn test_creatures_are_attacking_count_ge() {
+        let (rest, c) = parse_inner_condition("three or more creatures are attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_control_count_ge_artifacts() {
         let (rest, c) = parse_inner_condition("you control two or more artifacts").unwrap();
@@ -10553,6 +10749,26 @@ mod tests {
             matches!(c, StaticCondition::UnlessPay { .. }),
             "expected raw UnlessPay (not Not-wrapped), got {c:?}"
         );
+    }
+
+    #[test]
+    fn test_they_hand_size_exact_disjunction() {
+        let (rest, c) =
+            parse_inner_condition("they have exactly three or exactly four cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::Or { conditions } => {
+                assert_eq!(conditions.len(), 2);
+            }
+            other => panic!("expected Or of exact hand sizes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_they_control_two_or_more_basic_lands() {
+        let (rest, c) = parse_inner_condition("they control two or more basic lands").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::QuantityComparison { .. }));
     }
 
     // -- Source power/toughness comparison conditions --

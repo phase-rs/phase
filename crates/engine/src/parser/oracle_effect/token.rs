@@ -231,30 +231,89 @@ fn split_token_except_clause<'a>(
     ctx: &ParseContext,
 ) -> (&'a str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
-    let Ok((except_input, head_lower)) = parse_token_except_boundary(&lower) else {
+    let Ok((_, head_lower)) = parse_token_except_boundary(&lower) else {
         return (text, Vec::new(), Vec::new());
     };
     let head = &text[..head_lower.len()];
+    // CR 707.9b + CR 707.2: a token-copy exception can rename the copy with a
+    // literal name ("…named Mishra's Warform…", Mishra, Eminent One). Unlike the
+    // self-name "its name is ~" arm — which keys off the copying card's own name
+    // and so cannot apply to a token copy (`card_name` empty below) — a literal
+    // override carries the name in the text itself, so peel it off here (original
+    // case preserved) and strip the "named <X>" span before the body reaches the
+    // shared except parser. Without this the name words leak into the copied
+    // creature's subtype list AND the override is dropped, so a token copying a
+    // legendary permanent keeps the source's name and wrongly collides with it
+    // under the legend rule (CR 704.5j). The original-case except body is
+    // byte-aligned to its lowercase form (mirrors the `head` slice above).
+    let except_original = &text[head_lower.len()..];
+    let (name_override, except_body) = strip_copy_except_named_override(except_original);
+    let except_lower = except_body.to_lowercase();
+
     // Pass the lowercase suffix starting at `[, ]except ` to the shared
     // building block. The except parser is the single authority for the
     // grammar (CR 707.9 + CR 707.2): keyword lists, supertype additions /
     // removals, conditional counter placement, etc.
     let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
-    let (_, modifications) =
-        match super::become_copy_except::parse_except_clause(except_input, card_name, ctx) {
-            Some(parts) => parts,
-            None => return (head, Vec::new(), Vec::new()),
-        };
-
     let mut extra_keywords = Vec::new();
     let mut additional_modifications = Vec::new();
-    for modification in modifications {
-        match modification {
-            ContinuousModification::AddKeyword { keyword } => extra_keywords.push(keyword),
-            other => additional_modifications.push(other),
+    match super::become_copy_except::parse_except_clause(&except_lower, card_name, ctx) {
+        Some((_, modifications)) => {
+            for modification in modifications {
+                match modification {
+                    ContinuousModification::AddKeyword { keyword } => extra_keywords.push(keyword),
+                    other => additional_modifications.push(other),
+                }
+            }
         }
+        // A clause that is *only* a literal name override (no other recognised
+        // body) still yields the rename — don't discard it.
+        None if name_override.is_none() => return (head, Vec::new(), Vec::new()),
+        None => {}
+    }
+
+    if let Some(name) = name_override {
+        additional_modifications.push(ContinuousModification::SetName { name });
     }
     (head, extra_keywords, additional_modifications)
+}
+
+/// CR 707.9b + CR 707.2: peel a literal `"named <X>"` rename off a token-copy
+/// `, except <body>` clause, returning the original-case name and the body with
+/// the `"named <X>"` span removed. Mishra, Eminent One: "…except it's a 4/4
+/// Construct artifact creature named Mishra's Warform in addition to its other
+/// types." — the name must not be ingested as creature subtypes, and must
+/// override the copied name so the legend rule (CR 704.5j) sees the distinct
+/// token name.
+///
+/// Quoted-ability exceptions ("…except it has \"…\"") are left untouched: any
+/// `named` inside a granted ability is part of that ability's own text, not a
+/// rename of the copy, so the strip is skipped when the body carries a `"`.
+fn strip_copy_except_named_override(body: &str) -> (Option<String>, String) {
+    if body.contains('"') {
+        return (None, body.to_string());
+    }
+    let lower = body.to_lowercase();
+    let tp = TextPair::new(body, &lower);
+    let Some((before, after)) = tp.split_around(" named ") else {
+        return (None, body.to_string());
+    };
+    // The literal name runs to the next copy-exception boundary: the additive
+    // type carve-out, a further `and`-joined body, or sentence punctuation.
+    let mut end = after.original.len();
+    for needle in [" in addition to", " and ", " with ", " that ", ",", "."] {
+        if let Some(pos) = after.find(needle) {
+            end = end.min(pos);
+        }
+    }
+    let name = after.original[..end].trim().trim_matches('"');
+    if name.is_empty() {
+        return (None, body.to_string());
+    }
+    // Reassemble the body without the " named <X>" span so the type list parses
+    // cleanly ("…artifact creature in addition to its other types").
+    let stripped = format!("{}{}", before.original, &after.original[end..]);
+    (Some(name.to_string()), stripped)
 }
 
 fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
@@ -1335,6 +1394,55 @@ mod tests {
         };
         assert_eq!(target, TargetFilter::CostPaidObject);
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn copy_token_with_literal_named_override_emits_set_name() {
+        // CR 707.9b + CR 704.5j (issue #4444): Mishra, Eminent One creates a
+        // token copy renamed by a literal "named <X>" exception. The override
+        // must reach `additional_modifications` as a `SetName` (so the copy of a
+        // legendary permanent does not collide with its source under the legend
+        // rule), and the name words must NOT leak into the copied subtype list.
+        let txt = "create a token that's a copy of target artifact you control, except it's a 4/4 Construct artifact creature named Mishra's Warform in addition to its other types";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetName { name } if name == "Mishra's Warform"
+            )),
+            "literal name override must emit SetName with original casing, got {additional_modifications:?}"
+        );
+        // The name words must not be misclassified as creature subtypes.
+        assert!(
+            !additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype }
+                    if matches!(subtype.as_str(), "Named" | "Mishra's" | "Warform")
+            )),
+            "name words must not leak into the subtype list, got {additional_modifications:?}"
+        );
+        // The genuine copy exceptions still flow through.
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Construct"
+        )));
     }
 
     #[test]

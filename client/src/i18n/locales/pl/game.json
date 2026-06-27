@@ -899,6 +899,7 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "aiUnsupportedFormat": "{{format}} jest dostępny do hostowania gier wieloosobowych, ale mecze z AI nie są jeszcze obsługiwane.",
     "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
     "cedhWarningUntagged": "bez bracketu",
     "bracketViolation": {
@@ -1842,5 +1843,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

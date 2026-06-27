@@ -1014,12 +1014,77 @@ static MANA_READINESS_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// `can_activate_mana_ability_now` pre-clone gate and the `batch_eligible_siblings`
 /// sibling filter, so both agree on readiness without each cloning + recursing
 /// the whole game state (the O(N!) cause when N batchable sources are present).
+/// CR 602.5 + CR 604.1: hoistable existence gates for the two whole-battlefield
+/// activation-prohibition scans inside [`mana_ability_ready_without_simulation`].
+///
+/// `is_blocked_by_cant_be_activated` (CR 602.5, City of Solitude class) and
+/// `is_blocked_by_cant_activate_during` (CR 117.1b) each iterate every
+/// battlefield static. Calling them per mana source turns the board-global mana
+/// availability sweep into O(N^2) (~700 Cryptolith-Rite tokens × ~700 statics).
+/// Computing presence ONCE and gating each scan collapses the sweep to O(N) when
+/// no such static exists (the overwhelming common case). Mirrors
+/// `combat::CombatStaticGates`. Uses `game_functioning_statics` (a superset of
+/// the precise `battlefield_active_statics` the scans use) so a `false` gate is a
+/// sound skip; a `true` gate falls through to the exact per-source scan.
+#[derive(Debug, Clone, Copy)]
+pub struct ManaActivationGates {
+    has_cant_be_activated: bool,
+    has_cant_activate_during: bool,
+}
+
+impl ManaActivationGates {
+    /// One `game_functioning_statics` sweep computing both presence flags.
+    pub fn compute(state: &GameState) -> Self {
+        let mut gates = ManaActivationGates {
+            has_cant_be_activated: false,
+            has_cant_activate_during: false,
+        };
+        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+            match def.mode {
+                crate::types::statics::StaticMode::CantBeActivated { .. } => {
+                    gates.has_cant_be_activated = true
+                }
+                crate::types::statics::StaticMode::CantActivateDuring { .. } => {
+                    gates.has_cant_activate_during = true
+                }
+                _ => {}
+            }
+            if gates.has_cant_be_activated && gates.has_cant_activate_during {
+                break;
+            }
+        }
+        gates
+    }
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
+) -> bool {
+    // Single-call entry: compute the gates once (one battlefield scan) and
+    // delegate. The board-sweep caller (`derive_display_state`) hoists the gates
+    // across all sources via `..._gated` instead.
+    let gates = ManaActivationGates::compute(state);
+    mana_ability_ready_without_simulation_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        &gates,
+    )
+}
+
+fn mana_ability_ready_without_simulation_gated(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
@@ -1065,11 +1130,17 @@ fn mana_ability_ready_without_simulation(
         return false;
     }
     // CR 602.5: CantBeActivated (City of Solitude class) blocks activation.
-    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+    // CR 604.1: gated existence check hoisted across the board sweep — the
+    // per-source full-battlefield scan only runs when such a static exists.
+    if gates.has_cant_be_activated
+        && super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def)
+    {
         return false;
     }
     // CR 602.5 + CR 117.1b: CantActivateDuring blocks activation this turn.
-    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+    if gates.has_cant_activate_during
+        && super::casting::is_blocked_by_cant_activate_during(state, player, ability_def)
+    {
         return false;
     }
     // CR 604 + CR 605.3b: Static activation restrictions must currently hold.
@@ -1102,12 +1173,52 @@ pub fn can_activate_mana_ability_now(
     ability_index: usize,
     ability_def: &AbilityDefinition,
 ) -> bool {
+    // Single-call entry: compute the activation-prohibition gates once and
+    // delegate. Board-wide sweeps use `..._gated` to hoist them across sources.
+    let gates = ManaActivationGates::compute(state);
+    can_activate_mana_ability_now_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        &gates,
+    )
+}
+
+/// Gated variant of [`can_activate_mana_ability_now`]: the caller supplies
+/// once-computed [`ManaActivationGates`] so a board-global mana sweep does not
+/// re-scan the battlefield for activation-prohibition statics per source.
+pub fn can_activate_mana_ability_now_gated(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    gates: &ManaActivationGates,
+) -> bool {
     #[cfg(test)]
     MANA_READINESS_CALLS.fetch_add(1, Ordering::Relaxed);
 
-    if !mana_ability_ready_without_simulation(state, player, source_id, ability_index, ability_def)
-    {
+    if !mana_ability_ready_without_simulation_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        gates,
+    ) {
         return false;
+    }
+    // CR 605.3a + CR 106.12 + CR 107.6: When the cheap gate already conclusively
+    // decides payability (no cost, or a {T}/{Q}-only cost whose production +
+    // payment path is infallible), skip the full-state-clone legality
+    // simulation. Eliminates the mana-display board-sweep clone-storm (Cryptolith
+    // Rite granting bare `{T}: Add` to ~700 tokens => ~700 clones/sweep). Mana/
+    // resource/composite costs still simulate — the auto-tap affordability
+    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE.
+    if mana_sources::cost_conclusively_payable_by_cheap_gate(&ability_def.cost) {
+        return true;
     }
     can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
 }
@@ -4887,6 +4998,217 @@ mod tests {
             N,
             "all six Treasures each produced one red"
         );
+    }
+
+    /// CR 106.12: A tapped `{T}: Add` source can't pay its tap cost, so the cheap
+    /// gate (`mana_ability_ready_without_simulation`) rejects it BEFORE the skip
+    /// shortcut and before any legality clone — A(a).
+    #[test]
+    fn cheap_gate_rejects_tapped_tap_mana_source_without_clone() {
+        let mut state = GameState::new_two_player(42);
+        let dork = make_tap_any_color_creature(&mut state, 9300, PlayerId(0), false);
+        state.objects.get_mut(&dork).unwrap().tapped = true;
+        let def = state.objects.get(&dork).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), dork, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            !activatable,
+            "a tapped {{T}} mana source can't pay its tap cost (CR 106.12)"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "cheap gate rejects before any legality clone"
+        );
+    }
+
+    /// CR 601.2g: A `Composite{{Tap, Sacrifice}}` mana cost (Treasure) is NOT
+    /// conclusively decided by the cheap gate, so it must still simulate — the
+    /// must-simulate path is preserved (clone >= 1) even though it is activatable.
+    /// A(b). The self-sacrifice is always a legal target, so this does NOT build a
+    /// cost that passes `is_payable` yet fails simulation.
+    #[test]
+    fn composite_tap_sacrifice_still_simulates() {
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9301, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "an untapped Treasure with a legal self-sacrifice is activatable"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "a Composite with a Sacrifice component must still simulate (CR 601.2g)"
+        );
+    }
+
+    /// CR 605.3a + CR 106.12: A ready plain `{T}: Add` source is activatable and
+    /// its `{T}`-only cost is conclusively payable by the cheap gate, so NO
+    /// legality clone is taken — B (revert-failing: pre-fix takes one clone here).
+    #[test]
+    fn plain_tap_mana_source_skips_legality_clone() {
+        let mut state = GameState::new_two_player(42);
+        let dork = make_tap_any_color_creature(&mut state, 9302, PlayerId(0), false);
+        let def = state.objects.get(&dork).unwrap().abilities[0].clone();
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), dork, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(activatable, "a ready {{T}}: Add source is activatable");
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a {{T}}-only mana cost is conclusively payable by the cheap gate — no clone"
+        );
+    }
+
+    /// CR 601.2g: A filter land's `Composite{{Mana, Tap}}` cost still simulates —
+    /// the cheap-gate skip must not apply to mana sub-costs. Affordable pool keeps
+    /// it activatable (behavior preserved). C — behavior-preservation only, so we
+    /// do NOT assert a zero clone count.
+    #[test]
+    fn filter_land_composite_still_activatable_via_simulation() {
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        crate::game::perf_counters::reset();
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), ruins, 0, &ability);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "an affordable filter land remains activatable (behavior preserved)"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "a Composite{{Mana, Tap}} cost must still simulate (CR 601.2g)"
+        );
+    }
+
+    /// CR 605.3a: The board-wide mana-display sweep over N untapped `{T}: Add`
+    /// sources takes ZERO legality clones — the headline regression. Pre-fix every
+    /// source cloned + simulated (N clones, the Cryptolith-Rite clone-storm). D.
+    #[test]
+    fn mana_display_sweep_is_clone_free_for_tap_only_sources() {
+        const N: usize = 8;
+        let mut state = GameState::new_two_player(42);
+        for i in 0..N {
+            make_tap_any_color_creature(&mut state, 9400 + i as u64, PlayerId(0), false);
+        }
+        assert_eq!(
+            state.battlefield.len(),
+            N,
+            "board has exactly N {{T}}: Add sources"
+        );
+
+        crate::game::public_state::mark_mana_display_dirty(&mut state);
+        crate::game::perf_counters::reset();
+        crate::game::derived::derive_display_state(&mut state);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            snap.mana_display_sweeps, 1,
+            "exactly one board-wide mana sweep"
+        );
+        assert_eq!(
+            snap.mana_display_swept_objects, N as u64,
+            "the sweep visited all N battlefield objects"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "no per-source legality clone for {{T}}-only sources (revert-failing: pre-fix = N clones)"
+        );
+    }
+
+    /// Direct classifier unit tests for `AbilityCost::all_components_cheap_gate_covered`
+    /// and the `cost_conclusively_payable_by_cheap_gate` wrapper anchor guard.
+    #[test]
+    fn cheap_gate_cost_classification_units() {
+        assert!(AbilityCost::Tap.all_components_cheap_gate_covered());
+        assert!(AbilityCost::Untap.all_components_cheap_gate_covered());
+        assert!(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Untap]
+        }
+        .all_components_cheap_gate_covered());
+        assert!(!AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1)
+                }
+            ]
+        }
+        .all_components_cheap_gate_covered());
+        assert!(!AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }
+        .all_components_cheap_gate_covered());
+        // Empty composite is vacuously all()-true at the classifier level...
+        assert!(AbilityCost::Composite { costs: vec![] }.all_components_cheap_gate_covered());
+
+        // ...but the wrapper's {T}/{Q} anchor guards the degenerate empty
+        // Composite, and a None cost is conclusively payable (no cost to pay).
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(&None));
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &Some(AbilityCost::Composite { costs: vec![] })
+        ));
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &Some(AbilityCost::Tap)
+        ));
+    }
+
+    /// Hostile classifier coverage: costs whose every component is NOT a
+    /// tap/untap symbol must NOT be skipped (the wrapper returns false, so the
+    /// caller falls through to full simulation). Mill needs a populated library
+    /// and EffectCost an arbitrary effect, so these are asserted at the
+    /// classifier/wrapper level rather than as full runtime cards; the runtime
+    /// "falls through to simulate" path itself is exercised by
+    /// `composite_tap_sacrifice_still_simulates` (A(b)) and
+    /// `filter_land_composite_still_activatable_via_simulation` (C).
+    #[test]
+    fn cheap_gate_hostile_costs_must_simulate() {
+        let tap_mill = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &tap_mill
+        ));
+
+        let effect_cost = Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }),
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &effect_cost
+        ));
+
+        // Bare Mana-only cost (no {T}) — the wrapper's anchor requires a {T}/{Q}
+        // component, so a mana-only cost is never skipped.
+        let mana_only = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        });
+        assert!(!mana_sources::cost_conclusively_payable_by_cheap_gate(
+            &mana_only
+        ));
+
+        // None cost is conclusively payable (covered above too) — sanity anchor.
+        assert!(mana_sources::cost_conclusively_payable_by_cheap_gate(&None));
     }
 
     /// CR 302.6 / CR 702.10: A summoning-sick creature's `{T}` mana ability is not a
@@ -8954,6 +9276,71 @@ mod tests {
         assert_eq!(state.players[1].mana_pool.total(), 0);
         assert!(!state.objects.get(&forest).unwrap().tapped);
         assert!(events.is_empty());
+    }
+
+    /// Perf-gate correctness (`ManaActivationGates`, Fix A): when a
+    /// CantActivateDuring (City of Solitude class) static is present the hoisted
+    /// gate flag is set, so the per-source readiness scan must still run and
+    /// report the mana ability UNAVAILABLE. Exercises the `gate=true` arm of
+    /// `mana_ability_ready_without_simulation_gated` that the board-global mana
+    /// display sweep depends on — without this the fast tests only cover the
+    /// `gate=false` (no-prohibition) arm.
+    #[test]
+    fn can_activate_mana_ability_now_respects_cant_activate_during_via_gate() {
+        use crate::types::statics::{ActivationExemption, CastingProhibitionCondition};
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        state.active_player = p0; // NOT p1's turn
+        state.phase = Phase::PreCombatMain;
+
+        // P0 controls a City of Solitude analogue (AllPlayers /
+        // NotDuringAffectedPlayersTurn / exemption: None).
+        let prohibitor = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "City of Solitude".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohibitor)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantActivateDuring {
+                who: ProhibitionScope::AllPlayers,
+                when: CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+                exemption: ActivationExemption::None,
+            }));
+
+        let forest = create_object(
+            &mut state,
+            CardId(2),
+            p1,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let mana_ability = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&forest).unwrap().abilities)
+            .push(mana_ability.clone());
+
+        // gate=true arm: prohibition exists → scan runs → unavailable on P0's turn.
+        assert!(
+            !can_activate_mana_ability_now(&state, p1, forest, 0, &mana_ability),
+            "City of Solitude must make P1's mana ability unavailable on P0's turn (gate=true)"
+        );
+
+        // Control: on the affected player's own turn the prohibition lifts.
+        state.active_player = p1;
+        assert!(
+            can_activate_mana_ability_now(&state, p1, forest, 0, &mana_ability),
+            "on the affected player's own turn the mana ability is available again"
+        );
     }
 
     // ---------------------------------------------------------------

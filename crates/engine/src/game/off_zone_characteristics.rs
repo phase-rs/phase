@@ -337,6 +337,62 @@ mod tests {
         );
     }
 
+    /// CR 702.138a + CR 601.2g/h: a transient `AddKeyword(Escape)` carrying the
+    /// COMPOUND granted cost (mana sub-cost + "exile N other cards from your
+    /// graveyard" residual) makes a graveyard card castable via escape —
+    /// `effective_escape_data` resolves the mana sub-cost (CR 601.2g) and surfaces
+    /// the exile residual for `pay_additional_cost` (CR 601.2h). Runtime proof for
+    /// the parser front door `try_parse_grant_graveyard_keyword_to_target`
+    /// (Confession Dial / Desdemona). Tests the building block — a transient
+    /// off-zone Escape grant — not a single card.
+    #[test]
+    fn transient_granted_compound_escape_makes_graveyard_card_castable() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::keywords::EscapeCost;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Snapcaster Mage",
+            Zone::Battlefield,
+        );
+        let target_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Scrubland Mongoose",
+            Zone::Graveyard,
+        );
+
+        let exile_residual = AbilityCost::Exile {
+            count: 3,
+            zone: Some(Zone::Graveyard),
+            filter: None,
+        };
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::SelfManaCost,
+                        },
+                        exile_residual.clone(),
+                    ],
+                })),
+            }],
+            None,
+        );
+
+        let (_, residual) = crate::game::keywords::effective_escape_data(&state, target_id)
+            .expect("granted compound escape must make the graveyard card castable");
+        assert_eq!(residual, exile_residual);
+    }
+
     #[test]
     fn battlefield_static_grants_sneak_to_graveyard_creature() {
         // CR 702.190a: Ninja Teen Level 3 grants Sneak to creature cards in GY.

@@ -7,16 +7,33 @@
 //! module is the classifier that turns those two measurements into a
 //! [`LoopCertificate`].
 //!
-//! # What "detection" means here (and what it does NOT)
+//! # What "detection" means here
 //!
-//! This is **purely offline analysis**. It changes no game behavior: the live
-//! resolution loop (`game::engine::run_auto_pass_loop`) still draws a repeating
-//! *mandatory* loop (CR 104.4b / CR 732.4) and still halts a runaway cascade
-//! (`emit_resolution_halt`) exactly as before. [`detect_loop`] is never called
-//! from the reducer; it is called by analysis code and the corpus test harness on
-//! a *driven* `GameRunner` to answer the question the engine's live path cannot:
-//! "given that the board returned to an identical configuration while a resource
-//! strictly increased, what resource is unbounded and how does this loop win?"
+//! [`detect_loop`] is the offline classifier: given two driven states plus a
+//! per-cycle delta it answers "what resource is unbounded and how does this loop
+//! win?" It is called by analysis code and the corpus test harness on a *driven*
+//! `GameRunner`.
+//!
+//! [`live_mandatory_loop_winner`] couples that classifier into the live reducer
+//! (`game::engine::reconcile_terminal_result`, CR 732.2a / CR 704.5a): at an
+//! all-mandatory cascade whose board has returned identical modulo monotone resources
+//! (and the volatile stack id, see `resource::project_out_resources`) while exactly
+//! one opponent's life drains without bound, it shortcuts to the forced loss instead
+//! of halting on the resource ceiling. PR-3 (Option C) scans a persisted bounded ring
+//! of post-resolution snapshots (`GameState::loop_detect_ring`), maintained at the
+//! post-pipeline frame of `game::engine::pass_priority_once_with_pipeline` (after
+//! `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at the
+//! single SBA-reconciliation seam — so the win path
+//! fires LIVE under the default per-beat `apply(PassPriority)` drive (the production
+//! frontend default), which runs `reconcile_terminal_result` after every beat. Note
+//! `run_auto_pass_loop` does NOT call `reconcile_terminal_result` inside its internal
+//! iterations, so its net-progress grind still runs to the natural CR 704.5a death;
+//! the per-beat drive is the accelerated path. So `detect_loop` IS now reached from
+//! the reducer via that
+//! helper. The strict CR 104.4b / CR 732.4 mandatory-DRAW path (a repeat with no net
+//! progress) and the `emit_resolution_halt` runaway backstop are unchanged — the live
+//! win path is strictly additive and fires only when life strictly advances toward a
+//! single determinate opponent loss.
 //!
 //! # The detection rule (CR 732.2a — the shortcut, not the draw)
 //!
@@ -170,6 +187,93 @@ pub fn detect_loop(
         win_kind,
         mandatory,
     })
+}
+
+/// CR 732.2a + CR 704.5a: the LIVE coupling of [`detect_loop`] into the reducer.
+///
+/// At an all-mandatory auto-pass cascade whose board has returned identical (modulo
+/// monotone resources AND the volatile stack id, see
+/// [`crate::analysis::resource::project_out_resources`]), decide whether the loop
+/// forces a single determinate opponent life-loss and, if so, name the winner.
+/// Returns `None` unless the outcome is unambiguous (the soundness guarantee: the
+/// reducer only shortcuts to a WIN it can prove).
+///
+/// The caller guarantees `mandatory == true` (every iteration in the auto-pass loop
+/// is mandatory by construction) and passes the LIVE (raw) reducer state as
+/// `cycle_end` so the SBA-layer can't-lose/can't-win firewall sees real
+/// `transient_continuous_effects` and is not perturbed by `normalize_for_loop`'s
+/// `layers_dirty = full()`. `cycle_start` is a prior NORMALIZED window snapshot; the
+/// caller-measured per-cycle `delta` is the `snapshot`/`delta` difference between
+/// them.
+///
+/// Every `BTreeMap` read uses `.get(&k).copied().unwrap_or(0)` — `map_delta` drops
+/// zero-delta keys, so an unchanged axis is ABSENT and `[]` would panic in the live
+/// reducer.
+pub(crate) fn live_mandatory_loop_winner(
+    cycle_start: &GameState,
+    cycle_end: &GameState,
+    delta: &ResourceVector,
+) -> Option<PlayerId> {
+    // CR 104.2a: a forced single-loser outcome is unambiguous only in a 2-player
+    // game; multiplayer player-elimination is deferred (offline-covered by PR-2).
+    let living: Vec<PlayerId> = cycle_end
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated)
+        .map(|p| p.id)
+        .collect();
+    if living.len() != 2 {
+        return None;
+    }
+
+    // CR 704.5a: the per-player attributable life axis — who is draining out.
+    let life_fallers: Vec<PlayerId> = living
+        .iter()
+        .copied()
+        .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
+        .collect();
+    // CR 704.5b: any decking (library going down) is a SECOND determinate-loss path.
+    let any_library_loss = living
+        .iter()
+        .any(|p| delta.library_delta.get(p).copied().unwrap_or(0) < 0);
+    // CR 704.5c: poison is keyed by an aggregate (Poison, Player) pair in `snapshot`
+    // (unattributable per player), so treat any poison gain conservatively.
+    let any_poison_gain = delta
+        .counters
+        .get(&(CounterClass::Poison, ObjectClass::Player))
+        .copied()
+        .unwrap_or(0)
+        > 0;
+    // Single-faller firewall: reject dual-faller (mutual drain), the Niv shape
+    // (opponent life ↓ AND a controller library ↓), and any second determinate-loss
+    // path. PR-3 wins ONLY on the CR 704.5a life axis.
+    if life_fallers.len() != 1 || any_library_loss || any_poison_gain {
+        return None;
+    }
+    let faller = life_fallers[0];
+    let winner = living.iter().copied().find(|&p| p != faller)?;
+
+    // CR 101.2 + CR 104.3b + CR 704.5a: a player who can't lose the game can't be the
+    // faller of a forced loss (Platinum Angel / "you can't lose the game"). CR 101.2 +
+    // CR 104.2b: a player who can't win can't be named winner (Abyssal Persecutor:
+    // "your opponents can't win the game"). Reuse the SBA-layer predicates on the LIVE
+    // `cycle_end` so static effects are evaluated against the real board. (This
+    // firewall is strict 2-player — the Two-Headed Giant team rule CR 810.8a does not
+    // apply here.)
+    if crate::game::sba::player_has_cant_lose(cycle_end, faller)
+        || crate::game::static_abilities::player_has_cant_win(cycle_end, winner)
+    {
+        return None;
+    }
+
+    // Confirm via the PR-2 classifier: `detect_loop` re-runs
+    // `loop_states_equal_modulo_resources` (so the board-equality gate is enforced
+    // here, no redundant pre-check) and `is_progress`. Holds by construction —
+    // `is_progress` passes (winner life Δ≥0), and `classify_win_kind` sees `faller`
+    // life<0 with faller≠winner ⇒ `LethalDamage`. Require exactly that win kind so the
+    // live shortcut is scoped to the CR 704.5a life axis.
+    let cert = detect_loop(cycle_start, cycle_end, delta, winner, true)?;
+    matches!(cert.win_kind, WinKind::LethalDamage).then_some(winner)
 }
 
 /// CR 732.2a: controller-scoped net-progress. Returns true iff the cycle makes
@@ -691,6 +795,238 @@ mod tests {
             cert.covers(&[ResourceAxis::DamageDealt(pid(0))]),
             "certificate names the controller's damage axis (the unbounded resource), \
              but classifies it as Advantage, not a win"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // live_mandatory_loop_winner (§8): the LIVE reducer coupling. Each test
+    // injects a per-cycle delta into a modulo-equal (start == end.clone())
+    // state, exactly as the existing detect_loop tests do.
+    // ------------------------------------------------------------------
+
+    /// Add a battlefield permanent controlled by `owner` carrying a `mode` static
+    /// (CR 101.2 can't-lose / can't-win shape) affecting its controller ("You").
+    fn add_cant_static(
+        state: &mut GameState,
+        owner: u8,
+        id: u64,
+        mode: crate::types::statics::StaticMode,
+    ) {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        let oid = ObjectId(id);
+        let mut object = GameObject::new(
+            oid,
+            CardId(2),
+            PlayerId(owner),
+            "Platinum Angel".to_string(),
+            Zone::Battlefield,
+        );
+        object
+            .static_definitions
+            .push(StaticDefinition::new(mode).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )));
+        state.objects.insert(oid, object);
+        state.battlefield.push_back(oid);
+    }
+
+    /// U1 POSITIVE: a clean single-opponent life-drain names the winner.
+    #[test]
+    fn live_winner_positive_life_drain() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1); // opponent drains
+        delta.life.insert(pid(0), 1); // controller gains
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            Some(pid(0)),
+            "a single-opponent forced life-drain shortcuts to the winner"
+        );
+    }
+
+    /// U2 SOUNDNESS (CR 704.5b): a dual-faller (opponent life ↓ AND a controller
+    /// library ↓ — the Niv shape) is a SECOND determinate-loss path ⇒ None.
+    /// Revert: dropping `any_library_loss` wrongly yields `Some(P0)`.
+    #[test]
+    fn live_winner_dual_faller_library_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.library_delta.insert(pid(0), -1); // controller mills itself too
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "opponent life-loss AND a library-loss is two loss paths — refuse to name a winner"
+        );
+    }
+
+    /// U3 SOUNDNESS: a mutual drain (both players' life falls) has no single
+    /// determinate loser ⇒ None (the single-faller guard rejects, and is_progress
+    /// would reject the negative-life winner as a backstop).
+    #[test]
+    fn live_winner_mutual_drain_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(0), -1);
+        delta.life.insert(pid(1), -1);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a mutual drain has no single determinate loser"
+        );
+    }
+
+    /// U4: pure advantage (mana up, no life faller) is not a forced loss ⇒ None.
+    #[test]
+    fn live_winner_advantage_no_faller_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let delta = ResourceVector {
+            mana: [0, 0, 0, 0, 0, 1],
+            ..Default::default()
+        };
+        assert_eq!(live_mandatory_loop_winner(&start, &end, &delta), None);
+    }
+
+    /// U5 SOUNDNESS: a board change at cycle end (extra permanent) is not a
+    /// repeating cycle ⇒ None even with a clean life-drain delta. `detect_loop`'s
+    /// board-equality gate is load-bearing here.
+    #[test]
+    fn live_winner_board_change_is_none() {
+        let mut end = GameState::new_two_player(7);
+        let start = end.clone();
+        battlefield_creature(&mut end, 900, 0); // board grew only at end
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(0), 1);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a growing board is not a repeating cycle (detect_loop rejects)"
+        );
+    }
+
+    /// U6 SOUNDNESS: a single faller but THREE living players ⇒ None (2-player
+    /// scope only; multiplayer deferred). Revert: dropping `living.len()==2` yields
+    /// a winner.
+    #[test]
+    fn live_winner_three_player_is_none() {
+        let mut end = GameState::new_two_player(7);
+        let mut p2 = end.players[1].clone();
+        p2.id = pid(2);
+        end.players.push(p2);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(0), 1);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a determinate single-loser outcome is unambiguous only in 2-player"
+        );
+    }
+
+    /// U7 SOUNDNESS (CR 704.5c): opponent life ↓ AND a poison gain is a SECOND
+    /// (unattributable) loss path ⇒ None. Revert: dropping `any_poison_gain`
+    /// wrongly yields `Some(P0)`.
+    #[test]
+    fn live_winner_dual_faller_poison_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta
+            .counters
+            .insert((CounterClass::Poison, ObjectClass::Player), 1);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "opponent life-loss AND poison gain is two loss paths — refuse to name a winner"
+        );
+    }
+
+    /// U8: PR-3 wins ONLY on the CR 704.5a life axis — a pure opponent mill (no
+    /// life faller) is not shortcut here ⇒ None (decking live-shortcut deferred).
+    #[test]
+    fn live_winner_pure_mill_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.library_delta.insert(pid(1), -1);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "PR-3 shortcuts only the life axis; a pure mill has no life faller"
+        );
+    }
+
+    /// U9 SOUNDNESS (CR 101.2 + CR 104.3b): the faller CAN'T LOSE ⇒ None. Reverting
+    /// the `player_has_cant_lose` firewall would end a game P1 cannot lose.
+    #[test]
+    fn live_winner_faller_cant_lose_is_none() {
+        let mut end = GameState::new_two_player(7);
+        add_cant_static(
+            &mut end,
+            1, // permanent controlled by the faller P1, affecting itself
+            901,
+            crate::types::statics::StaticMode::CantLoseTheGame,
+        );
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(0), 1);
+        assert!(
+            crate::game::sba::player_has_cant_lose(&end, pid(1)),
+            "fixture sanity: P1 must actually have can't-lose"
+        );
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a forced loss can't be applied to a player who can't lose"
+        );
+    }
+
+    /// U10 SOUNDNESS (CR 101.2 + CR 104.2b): the winner CAN'T WIN ⇒ None. Reverting
+    /// the `player_has_cant_win` firewall would name a winner who cannot win.
+    #[test]
+    fn live_winner_winner_cant_win_is_none() {
+        let mut end = GameState::new_two_player(7);
+        add_cant_static(
+            &mut end,
+            0, // permanent controlled by the winner P0, affecting itself
+            902,
+            crate::types::statics::StaticMode::CantWinTheGame,
+        );
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(0), 1);
+        assert!(
+            crate::game::static_abilities::player_has_cant_win(&end, pid(0)),
+            "fixture sanity: P0 must actually have can't-win"
+        );
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a player who can't win must not be named the loop winner"
+        );
+    }
+
+    /// U-draw: a net-zero cycle (every axis zero) has no life faller ⇒ None. The
+    /// modulo path can never hijack a true mandatory-draw (structural complement of
+    /// the strict CR 104.4b block, which runs first and returns).
+    #[test]
+    fn live_winner_net_zero_is_none() {
+        let end = GameState::new_two_player(7);
+        let start = end.clone();
+        let delta = ResourceVector::default();
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a net-zero repeat is a draw, not a win — no life faller"
         );
     }
 }

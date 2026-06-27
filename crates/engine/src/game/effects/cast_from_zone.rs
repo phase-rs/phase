@@ -184,6 +184,26 @@ pub fn resolve(
                 );
             }
         }
+        // CR 701.20a + CR 608.2c: "Draw three cards and reveal them. You may cast
+        // one of them" (Mad Wizard's Lair) leaves the revealed cards in hand;
+        // `LastRevealed` must open a hand selection among them, not resolve to
+        // `.first()` or filter them out via the library-only reveal injector.
+        if matches!(target_filter, TargetFilter::LastRevealed)
+            && state.last_revealed_ids.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Hand)
+            })
+        {
+            return open_private_zone_cast_selection(
+                state,
+                ability,
+                target_filter,
+                Zone::Hand,
+                events,
+            );
+        }
         // No targets resolved — nothing to cast.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,

@@ -336,6 +336,12 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          # changelog{,-meta}.json are committed to client/public/ (not generated
+          # into data/ like the files above), so the preview snapshot tracks main
+          # the moment a regenerated changelog lands — ahead of the nightly that
+          # carries it to production.
+          npx wrangler r2 object put phase-rs-data/preview/changelog.json --file client/public/changelog.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/changelog-meta.json --file client/public/changelog-meta.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
 
       - name: Publish immutable parse-diff baseline to R2
         # Content-addressed sibling of the mutable preview/coverage-data.json

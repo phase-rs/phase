@@ -306,7 +306,11 @@ pub(crate) fn try_parse_impose_additional_cost(
 }
 
 /// Dynamic "for each" counts are extracted when present.
-pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_cost_modification(
+    text: &str,
+    lower: &str,
+    casting_as_variant: Option<crate::types::game_state::CastingVariant>,
+) -> Option<StaticDefinition> {
     let original_text = text;
     let (cost_text, leading_condition) =
         peel_leading_cost_modifier_condition(TextPair::new(text, lower));
@@ -744,6 +748,18 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
             .is_ok()
     {
         definition.condition = Some(StaticCondition::DuringYourTurn);
+    }
+
+    // CR 601.2f + CR 702.34a: Caller-proven casting variant (e.g. Flashback from
+    // the compound-line parser) gates self-spell cost modifiers — never inferred
+    // from generic "cast this way" wording alone.
+    if let Some(variant) = casting_as_variant {
+        definition.condition = Some(match definition.condition.take() {
+            Some(existing) => StaticCondition::And {
+                conditions: vec![existing, StaticCondition::CastingAsVariant { variant }],
+            },
+            None => StaticCondition::CastingAsVariant { variant },
+        });
     }
 
     Some(definition)

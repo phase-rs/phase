@@ -131,6 +131,7 @@ class AudioManager {
   playSfxForStep(effects: StepEffect[]): void {
     const typeCounts = new Map<string, number>();
     for (const effect of effects) {
+      if (effect.displayOnly) continue;
       const sfxKey = this.resolveSfxKey(effect.event);
       typeCounts.set(sfxKey, (typeCounts.get(sfxKey) ?? 0) + 1);
     }
@@ -452,6 +453,7 @@ class AudioManager {
    * so the theme can assign distinct sounds for healing vs damage.
    */
   private resolveSfxKey(event: { type: string; data?: unknown }): string {
+    if (event.type === "GroupedDamageFlurry") return "DamageDealt";
     if (event.type === "LifeChanged") {
       const data = event.data as { amount: number } | undefined;
       if (data && data.amount > 0) return "LifeGained";

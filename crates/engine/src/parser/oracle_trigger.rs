@@ -10,6 +10,7 @@ use nom::Parser;
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_exile_top_each_library_with_collection_counter,
+    try_parse_grant_graveyard_keyword_to_target,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
@@ -21,7 +22,6 @@ use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
-use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_static::parse_commander_subject_filter_prefix;
 use super::oracle_target::{
@@ -994,23 +994,21 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
-        } else if unless_pay.is_none()
-            && scan_contains(&effect_for_parse_lower, "unless")
-            && !has_later_sentence_if(&effect_for_parse_lower)
-        {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported unless clause".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
         } else {
             try_parse_exile_top_each_library_with_collection_counter(
                 &effect_for_parse,
                 AbilityKind::Spell,
             )
             .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            .or_else(|| {
+                // CR 702.138a: triggered one-shot grant of escape to a target
+                // graveyard card whose compound cost rides a continuation sentence
+                // (Desdemona, Freedom's Edge). Fail-closed: declines unless the
+                // whole two-sentence shape parses, so a card with an unparsed
+                // target filter stays an honest Unimplemented rather than misparsing.
+                try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
             .or_else(|| {
                 // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
                 // mode1; or mode2" on a single line (no bullet-line modes). Grenzo,
@@ -1643,6 +1641,78 @@ fn strip_constraint_sentences(text: &str) -> String {
     }
 }
 
+/// CR 118.12a + CR 107.4: Parse mana / energy unless-payment tails after
+/// "they pay " / "pays ". Disjunctive "{B} or {3}" lowers to `OneOf` of mana
+/// branches (Lim-Dul's Hex); single-mana, dynamic-{X}, and for-each-scaling
+/// forms are unchanged.
+fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
+    let trimmed = cost_str.trim().trim_end_matches('.').trim();
+
+    if let Some(costs) = super::oracle_cost::parse_or_separated_mana_costs(trimmed) {
+        return Some(AbilityCost::OneOf {
+            costs: costs
+                .into_iter()
+                .map(|cost| AbilityCost::Mana { cost })
+                .collect(),
+        });
+    }
+
+    let cost_end = trimmed
+        .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
+        .unwrap_or(trimmed.len());
+    let cost_text = trimmed[..cost_end].trim();
+
+    if cost_text.is_empty() || !cost_text.contains('{') {
+        return None;
+    }
+
+    if let Some((amount, rest)) = super::oracle_effect::parse_fixed_energy_unless_cost(cost_text) {
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        return Some(AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed {
+                value: amount as i32,
+            },
+        });
+    }
+
+    if cost_text == "{x}" || cost_text == "{X}" {
+        let after_cost = &trimmed[cost_end..];
+        if let Some(quantity) = super::oracle_effect::parse_where_x_is(after_cost) {
+            return Some(AbilityCost::ManaDynamic { quantity });
+        }
+        let after_x = after_cost.trim().trim_start_matches(',').trim();
+        let after_x_lower = after_x.to_lowercase();
+        if tag::<_, _, OracleError<'_>>("where x is ")
+            .parse(after_x_lower.as_str())
+            .is_ok()
+        {
+            return None;
+        }
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
+    }
+
+    let mana_cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text);
+    if mana_cost == crate::types::mana::ManaCost::NoCost
+        || mana_cost == crate::types::mana::ManaCost::zero()
+    {
+        return None;
+    }
+    if let Some(cost) =
+        super::oracle_effect::parse_unless_for_each_payment(&trimmed[cost_end..], &mana_cost)
+    {
+        return Some(cost);
+    }
+    Some(AbilityCost::Mana { cost: mana_cost })
+}
+
 /// CR 118.12: Detect "unless [player] pays {cost}" in trigger effect text.
 /// Returns (cleaned effect text without the unless clause, optional UnlessPayModifier).
 ///
@@ -1777,50 +1847,8 @@ fn extract_unless_pay_modifier(
         );
     }
 
-    // Extract cost symbols
-    let cost_end = cost_str
-        .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
-        .unwrap_or(cost_str.len());
-    let cost_text = cost_str[..cost_end].trim();
-
-    if cost_text.is_empty() || !cost_text.contains('{') {
+    let Some(cost) = parse_unless_mana_payment(cost_str) else {
         return (text.to_string(), None);
-    }
-
-    // Determine the cost type
-    let cost = if let Some((amount, rest)) =
-        super::oracle_effect::parse_fixed_energy_unless_cost(cost_text)
-    {
-        if !rest.trim().is_empty() {
-            return (text.to_string(), None);
-        }
-        AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed {
-                value: amount as i32,
-            },
-        }
-    } else if cost_text == "{x}" || cost_text == "{X}" {
-        // Check for "where X is" clause
-        let remainder = &cost_str[cost_end..];
-        if let Some(quantity) = parse_where_x_is_trigger(remainder) {
-            AbilityCost::ManaDynamic { quantity }
-        } else {
-            return (text.to_string(), None);
-        }
-    } else {
-        let mana_cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text);
-        if mana_cost == crate::types::mana::ManaCost::NoCost
-            || mana_cost == crate::types::mana::ManaCost::zero()
-        {
-            return (text.to_string(), None);
-        }
-        if let Some(cost) =
-            super::oracle_effect::parse_unless_for_each_payment(&cost_str[cost_end..], &mana_cost)
-        {
-            cost
-        } else {
-            AbilityCost::Mana { cost: mana_cost }
-        }
     };
 
     // Payer was already determined by the combinator above.
@@ -2385,8 +2413,13 @@ fn parse_unless_they_branch_by_verb(input: &str) -> Option<(AbilityCost, &str)> 
         let (cost, after) = parse_unless_they_discard_cost(rest)?;
         return Some((cost, after));
     }
-    // CR 119.4: "pay(s) N life"
+    // CR 118.12a + CR 107.4: "pay(s) {mana}" / "{B} or {3}" disjunction
     if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("pays "), tag("pay "))).parse(input) {
+        let boundary = unless_branch_boundary(rest);
+        let branch_text = rest[..boundary].trim();
+        if let Some(cost) = parse_unless_mana_payment(branch_text) {
+            return Some((cost, &rest[boundary..]));
+        }
         let (cost, after) = parse_unless_they_pay_life(rest)?;
         return Some((cost, after));
     }
@@ -2710,40 +2743,6 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
         filter: Some(filter),
         from_zone,
     })
-}
-
-/// Parse "where X is ~'s power" / "where X is this creature's power" etc.
-/// Delegates to `nom_quantity::parse_quantity_ref` for the value reference after
-/// stripping the "where X is" prefix.
-fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
-    let trimmed = text.trim().trim_start_matches(',').trim();
-    let (rest, ()) = alt((
-        value((), tag::<_, _, OracleError<'_>>("where x is ")),
-        value((), tag("where X is ")),
-    ))
-    .parse(trimmed)
-    .ok()?;
-    let rest_lower = rest.to_lowercase();
-    // Try nom quantity ref combinator first for common patterns
-    if let Ok((_rem, qty)) = nom_quantity::parse_quantity_ref.parse(&rest_lower) {
-        return Some(QuantityExpr::Ref { qty });
-    }
-    // Fall through to keyword-based matching for less common patterns
-    if scan_contains(&rest_lower, "power") {
-        Some(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-        })
-    } else if scan_contains(&rest_lower, "toughness") {
-        Some(QuantityExpr::Ref {
-            qty: QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-        })
-    } else {
-        None
-    }
 }
 
 /// CR 603.4: Rewrite any `FilterProp::Another` inside a `TargetFilter` to
@@ -3233,6 +3232,7 @@ pub(crate) fn static_condition_to_trigger_condition(
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // intervening-if (`TriggerCondition`) equivalent.
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
@@ -4863,18 +4863,29 @@ fn parse_cast_using_variant_intervening_if(input: &str) -> OracleResult<'_, Trig
     ))
 }
 
+/// Single source of truth for the "<variant> cost was paid" intervening-if /
+/// instead phrases. Consumed by both the trigger-condition extractor below and
+/// the instead-clause recognizer (`parse_cast_variant_cost_paid_condition` in
+/// `oracle_effect/conditions.rs`); each call site filters to the membership it
+/// needs (the instead route accepts only `Emerge`). Sharing the pairs keeps the
+/// recognized strings from drifting between the two consumers. Per-variant CR
+/// cites: Surge CR 702.117a, Spectacle CR 702.137a, Prowl CR 702.76a, Emerge
+/// CR 702.119a.
+pub(crate) const CAST_VARIANT_COST_PAID_PHRASES: &[(&str, CastVariantPaid)] = &[
+    ("sneak cost was paid", CastVariantPaid::Sneak),
+    ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
+    ("surge cost was paid", CastVariantPaid::Surge),
+    ("spectacle cost was paid", CastVariantPaid::Spectacle),
+    ("prowl cost was paid", CastVariantPaid::Prowl),
+    ("emerge cost was paid", CastVariantPaid::Emerge),
+];
+
 fn try_extract_cast_variant_paid_condition(
     tp: &TextPair<'_>,
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    for (keyword, variant) in &[
-        ("sneak cost was paid", CastVariantPaid::Sneak),
-        ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
-        ("surge cost was paid", CastVariantPaid::Surge), // CR 702.117a
-        ("spectacle cost was paid", CastVariantPaid::Spectacle), // CR 702.137a
-        ("prowl cost was paid", CastVariantPaid::Prowl), // CR 702.76a
-    ] {
+    for (keyword, variant) in CAST_VARIANT_COST_PAID_PHRASES {
         if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
             let kw_pos = tp.find(keyword)?;
@@ -9469,6 +9480,9 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
             def.valid_target = Some(TargetFilter::AttachedTo);
+            // CR 508.3b: only fires when the player themselves is attacked,
+            // not when a planeswalker they control or battle they protect is.
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
             return Some((TriggerMode::Attacks, def));
         }
     }
@@ -20508,6 +20522,31 @@ mod tests {
     }
 
     #[test]
+    fn trigger_heirloom_blade_reveal_until_shares_creature_type() {
+        let def = parse_trigger_line(
+            "Whenever equipped creature dies, reveal cards from the top of your library until you reveal a creature card that shares a creature type with it, then you may put that card into your hand and the rest on the bottom of your library in a random order.",
+            "Heirloom Blade",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        let Effect::RevealUntil { filter, .. } = def.execute.as_ref().unwrap().effect.as_ref()
+        else {
+            panic!("expected RevealUntil, got {:?}", def.execute);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                ..
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
+    }
+
+    #[test]
     fn trigger_enchanted_creature_attacks() {
         let def = parse_trigger_line(
             "Whenever enchanted creature attacks, draw a card.",
@@ -23040,6 +23079,34 @@ mod tests {
             matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_disjunctive_mana_builds_one_of() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, for each player, this enchantment deals 1 damage to that player unless they pay {B} or {3}.",
+            "Lim-Dul's Hex",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(
+            costs.len(),
+            2,
+            "OneOf should have two mana branches: {costs:?}"
+        );
+        assert!(
+            matches!(&costs[0], AbilityCost::Mana { .. }),
+            "first branch should be Mana, got {:?}",
+            costs[0]
+        );
+        assert!(
+            matches!(&costs[1], AbilityCost::Mana { .. }),
+            "second branch should be Mana, got {:?}",
+            costs[1]
         );
     }
 
@@ -27355,6 +27422,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+        // CR 508.3b: only fires when the player themselves is attacked.
+        assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
         assert!(def.execute.is_some());
     }
 
@@ -33018,7 +33087,9 @@ mod tests {
         };
         assert_eq!(
             replacement.damage_modification,
-            Some(DamageModification::Plus { value: 0 }),
+            Some(DamageModification::Plus {
+                value: crate::types::ability::QuantityExpr::Fixed { value: 0 }
+            }),
             "the 'plus X' placeholder is frozen at activation, not parse time"
         );
         assert_eq!(

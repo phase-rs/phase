@@ -256,7 +256,8 @@ export class ParticleSystem {
     for (let i = this.effects.length - 1; i >= 0; i--) {
       const effect = this.effects[i];
       const elapsed = now - effect.startTime;
-      const t = Math.min(elapsed / effect.duration, 1);
+      if (elapsed < 0) continue;
+      const t = Math.min(Math.max(elapsed / effect.duration, 0), 1);
       effect.update(t, this);
       if (t >= 1) {
         effect.onComplete?.(this);
@@ -302,7 +303,8 @@ export class ParticleSystem {
     for (const effect of this.effects) {
       if (effect.draw) {
         const elapsed = _now - effect.startTime;
-        const t = Math.min(elapsed / effect.duration, 1);
+        if (elapsed < 0) continue;
+        const t = Math.min(Math.max(elapsed / effect.duration, 0), 1);
         effect.draw(t, ctx);
       }
     }

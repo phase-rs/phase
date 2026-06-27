@@ -42,6 +42,26 @@ export class AiWorkerPool {
     this.cardDbLoaded = true;
   }
 
+  /**
+   * Load a pre-built game-scoped card-DB subset (small JSON) into every worker
+   * instead of each fetching+parsing the full ~93MB corpus. Used by the AI pool
+   * for bounded games to stay within the iOS WebKit memory ceiling.
+   */
+  async loadCardDbText(text: string): Promise<void> {
+    await Promise.all(this.workers.map((w) => w.loadCardDb(text)));
+    this.cardDbLoaded = true;
+  }
+
+  /**
+   * Mark the pool's card DB stale so the next `ensureCardDb`/`ensureAiPool`
+   * rebuilds this game's subset. The worker instances are preserved; only the
+   * loaded-flag is flipped (the subset is game-scoped and must be rebuilt
+   * per game).
+   */
+  invalidateCardDb(): void {
+    this.cardDbLoaded = false;
+  }
+
   get isCardDbLoaded(): boolean {
     return this.cardDbLoaded;
   }

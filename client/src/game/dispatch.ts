@@ -22,14 +22,14 @@ import { applySpellPaymentPreference } from "./castPaymentMode";
  * Event types whose SFX is deferred to the card slam onImpact callback
  * in AnimationOverlay, so sound aligns with the visual impact moment.
  */
-const SLAM_DEFERRED_SFX = new Set(["DamageDealt"]);
+const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "GroupedDamageFlurry"]);
 
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
   let offset = 0;
   for (const step of steps) {
     // Filter out slam-deferred events — their SFX fires at impact time instead
-    const immediate = step.effects.filter((e) => !SLAM_DEFERRED_SFX.has(e.event.type));
+    const immediate = step.effects.filter((e) => !e.displayOnly && !SLAM_DEFERRED_SFX.has(e.event.type));
     if (immediate.length > 0) {
       if (offset === 0) {
         audioManager.playSfxForStep(immediate);

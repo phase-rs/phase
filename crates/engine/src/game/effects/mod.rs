@@ -12,9 +12,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
     EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetRef, ThisWayCause,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2029,6 +2029,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::IsMonarch
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
+            | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
@@ -3423,6 +3424,19 @@ fn affected_objects_from_events(
         // card ids for downstream "from among the revealed cards"
         // `ChooseFromZone` continuations (Atraxa, Grand Unifier class).
         Effect::RevealTop { .. } | Effect::RevealHand { .. } | Effect::Clash => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
+                _ => None,
+            })
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
+        // CR 701.20b: reveal-only RevealUntil (Sanar) publishes the full revealed
+        // pile from `CardsRevealed` — no zone changes occurred.
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
@@ -6577,6 +6591,27 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
+            && matches!(ability.effect, Effect::Draw { .. })
+            && matches!(sub.effect, Effect::Reveal { .. })
+        {
+            // CR 701.20a: "Draw N cards and reveal them" — the pronoun refers to
+            // the cards that just moved into the hand, not a separate library
+            // reveal. Forward the draw's ZoneChanged objects as reveal targets
+            // (Mad Wizard's Lair and the same draw-then-reveal class).
+            let mut sub_with_targets = sub.as_ref().clone();
+            sub_with_targets.targets = state
+                .last_zone_changed_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect();
+            apply_parent_chain_context(
+                &mut sub_with_targets,
+                ability,
+                effect_context_object.as_ref(),
+            );
+            resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::ExileTop { .. })
             && !effect_uses_implicit_tracked_set_targets(&sub.effect)
         {
@@ -7050,6 +7085,12 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),
+        // CR 701.54a: Ring-bearer designation on the ability source.
+        AbilityCondition::IsRingBearer => crate::game::effects::ring::is_current_ring_bearer(
+            state,
+            ability.controller,
+            ability.source_id,
+        ),
         // "Instead" override conditions — return pure boolean value.
         // Terminal control flow (early return from resolve_ability_chain) is the caller's
         // responsibility in the sub-ability context.
@@ -7642,6 +7683,7 @@ fn resolve_grant_next_spell_ability(
             player,
             modifier,
             spell_filter,
+            source_id: Some(ability.source_id),
         });
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::GrantNextSpellAbility,

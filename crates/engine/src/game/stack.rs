@@ -820,6 +820,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     obj.additional_cost_payment_count =
                         ability.context.additional_cost_payment_count;
                     obj.additional_cost_payments = ability.context.additional_cost_payments.clone();
+                    // CR 400.7d: carry the object paid as a cost to cast this
+                    // spell (e.g. the emerge-sacrificed creature) onto the stack
+                    // object so the `CastLinkSnapshot` restores it onto the
+                    // resulting permanent (Adipose Offspring). `cost_paid_object`
+                    // is a field on the resolving `ResolvedAbility` itself, not
+                    // on its `context`.
+                    obj.cast_cost_paid_object = ability.cost_paid_object.clone();
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
@@ -962,11 +969,25 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 });
                             }
                         }
+                        // CR 709.5d: a Room permanent enters with the unlocked
+                        // designation for whichever half was cast as a spell — the
+                        // right door when its right half was cast, otherwise the
+                        // left. `modal_back_face` (still set on the battlefield, see
+                        // zones.rs) records that the right half was the cast face.
+                        let cast_door = if state
+                            .objects
+                            .get(&entry.id)
+                            .is_some_and(|obj| obj.modal_back_face)
+                        {
+                            crate::game::game_object::RoomDoor::Right
+                        } else {
+                            crate::game::game_object::RoomDoor::Left
+                        };
                         super::room::unlock_door_designation(
                             state,
                             entry.id,
                             entry.controller,
-                            crate::game::game_object::RoomDoor::Left,
+                            cast_door,
                             events,
                         );
                     }
@@ -1418,6 +1439,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         }],
                         None,
                     );
+                }
+            }
+
+            // CR 702.119a-c: Emerge-cast permanent is tagged so "if its emerge
+            // cost was paid" ETB instead-clauses (Adipose Offspring) can
+            // distinguish an emerge cast from a hard-cast. CR 603.4 re-checks at
+            // resolution; the marker is read by
+            // `AbilityCondition::CastVariantPaid` / `CastVariantPaidInstead`.
+            if casting_variant == CastingVariant::Emerge {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Emerge,
+                        state.turn_number,
+                    ));
                 }
             }
 

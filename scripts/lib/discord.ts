@@ -161,6 +161,33 @@ export async function createMessage(
   return posted;
 }
 
+// PATCH /channels/{channel.id}/messages/{message.id} — edit the bot's own message.
+export async function editMessage(
+  channelId: string,
+  messageId: string,
+  content: string,
+): Promise<void> {
+  await discordRequest<DiscordPostedMessage>(
+    "PATCH",
+    `/channels/${channelId}/messages/${messageId}`,
+    { content },
+  );
+}
+
+// POST /channels/{channel.id}/messages/{message.id}/crosspost — publish a message
+// from an Announcement/News channel (type 5) to all servers following it.
+// Authoring the message only requires SEND_MESSAGES (MANAGE_MESSAGES is needed
+// only to crosspost someone else's message).
+export async function crosspostMessage(
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await discordRequest<DiscordPostedMessage>(
+    "POST",
+    `/channels/${channelId}/messages/${messageId}/crosspost`,
+  );
+}
+
 export async function fetchActiveThreads(
   guildId: string,
   channelId: string,

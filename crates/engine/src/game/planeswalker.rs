@@ -11,6 +11,7 @@ use super::ability_utils::{
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
+use super::priority;
 use super::stack;
 
 use crate::types::ability::ResolvedAbility;
@@ -312,8 +313,7 @@ fn finalize_loyalty_activation(
         source_id: pw_id,
     });
     state.lands_tapped_for_mana.remove(&player);
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     WaitingFor::Priority { player }
 }

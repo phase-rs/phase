@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin, BounceSelection,
-    ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
-    DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter, QuantityExpr, RenownSubject,
-    ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
+    BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
+    ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
+    ObjectScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility,
+    SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1163,6 +1164,26 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .iter()
         .position(|p| *p == controller)
         .unwrap_or(order.len())
+}
+
+fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+    if state.format_config.topology().has_shared_team_turns() {
+        super::topology::apnap_team_rank(state, controller)
+    } else {
+        let apnap = crate::game::players::apnap_order(state);
+        apnap_rank(&apnap, controller)
+    }
+}
+
+fn trigger_order_controller(state: &GameState, controller: PlayerId) -> PlayerId {
+    if state.format_config.topology().has_shared_team_turns() {
+        // CR 805.6 / CR 805.7 + CR 603.3b: APNAP choices are made by teams in
+        // shared-team-turn games. Keep each trigger's real controller intact;
+        // only the ordering prompt is assigned to the team's representative.
+        super::topology::priority_pass_representative(state, controller)
+    } else {
+        controller
+    }
 }
 
 /// CR 603.2 + CR 603.3b: Collect every triggered ability matching `events`,
@@ -2881,15 +2902,12 @@ fn collect_pending_triggers(
     apply_trigger_doubling(state, &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
-    // CR 603.3b + CR 101.4: Stack-placement order is full APNAP turn order
-    // (active player first / lowest on stack, then each non-active player in
-    // turn order) — not a binary active/non-active split, which mis-orders 2+
-    // non-active players in multiplayer. Within the same controller, seed the
-    // ordering prompt by timestamp.
-    let apnap = crate::game::players::apnap_order(state);
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is full
+    // APNAP turn order. Shared-team-turn formats rank/order by team while
+    // preserving the real trigger controller on each pending trigger.
     pending.sort_by_key(|t| {
         (
-            apnap_rank(&apnap, t.pending.controller),
+            trigger_apnap_rank(state, t.pending.controller),
             t.pending.timestamp,
         )
     });
@@ -3429,9 +3447,9 @@ fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     })
 }
 
-/// CR 603.3b: Partition `pending` by controller (preserving the APNAP
+/// CR 603.3b: Partition `pending` by ordering controller (preserving the APNAP
 /// placement order produced by `collect_pending_triggers`), populate
-/// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller,
+/// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller/team,
 /// and return either the first ordering prompt (earliest APNAP unordered group) or
 /// `NoChoiceNeeded` when no group requires a choice.
 ///
@@ -3448,10 +3466,10 @@ fn begin_trigger_ordering(
 ) -> TriggerOrderingDisposition {
     use crate::types::game_state::{PendingTriggerOrder, TriggerOrderGroup};
 
-    // Partition by controller while preserving the input (placement) order.
+    // Partition by ordering controller while preserving the input (placement) order.
     let mut groups: Vec<TriggerOrderGroup> = Vec::new();
     for ctx in pending {
-        let controller = ctx.pending.controller;
+        let controller = trigger_order_controller(state, ctx.pending.controller);
         if let Some(last) = groups.last_mut() {
             if last.controller == controller {
                 last.triggers.push(ctx);
@@ -4734,11 +4752,9 @@ pub fn check_state_triggers(state: &mut GameState) {
         return;
     }
 
-    // CR 603.3b + CR 101.4: Full APNAP stack-placement order for state triggers
-    // (active player lowest, then each non-active player in turn order),
-    // tiebroken by timestamp.
-    let apnap = crate::game::players::apnap_order(state);
-    pending.sort_by_key(|t| (apnap_rank(&apnap, t.controller), t.timestamp));
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Full APNAP stack-placement order
+    // for state triggers, ranking shared-turn teams as the APNAP actors.
+    pending.sort_by_key(|t| (trigger_apnap_rank(state, t.controller), t.timestamp));
 
     let mut events_out = Vec::new();
     for trigger in pending {
@@ -4838,13 +4854,12 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     let mut new_events = Vec::new();
 
-    // CR 603.3b + CR 101.4: Full APNAP stack-placement order — active player's
-    // triggers go lowest, then each non-active player's triggers in turn order.
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Full APNAP stack-placement order
+    // by player, or by team in shared-team-turn formats.
     // The old `state.turn_number` tiebreaker was constant across this batch, so
     // dropping it changes nothing; `sort_by_key` is stable, preserving the
     // prior same-controller ordering before stack placement.
-    let apnap = crate::game::players::apnap_order(state);
-    to_fire.sort_by_key(|(trigger, _)| apnap_rank(&apnap, trigger.controller));
+    to_fire.sort_by_key(|(trigger, _)| trigger_apnap_rank(state, trigger.controller));
 
     // CR 603.3 + CR 603.3d + CR 601.2c: Dispatch each firing delayed trigger
     // through the shared trigger dispatcher rather than a bare stack push. The
@@ -6359,6 +6374,237 @@ fn record_trigger_fired(
 }
 
 /// Build a ResolvedAbility from a TriggerDefinition using typed fields.
+/// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
+/// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
+/// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
+/// `AbilityCondition::CostPaidObjectMatchesFilter` — anywhere in its effect,
+/// condition, or `sub_ability` / `else_ability` branches. Used to gate emerge
+/// cast-cost-object propagation (`build_triggered_ability`) so it stamps only
+/// the triggers that actually consume it (Adipose Offspring), never clobbering
+/// unrelated ETB triggers.
+fn resolved_ability_refs_cost_paid_object(resolved: &ResolvedAbility) -> bool {
+    if effect_refs_cost_paid_object(&resolved.effect) {
+        return true;
+    }
+    if resolved
+        .condition
+        .as_ref()
+        .is_some_and(ability_condition_refs_cost_paid_object)
+    {
+        return true;
+    }
+    resolved
+        .sub_ability
+        .as_deref()
+        .is_some_and(resolved_ability_refs_cost_paid_object)
+        || resolved
+            .else_ability
+            .as_deref()
+            .is_some_and(resolved_ability_refs_cost_paid_object)
+}
+
+/// CR 400.7d: does this single effect's primary magnitude, primary target
+/// filter, or P-T modification read the cost-paid object?
+fn effect_refs_cost_paid_object(effect: &Effect) -> bool {
+    if effect
+        .count_expr()
+        .is_some_and(quantity_expr_refs_cost_paid_object)
+    {
+        return true;
+    }
+    if effect
+        .target_filter()
+        .is_some_and(TargetFilter::references_cost_paid_object)
+    {
+        return true;
+    }
+    // Set-P/T magnitudes (e.g. "+X/+X where X is the sacrificed creature's
+    // power") carry their quantity in a `PtValue`, which `count_expr` does not
+    // surface.
+    if let Effect::Pump {
+        power, toughness, ..
+    } = effect
+    {
+        return pt_value_refs_cost_paid_object(power) || pt_value_refs_cost_paid_object(toughness);
+    }
+    false
+}
+
+fn pt_value_refs_cost_paid_object(value: &PtValue) -> bool {
+    match value {
+        PtValue::Quantity(expr) => quantity_expr_refs_cost_paid_object(expr),
+        PtValue::Fixed(_) | PtValue::Variable(_) => false,
+    }
+}
+
+/// Recurse through a quantity expression, returning true if any leaf
+/// `QuantityRef` is scoped to `ObjectScope::CostPaidObject`.
+fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_refs_cost_paid_object(qty),
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_refs_cost_paid_object(inner),
+        QuantityExpr::UpTo { max } => quantity_expr_refs_cost_paid_object(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_refs_cost_paid_object(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_refs_cost_paid_object(left) || quantity_expr_refs_cost_paid_object(right)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_refs_cost_paid_object)
+        }
+    }
+}
+
+/// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
+/// object, by either of the two structural axes a ref can carry it on:
+///
+/// 1. **Object-axis refs** carry a `scope: ObjectScope` and read the cost-paid
+///    object iff that scope is `CostPaidObject`.
+/// 2. **Filter-bearing refs** embed a `TargetFilter`, which can itself reference
+///    `TargetFilter::CostPaidObject` (e.g. "the number of counters on the
+///    sacrificed creature" via `CountersOnObjects { filter: CostPaidObject }`),
+///    so the embedded filter is walked recursively.
+///
+/// The match is intentionally exhaustive (no `_` wildcard) so a future
+/// `QuantityRef` variant that adds either axis forces a compile error here
+/// rather than silently falling through and dropping the snapshot propagation.
+fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
+    match qty {
+        // Object-axis refs: read the cost-paid object iff scoped to it.
+        QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::CostPaidObject),
+
+        // Filter-bearing refs (owned `TargetFilter`): recurse into the filter.
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctColorsAmongPermanents { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
+
+        // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            filter.references_cost_paid_object()
+        }
+
+        // Filter-bearing refs (optional `TargetFilter`): recurse when present.
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(TargetFilter::references_cost_paid_object),
+
+        // Damage history carries a source filter and a recipient filter.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            source.references_cost_paid_object() || target.references_cost_paid_object()
+        }
+
+        // Card-type counting embeds a `TargetFilter` through its source enum.
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+
+        // Mana-spent metering embeds a `TargetFilter` through its metric enum.
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                source_filter.references_cost_paid_object()
+            }
+            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
+        },
+
+        // Non-object, non-filter refs never read the cost-paid object. Listed
+        // explicitly (no wildcard) so adding any future object-axis or
+        // filter-bearing variant is caught by the compiler here. `PlayerCount`
+        // carries a `PlayerFilter`, not a `TargetFilter`, so it cannot embed a
+        // `CostPaidObject` object reference.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// CR 608.2k: does this ability condition read the cost-paid object?
+fn ability_condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            ability_condition_refs_cost_paid_object(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .any(ability_condition_refs_cost_paid_object),
+        _ => false,
+    }
+}
+
 pub(super) fn build_triggered_ability(
     state: &GameState,
     trig_def: &TriggerDefinition,
@@ -6400,6 +6646,23 @@ pub(super) fn build_triggered_ability(
                     .additional_cost_payments
                     .clone_from(&obj.additional_cost_payments);
                 resolved.context.additional_cost_paid = true;
+            }
+        }
+        // CR 400.7d: an ability of a permanent may reference what was paid to
+        // cast the spell that became it. The emerge-sacrificed creature is read
+        // via `ObjectScope::CostPaidObject`. Stamp it across the trigger chain
+        // only when the execute actually references it, leaving triggers that
+        // rely on other `CostPaidObject` population paths (e.g. the trigger's own
+        // cost, paid at resolution) unmodified. `set_cost_paid_object_recursive`
+        // replaces the whole field, so a future trigger with its own
+        // cost-paid-object cost (paid at resolution, after this build-time stamp)
+        // still wins; for Adipose Offspring the ETB trigger has no cost, so this
+        // build-time stamp is the sole, correct source.
+        if let Some(obj) = state.objects.get(&source_id) {
+            if let Some(snapshot) = &obj.cast_cost_paid_object {
+                if resolved_ability_refs_cost_paid_object(&resolved) {
+                    resolved.set_cost_paid_object_recursive(snapshot.clone());
+                }
             }
         }
         // CR 118.12: Carry unless_pay modifier from trigger definition.
@@ -9972,6 +10235,232 @@ pub mod tests {
             crate::types::ability::effect_variant_name(&sub.effect),
             "GainLife"
         );
+    }
+
+    /// CR 400.7d: an emerge-cast permanent's ETB "instead create X of those
+    /// tokens, where X is the sacrificed creature's toughness" reads the
+    /// sacrificed creature via `ObjectScope::CostPaidObject` (Adipose Offspring).
+    /// `build_triggered_ability` must propagate the permanent's
+    /// `cast_cost_paid_object` snapshot onto the resolved ETB ability — and its
+    /// conditional `instead` branch — so the count resolves to the right
+    /// toughness at runtime.
+    #[test]
+    fn build_triggered_ability_propagates_emerge_cost_paid_object_to_referencing_branch() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{CastVariantPaid, CostPaidObjectSnapshot, ObjectScope};
+
+        let mut scenario = GameScenario::new();
+        let offspring = scenario.add_creature(P0, "Adipose Offspring", 2, 2).id();
+        // The creature sacrificed to pay emerge — toughness 3.
+        let sacrificed = scenario.add_creature(P0, "Sacrificed Creature", 4, 3).id();
+        let mut runner = scenario.build();
+
+        // Stamp the cost-paid-object snapshot onto the entering permanent, as the
+        // cast-link machinery (stack.rs + CastLinkSnapshot) does at emerge cast
+        // resolution.
+        let snapshot = {
+            let obj = runner.state().objects.get(&sacrificed).unwrap();
+            CostPaidObjectSnapshot {
+                object_id: sacrificed,
+                lki: obj.snapshot_for_mana_spent(),
+            }
+        };
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&offspring)
+            .unwrap()
+            .cast_cost_paid_object = Some(snapshot.clone());
+
+        // Adipose's ETB shape: parent creates one token (no cost-paid ref); the
+        // `instead` branch reads the sacrificed creature's toughness.
+        let toughness_count = QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let trig_def = TriggerDefinition::new(TriggerMode::ChangesZone).execute(
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: toughness_count.clone(),
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .condition(AbilityCondition::ConditionInstead {
+                    inner: Box::new(AbilityCondition::CastVariantPaid {
+                        variant: CastVariantPaid::Emerge,
+                    }),
+                }),
+            ),
+        );
+
+        let ability = build_triggered_ability(runner.state(), &trig_def, offspring, P0);
+
+        // CR 400.7d: the snapshot is stamped across the whole resolved chain so
+        // the instead branch's `Toughness { CostPaidObject }` resolves correctly.
+        assert_eq!(ability.cost_paid_object.as_ref(), Some(&snapshot));
+        let sub = ability.sub_ability.as_ref().expect("instead sub_ability");
+        assert_eq!(sub.effect.count_expr(), Some(&toughness_count));
+        assert_eq!(sub.cost_paid_object.as_ref(), Some(&snapshot));
+    }
+
+    /// CR 400.7d gate: an ETB trigger that does NOT reference the cost-paid
+    /// object must not inherit the emerge snapshot. The propagation is
+    /// reference-gated so it never clobbers an unrelated trigger whose own cost
+    /// populates `CostPaidObject` at resolution.
+    #[test]
+    fn build_triggered_ability_skips_emerge_object_for_unrelated_trigger() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Unrelated ETB", 2, 2).id();
+        let sacrificed = scenario.add_creature(P0, "Sacrificed Creature", 4, 3).id();
+        let mut runner = scenario.build();
+
+        let snapshot = {
+            let obj = runner.state().objects.get(&sacrificed).unwrap();
+            CostPaidObjectSnapshot {
+                object_id: sacrificed,
+                lki: obj.snapshot_for_mana_spent(),
+            }
+        };
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .cast_cost_paid_object = Some(snapshot);
+
+        // A plain "draw a card" ETB never reads the cost-paid object.
+        let trig_def =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+
+        let ability = build_triggered_ability(runner.state(), &trig_def, source, P0);
+        assert!(
+            ability.cost_paid_object.is_none(),
+            "unrelated ETB trigger must not inherit the emerge cost-paid object"
+        );
+    }
+
+    /// CR 608.2k gate, object-axis coverage: every `QuantityRef` that carries an
+    /// `ObjectScope` must read the cost-paid object when scoped to it — including
+    /// `CountersOn`, the counter-axis sibling. A `Source`-scoped ref must not.
+    #[test]
+    fn cost_paid_object_gate_covers_counters_on_object_scope() {
+        let counters_on = |scope| QuantityRef::CountersOn {
+            scope,
+            counter_type: None,
+        };
+        assert!(
+            quantity_ref_refs_cost_paid_object(&counters_on(ObjectScope::CostPaidObject)),
+            "CountersOn with CostPaidObject scope must be detected as a cost-paid-object ref"
+        );
+        assert!(
+            !quantity_ref_refs_cost_paid_object(&counters_on(ObjectScope::Source)),
+            "CountersOn with Source scope must not be treated as a cost-paid-object ref"
+        );
+    }
+
+    /// CR 608.2k gate, filter-embedded coverage: a filter-bearing `QuantityRef`
+    /// whose embedded `TargetFilter` references the cost-paid object — directly
+    /// or nested inside `And`/`Or`/`Not` — must be detected so the snapshot is
+    /// propagated. A filter that does not reference it must not be.
+    #[test]
+    fn cost_paid_object_gate_recurses_into_quantity_ref_filters() {
+        let counters_on_objects = |filter| QuantityRef::CountersOnObjects {
+            counter_type: None,
+            filter,
+        };
+        assert!(
+            quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::CostPaidObject)),
+            "CountersOnObjects over the cost-paid object must be detected"
+        );
+        assert!(
+            quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::And {
+                filters: vec![TargetFilter::Controller, TargetFilter::CostPaidObject],
+            })),
+            "a nested CostPaidObject inside an And filter must be detected"
+        );
+        assert!(
+            quantity_ref_refs_cost_paid_object(&QuantityRef::ObjectCount {
+                filter: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::CostPaidObject),
+                },
+            }),
+            "a CostPaidObject inside a Not filter must be detected"
+        );
+        assert!(
+            !quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::Controller)),
+            "a filter with no CostPaidObject reference must not be detected"
+        );
+    }
+
+    /// CR 400.7d end-to-end: `build_triggered_ability` propagates the emerge
+    /// `cast_cost_paid_object` snapshot onto a sub-ability whose magnitude reads
+    /// "the number of counters on the sacrificed creature"
+    /// (`CountersOn { CostPaidObject }`) — the class the MED finding covers.
+    #[test]
+    fn build_triggered_ability_propagates_emerge_object_to_counters_on_ref() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Counter Reader", 2, 2).id();
+        let sacrificed = scenario.add_creature(P0, "Sacrificed Creature", 4, 3).id();
+        let mut runner = scenario.build();
+
+        let snapshot = {
+            let obj = runner.state().objects.get(&sacrificed).unwrap();
+            CostPaidObjectSnapshot {
+                object_id: sacrificed,
+                lki: obj.snapshot_for_mana_spent(),
+            }
+        };
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .cast_cost_paid_object = Some(snapshot.clone());
+
+        let counters_count = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::CostPaidObject,
+                counter_type: None,
+            },
+        };
+        let trig_def =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: counters_count.clone(),
+                    target: TargetFilter::Controller,
+                },
+            ));
+
+        let ability = build_triggered_ability(runner.state(), &trig_def, source, P0);
+        assert_eq!(
+            ability.cost_paid_object.as_ref(),
+            Some(&snapshot),
+            "CountersOn {{ CostPaidObject }} magnitude must inherit the emerge snapshot"
+        );
+        assert_eq!(ability.effect.count_expr(), Some(&counters_count));
     }
 
     /// Issue #2008: desert ETB must surface a stack-time opponent target slot.
@@ -25541,6 +26030,75 @@ mod dedup_regression_tests {
         assert!(
             state.pending_trigger_order.is_some(),
             "a live ordering pass must back the prompt"
+        );
+    }
+
+    #[test]
+    fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 42);
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.phase = Phase::Upkeep;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let make_ctx = |source: ObjectId, controller: PlayerId, description: &str| {
+            let ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(0),
+                controller,
+            );
+            PendingTriggerContext::single(PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability,
+                timestamp: source.0 as u32,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: None,
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: Some(description.to_string()),
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+            })
+        };
+
+        let disposition = begin_trigger_ordering(
+            &mut state,
+            vec![
+                make_ctx(ObjectId(1), PlayerId(1), "Hero one trigger."),
+                make_ctx(ObjectId(2), PlayerId(2), "Hero two trigger."),
+            ],
+        );
+
+        let TriggerOrderingDisposition::PromptForChoice(prompt) = disposition else {
+            panic!("hero-team trigger group must prompt for ordering");
+        };
+        assert!(matches!(
+            *prompt,
+            WaitingFor::OrderTriggers {
+                player: PlayerId(1),
+                ..
+            }
+        ));
+        let order = state.pending_trigger_order.as_ref().unwrap();
+        assert_eq!(order.groups.len(), 1);
+        assert_eq!(order.groups[0].controller, PlayerId(1));
+        assert_eq!(
+            order.groups[0]
+                .triggers
+                .iter()
+                .map(|ctx| ctx.pending.controller)
+                .collect::<Vec<_>>(),
+            vec![PlayerId(1), PlayerId(2)]
         );
     }
 

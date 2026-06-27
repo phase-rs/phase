@@ -662,6 +662,10 @@ pub fn check_static_ability(
     mode: StaticMode,
     context: &StaticCheckContext,
 ) -> bool {
+    // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
+    // loops hoist an existence gate in front of (see
+    // `functioning_abilities::any_functioning_static_mode`).
+    crate::game::perf_counters::record_static_full_scan();
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.
@@ -991,9 +995,10 @@ fn life_lock_active_for(state: &GameState, player_id: PlayerId, mode: StaticMode
 /// propagates from either teammate.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantGainLife)
-        || super::players::teammates(state, player_id)
-            .into_iter()
-            .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife))
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife)))
 }
 
 /// CR 119.8 + CR 810.9h: Check if a player has active `CantLoseLife`
@@ -1008,9 +1013,10 @@ pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool
 /// — in team-based formats the lock also propagates from either teammate.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantLoseLife)
-        || super::players::teammates(state, player_id)
-            .into_iter()
-            .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife))
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
 /// CR 702.11e: Check if `player_id` may target creatures as though they didn't

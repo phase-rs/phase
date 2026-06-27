@@ -2843,6 +2843,28 @@ mod tests {
         );
     }
 
+    /// CR 105.1 + CR 601.2f + CR 115.1: Dragonfire Blade — equip cost scales
+    /// with the number of colors on the creature chosen as the equip target.
+    #[test]
+    fn cost_reduction_for_each_color_of_creature_it_targets() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each color of the creature it targets",
+        )
+        .expect("Dragonfire Blade equip discount should parse");
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectColorCount {
+                    scope: crate::types::ability::ObjectScope::Target,
+                },
+            },
+        );
+    }
+
     /// #3223: the self cost-reduction *head* recognizer matches both the bare
     /// sentence and a sentence carrying a trailing "if [condition]" tail; it
     /// rejects unrelated effect sentences. Drives the upstream

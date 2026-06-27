@@ -67,23 +67,15 @@ fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
 /// "a"/"an" require a word boundary after the match (whitespace, punctuation, or
 /// end-of-input) to prevent false matches on words like "another" or "anyone".
 ///
-/// Supports multiples of ten from thirty through ninety, plus "one hundred",
-/// for cards like Lux Artillery ("thirty or more counters") and Hundred-Handed
-/// One. Compound forms like "twenty-one" are not currently printed in Oracle
-/// text — add them here if that changes.
+/// Supports multiples of ten from thirty through ninety, hyphenated compounds
+/// from twenty-one through ninety-nine, plus "one hundred".
 fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
     // Longest-match-first ordering within shared prefixes (e.g. "fourteen" before "four").
     // Split into multiple alt groups to stay within nom's 21-element tuple limit.
     alt((
         value(100u32, tag("one hundred")),
-        value(90, tag("ninety")),
-        value(80, tag("eighty")),
-        value(70, tag("seventy")),
-        value(60, tag("sixty")),
-        value(50, tag("fifty")),
-        value(40, tag("forty")),
-        value(30, tag("thirty")),
-        value(20, tag("twenty")),
+        parse_hyphenated_english_number,
+        parse_english_tens,
     ))
     .or(alt((
         value(19u32, tag("nineteen")),
@@ -109,6 +101,43 @@ fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
         value(1, tag("one")),
         parse_article_number,
     )))
+    .parse(input)
+}
+
+fn parse_english_tens(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(90u32, tag("ninety")),
+        value(80, tag("eighty")),
+        value(70, tag("seventy")),
+        value(60, tag("sixty")),
+        value(50, tag("fifty")),
+        value(40, tag("forty")),
+        value(30, tag("thirty")),
+        value(20, tag("twenty")),
+    ))
+    .parse(input)
+}
+
+fn parse_english_one_to_nine(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(9u32, tag("nine")),
+        value(8, tag("eight")),
+        value(7, tag("seven")),
+        value(6, tag("six")),
+        value(5, tag("five")),
+        value(4, tag("four")),
+        value(3, tag("three")),
+        value(2, tag("two")),
+        value(1, tag("one")),
+    ))
+    .parse(input)
+}
+
+fn parse_hyphenated_english_number(input: &str) -> OracleResult<'_, u32> {
+    map(
+        (parse_english_tens, tag("-"), parse_english_one_to_nine),
+        |(tens, _, ones)| tens + ones,
+    )
     .parse(input)
 }
 
@@ -1057,6 +1086,14 @@ mod tests {
         assert_eq!(parse_number("sixty").unwrap().1, 60);
         assert_eq!(parse_number("seventy").unwrap().1, 70);
         assert_eq!(parse_number("eighty").unwrap().1, 80);
+        assert_eq!(parse_number("ninety").unwrap().1, 90);
+        assert_eq!(parse_number("one hundred").unwrap().1, 100);
+    }
+
+    #[test]
+    fn test_parse_number_hyphenated_words() {
+        assert_eq!(parse_number("twenty-one").unwrap().1, 21);
+        assert_eq!(parse_number("ninety-nine").unwrap().1, 99);
         assert_eq!(parse_number("ninety").unwrap().1, 90);
         assert_eq!(parse_number("one hundred").unwrap().1, 100);
     }

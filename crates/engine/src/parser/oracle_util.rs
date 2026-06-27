@@ -440,9 +440,9 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             ));
         }
     }
-    // CR 107.1b: "equal to <quantity ref>" — composes the existing
-    // QuantityRef parser into the count-position. Strips the prefix, hands
-    // the trimmed tail to the shared `parse_quantity_ref` building block.
+    // CR 107.1b: "equal to <quantity expr>" — delegate to the shared
+    // `parse_cda_quantity` grammar so composed forms (twice/half/offset/sum/
+    // difference/max/aggregate) parse in count positions, not just bare refs.
     if let Some(((), rest_lower)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
         nom::combinator::value(
             (),
@@ -451,8 +451,8 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         .parse(i)
     }) {
         let trimmed = rest_lower.trim_end_matches('.').trim_end();
-        if let Some(qty) = super::oracle_quantity::parse_quantity_ref(trimmed) {
-            return Some((QuantityExpr::Ref { qty }, ""));
+        if let Some(expr) = parse_cda_quantity(trimmed) {
+            return Some((expr, ""));
         }
     }
 
@@ -2506,6 +2506,33 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "stun counters");
+    }
+
+    /// CR 107.1b: "equal to" in count positions must compose full quantity
+    /// expressions, not just bare `QuantityRef` leaves (Tormented Thoughts /
+    /// Ulamog enter-with-counters class).
+    #[test]
+    fn parse_count_expr_equal_to_composed_quantity() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+
+        let (qty, rest) =
+            parse_count_expr("equal to twice the number of creatures you control").unwrap();
+        assert!(matches!(qty, QuantityExpr::Multiply { factor: 2, .. }));
+        assert!(rest.is_empty());
+
+        let (qty, rest) =
+            parse_count_expr("equal to the greatest mana value among cards in exile").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::ManaValue,
+                    ..
+                }
+            }
+        ));
+        assert!(rest.is_empty());
     }
 
     #[test]

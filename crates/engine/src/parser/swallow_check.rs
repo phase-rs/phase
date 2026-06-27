@@ -2895,6 +2895,7 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
     use crate::types::identifiers::TrackedSetId;
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
@@ -4037,6 +4038,11 @@ mod tests {
                 &["Instant"][..],
             ),
             (
+                "Counter target instant or sorcery spell unless that spell's controller has Molten Influence deal 4 damage to them.",
+                "Molten Influence",
+                &["Instant"][..],
+            ),
+            (
                 "This creature can't attack unless defending player is poisoned.",
                 "Chained Throatseeker",
                 &["Creature"][..],
@@ -4061,6 +4067,16 @@ mod tests {
                 "Counter-Discard",
                 &["Instant"][..],
             ),
+            (
+                "At the beginning of your upkeep, for each player, this enchantment deals 1 damage to that player unless they pay {B} or {3}.",
+                "Lim-Dul's Hex",
+                &["Enchantment"][..],
+            ),
+            (
+                "Return target creature to its owner's hand unless its controller has you draw a card.",
+                "Decoy Gambit Bounce",
+                &["Instant"][..],
+            ),
         ] {
             let parsed = parse_named(oracle, name, types);
             assert!(
@@ -4068,6 +4084,176 @@ mod tests {
                 "{name} should not swallow unless clause"
             );
         }
+    }
+
+    /// CR 701.20a + CR 604.3: Reveal-until chosen-type and shares-a-type filters
+    /// must parse without any swallowed-clause warnings (Riptide Shapeshifter,
+    /// Heirloom Blade).
+    #[test]
+    fn reveal_until_chosen_type_and_shares_type_do_not_swallow() {
+        for (oracle, name, types) in [
+            (
+                "Reveal cards from the top of your library until you reveal a creature card of the chosen type. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+                "Riptide Shapeshifter",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever equipped creature dies, reveal cards from the top of your library until you reveal a creature card that shares a creature type with it, then you may put that card into your hand and the rest on the bottom of your library in a random order.",
+                "Heirloom Blade",
+                &["Artifact"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                parsed.parse_warnings.iter().all(|warning| {
+                    !matches!(warning, OracleDiagnostic::SwallowedClause { .. })
+                }),
+                "{name} must not trigger any swallowed clause warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 702.5a + CR 702.9: Aura enchant lines with "without [keyword]" must not
+    /// fall through as unknown Enchant targets (Trapped in the Tower, Roots).
+    #[test]
+    fn enchant_creature_without_flying_do_not_swallow() {
+        for (oracle, name, types) in [
+            (
+                "Enchant creature without flying\nEnchanted creature can't attack or block, and its activated abilities can't be activated.",
+                "Trapped in the Tower",
+                &["Enchantment", "Aura"][..],
+            ),
+            (
+                "Enchant creature without flying\nEnchanted creature can't block.",
+                "Roots",
+                &["Enchantment", "Aura"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                parsed.parse_warnings.iter().all(|warning| {
+                    !matches!(warning, OracleDiagnostic::SwallowedClause { .. })
+                }),
+                "{name} must not trigger any swallowed clause warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 601.2f + CR 607.2d: Progenitor's Icon's chosen-type next-spell flash
+    /// grant must parse without swallowing the "of the chosen type" qualifier.
+    #[test]
+    fn progenitors_icon_chosen_type_next_spell_flash_do_not_swallow() {
+        let parsed = parse_named(
+            "As this artifact enters, choose a creature type.\n\
+             {T}: Add one mana of any color.\n\
+             {T}: The next spell of the chosen type you cast this turn can be cast as though it had flash.",
+            "Progenitor's Icon",
+            &["Artifact"],
+        );
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| { !matches!(warning, OracleDiagnostic::SwallowedClause { .. }) }),
+            "Progenitor's Icon must not trigger swallowed clause warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 608.2c: Wretched Banquet — least-power destroy gate must parse without
+    /// swallowing the intervening-if clause.
+    #[test]
+    fn wretched_banquet_least_power_destroy_parses_without_swallow() {
+        let parsed = parse_named(
+            "Destroy target creature if it has the least power among creatures.",
+            "Wretched Banquet",
+            &["Sorcery"],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "expected one spell ability");
+        match &parsed.abilities[0].condition {
+            Some(crate::types::ability::AbilityCondition::QuantityCheck { comparator, .. }) => {
+                assert_eq!(*comparator, crate::types::ability::Comparator::LE)
+            }
+            other => panic!("expected QuantityCheck least-power gate, got: {other:?}"),
+        }
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::SwallowedClause { .. })),
+            "Wretched Banquet must not swallow the least-power gate: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 702.34a + CR 601.2f: Visions of Ruin — flashback cost plus commander-MV
+    /// "cast this way" reduction must parse without swallowing either clause.
+    #[test]
+    fn visions_of_ruin_flashback_commander_reduction_parses_without_swallow() {
+        let parsed = parse_named(
+            "Each opponent sacrifices an artifact. For each artifact sacrificed this way, you create a Treasure token.\n\
+             Flashback {8}{R}{R}. This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.",
+            "Visions of Ruin",
+            &["Sorcery"],
+        );
+        assert!(
+            parsed
+                .extracted_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Flashback(_))),
+            "expected Flashback keyword, got {:?}",
+            parsed.extracted_keywords
+        );
+        assert!(
+            parsed.statics.iter().any(|sd| {
+                matches!(sd.mode, StaticMode::ModifyCost { .. })
+                    && sd.condition.as_ref().is_some_and(|cond| {
+                        matches!(
+                            cond,
+                            crate::types::ability::StaticCondition::CastingAsVariant { .. }
+                        )
+                    })
+            }),
+            "expected flashback-gated ReduceCost static, got {:?}",
+            parsed.statics
+        );
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::SwallowedClause { .. })),
+            "Visions of Ruin must not swallow flashback cost-reduction clauses: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 508.1 + CR 118.9: Lethargy Trap — leading-if attacking-creature count
+    /// gate on the {U} alternative casting cost must not report Condition_If.
+    #[test]
+    fn condition_if_accepts_lethargy_trap_alt_cost_gate() {
+        let parsed = parse_named(
+            "If three or more creatures are attacking, you may pay {U} rather than pay \
+this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
+            "Lethargy Trap",
+            &["Instant"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "alt-cost attacking-creature gate must bind to casting_options: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(
+            parsed.casting_options.len(),
+            1,
+            "expected one alternative casting option, got {:?}",
+            parsed.casting_options
+        );
+        assert!(
+            parsed.casting_options[0].condition.is_some(),
+            "alt-cost must carry the attacking-creature count gate"
+        );
     }
 
     /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower

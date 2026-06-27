@@ -46,7 +46,7 @@ use super::oracle_classifier::{
     is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
     is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
     is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect,
+    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -82,9 +82,9 @@ use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
     parse_collect_evidence_alt_cost, parse_every_creature_type_static_prefix,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    GraveyardGrantedKeywordKind,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -631,7 +631,7 @@ fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
         })
 }
 
-fn parse_graveyard_keyword_continuation(
+pub(crate) fn parse_graveyard_keyword_continuation(
     text: &str,
     kind: GraveyardGrantedKeywordKind,
 ) -> Option<Keyword> {
@@ -3097,6 +3097,35 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
+        // CR 702.34a: Flashback em-dash / compound self-spell cost-reduction lines.
+        // Must run before Priority 7 static patterns: "This spell costs {X} less
+        // to cast this way" matches `is_static_pattern` and would swallow the
+        // flashback keyword on Visions of Ruin class cards.
+        if lower_starts_with(&lower, "flashback") {
+            if line.contains('\u{2014}') {
+                let lower_clean = lower.trim_end_matches('.').trim();
+                if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            } else if let Some((flashback_part, reduction_part)) =
+                split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
+            {
+                let flashback_lower = flashback_part.to_lowercase();
+                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                    result.extracted_keywords.push(kw);
+                }
+                if let Some(def) =
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
+                {
+                    result.statics.push(def);
+                }
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 7: Static/continuous patterns
         // CR 611.2a + CR 611.3a: On permanents, "creatures you control get +1/+1"
         // is a static ability (CR 611.3a). On instants/sorceries, lines with an
@@ -3506,25 +3535,6 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // CR 702.34a: Flashback em-dash form — "Flashback—{cost}", "Flashback—Tap N
-        // creatures...", or compound "Flashback—{mana}, Pay N life." The comma in
-        // compound costs prevents `extract_keyword_line` (priority 1b) from
-        // recognising the line as a keyword-only line, and Priority 9 would
-        // otherwise route it to the spell-effect catch-all and produce
-        // `Unimplemented`. Intercept it here, before the spell catch-all, and
-        // delegate to `parse_keyword_from_oracle`'s em-dash dispatcher.
-        if lower_starts_with(&lower, "flashback") && line.contains('\u{2014}') {
-            // Strip trailing punctuation so the em-dash dispatcher sees a clean
-            // cost string. Reminder text was already removed by `strip_reminder_text`
-            // upstream, but the trailing period from "Pay 3 life." remains.
-            let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
-                result.extracted_keywords.push(kw);
-                i += 1;
-                continue;
-            }
-        }
-
         // CR 702.27a: Buyback em-dash form — "Buyback—Sacrifice a land." (Constant
         // Mists) etc. MTGJSON omits the Buyback keyword when the cost is non-mana,
         // so `extract_keyword_line` bails and the line would otherwise fall through
@@ -3614,6 +3624,7 @@ pub(crate) fn parse_oracle_ir(
                     || ends_with_quoted_activated_ability(&prepared_line.effect_text)
                     || is_self_exile_cleanup_line(&next_prepared.effect_text, card_name)
                     || is_standalone_spell_keyword_action_line(&prepared_line.effect_text)
+                    || lower_starts_with(&next_prepared.effect_text.to_lowercase(), "flashback")
                     || !is_spell_resolution_instruction_line(
                         &next_prepared,
                         card_name,
@@ -3787,6 +3798,23 @@ pub(crate) fn parse_oracle_ir(
         // Priority 13: Keyword cost lines — extract keyword if parseable, then skip.
         // MTGJSON provides keyword names (e.g. "Morph") but not parameterized forms.
         // The Oracle text has the full form (e.g. "Morph {2}{B}{G}{U}") which we extract here.
+        if lower_starts_with(&lower, "flashback") {
+            if let Some((flashback_part, reduction_part)) =
+                split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
+            {
+                let flashback_lower = flashback_part.to_lowercase();
+                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                    result.extracted_keywords.push(kw);
+                }
+                if let Some(def) =
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
+                {
+                    result.statics.push(def);
+                }
+                i += 1;
+                continue;
+            }
+        }
         if is_keyword_cost_line(&lower) {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
                 result.extracted_keywords.push(kw);

@@ -717,7 +717,7 @@ fn split_choices(input: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TypedFilter};
 
     #[test]
     fn parses_tivit_vote_block() {
@@ -1148,7 +1148,10 @@ mod tests {
             .expect("expected second-half sub_ability");
         match *sub.effect {
             Effect::Token { ref owner, .. } => {
-                assert_eq!(*owner, TargetFilter::Player);
+                assert_eq!(
+                    *owner,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+                );
             }
             other => panic!("expected Token for second half, got {:?}", other),
         }
@@ -1156,7 +1159,7 @@ mod tests {
 
     /// Fall of the First Civilization chapter I: "you and target opponent each
     /// draw two cards" — both halves distribute; the opponent half keeps a real
-    /// `Player` target slot (not a context ref).
+    /// opponent-scoped target slot (not a context ref).
     #[test]
     fn parser_distributes_you_and_target_opponent_each_draw_two() {
         let parsed = parse_effect_chain_with_context(
@@ -1183,7 +1186,10 @@ mod tests {
             Effect::Draw {
                 ref target, count, ..
             } => {
-                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+                );
                 assert_eq!(count, QuantityExpr::Fixed { value: 2 });
             }
             other => panic!(
@@ -1221,6 +1227,12 @@ mod tests {
                 .legal_targets
                 .contains(&TargetRef::Player(PlayerId(1))),
             "target slot must offer the opponent"
+        );
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(0))),
+            "target opponent draw must not allow targeting yourself"
         );
     }
 

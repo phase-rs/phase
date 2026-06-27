@@ -1381,6 +1381,29 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// bridges to ObjectCount(creature + Attacking) >= N.
+    #[test]
+    fn restriction_attacking_creatures_count_ge() {
+        match parse_restriction_condition("three or more creatures are attacking") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }) => assert!(
+                matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking { defender: None }
+                ))),
+                "filter should be attacking creatures, got {filter:?}"
+            ),
+            other => panic!("expected QuantityComparison(ObjectCount >= 3), got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_source_conditions() {
         assert_eq!(

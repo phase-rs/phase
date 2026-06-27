@@ -2879,10 +2879,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             step,
             count,
+            scope,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("step".into(), format!("{step:?}")));
-            if !matches!(
+            // CR 614.10 + CR 614.10a: surface the turn-scoped variant; the
+            // occurrence-scoped default keeps the existing rows unchanged.
+            if matches!(scope, crate::types::ability::SkipScope::AllOfNextTurn) {
+                d.push(("scope".into(), "all of next turn".into()));
+            } else if !matches!(
                 count,
                 crate::types::ability::QuantityExpr::Fixed { value: 1 }
             ) {
@@ -3206,6 +3211,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::IsMonarch => "is monarch".into(),
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
+        AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
         }
@@ -3528,6 +3534,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
+        SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
     }
 }
@@ -6213,6 +6220,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
         AbilityCondition::IsYourTurn => ("IsYourTurn", Handled),
@@ -6564,6 +6572,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
+        StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }
 }
 

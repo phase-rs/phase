@@ -18,7 +18,7 @@ import { useDeckFolders } from "../../hooks/useDeckFolders";
 import { DeckActionsMenu } from "./DeckActionsMenu";
 import { FolderActionsMenu } from "./FolderActionsMenu";
 import { DeckSection } from "./DeckSection";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import {
   getDeckFeedOrigin,
   listSubscriptions,
@@ -78,14 +78,14 @@ type FolderPromptRequest =
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
-  ...FORMAT_REGISTRY.flatMap((m) => [
+  ...DECK_CONSTRUCTION_FORMATS.flatMap((m) => [
     m.format.toLowerCase(),
     m.label.toLowerCase(),
     m.short_label.toLowerCase(),
   ]),
   "metagame",
 ]);
-const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
+const DECK_FORMATS = DECK_CONSTRUCTION_FORMATS;
 const BASIC_LAND_COLORS: Record<string, string> = {
   Plains: "W",
   Island: "U",

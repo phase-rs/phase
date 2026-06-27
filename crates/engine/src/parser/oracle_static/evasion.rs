@@ -407,6 +407,116 @@ pub(crate) fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, (
     .parse(input)
 }
 
+fn parse_extra_blockers_creature_noun(input: &str) -> OracleResult<'_, ()> {
+    value((), (tag(" creature"), opt(tag("s")))).parse(input)
+}
+
+pub(crate) fn parse_extra_blockers_count_phrase(input: &str) -> OracleResult<'_, Option<u32>> {
+    alt((
+        value(None, tag("any number of creatures")),
+        map(
+            preceded(
+                tag("an additional "),
+                terminated(
+                    nom_primitives::parse_number,
+                    parse_extra_blockers_creature_noun,
+                ),
+            ),
+            Some,
+        ),
+        value(
+            Some(1),
+            (
+                tag("additional creature"),
+                opt(tag::<_, _, OracleError<'_>>("s")),
+            ),
+        ),
+        map(
+            terminated(
+                nom_primitives::parse_number,
+                (
+                    tag(" additional creature"),
+                    opt(tag::<_, _, OracleError<'_>>("s")),
+                ),
+            ),
+            Some,
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_extra_blockers_tail(input: &str) -> OracleResult<'_, Option<u32>> {
+    let (input, count) = parse_extra_blockers_count_phrase(input)?;
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>(" each combat"),
+        tag(" this combat"),
+        tag(" this turn"),
+    )))
+    .parse(input)?;
+    Ok((input, count))
+}
+
+fn parse_can_block_extra_blockers_predicate(input: &str) -> OracleResult<'_, Option<u32>> {
+    preceded(tag("can block "), parse_extra_blockers_tail).parse(input)
+}
+
+fn parse_and_can_block_extra_blockers_predicate(input: &str) -> OracleResult<'_, Option<u32>> {
+    preceded(tag("and "), parse_can_block_extra_blockers_predicate).parse(input)
+}
+
+fn extra_blockers_static_definition(
+    affected: TargetFilter,
+    mode: StaticMode,
+    text: &str,
+) -> StaticDefinition {
+    if matches!(affected, TargetFilter::SelfRef) {
+        StaticDefinition::new(mode)
+            .affected(affected)
+            .description(text.to_string())
+    } else {
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+            .description(text.to_string())
+    }
+}
+
+fn parse_subject_trailing_conjunction(input: &str) -> OracleResult<'_, ()> {
+    value((), all_consuming((take_until(" and"), tag(" and")))).parse(input)
+}
+
+pub(crate) fn parse_extra_blockers_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (before, count, rest) =
+        nom_primitives::scan_preceded(&lower, parse_can_block_extra_blockers_predicate)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let subject_len = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let subject = text[..subject_len].trim();
+    if subject.is_empty() {
+        return None;
+    }
+    let subject_lower = lower[..subject_len].trim();
+    if parse_subject_trailing_conjunction(subject_lower).is_ok() {
+        return None;
+    }
+    let affected = parse_rule_static_subject_filter(subject).unwrap_or(TargetFilter::SelfRef);
+    Some(extra_blockers_static_definition(
+        affected,
+        StaticMode::ExtraBlockers { count },
+        text,
+    ))
+}
+
+pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
+    parse_extra_blockers_static(lower).is_some()
+}
+
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
 /// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
 /// independent `StaticDefinition`s sharing the same `affected` + `condition`.
@@ -570,35 +680,14 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
 /// the remainder for the first conjunct, then clone its `affected`/`condition`
 /// onto the companion `ExtraBlockers` definition.
 pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<StaticDefinition>> {
-    type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
-    let (before, count, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        let (i, _) = tag::<_, _, VE>("and can block ").parse(i)?;
-        // CR 107.1c: "any number of creatures" → unbounded (None); otherwise a
-        // numeric count of additional creatures ("an"/"a" → 1, "two" → 2, …).
-        let (i, count): (&str, Option<u32>) = if let Ok((after, _)) = (
-            tag::<_, _, VE>("any"),
-            tag::<_, _, VE>(" number of creatures"),
-        )
-            .parse(i)
-        {
-            (after, None)
-        } else {
-            let (after_n, n) = nom_primitives::parse_number(i)?;
-            let (after_kw, _) = tag::<_, _, VE>(" additional creature").parse(after_n)?;
-            let (after_s, _) = opt(tag::<_, _, VE>("s")).parse(after_kw)?;
-            (after_s, Some(n))
-        };
-        // Optional trailing duration phrase ("each combat", "this combat", …).
-        let (i, _) = opt(alt((
-            tag::<_, _, VE>(" each combat"),
-            tag::<_, _, VE>(" this combat"),
-            tag::<_, _, VE>(" this turn"),
-        )))
-        .parse(i)?;
-        Ok((i, count))
-    })?;
+    let (before, count, rest) =
+        nom_primitives::scan_preceded(&lower, parse_and_can_block_extra_blockers_predicate)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
 
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
@@ -614,9 +703,8 @@ pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<Stati
 
     let affected = defs[0].affected.clone()?;
     let condition = defs[0].condition.clone();
-    let mut companion = StaticDefinition::new(StaticMode::ExtraBlockers { count })
-        .affected(affected)
-        .description(text.to_string());
+    let mut companion =
+        extra_blockers_static_definition(affected, StaticMode::ExtraBlockers { count }, text);
     if let Some(condition) = condition {
         companion = companion.condition(condition);
     }

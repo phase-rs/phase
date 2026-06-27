@@ -191,6 +191,9 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, modification)) = parse_is_supertype_in_addition(input) {
         return Some((rest, vec![modification]));
     }
+    if let Some((rest, modification)) = parse_is_supertype(input) {
+        return Some((rest, vec![modification]));
+    }
     if let Some((rest, modification)) = parse_isnt_supertype(input) {
         return Some((rest, vec![modification]));
     }
@@ -947,6 +950,9 @@ fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
 ///
 /// Sarkhan, Soul Aflame: `"… except its name is ~ and it's legendary in
 /// addition to its other types"` is the canonical case.
+///
+/// Adagia, Windswept Bastion: `"… except it's legendary"` (no "in addition"
+/// suffix) is handled by [`parse_is_supertype`] instead.
 fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's "),
@@ -966,6 +972,26 @@ fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModifi
     ))
     .parse(rest)
     .ok()?;
+    Some((rest, ContinuousModification::AddSupertype { supertype }))
+}
+
+/// CR 205.4 + CR 707.9d: Match `"<subject>'s <supertype>"` without the Sarkhan
+/// "in addition to its other types" suffix. Emits [`ContinuousModification::AddSupertype`].
+///
+/// Adagia, Windswept Bastion: `"create a token that's a copy of target artifact
+/// or enchantment you control, except it's legendary"`.
+fn parse_is_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it's "),
+        tag("it\u{2019}s "),
+        tag("he's "),
+        tag("he\u{2019}s "),
+        tag("she's "),
+        tag("she\u{2019}s "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (rest, supertype) = parse_supertype_word(rest)?;
     Some((rest, ContinuousModification::AddSupertype { supertype }))
 }
 
@@ -2216,6 +2242,23 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it's legendary in addition to its other types",
             "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9d: bare "except it's legendary" (Adagia, Windswept Bastion).
+    #[test]
+    fn its_legendary_emits_add_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's legendary",
+            "Adagia, Windswept Bastion",
             &ParseContext::default(),
         )
         .unwrap();

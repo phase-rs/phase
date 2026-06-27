@@ -93,7 +93,6 @@ export function DeckBuilder({
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
-    effectiveCap,
   } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
   const { t } = useTranslation("deck-builder");
 
@@ -443,7 +442,6 @@ export function DeckBuilder({
                       onRemoveCommander={handleRemoveCommander}
                       onCardHover={onCardHover}
                       format={format}
-                      getEffectiveCap={effectiveCap}
                     />
                   )}
                 </div>
@@ -470,7 +468,7 @@ export function DeckBuilder({
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 onCardHover={onCardHover}
-                getEffectiveCap={effectiveCap}
+                formatValidationReasons={compatibility?.selected_format_reasons}
               />
             )}
             <StatsPanel

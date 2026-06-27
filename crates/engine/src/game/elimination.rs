@@ -35,6 +35,21 @@ pub fn eliminate_players_simultaneously(
     events: &mut Vec<GameEvent>,
 ) {
     let mut eliminated_any = false;
+    let mut leaving_set = HashSet::new();
+
+    for &player in players_to_eliminate {
+        if !players::is_alive(state, player) {
+            continue;
+        }
+        leaving_set.insert(player);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    leaving_set.insert(teammate);
+                }
+            }
+        }
+    }
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -43,14 +58,14 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
 
-        do_eliminate(state, player, events);
+        do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        // For team-based formats, eliminate teammates too.
-        if state.format_config.team_based {
-            let team = players::teammates(state, player);
-            for teammate in team {
-                do_eliminate(state, teammate, events);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    do_eliminate(state, teammate, &leaving_set, events);
+                }
             }
         }
     }
@@ -302,7 +317,15 @@ fn exile_owned_objects_on_player_left_game(
 }
 
 /// Perform the actual elimination of a single player (CR 800.4).
-fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+fn do_eliminate(
+    state: &mut GameState,
+    player: PlayerId,
+    leaving_set: &HashSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    let planar_handoff =
+        crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
+
     // Mark as eliminated
     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
         p.is_eliminated = true;
@@ -310,6 +333,8 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     if !state.eliminated_players.contains(&player) {
         state.eliminated_players.push(player);
     }
+
+    crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
@@ -358,8 +383,10 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     // player leaving the game, so the consult is skipped while the
     // unconditional primitive guards still run (PLAN §3).
     exile_owned_objects_on_player_left_game(state, player, events);
+    crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
+    state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
     // If the active player is also leaving, the next living player in turn order gets it.
@@ -444,29 +471,6 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         }
     }
 
-    // CR 901.10 / CR 311.5 / CR 312.4: If the planar controller leaves the game,
-    // the next player in turn order that isn't leaving becomes the planar
-    // controller (the active player normally, unless they're the one leaving).
-    // This is NOT a state-based action — it happens immediately on leave.
-    if state.planar_controller == Some(player) {
-        let any_alive = state
-            .players
-            .iter()
-            .any(|p| !p.is_eliminated && p.id != player);
-
-        if !any_alive {
-            state.planar_controller = None;
-        } else {
-            let new_controller =
-                if players::is_alive(state, state.active_player) && state.active_player != player {
-                    state.active_player
-                } else {
-                    players::next_player(state, player)
-                };
-            crate::game::planechase::set_planar_controller(state, new_controller, events);
-        }
-    }
-
     // CR 800.4a: If the archenemy leaves the game, the Archenemy subsystem ends.
     // The archenemy is unique (CR 904.2a), so there is no reassignment — unlike the
     // planar controller. Scheme cards are owned by the archenemy and are locked to
@@ -504,12 +508,28 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|p| p.id)
         .collect();
 
-    if state.format_config.team_based {
-        // Count living teams (team = pair of players with same team index)
-        let mut living_teams = std::collections::HashSet::new();
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        let archenemy_alive = living.contains(&archenemy);
+        let living_heroes: Vec<PlayerId> = living
+            .iter()
+            .copied()
+            .filter(|&pid| pid != archenemy)
+            .collect();
+        let winner = if archenemy_alive && living_heroes.is_empty() {
+            Some(archenemy)
+        } else if !archenemy_alive && !living_heroes.is_empty() {
+            living_heroes.first().copied()
+        } else if !archenemy_alive && living_heroes.is_empty() {
+            None
+        } else {
+            return;
+        };
+        events.push(GameEvent::GameOver { winner });
+        state.waiting_for = WaitingFor::GameOver { winner };
+    } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
-            let team_idx = pid.0 / 2;
-            living_teams.insert(team_idx);
+            living_teams.insert(super::topology::team_dedup_key(state, pid));
         }
 
         if living_teams.len() <= 1 {
@@ -564,6 +584,12 @@ mod tests {
 
     fn setup_2hg() -> GameState {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state
+    }
+
+    fn setup_archenemy() -> GameState {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
         state.turn_number = 1;
         state
     }
@@ -896,6 +922,52 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_hero_loss_eliminates_only_that_hero() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn archenemy_wins_after_all_heroes_are_eliminated() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(3), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_loss_uses_persistent_topology_after_runtime_state_cleared() {
+        let mut state = setup_archenemy();
+        state.archenemy = None;
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
             }
         ));
     }

@@ -3,12 +3,20 @@ import { Link, useLocation } from "react-router";
 
 import { BuildBadge } from "./BuildBadge";
 import { activeNavKey, NAV_ITEMS } from "./navItems";
+import { SparkleIcon } from "./SparkleIcon";
+
+interface TabBarProps {
+  onWhatsNew: () => void;
+  /** When true, an unread dot rides the "What's New" tab. */
+  hasUnread: boolean;
+}
 
 /**
  * Mobile bottom tab bar (<820px) — the rail's counterpart. Same five primary
- * destinations; the rail is hidden at this width.
+ * destinations plus the "What's New" affordance the rail carries; the rail is
+ * hidden at this width.
  */
-export function TabBar() {
+export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
   const { t } = useTranslation("menu");
   const active = activeNavKey(useLocation().pathname);
 
@@ -40,6 +48,21 @@ export function TabBar() {
           </Link>
         );
       })}
+
+      <button
+        onClick={onWhatsNew}
+        className="flex flex-1 flex-col items-center gap-1 rounded-xl px-0.5 py-1.5 text-[10.5px] font-semibold text-fg-meta transition-colors"
+      >
+        <span className="relative">
+          <SparkleIcon className="h-7 w-7 opacity-50" />
+          {hasUnread && (
+            <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-[rgba(6,10,22,0.92)]">
+              <span className="sr-only">{t("whatsNew.unread")}</span>
+            </span>
+          )}
+        </span>
+        <span>{t("nav.whatsNew")}</span>
+      </button>
     </nav>
   );
 }

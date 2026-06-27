@@ -1023,102 +1023,6 @@ fn pay_ability_cost_inner(
     Ok(PaymentOutcome::Paid)
 }
 
-/// A minimal board mutation modeled on a throwaway clone by the activation-time
-/// supplemental affordability check (`composite_sacrifice_mana_witness_exists`).
-///
-/// Each variant names a concrete way the live cost-payment path mutates the
-/// board *before* the residual mana leg is paid, so the affordability oracle can
-/// re-derive remaining-board mana on the post-mutation state instead of the
-/// (over-approximating) intact board.
-enum MutationWitness {
-    /// CR 701.21a: Sacrifice the carried permanent(s) — each is removed from the
-    /// battlefield to its owner's graveyard. The `(ObjectId, PlayerId)` pairs are
-    /// the witness object and its owner.
-    Sacrifice(Vec<(ObjectId, PlayerId)>),
-}
-
-/// Apply a [`MutationWitness`] to a throwaway clone.
-///
-/// INVARIANT (CR 613.1): any witness that removes or moves a board permanent
-/// MUST leave `layers_dirty` non-`Clean`, so the downstream payability oracle's
-/// `flush_layers` (in `can_pay_effect_mana_cost_after_auto_tap`) re-derives the
-/// continuous effects (affinity-style cost reductions, granted mana abilities,
-/// devotion) whose values depend on board population. `zones::remove_from_zone`
-/// does NOT mark layers dirty, so `layers::mark_layers_full` is mandatory here.
-fn apply_mutation_witness(sim: &mut GameState, witness: &MutationWitness) {
-    match witness {
-        MutationWitness::Sacrifice(removals) => {
-            // CR 701.21a: battlefield → graveyard. The graveyard add is
-            // intentionally omitted — the destination zone is irrelevant to the
-            // remaining-board mana the oracle re-derives below; only the
-            // battlefield removal matters.
-            for &(id, owner) in removals {
-                super::zones::remove_from_zone(sim, id, Zone::Battlefield, owner);
-            }
-            // CR 613.1: re-derive continuous effects against the post-removal
-            // board on the downstream `flush_layers`. Mandatory — see the
-            // function-level invariant above.
-            super::layers::mark_layers_full(sim);
-        }
-    }
-}
-
-/// Enumerate the single-witness mutation set for the supplemental affordability
-/// check. Gated on a non-self single-permanent sacrifice leg
-/// (`find_non_self_sacrifice_cost`): for `count == 1`, emit one singleton
-/// `Sacrifice` witness per eligible permanent (the existential candidates).
-///
-/// For `count > 1` (or no non-self sacrifice leg) this returns an empty `Vec` —
-/// the caller MUST treat an empty set as "out of scope, do not reject" rather
-/// than feeding it into `.any()` (which would wrongly yield `false`). See the
-/// wiring in [`can_pay`].
-fn mutation_witness_set(
-    state: &GameState,
-    payer: PlayerId,
-    source_id: ObjectId,
-    cost: &AbilityCost,
-) -> Vec<MutationWitness> {
-    let Some((count, filter)) = super::casting::find_non_self_sacrifice_cost(cost) else {
-        return Vec::new();
-    };
-    if count != 1 {
-        return Vec::new();
-    }
-    super::casting::find_eligible_sacrifice_targets(state, payer, source_id, filter)
-        .into_iter()
-        .filter_map(|id| {
-            state
-                .objects
-                .get(&id)
-                .map(|obj| MutationWitness::Sacrifice(vec![(id, obj.owner)]))
-        })
-        .collect()
-}
-
-/// CR 601.2h: single-witness monotonic existential affordability check for the
-/// "conditional static mana leg + non-self single-sacrifice" composite shape.
-///
-/// The composite is genuinely payable iff THERE EXISTS one eligible sacrifice
-/// whose removal (applied on a throwaway clone) leaves the static mana leg
-/// payable. First-success early-return: `.any()` stops at the first witness that
-/// keeps the mana payable.
-fn composite_sacrifice_mana_witness_exists(
-    state: &GameState,
-    payer: PlayerId,
-    source_id: ObjectId,
-    cost: &AbilityCost,
-    mana: &crate::types::mana::ManaCost,
-) -> bool {
-    mutation_witness_set(state, payer, source_id, cost)
-        .iter()
-        .any(|witness| {
-            crate::game::perf_counters::record_state_clone_for_legality();
-            let mut sim = state.clone();
-            apply_mutation_witness(&mut sim, witness);
-            can_pay_effect_mana_cost_after_auto_tap(&sim, payer, source_id, mana)
-        })
-}
-
 /// CR 118.3 + CR 601.2h: The single affordability authority. Returns whether
 /// `payer` could pay `cost` right now in the active [`PaymentScope`].
 ///
@@ -1184,30 +1088,15 @@ pub(crate) fn can_pay(
             if !dry_run_ok {
                 return false;
             }
-            // CR 601.2f / CR 602.2b: an activated ability's activation cost is the
-            // analog of a spell's mana cost, so the CR 601.2h ordering applies.
-            // CR 601.2h: the live path pays the sacrifice FIRST and the mana
-            // LAST. The dry-run above pays mana first (board intact) and no-ops a
-            // non-self sacrifice, so it over-approves a "{N}, Sacrifice a
-            // permanent" cost whose only {N} source is gated on the sacrificed
-            // board (Mox Opal Metalcraft / affinity-style reductions). CR 118.3:
-            // supplement the dry run with a single-witness monotonic existence
-            // check for that exact shape — does ANY eligible sacrifice leave the
-            // mana leg payable on the post-sacrifice board?
-            if let (Some(mana), Some((count, _))) = (
-                super::casting::composite_mana_leg(cost),
-                super::casting::find_non_self_sacrifice_cost(cost),
-            ) {
-                if count == 1 {
-                    return composite_sacrifice_mana_witness_exists(
-                        state, payer, source_id, cost, mana,
-                    );
-                }
-                // AMENDMENT 1: count > 1 is OUT OF SCOPE — fall through to the
-                // unchanged `true` below (preserves today's over-approximation;
-                // a count >= 2 conditional-mana-base sacrifice is a vanishingly
-                // rare tracked follow-up). MUST NOT reject count > 1 here.
-            }
+            // CR 601.2g + CR 601.2f / CR 602.2b: an activated ability's activation
+            // cost is the analog of a spell's mana cost, so the CR 601.2g/601.2h
+            // ordering applies. The mana-leg detour in `handle_activate_ability`
+            // now pays the mana leg FIRST (opening the CR 601.2g mana-ability
+            // window on the INTACT board) and the non-mana battlefield-removal leg
+            // LAST. The dry-run above therefore matches the live path exactly —
+            // both pay mana on the intact board — so no supplemental
+            // remove-then-recheck witness is needed; the former over-approximation
+            // is now the correct verdict.
             true
         }
         PaymentScope::Resolution { ability } => can_pay_resolution(state, payer, cost, ability),
@@ -1899,26 +1788,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Composite "{N}, Sacrifice a permanent" supplemental affordability check
-    // (CR 601.2h ordering: live path pays sacrifice FIRST, mana LAST). The
-    // helpers below build the Claws-of-Gix / Mox-Opal-Metalcraft minimal board.
+    // Composite "{N}, <battlefield-removal>" mana-first affordability (CR 601.2g
+    // / CR 601.2h ordering: the mana-leg detour pays mana FIRST on the intact
+    // board, the removal LAST). The helpers below build the Claws-of-Gix /
+    // Mox-Opal-Metalcraft minimal board.
     // -----------------------------------------------------------------------
-
-    /// Budget for `record_state_clone_for_legality` calls on the PAYABLE witness
-    /// path. Three CONSTANT clones, none scaling with the eligible-set size K:
-    ///   1. the existing `can_pay` dry-run clone;
-    ///   2. the first (and, via first-success early-return, ONLY) witness clone in
-    ///      `composite_sacrifice_mana_witness_exists`;
-    ///   3. one mana-ability simulation clone
-    ///      (`can_activate_mana_ability_by_simulation`) when that single witness's
-    ///      `can_pay_effect_mana_cost_after_auto_tap` evaluates the Mox's tap mana
-    ///      ability — fixed per-witness overhead, examined once.
-    ///
-    /// It is intentionally NOT 1 (the dry run alone), NOT O(N) per candidate, and
-    /// NOT the full eligible-set size K. With a WIDE board (K = 7) an O(N) check
-    /// would record ~K+ clones; the bound of 3 proves the `.any()` short-circuits
-    /// at the first witness that keeps the mana payable.
-    const WITNESS_CLONE_BUDGET: u64 = 3;
 
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ActivationRestriction, Comparator, ContinuousModification,
@@ -1994,21 +1868,24 @@ mod tests {
         }
     }
 
-    /// V1 (dead-end gone): Metalcraft-only board — exactly 3 artifacts including
-    /// Mox Opal (the only {1} source) + Claws. Sacrificing ANY artifact drops to
-    /// 2 → Metalcraft off → residual {1} unpayable. CR 601.2h / CR 118.3.
-    /// REVERT-FAILING: without the supplemental block this asserts `true` (the
-    /// dry-run pays {1} first on the intact 3-artifact board).
+    /// V1 (mana-first → payable): Metalcraft-only board — exactly 3 artifacts
+    /// including Mox Opal (the only {1} source) + Claws. CR 601.2g / CR 601.2h:
+    /// the mana-leg detour pays {1} FIRST while all 3 artifacts are intact
+    /// (Metalcraft holds → Mox produces {1}); the sacrifice is paid LAST. So the
+    /// composite IS payable even though sacrificing afterwards drops below
+    /// Metalcraft — the mana was already in the pool. Reverting the mana-first
+    /// detour restores the sacrifice-first ordering, which dead-ends here.
     #[test]
-    fn claws_metalcraft_only_board_is_dead_end_unpayable() {
+    fn claws_metalcraft_only_board_is_payable_mana_first() {
         let mut scenario = GameScenario::new();
         metalcraft_mox(&mut scenario);
         plain_artifact(&mut scenario, "Artifact A");
         let claws = plain_artifact(&mut scenario, "Claws of Gix");
-        // 3 artifacts on board; Mox makes {1} only while Metalcraft holds.
+        // 3 artifacts on board; Mox makes {1} while Metalcraft holds, and the
+        // mana-first window pays {1} before the sacrifice shrinks the board.
         assert!(
-            !can_pay_activation(&scenario.state, claws, &claws_cost()),
-            "every sacrifice drops to 2 artifacts → Metalcraft off → {{1}} unpayable"
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "mana paid first on the intact 3-artifact board → payable"
         );
     }
 
@@ -2034,19 +1911,19 @@ mod tests {
         );
     }
 
-    /// V5 (unpayable): EVERY eligible sacrifice breaks the sole {1} producer →
-    /// `false`. Same as V1 but stated as the existential-failure case: 3
-    /// artifacts, the only producer is the Metalcraft Mox, no sacrifice keeps the
-    /// count at 3.
+    /// V5 (mana-first → payable): even though EVERY eligible sacrifice would break
+    /// the sole {1} producer, CR 601.2g pays {1} from the Mox on the intact
+    /// 3-artifact board BEFORE the sacrifice, so the composite is payable. The
+    /// post-sacrifice board state is irrelevant once the mana is in the pool.
     #[test]
-    fn claws_every_sacrifice_breaks_producer_is_unpayable() {
+    fn claws_every_sacrifice_breaks_producer_is_payable_mana_first() {
         let mut scenario = GameScenario::new();
         metalcraft_mox(&mut scenario);
         plain_artifact(&mut scenario, "Filler 1");
         let claws = plain_artifact(&mut scenario, "Claws of Gix");
         assert!(
-            !can_pay_activation(&scenario.state, claws, &claws_cost()),
-            "no witness preserves Metalcraft → unpayable"
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "{{1}} paid from the Mox before the sacrifice → payable"
         );
     }
 
@@ -2086,39 +1963,11 @@ mod tests {
         );
     }
 
-    /// V8 (clone-bound): WIDE board (Mox + 6 plain artifacts). On the PAYABLE
-    /// path the existential check must short-circuit at the first witness that
-    /// keeps the mana payable, so the legality-clone delta stays within
-    /// `WITNESS_CLONE_BUDGET` — NOT O(eligible-set-size).
-    #[test]
-    fn claws_payable_path_is_clone_bounded() {
-        let mut scenario = GameScenario::new();
-        metalcraft_mox(&mut scenario);
-        // 6 plain artifacts → 7 artifacts total; sacrificing any one leaves 6
-        // (>= 3) → Metalcraft holds, so the FIRST witness already succeeds.
-        for i in 0..6 {
-            plain_artifact(&mut scenario, &format!("Filler {i}"));
-        }
-        let claws = plain_artifact(&mut scenario, "Claws of Gix");
-        crate::game::perf_counters::reset();
-        let payable = can_pay_activation(&scenario.state, claws, &claws_cost());
-        let delta = crate::game::perf_counters::snapshot().state_clone_for_legality;
-        assert!(
-            payable,
-            "wide board → first witness keeps Metalcraft → payable"
-        );
-        assert!(
-            delta <= WITNESS_CLONE_BUDGET,
-            "payable path must short-circuit: {delta} clones > budget {WITNESS_CLONE_BUDGET}"
-        );
-    }
-
-    /// V10 (no count>1 regression): a `Composite[{1}, Sacrifice TWO permanents]`
-    /// must NOT be rejected by the supplemental check (AMENDMENT 1: count > 1 is
-    /// out of scope and falls through to the unchanged `true`), even on a board
-    /// where sacrificing would break the conditional mana source. This pins the
-    /// count==1 guard: the dry-run already approves it (mana paid first), and the
-    /// witness block must leave that verdict byte-identical.
+    /// V10 (count>1 still payable): a `Composite[{1}, Sacrifice TWO permanents]`
+    /// is payable on a board where sacrificing would break the conditional mana
+    /// source, because CR 601.2g pays {1} on the intact board before either
+    /// sacrifice. The mana-first detour is count-agnostic — it pays the mana leg
+    /// regardless of how many permanents the removal leg sacrifices.
     #[test]
     fn claws_sacrifice_two_count_gt_one_not_rejected() {
         let mut scenario = GameScenario::new();
@@ -2142,24 +1991,20 @@ mod tests {
         );
     }
 
-    /// B1 (mark_layers_full discriminator — MANDATORY): a LAYER-APPLIED mana
-    /// source. The Mox grants its own `{T}: Add {1}` mana ability via a
-    /// continuous `StaticDefinition` (`ContinuousModification::GrantAbility`)
-    /// gated by `StaticCondition::QuantityComparison(artifacts >= 3)` — the
-    /// def-index "as long as" gate re-evaluated every layer recompute. Unlike
+    /// B1 (layer-granted mana source, mana-first → payable): the Mox grants its
+    /// own `{T}: Add {1}` mana ability via a continuous `StaticDefinition`
+    /// (`ContinuousModification::GrantAbility`) gated by
+    /// `StaticCondition::QuantityComparison(artifacts >= 3)`. Unlike
     /// `metalcraft_mox` (live-eval `activation_restrictions`), the granted ability
     /// only appears in `obj.abilities` after `flush_layers` re-derives layer 6.
     ///
-    /// Sacrificing an artifact drops the count to 2; the witness applies the
-    /// removal and `mark_layers_full`, so the downstream
-    /// `can_pay_effect_mana_cost_after_auto_tap` re-derives layers, the granted
-    /// `{T}: Add {1}` disappears, and the residual `{1}` is unpayable →
-    /// `can_pay == false`.
-    ///
-    /// This test FAILS if `mark_layers_full` is omitted from
-    /// `apply_mutation_witness`: the clone's `layers_dirty` stays `Clean`, the
-    /// downstream `flush_layers` no-ops, the stale granted ability persists, and
-    /// the check over-approves to `true`.
+    /// CR 601.2g / CR 601.2h: the mana-leg detour pays {1} from the granted
+    /// ability while all 3 artifacts are intact (the grant is live), and the
+    /// sacrifice is paid LAST. So the composite is payable even though sacrificing
+    /// afterwards would drop below Metalcraft and the layer reflush would remove
+    /// the grant — that post-removal board is irrelevant once the mana is paid.
+    /// Reverting the mana-first detour restores sacrifice-first ordering, which
+    /// dead-ends here (the granted {1} is gone before mana payment).
     #[test]
     fn claws_layer_granted_mana_requires_layer_reflush() {
         let mut scenario = GameScenario::new();
@@ -2209,8 +2054,142 @@ mod tests {
         );
 
         assert!(
-            !can_pay_activation(&scenario.state, claws, &claws_cost()),
-            "sacrifice drops to 2 artifacts → layer reflush removes granted {{1}} → unpayable"
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "granted {{1}} paid on the intact 3-artifact board before the sacrifice → payable"
+        );
+    }
+
+    /// BLOCKER-1 regression (CR 117.1 + CR 701.13a): a `Composite[{N}, Exile a
+    /// CARD]` whose exile leg has `zone: None` and a NON-permanent filter must
+    /// classify to `Zone::Hand`, so the battlefield-removal walker returns `None`
+    /// and the mana-leg detour is NOT triggered — the composite keeps its
+    /// payable dry-run verdict. This pins the walker's hand-vs-battlefield
+    /// classification: if `find_battlefield_exile_cost` wrongly routed a
+    /// hand-exile here, the detour would mis-fire on a non-battlefield cost.
+    #[test]
+    fn hand_exile_composite_not_routed_to_battlefield_removal() {
+        use crate::types::ability::TypeFilter;
+        let card_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Card));
+        // Classifier: a `zone: None` + non-permanent (Card) filter is Hand, not
+        // Battlefield — the exact false-reject guard documented at the walker.
+        assert_eq!(
+            crate::game::cost_payability::exile_cost_effective_zone(None, Some(&card_filter)),
+            Zone::Hand,
+            "zone:None + Card filter must classify to Hand"
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::NoCost,
+                },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
+                    filter: Some(card_filter),
+                },
+            ],
+        };
+        // The battlefield-removal walker must NOT match a hand-exile leg.
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "hand-exile leg must not be treated as a battlefield removal"
+        );
+        // can_pay keeps the dry-run verdict: NoCost mana + no-op activation-scope
+        // exile → payable; the hand-exile leg never triggers the mana-leg detour.
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Jhoira", 0, 1).id();
+        scenario.add_card_to_hand(P0, "Some Card");
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// Row 4 (count > 1 exile still payable): a `Composite[{1}, Exile TWO
+    /// artifacts from the battlefield]` on a board where the only `{1}` source is
+    /// Metalcraft-gated is payable, because CR 601.2g pays {1} on the intact board
+    /// before either exile. The mana-first detour is count-agnostic. Mirrors the
+    /// count==2 sacrifice case (`claws_sacrifice_two_count_gt_one_not_rejected`).
+    #[test]
+    fn exile_two_count_gt_one_not_rejected() {
+        use crate::types::ability::TypeFilter;
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let src = plain_artifact(&mut scenario, "Exiler");
+        let cost_two = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Exile {
+                    count: 2,
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+                },
+            ],
+        };
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost_two),
+            "{{1}} paid on the intact board before the exiles → payable"
+        );
+    }
+
+    /// Row 5 (Discard excluded): a `Composite[{1}, Discard a card]` is NOT a
+    /// battlefield removal — discard shrinks the hand, never the board, so it can
+    /// never change board-derived mana. The walker must return `None` (proven
+    /// no-op, deliberately out of scope).
+    #[test]
+    fn discard_leg_is_not_battlefield_removal() {
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "Discard must not be treated as a battlefield removal"
+        );
+    }
+
+    /// Row 6 (self-ref excluded): a self-referential Exile or Sacrifice leg
+    /// (Scavenge/Suspend-style self-exile, "Sacrifice this") is the source's own
+    /// removal, not a board-shrinking non-mana leg in the CR 601.2h ordering
+    /// sense — the walker must return `None` for both. The SelfRef-first arm in
+    /// `find_battlefield_exile_cost` exists precisely because a SelfRef filter can
+    /// be permanent-implying and would otherwise pass the battlefield gate.
+    #[test]
+    fn self_ref_removal_legs_are_out_of_scope() {
+        let self_exile = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_exile).is_none(),
+            "self-exile leg must not be treated as a battlefield removal"
+        );
+        let self_sacrifice = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_sacrifice).is_none(),
+            "self-sacrifice leg must not be treated as a battlefield removal"
+        );
+        let self_return = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_return).is_none(),
+            "self-bounce leg must not be treated as a battlefield removal"
         );
     }
 

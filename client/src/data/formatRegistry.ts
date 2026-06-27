@@ -381,6 +381,73 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "TwoHeadedGiant",
+    label: "Two-Headed Giant",
+    short_label: "2HG",
+    description: "4 players, two teams of two",
+    group: "Multiplayer",
+    default_config: {
+      format: "TwoHeadedGiant",
+      starting_life: 30,
+      min_players: 4,
+      max_players: 4,
+      deck_size: 60,
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: true,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      allow_debug_actions: false,
+    },
+  },
+  {
+    format: "Archenemy",
+    label: "Archenemy",
+    short_label: "ARC",
+    description: "One archenemy against a team of heroes",
+    group: "Multiplayer",
+    default_config: {
+      format: "Archenemy",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 6,
+      deck_size: 60,
+      singleton: false,
+      command_zone: true,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      archenemy_player: 0,
+      allow_debug_actions: false,
+    },
+  },
+  {
+    format: "Planechase",
+    label: "Planechase",
+    short_label: "PLC",
+    description: "60-card multiplayer with a communal planar deck",
+    group: "Multiplayer",
+    default_config: {
+      format: "Planechase",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: 60,
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "Limited",
     label: "Limited",
     short_label: "LIM",
@@ -429,6 +496,18 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
   return FORMAT_REGISTRY.find((m) => m.format === format);
 }
+
+export const SETUP_FORMATS = FORMAT_REGISTRY;
+
+export function isSetupFormat(metadata: FormatMetadata): boolean {
+  return SETUP_FORMATS.includes(metadata);
+}
+
+export function isDeckConstructionFormat(metadata: FormatMetadata): boolean {
+  return metadata.group !== "Multiplayer" || metadata.format === "Planechase";
+}
+
+export const DECK_CONSTRUCTION_FORMATS = FORMAT_REGISTRY.filter(isDeckConstructionFormat);
 
 /**
  * Whether the format's deck is fixed by the format rules and supplied
