@@ -1236,6 +1236,26 @@ fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
         .any(|qualifier| last_word.eq_ignore_ascii_case(qualifier))
 }
 
+/// nom combinator: match the type-addition marker
+/// "in addition to {pronoun} other [colors and ][creature ]types".
+///
+/// Pronoun axis (its/their/his/her) and type-scope axis (colors and?, creature?)
+/// are independent dimensions composed with `alt` + `opt` — not enumerated as
+/// the N×M cross product. Mirrors `parse_in_addition_other_types_marker` in
+/// oracle_effect/animation.rs.
+fn parse_in_addition_type_probe(i: &str) -> OracleResult<'_, ()> {
+    (
+        tag("in addition to "),
+        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
+        tag(" other "),
+        opt(tag("colors and ")),
+        opt(tag("creature ")),
+        tag("types"),
+    )
+        .parse(i)
+        .map(|(rest, _)| (rest, ()))
+}
+
 /// CR 205.1b + CR 201.5: A subtype-word card name immediately followed by
 /// "in addition to its other types" is the creature TYPE being added to a
 /// permanent ("becomes a Coward in addition to its other types" — Coward),
@@ -1246,11 +1266,8 @@ fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
 /// `subtype_in_type_change_context` suppression on the "of"-based short-name
 /// path. `end` is the byte index just past the matched word.
 fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
-    // Normalization-layer prefix probe (pre-parse text munging, not parsing
-    // dispatch); mirrors the raw string ops in `follows_subtype_status_qualifier`.
-    let rest = haystack[end..].trim_start().to_ascii_lowercase();
-    // allow-noncombinator: structural prefix probe on pre-parse normalized text
-    rest.starts_with("in addition to its other types")
+    let lower = haystack[end..].trim_start().to_ascii_lowercase();
+    parse_in_addition_type_probe(&lower).is_ok()
 }
 
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
