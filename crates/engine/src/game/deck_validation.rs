@@ -5443,9 +5443,12 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            player_count: default_player_count(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
