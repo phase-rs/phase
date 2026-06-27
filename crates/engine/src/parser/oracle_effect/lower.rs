@@ -7152,13 +7152,10 @@ mod tests {
     #[test]
     fn match_create_of_those_tokens_binds_trailing_where_x_clause() {
         // CR 107.3c: cost-paid-object possessive → Toughness { CostPaidObject }.
-        let adipose = Effect::Unimplemented {
-            name: "create".to_string(),
-            description: Some(
-                "create x of those tokens, where x is the sacrificed creature's toughness"
-                    .to_string(),
-            ),
-        };
+        let adipose = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the sacrificed creature's toughness",
+        );
         assert_eq!(
             match_create_of_those_tokens(&adipose),
             Some(QuantityExpr::Ref {
@@ -7169,14 +7166,11 @@ mod tests {
         );
 
         // Boy-scout: The Final Days' graveyard-creature-count where-clause.
-        let final_days = Effect::Unimplemented {
-            name: "create".to_string(),
-            description: Some(
-                "create x of those tokens, where x is the number of creature cards in your \
-                 graveyard"
-                    .to_string(),
-            ),
-        };
+        let final_days = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the number of creature cards in your \
+             graveyard",
+        );
         assert!(
             matches!(
                 match_create_of_those_tokens(&final_days),
@@ -7189,10 +7183,7 @@ mod tests {
         );
 
         // No where-clause → the count stays the spell's announced {X}.
-        let bare = Effect::Unimplemented {
-            name: "create".to_string(),
-            description: Some("create x of those tokens".to_string()),
-        };
+        let bare = Effect::unimplemented("create", "create x of those tokens");
         assert_eq!(
             match_create_of_those_tokens(&bare),
             Some(QuantityExpr::Ref {
