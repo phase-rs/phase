@@ -8,7 +8,7 @@
 //! exercising the deferred-outcome machinery the cluster ships:
 //!   choose/commit → raise `WaitingFor::OpponentGuess` → answer via
 //!   `GameAction::ChooseOption` → `guess_is_correct` → `set_guess_outcome_recursive`
-//!   stamps `Guessed { correct }` → drain → the correct/incorrect branch fires.
+//!   stamps `Guessed { outcome: GuessOutcome }` → drain → the correct/incorrect branch fires.
 //! The parser-level AST shape is covered in `oracle_trigger.rs`; here the seam is
 //! the runtime branch resolution (life loss / draw / sacrifice / free-cast /
 //! investigate) and the no-guess fallbacks (impossible commit / empty hand).
@@ -416,7 +416,7 @@ fn seventh_doctor_correct_proposition_guess_skips_free_cast() {
         })
         .expect("answering the guess must succeed");
 
-    // The free-cast window is gated on a WRONG guess (Guessed { false }); a
+    // The free-cast window is gated on a WRONG guess (GuessOutcome::Incorrect); a
     // correct guess must not offer it, and the chosen card stays in hand.
     assert_ne!(
         runner.waiting_for_kind(),

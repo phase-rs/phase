@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, LibraryPosition, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -3451,13 +3451,17 @@ pub(super) fn handle_resolution_choice(
             }
 
             // (b) Correctness, resolved against the unfiltered GameState.
-            let correct = effects::opponent_guess::guess_is_correct(
+            let outcome = if effects::opponent_guess::guess_is_correct(
                 state,
                 source_id,
                 &options,
                 &choice,
                 proposition_truth,
-            );
+            ) {
+                GuessOutcome::Correct
+            } else {
+                GuessOutcome::Incorrect
+            };
 
             // (c) Record the guessed value WITHOUT persisting it to the source.
             // "they lose life equal to the number they guessed" reads the
@@ -3473,12 +3477,12 @@ pub(super) fn handle_resolution_choice(
             }
 
             // (d) Stamp the outcome across the stashed continuation chain so each
-            // branch head re-evaluates `Guessed { correct }` against it on drain.
+            // branch head re-evaluates `Guessed { outcome }` against it on drain.
             // Also expose the guesser as a front player target so a "they lose
             // life ..." `ParentTarget` anaphor in a branch resolves to them
             // (CR 608.2d — the guesser is the player the branch acts on).
             if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_guess_outcome_recursive(Some(correct));
+                cont.chain.set_guess_outcome_recursive(Some(outcome));
                 cont.chain.push_front_player_target_recursive(guesser);
             }
 

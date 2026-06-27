@@ -22,8 +22,8 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, ObjectScope, ParsedCondition, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
+    PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -644,24 +644,36 @@ fn strip_reflexive_conditional_body_separator(input: &str) -> &str {
 }
 
 /// CR 608.2d: Strip a leading "if they guessed wrong/right, " head into the
-/// typed `EffectOutcomeSignal::Guessed { correct }` outcome condition for an
+/// typed `EffectOutcomeSignal::Guessed { outcome }` outcome condition for an
 /// `Effect::OpponentGuess` branch. Both polarities are positive tests: "wrong"
-/// → `correct: false`, "right" → `correct: true`.
+/// → `outcome: GuessOutcome::Incorrect`, "right" → `outcome: GuessOutcome::Correct`.
 pub(super) fn strip_guess_outcome_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_ascii_lowercase();
-    let parsed: Result<(&str, bool), nom::Err<()>> = alt((
-        value(false, tag::<_, _, ()>("if they guessed wrong, ")),
-        value(false, tag::<_, _, ()>("if they guess wrong, ")),
-        value(true, tag::<_, _, ()>("if they guessed right, ")),
-        value(true, tag::<_, _, ()>("if they guess right, ")),
+    let parsed: Result<(&str, GuessOutcome), nom::Err<()>> = alt((
+        value(
+            GuessOutcome::Incorrect,
+            tag::<_, _, ()>("if they guessed wrong, "),
+        ),
+        value(
+            GuessOutcome::Incorrect,
+            tag::<_, _, ()>("if they guess wrong, "),
+        ),
+        value(
+            GuessOutcome::Correct,
+            tag::<_, _, ()>("if they guessed right, "),
+        ),
+        value(
+            GuessOutcome::Correct,
+            tag::<_, _, ()>("if they guess right, "),
+        ),
     ))
     .parse(lower.as_str());
-    if let Ok((rest, correct)) = parsed {
+    if let Ok((rest, outcome)) = parsed {
         let consumed = lower.len() - rest.len();
         let body = text[consumed..].trim_start().to_string();
         return (
             Some(AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::Guessed { correct },
+                signal: EffectOutcomeSignal::Guessed { outcome },
             }),
             body,
         );

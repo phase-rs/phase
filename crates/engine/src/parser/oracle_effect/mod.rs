@@ -376,7 +376,7 @@ fn overwrite_committed_guess_choice_types(
 }
 
 /// CR 608.2d: A compound wrong/right branch ("they lose life ... and you draw a
-/// card") splits into a head clause gated `Guessed { correct }` and an "and"
+/// card") splits into a head clause gated `Guessed { outcome }` and an "and"
 /// continuation that parsed with no condition. Propagate the branch's guess
 /// condition down consecutive unconditioned continuation steps so the whole
 /// branch is gated, stopping at the next explicitly-conditioned node (e.g. the

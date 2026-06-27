@@ -7725,7 +7725,7 @@ impl DigSource {
 /// The two variants cover the two structural shapes in the printed card pool:
 /// guessing a value the controller secretly committed (`CommittedChoice`), and
 /// guessing whether a typed quantity comparison holds (`Proposition`). Both feed
-/// the same `EffectOutcomeSignal::Guessed { correct }` branch machinery, so every
+/// the same `EffectOutcomeSignal::Guessed { outcome }` branch machinery, so every
 /// downstream effect dispatches onto existing handlers — this is the building
 /// block, not a per-card special case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13940,6 +13940,21 @@ impl AbilityDefinition {
     }
 }
 
+/// The result of an `Effect::OpponentGuess` round-trip.
+///
+/// CR 608.2d: after the guesser answers, the outcome is stamped onto every
+/// stashed continuation branch via `set_guess_outcome_recursive`. Both
+/// polarities are positive tests: "if they guessed right" checks
+/// `GuessOutcome::Correct`, "if they guessed wrong" checks
+/// `GuessOutcome::Incorrect`. When no guess happened (impossible commit per
+/// CR 609.3, or empty hand) `SpellContext::guess_outcome` is `None` and
+/// NEITHER polarity fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuessOutcome {
+    Correct,
+    Incorrect,
+}
+
 /// Which previous-effect outcome a conditional sub-ability asks about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectOutcomeSignal {
@@ -13952,11 +13967,11 @@ pub enum EffectOutcomeSignal {
     CurrentScopeSucceeded,
     /// CR 608.2d: the just-resolved `Effect::OpponentGuess` outcome. Both
     /// polarities are positive tests: "if they guessed right" reads
-    /// `Guessed { correct: true }`, "if they guessed wrong" reads
-    /// `Guessed { correct: false }`. When no guess happened (impossible commit
-    /// per CR 609.3, empty hand) the source `AbilityContext.guess_outcome` is
-    /// `None` and NEITHER polarity fires.
-    Guessed { correct: bool },
+    /// `Guessed { outcome: GuessOutcome::Correct }`, "if they guessed wrong"
+    /// reads `Guessed { outcome: GuessOutcome::Incorrect }`. When no guess
+    /// happened (impossible commit per CR 609.3, empty hand) the source
+    /// `SpellContext::guess_outcome` is `None` and NEITHER polarity fires.
+    Guessed { outcome: GuessOutcome },
 }
 
 /// Condition on an ability within a sub_ability chain.
@@ -14516,11 +14531,12 @@ pub struct SpellContext {
     /// CR 608.2d: The just-resolved `Effect::OpponentGuess` outcome, stamped onto
     /// the stashed continuation chain by the guess answer handler. Tri-state:
     /// `None` = no guess happened (impossible commit per CR 609.3 / empty hand),
-    /// `Some(true)` = guessed correctly, `Some(false)` = guessed incorrectly.
-    /// Read by `EffectOutcomeSignal::Guessed { correct }`; `None` makes both
+    /// `Some(GuessOutcome::Correct)` = guessed correctly,
+    /// `Some(GuessOutcome::Incorrect)` = guessed incorrectly.
+    /// Read by `EffectOutcomeSignal::Guessed { outcome }`; `None` makes both
     /// polarities false so neither rider branch fires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guess_outcome: Option<bool>,
+    pub guess_outcome: Option<GuessOutcome>,
     /// CR 608.2d: The player who accepted an "any opponent may" optional effect.
     /// Used to resolve "that player" / "them" backreferences and target scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17234,9 +17250,9 @@ impl ResolvedAbility {
     /// Used when the `Effect::OpponentGuess` answer arrives after the prompt
     /// suspended the parent chain — the stashed branch continuation was captured
     /// before the guess, so its context must be updated retroactively for
-    /// `EffectOutcomeSignal::Guessed { correct }` gates to evaluate correctly on
+    /// `EffectOutcomeSignal::Guessed { outcome }` gates to evaluate correctly on
     /// drain (mirrors `set_optional_effect_performed_recursive`).
-    pub fn set_guess_outcome_recursive(&mut self, outcome: Option<bool>) {
+    pub fn set_guess_outcome_recursive(&mut self, outcome: Option<GuessOutcome>) {
         self.context.guess_outcome = outcome;
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_guess_outcome_recursive(outcome);
@@ -17249,11 +17265,13 @@ impl ResolvedAbility {
     /// CR 608.2d: Make `player` available as a player target across the chain so
     /// a `TargetFilter::ParentTarget` anaphor ("they lose life ...") resolves to
     /// the guesser. Inserted at the front so it wins the first-player-target
-    /// lookup; a no-op when the player is already present.
+    /// lookup. Any existing occurrence of this player is removed first to
+    /// guarantee they land at index 0 regardless of their prior seat position.
     pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
-        if !self.targets.contains(&TargetRef::Player(player)) {
-            self.targets.insert(0, TargetRef::Player(player));
-        }
+        // CR 608.2d: Remove any existing occurrence first so the guesser is
+        // always at index 0 regardless of seat order in the target list.
+        self.targets.retain(|t| t != &TargetRef::Player(player));
+        self.targets.insert(0, TargetRef::Player(player));
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.push_front_player_target_recursive(player);
         }

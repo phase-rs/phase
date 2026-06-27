@@ -16,8 +16,8 @@ use crate::types::player::PlayerId;
 /// `WaitingFor::OpponentGuess` is a member of `waits_for_resolution_choice`, the
 /// generic chain walker auto-stashes `ability.sub_ability` onto
 /// `pending_continuation` once this resolver returns. The answer handler
-/// (`engine_resolution_choices.rs`) stamps the correct/incorrect outcome onto
-/// that stashed chain via `EffectOutcomeSignal::Guessed` and drains it.
+/// (`engine_resolution_choices.rs`) stamps the correct/incorrect `GuessOutcome`
+/// onto that stashed chain via `EffectOutcomeSignal::Guessed` and drains it.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -142,15 +142,34 @@ fn resolve_guesser(
     }
 }
 
-/// Whether a `QuantityExpr` directly reads an `ObjectScope::Target` referent
-/// (the chosen card for `GuessSubject::Proposition`). Checks the top-level `Ref`
-/// only — sufficient for the current pool (Seventh Doctor's LHS is a bare
-/// `Ref { ObjectManaValue { scope: Target } }`); composite expressions fall
-/// through to `false` (conservative: the guess is not skipped).
+/// CR 608.2b + CR 609.3: Whether a `QuantityExpr` (possibly composite) reads an
+/// `ObjectScope::Target` referent — the chosen card for a
+/// `GuessSubject::Proposition`. Recurses into all `QuantityExpr` wrappers so
+/// composite expressions such as "that card's mana value plus 1"
+/// (`Offset { Ref(ObjectManaValue{Target}), 1 }`) are detected correctly.
+/// When no object target exists (empty hand), the proposition is skipped
+/// (CR 609.3: an effect that would reference a non-existent object does nothing).
 fn references_target_scope(expr: &QuantityExpr) -> bool {
-    matches!(expr, QuantityExpr::Ref { qty } if quantity_ref_targets(qty))
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_targets(qty),
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::DivideRounded { inner, .. } => references_target_scope(inner),
+        QuantityExpr::Offset { inner, .. } => references_target_scope(inner),
+        QuantityExpr::ClampMin { inner, .. } => references_target_scope(inner),
+        QuantityExpr::Multiply { inner, .. } => references_target_scope(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(references_target_scope),
+        QuantityExpr::UpTo { max } => references_target_scope(max),
+        QuantityExpr::Power { exponent, .. } => references_target_scope(exponent),
+        QuantityExpr::Difference { left, right } => {
+            references_target_scope(left) || references_target_scope(right)
+        }
+        QuantityExpr::Max { exprs } => exprs.iter().any(references_target_scope),
+    }
 }
 
+/// CR 608.2b: Whether a `QuantityRef` leaf directly reads an
+/// `ObjectScope::Target` referent (mana value, power, or toughness of the
+/// chosen card). Extended as new `ObjectScope::Target` ref variants are added.
 fn quantity_ref_targets(qty: &QuantityRef) -> bool {
     matches!(
         qty,

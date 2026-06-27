@@ -6886,8 +6886,8 @@ pub(crate) fn evaluate_condition(
         // no guess happened (impossible commit / empty hand) `guess_outcome` is
         // `None`, so BOTH polarities are false and NEITHER rider fires.
         AbilityCondition::EffectOutcome {
-            signal: EffectOutcomeSignal::Guessed { correct },
-        } => ability.context.guess_outcome == Some(*correct),
+            signal: EffectOutcomeSignal::Guessed { outcome },
+        } => ability.context.guess_outcome == Some(*outcome),
         AbilityCondition::EventOutcomeWon => state
             .current_trigger_event
             .as_ref()

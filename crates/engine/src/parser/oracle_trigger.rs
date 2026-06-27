@@ -13892,7 +13892,9 @@ mod tests {
             _ => unreachable!(),
         }
         let guessed_wrong = AbilityCondition::EffectOutcome {
-            signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: false },
+            signal: crate::types::ability::EffectOutcomeSignal::Guessed {
+                outcome: crate::types::ability::GuessOutcome::Incorrect,
+            },
         };
         assert_eq!(lose.1, Some(guessed_wrong.clone()));
         let draw = chain
@@ -13902,10 +13904,10 @@ mod tests {
         assert_eq!(
             draw.1,
             Some(guessed_wrong),
-            "the 'and you draw a card' continuation must inherit Guessed{{false}}"
+            "the 'and you draw a card' continuation must inherit Guessed{{Incorrect}}"
         );
 
-        // Right branch: sacrifice gated Guessed{true}.
+        // Right branch: sacrifice gated Guessed{Correct}.
         let sac = chain
             .iter()
             .find(|(e, _)| matches!(e, Effect::Sacrifice { .. }))
@@ -13913,7 +13915,9 @@ mod tests {
         assert_eq!(
             sac.1,
             Some(AbilityCondition::EffectOutcome {
-                signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: true },
+                signal: crate::types::ability::EffectOutcomeSignal::Guessed {
+                    outcome: crate::types::ability::GuessOutcome::Correct,
+                },
             })
         );
     }
@@ -13984,7 +13988,9 @@ mod tests {
         assert_eq!(
             cast.1,
             Some(AbilityCondition::EffectOutcome {
-                signal: crate::types::ability::EffectOutcomeSignal::Guessed { correct: false },
+                signal: crate::types::ability::EffectOutcomeSignal::Guessed {
+                    outcome: crate::types::ability::GuessOutcome::Incorrect,
+                },
             })
         );
     }
