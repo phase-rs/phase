@@ -98,6 +98,19 @@ function isStateLost(err: unknown): boolean {
   return err instanceof AdapterError && err.code === AdapterErrorCode.STATE_LOST;
 }
 
+/**
+ * True when a gameplay round-trip to the engine worker timed out (the worker
+ * wedged and never replied — see `ENGINE_REQUEST_TIMEOUT_MS`). Unlike
+ * STATE_LOST this is NOT rehydratable in place: the worker itself is
+ * unresponsive, so retrying or restoring through it would hang again. Surface
+ * the Layer 3 reload prompt and let the error propagate so the dispatch mutex
+ * is released (the alternative is an infinite freeze with a silently-held mutex
+ * that drops every later click).
+ */
+function isEngineUnresponsive(err: unknown): boolean {
+  return err instanceof AdapterError && err.code === AdapterErrorCode.ENGINE_UNRESPONSIVE;
+}
+
 async function processAction(action: GameAction, actor: number): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
@@ -146,6 +159,13 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       await routePanic("submitAction-panic", err.panic);
       throw err;
     }
+    // Worker wedged on submitAction: surface recovery and rethrow so the
+    // dispatch mutex is released. Do NOT rehydrate — the worker is the thing
+    // that's hung, so restoreState through it would hang too.
+    if (isEngineUnresponsive(err)) {
+      notifyEngineLost("submitAction-timeout");
+      throw err;
+    }
     if (!isStateLost(err)) throw err;
     debugLog(`processAction: STATE_LOST on ${action.type}; attempting rehydrate`, "warn");
     const recovered = await attemptStateRehydrate();
@@ -187,6 +207,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   } catch (err) {
     if (isEnginePanic(err)) {
       await routePanic("getState-panic", err.panic);
+      throw err;
+    }
+    if (isEngineUnresponsive(err)) {
+      notifyEngineLost("getState-timeout");
       throw err;
     }
     if (!isStateLost(err)) throw err;
@@ -298,6 +322,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       notifyEngineLost("getLegalActions-panic", err.panic);
       throw err;
     }
+    if (isEngineUnresponsive(err)) {
+      notifyEngineLost("getLegalActions-timeout");
+      throw err;
+    }
     if (!isStateLost(err)) throw err;
     const recovered = await attemptStateRehydrate();
     if (!recovered) {
@@ -379,11 +407,12 @@ async function processQueue(): Promise<void> {
       // de-duped but the log becomes noisy and we waste cycles on doomed
       // rehydrates. User is about to reload; nothing in this queue is
       // going to succeed.
-      if (isStateLost(err) || isEnginePanic(err)) {
-        // Drain on ENGINE_PANIC too: each queued action would otherwise hit
-        // its own catch + (no-op) recovery + re-throw, doubling the noise
-        // for an unrecoverable failure. The first item already fired
-        // notifyEngineLost with the captured panic.
+      if (isStateLost(err) || isEnginePanic(err) || isEngineUnresponsive(err)) {
+        // Drain on ENGINE_PANIC / ENGINE_UNRESPONSIVE too: each queued action
+        // would otherwise hit its own catch + (no-op) recovery + re-throw,
+        // doubling the noise for an unrecoverable failure. The first item
+        // already fired notifyEngineLost (captured panic, or the timeout
+        // recovery prompt) — a wedged worker won't service the rest either.
         while (pendingQueue.length > 0) {
           const stale = pendingQueue.shift()!;
           stale.reject(err);

@@ -2217,6 +2217,17 @@ export const AdapterErrorCode = {
    * offer a pre-filled bug report.
    */
   ENGINE_PANIC: "ENGINE_PANIC",
+  /**
+   * A gameplay round-trip to the engine Web Worker never returned within the
+   * timeout window (see `ENGINE_REQUEST_TIMEOUT_MS` in engine-worker-client).
+   * Without this, a wedged worker call hangs forever and leaves the dispatch
+   * mutex held, silently dropping every subsequent click. Classified as
+   * recoverable (mirrors STATE_LOST): the recovery layer surfaces the Layer 3
+   * reload prompt via `notifyEngineLost` rather than freezing the UI. A late
+   * worker reply that arrives after the timeout is a safe no-op (the pending
+   * entry has already been deleted by id).
+   */
+  ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
