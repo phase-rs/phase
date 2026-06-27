@@ -1,8 +1,49 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameEvent } from "../../adapter/types";
+import type { AnimationStep } from "../types";
 import { normalizeEvents } from "../eventNormalizer";
-import { EVENT_DURATIONS } from "../types";
+import {
+  EVENT_DURATIONS,
+  GROUPED_COMBAT_DAMAGE_DURATION_MS,
+  GROUPED_COMBAT_DAMAGE_THRESHOLD,
+  GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
+} from "../types";
+
+function combatPlayerDamage(sourceId: number, playerId = 0, amount = 1): GameEvent {
+  return { type: "DamageDealt", data: { source_id: sourceId, target: { Player: playerId }, amount, is_combat: true } };
+}
+
+function lifeChanged(playerId = 0, amount = -1): GameEvent {
+  return { type: "LifeChanged", data: { player_id: playerId, amount } };
+}
+
+function poisonCounterChanged(playerId = 0, amount = 1): GameEvent {
+  return { type: "PlayerCounterChanged", data: { player: playerId, counter_kind: "Poison", delta: amount } };
+}
+
+function combatAggregate(sourceIds: number[], playerId = 0, amount = 1): GameEvent {
+  return {
+    type: "CombatDamageDealtToPlayer",
+    data: {
+      player_id: playerId,
+      source_amounts: sourceIds.map((sourceId) => [sourceId, amount]),
+      total_damage: sourceIds.length * amount,
+    },
+  };
+}
+
+function expectGroupedFlurry(event: AnimationStep["effects"][number]["event"]) {
+  expect(event.type).toBe("GroupedDamageFlurry");
+  if (event.type !== "GroupedDamageFlurry") throw new Error("Expected GroupedDamageFlurry");
+  return event;
+}
+
+function expectLifeChanged(event: AnimationStep["effects"][number]["event"]) {
+  expect(event.type).toBe("LifeChanged");
+  if (event.type !== "LifeChanged") throw new Error("Expected LifeChanged");
+  return event;
+}
 
 describe("normalizeEvents", () => {
   it("returns empty array for empty events", () => {
@@ -225,5 +266,367 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  it("groups large aggregate combat damage with following LifeChanged pairs into one flurry step", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(expectGroupedFlurry(steps[0].effects[0].event).data.hit_count).toBe(sources.length);
+    expect(steps[0].effects[1]).toMatchObject({
+      event: { type: "LifeChanged", data: { player_id: 0, amount: -sources.length } },
+      displayOnly: true,
+    });
+  });
+
+  it("groups aggregate combat damage when replacement effects change life-loss amount", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged(0, -2)]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(expectLifeChanged(steps[0].effects[1].event).data.amount).toBe(-sources.length * 2);
+  });
+
+  it("groups large aggregate combat damage with preceding LifeChanged pairs", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [lifeChanged(), combatPlayerDamage(sourceId)]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("GroupedDamageFlurry");
+    expect(expectLifeChanged(steps[0].effects[1].event).data.amount).toBe(-sources.length);
+  });
+
+  it("groups large toxic combat damage through poison side effects", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      ...sources.flatMap((sourceId) => [
+        lifeChanged(),
+        poisonCounterChanged(),
+        combatPlayerDamage(sourceId),
+      ]),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual([
+      "GroupedDamageFlurry",
+      "LifeChanged",
+    ]);
+    expect(expectLifeChanged(steps[0].effects[1].event).data.amount).toBe(-sources.length);
+  });
+
+  it("groups large infect combat damage without synthesizing life loss", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      ...sources.flatMap((sourceId) => [
+        poisonCounterChanged(),
+        combatPlayerDamage(sourceId),
+      ]),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["GroupedDamageFlurry"]);
+  });
+
+  it("keeps same-player aggregate matching bounded to the current combat aggregate segment", () => {
+    const firstSources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const secondSources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 101);
+    const events = [
+      ...firstSources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(firstSources),
+      ...secondSources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(secondSources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(2);
+    expect(steps.map((step) => step.effects[0].event.type)).toEqual(["GroupedDamageFlurry", "GroupedDamageFlurry"]);
+    expect(expectGroupedFlurry(steps[1].effects[0].event).data.source_ids).toEqual(secondSources);
+  });
+
+  it("groups aggregate combat damage without synthesizing life when no LifeChanged was consumed", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["GroupedDamageFlurry"]);
+  });
+
+  it("ignores zero-damage aggregate source amounts when grouping", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      {
+        type: "CombatDamageDealtToPlayer",
+        data: {
+          player_id: 0,
+          source_amounts: [[999, 0], ...sources.map((sourceId) => [sourceId, 1] as [number, number])],
+          total_damage: sources.length,
+        },
+      },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(expectGroupedFlurry(steps[0].effects[0].event).data.hit_count).toBe(sources.length);
+    expect(expectGroupedFlurry(steps[0].effects[0].event).data.source_ids).toEqual(sources);
+  });
+
+  it("carries lifelink life gain into the grouped combat impact step", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      lifeChanged(1, sources.length),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual([
+      "GroupedDamageFlurry",
+      "LifeChanged",
+    ]);
+    expect(steps[0].effects[1]).toMatchObject({
+      event: { type: "LifeChanged", data: { player_id: 1, amount: sources.length } },
+      displayOnly: true,
+    });
+  });
+
+  it("does not fold unrelated earlier life gain into the grouped combat step", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      lifeChanged(0, 3),
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(2);
+    expect(steps[0].effects[0]).toMatchObject({
+      event: { type: "LifeChanged", data: { player_id: 0, amount: 3 } },
+    });
+    expect(steps[1].effects.map((effect) => effect.event.type)).toEqual(["GroupedDamageFlurry"]);
+  });
+
+  it("defers unattributed lifelink gain until after consecutive grouped player aggregates", () => {
+    const firstSources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const secondSources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 101);
+    const steps = normalizeEvents([
+      ...firstSources.map((sourceId) => combatPlayerDamage(sourceId, 0)),
+      ...secondSources.map((sourceId) => combatPlayerDamage(sourceId, 2)),
+      lifeChanged(1, firstSources.length + secondSources.length),
+      combatAggregate(firstSources, 0),
+      combatAggregate(secondSources, 2),
+    ]);
+
+    expect(steps).toHaveLength(3);
+    expect(steps[0].effects[0].event.type).toBe("GroupedDamageFlurry");
+    expect(expectGroupedFlurry(steps[0].effects[0].event).data.player_id).toBe(0);
+    expect(steps[1].effects[0].event.type).toBe("GroupedDamageFlurry");
+    expect(expectGroupedFlurry(steps[1].effects[0].event).data.player_id).toBe(2);
+    expect(steps[2].effects[0]).toMatchObject({
+      event: { type: "LifeChanged", data: { player_id: 1, amount: firstSources.length + secondSources.length } },
+      displayOnly: true,
+    });
+  });
+
+  it("does not consume non-loss life changes or synthesize life from aggregate total damage", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents([
+      ...sources.map(() => lifeChanged(0, 2)),
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      combatAggregate(sources),
+    ]);
+
+    expect(steps).toHaveLength(2);
+    expect(steps[0].effects).toHaveLength(GROUPED_COMBAT_DAMAGE_THRESHOLD);
+    expect(steps[0].effects.every((effect) => effect.event.type === "LifeChanged")).toBe(true);
+    const grouped = steps[steps.length - 1];
+    expect(grouped.effects.map((effect) => effect.event.type)).toEqual(["GroupedDamageFlurry"]);
+  });
+
+  it("aborts aggregate grouping when the aggregate cannot match every source amount", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.slice(1).map((sourceId) => combatPlayerDamage(sourceId)),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps.some((step) => step.effects[0].event.type === "GroupedDamageFlurry")).toBe(false);
+    expect(steps).toHaveLength(GROUPED_COMBAT_DAMAGE_THRESHOLD - 1);
+  });
+
+  it("does not fall back to adjacent grouping inside a failed aggregate segment", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD + 1 }, (_, i) => i + 1);
+    const events = [
+      ...sources.slice(1).map((sourceId) => combatPlayerDamage(sourceId)),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps.some((step) => step.effects[0].event.type === "GroupedDamageFlurry")).toBe(false);
+    expect(steps).toHaveLength(GROUPED_COMBAT_DAMAGE_THRESHOLD);
+  });
+
+  it("falls back to adjacent-run grouping when aggregate source amounts are missing", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      { type: "CombatDamageDealtToPlayer", data: { player_id: 0, total_damage: sources.length } },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("GroupedDamageFlurry");
+  });
+
+  it("falls back when replacement effects change life-loss amount", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged(0, -2)]),
+      { type: "CombatDamageDealtToPlayer", data: { player_id: 0, total_damage: sources.length } },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(expectLifeChanged(steps[0].effects[1].event).data.amount).toBe(-sources.length * 2);
+  });
+
+  it("falls back with post-damage lifelink gain when aggregate source amounts are missing", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.map((sourceId) => combatPlayerDamage(sourceId)),
+      lifeChanged(1, sources.length),
+      { type: "CombatDamageDealtToPlayer", data: { player_id: 0, total_damage: sources.length } },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual([
+      "GroupedDamageFlurry",
+      "LifeChanged",
+    ]);
+    expect(steps[0].effects[1]).toMatchObject({
+      event: { type: "LifeChanged", data: { player_id: 1, amount: sources.length } },
+      displayOnly: true,
+    });
+  });
+
+  it("falls back through toxic poison side effects when aggregate source amounts are missing", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.flatMap((sourceId) => [
+        lifeChanged(),
+        poisonCounterChanged(),
+        combatPlayerDamage(sourceId),
+      ]),
+      { type: "CombatDamageDealtToPlayer", data: { player_id: 0, total_damage: sources.length } },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual([
+      "GroupedDamageFlurry",
+      "LifeChanged",
+    ]);
+  });
+
+  it("falls back through infect poison side effects without synthesizing life", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events: GameEvent[] = [
+      ...sources.flatMap((sourceId) => [
+        poisonCounterChanged(),
+        combatPlayerDamage(sourceId),
+      ]),
+      { type: "CombatDamageDealtToPlayer", data: { player_id: 0, total_damage: sources.length } },
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["GroupedDamageFlurry"]);
+  });
+
+  it("groups large adjacent combat player damage pairs without an aggregate", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents(sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]));
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("GroupedDamageFlurry");
+    expect(expectLifeChanged(steps[0].effects[1].event).data.amount).toBe(-sources.length);
+  });
+
+  it("keeps small combat player batches per attacker", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD - 1 }, (_, i) => i + 1);
+    const steps = normalizeEvents(sources.map((sourceId) => combatPlayerDamage(sourceId)));
+
+    expect(steps).toHaveLength(sources.length);
+    expect(steps.every((step) => step.effects[0].event.type === "DamageDealt")).toBe(true);
+  });
+
+  it("does not group non-combat or object-target combat damage", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const nonCombat = normalizeEvents(
+      sources.map((sourceId) => ({
+        type: "DamageDealt",
+        data: { source_id: sourceId, target: { Player: 0 }, amount: 1, is_combat: false },
+      })),
+    );
+    const objectTarget = normalizeEvents(
+      sources.map((sourceId) => ({
+        type: "DamageDealt",
+        data: { source_id: sourceId, target: { Object: 99 }, amount: 1, is_combat: true },
+      })),
+    );
+
+    expect(nonCombat.some((step) => step.effects[0].event.type === "GroupedDamageFlurry")).toBe(false);
+    expect(objectTarget.some((step) => step.effects[0].event.type === "GroupedDamageFlurry")).toBe(false);
+  });
+
+  it("uses capped combat-paced duration for grouped flurries", () => {
+    const sources = Array.from({ length: 700 }, (_, i) => i + 1);
+    const steps = normalizeEvents(sources.map((sourceId) => combatPlayerDamage(sourceId)), {
+      pacingMultipliers: { effects: 1, combat: 1.5, banners: 1 },
+    });
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].duration).toBe(GROUPED_COMBAT_DAMAGE_DURATION_MS * 1.5);
+  });
+
+  it("keeps grouped flurry duration at least as long as its impact delay", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents(sources.map((sourceId) => combatPlayerDamage(sourceId)), {
+      pacingMultipliers: { effects: 1, combat: 0, banners: 1 },
+    });
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].duration).toBe(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
   });
 });
