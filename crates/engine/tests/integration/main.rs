@@ -84,6 +84,7 @@ mod emrakul_control_turn_crash;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod enlightened_tutor_regression;
+mod equipment_etb_attach_parent_target;
 mod ertai_trickery_counter_kicked;
 mod evelyn_regression;
 mod exchange_life_totals_cards;
