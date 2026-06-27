@@ -1281,7 +1281,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         ));
     };
 
-    handle_tap_land_for_mana(state, object_id, events)?;
+    handle_tap_land_for_mana(state, player, object_id, events)?;
     state
         .lands_tapped_for_mana
         .entry(player)

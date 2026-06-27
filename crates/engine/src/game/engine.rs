@@ -1689,7 +1689,7 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_tap_land_for_mana(state, object_id, &mut events)?
+            handle_tap_land_for_mana(state, *player, object_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
             if state.priority_player
@@ -3309,7 +3309,7 @@ fn apply_action(
             GameAction::TapLandForMana { object_id },
         ) => {
             let events_before = events.len();
-            handle_tap_land_for_mana(state, object_id, &mut events)?;
+            handle_tap_land_for_mana(state, *player, object_id, &mut events)?;
             state
                 .lands_tapped_for_mana
                 .entry(state.priority_player)
@@ -5886,16 +5886,18 @@ fn handle_play_land(
 
 pub(super) fn handle_tap_land_for_mana(
     state: &mut GameState,
+    player: PlayerId,
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let player = turn_control::turn_resource_owner(state);
     let obj = state
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
-    // Validate: on battlefield, controlled by acting player, is a land, not tapped
+    // CR 117.1d + CR 605.3a: the player with priority, or the player making a
+    // mana payment, activates their own mana abilities even during another
+    // player's turn.
     if obj.zone != Zone::Battlefield {
         return Err(EngineError::InvalidAction(
             "Object is not on the battlefield".to_string(),
@@ -9940,6 +9942,71 @@ mod tests {
                 .mana_pool
                 .count_color(crate::types::mana::ManaType::Green),
             1
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn tap_land_for_mana_uses_priority_player_during_opponents_turn() {
+        let mut state = setup_game_at_main_phase();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::TapLandForMana { object_id: land_id },
+        )
+        .unwrap();
+
+        assert!(state.objects[&land_id].tapped);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
+        assert_eq!(
+            state.players[1]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            0
         );
         assert!(matches!(
             result.waiting_for,
