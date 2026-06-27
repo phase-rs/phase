@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 153,
+      "date": "2026-06-27",
+      "title": "Suspend arrives, plus Two-Headed Giant & Planechase",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "multiplayer",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Suspend is playable — cast spells with time counters that tick down each turn, plus Time Travel time-counter manipulation\n• Repeated cost payment arrives on Marvel's Spider-Man cards: Hawkeye, Master Marksman and Hawkeye, Young Avenger (pay a cost several times to scale the effect)\n• New cards: Cosmic Cube, The Ruinous Wrecking Crew, False Peace, Empty City Ruse, Lightning Dart, Inquisitor's Snare, Adipose Offspring, and Confession Dial\n• False Peace & Empty City Ruse can make a player skip all combat phases of their next turn\n• Doctor's companion legendary creatures are now supported\n\n🛠️ Cards That Now Work Right\n• Drag to the Underworld — devotion cost reduction now applies at cast time\n• Predatory Rampage — now forces every creature your opponents control to block\n• Wretched Banquet — correctly gates on the creature with the least power\n• Visions of Ruin — flashback casts now get the commander cost reduction\n• Progenitor's Icon — chosen-type next-spell flash now works\n• Fixes for Blademane Baku, Decoy Gambit, and Lethargy Trap\n\n⚔️ Combat & Gameplay\n• Game-winning loops now resolve instantly — infinite combos like Sanguine Bond + Exquisite Blood and Marauding Blight-Priest + Bloodthirsty Conqueror end the game immediately instead of grinding through hundreds of triggers\n• Much smoother play on huge token boards — declaring attackers and other decisions no longer slow down with hundreds of mana-producing tokens\n\n🌐 Multiplayer\n• New format foundations: Two-Headed Giant, Planechase, and Archenemy are now selectable in multiplayer setup\n\n🖥️ Interface\n• Sacrificing identical tokens now uses a single \"how many?\" prompt instead of clicking each one\n• Large combat damage is grouped into cleaner, faster animations",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520516929708626092"
+    },
+    {
       "id": 152,
       "date": "2026-06-26",
       "title": "Cast from graveyard & exile, right in your hand",
