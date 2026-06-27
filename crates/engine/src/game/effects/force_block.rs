@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(must_block_count, 2, "Should create one effect per target");
     }
 
-    /// CR 509.1g (issue #4233): a non-targeted mass force-block — Predatory
+    /// CR 509.1c (issue #4233): a non-targeted mass force-block — Predatory
     /// Rampage's "Each creature your opponents control blocks this turn if able"
     /// — carries no chosen targets; the requirement must be applied to every
     /// creature its `target` filter resolves to, not silently to no one (the

@@ -4871,7 +4871,7 @@ mod tests {
         assert_eq!(strip_trailing_additive_adverb("also"), "also");
     }
 
-    /// CR 509.1g (issue #4233): "Each creature your opponents control blocks this
+    /// CR 509.1c (issue #4233): "Each creature your opponents control blocks this
     /// turn if able" (Predatory Rampage) is a non-targeted mass requirement — it
     /// must lower to a `ForceBlock` whose `target` filter selects every opponent
     /// creature, with NO target prompt (so it does not ask the caster to pick one
