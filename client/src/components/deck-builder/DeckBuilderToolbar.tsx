@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
 import { useDeckFolders } from "../../hooks/useDeckFolders";
@@ -46,8 +46,8 @@ export function DeckBuilderToolbar({
 }: DeckBuilderToolbarProps) {
   const { t } = useTranslation("deck-builder");
   const formatLabel =
-    FORMAT_REGISTRY.find((entry) => entry.format === format)?.label ?? format;
-  const formatMenuItems = FORMAT_REGISTRY.map(({ format: value, label }) => ({
+    DECK_CONSTRUCTION_FORMATS.find((entry) => entry.format === format)?.label ?? format;
+  const formatMenuItems = DECK_CONSTRUCTION_FORMATS.map(({ format: value, label }) => ({
     value,
     label,
   }));

@@ -24,6 +24,8 @@ export interface DeckData {
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
+  planar_deck?: string[];
+  scheme_deck?: string[];
   sticker_sheets?: string[];
 }
 
@@ -32,18 +34,21 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
- * Derived as `PROTOCOL_VERSION - 1` so bumping `PROTOCOL_VERSION` automatically
- * rolls the floor forward — the same structural pattern as
- * `MIN_SUPPORTED_PROTOCOL` in `crates/server-core/src/protocol.rs`. Allows a
- * one-minor deprecation window so a freshly-built client can connect to a
- * not-yet-redeployed lobby broker during rollout, instead of hard-failing
- * with "Server protocol version N-1 does not match client N".
+ * Planechase changed the wire message surface in a non-backward-compatible way,
+ * so this release only accepts the current protocol.
  */
-export const MIN_SUPPORTED_SERVER_PROTOCOL = Math.max(0, PROTOCOL_VERSION - 1);
+export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
+
+/**
+ * Lowest server protocol version this client accepts for lobby-only brokers.
+ * LobbyOnly carries matchmaking metadata only, so it keeps a one-version
+ * rollout window while Full servers stay current-only.
+ */
+export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {

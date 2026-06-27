@@ -24,7 +24,7 @@ import type { CardSearchFilters } from "./CardSearch";
 import { hasSearchCriteria } from "./searchFilters";
 import type { GroupMode } from "./deckGrouping";
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS, formatMetadata } from "../../data/formatRegistry";
 import type { CommanderBracket } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
@@ -84,6 +84,8 @@ export function useDeckBuilder({
   const { cardDataCache, cacheCards } = useDeckCardData([
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
+    ...(deck.planar_deck ?? []),
+    ...(deck.scheme_deck ?? []),
     ...commanders,
   ]);
 
@@ -132,13 +134,22 @@ export function useDeckBuilder({
       "//",
       ...deck.sideboard.map((e) => `${e.count}x${e.name}`),
       "//",
+      ...(deck.planar_deck ?? []),
+      "//",
+      ...(deck.scheme_deck ?? []),
+      "//",
       ...commanders,
     ].join("|"),
     [deck, commanders],
   );
 
   useEffect(() => {
-    if (currentDeck.main.length === 0 && currentDeck.sideboard.length === 0) {
+    if (
+      currentDeck.main.length === 0
+      && currentDeck.sideboard.length === 0
+      && (currentDeck.planar_deck?.length ?? 0) === 0
+      && (currentDeck.scheme_deck?.length ?? 0) === 0
+    ) {
       setCompatibility(null);
       return;
     }
@@ -327,6 +338,8 @@ export function useDeckBuilder({
     setDeck({
       main: deduplicateEntries(next.main ?? []),
       sideboard: deduplicateEntries(next.sideboard ?? []),
+      planar_deck: next.planar_deck ? [...next.planar_deck] : undefined,
+      scheme_deck: next.scheme_deck ? [...next.scheme_deck] : undefined,
       companion: next.companion,
     });
     setCommanders(next.commander ?? []);
@@ -458,7 +471,7 @@ export function useDeckBuilder({
     setActiveSurface("deck");
     setDirty(false);
     if (persisted.format) {
-      const match = FORMAT_REGISTRY.find(
+      const match = DECK_CONSTRUCTION_FORMATS.find(
         (m) => m.format.toLowerCase() === persisted.format!.toLowerCase(),
       );
       if (match) onFormatChange(match.format);

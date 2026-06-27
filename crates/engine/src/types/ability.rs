@@ -7563,6 +7563,31 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 614.10 + CR 614.10a: How long a skip effect persists.
+///
+/// CR 614.10: "Skip [something]" is a replacement effect equivalent to
+/// "instead of doing [something], do nothing." A skip can be scoped to either a
+/// single next occurrence of a step (`NextOccurrence`) or to *every* occurrence
+/// within the player's next non-skipped turn (`AllOfNextTurn`, e.g. False Peace
+/// / Empty City Ruse: "skips all combat phases of their next turn"). Per
+/// CR 614.10a, an "all of next turn" skip lands on the first turn that isn't
+/// itself skipped (it waits past skipped turns), and — unlike a finite-count
+/// skip — it suppresses *every* combat phase that turn, including extra combat
+/// phases created that turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipScope {
+    /// CR 614.10a: skip the single next occurrence of the named step; satisfied
+    /// once that occurrence is skipped. This is the only scope that interacts
+    /// with a finite `count`.
+    #[default]
+    NextOccurrence,
+    /// CR 614.10 + CR 614.10a: skip every occurrence of the named phase across
+    /// the player's entire next non-skipped turn. Turn-binding subsumes
+    /// counting, so this scope ignores any finite `count`.
+    AllOfNextTurn,
+}
+
 /// CR 115.1: Whether the `Bounce` effect selects its affected object at
 /// cast/activation time ("target", locked) or at resolution time (controller-
 /// scoped filter like "a creature you control" — Whitemane Lion).
@@ -10170,6 +10195,15 @@ pub enum Effect {
         step: StepSkipTarget,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 614.10 + CR 614.10a: scope of the skip. `NextOccurrence` (default)
+        /// uses the finite `count` and consumes the per-player step counter at the
+        /// relevant turn-flow boundary. `AllOfNextTurn` binds the skip to the
+        /// player's entire next non-skipped turn via the turn-scoped combat-skip
+        /// state machine and is **mutually exclusive** with a finite `count` —
+        /// turn-binding subsumes counting, so `count` is ignored when
+        /// `scope == AllOfNextTurn`.
+        #[serde(default)]
+        scope: SkipScope,
     },
     /// CR 500.8: Add an additional step or phase after the specified anchor phase.
     /// Uses a LIFO stack on GameState.extra_phases. `followed_by` entries are pushed

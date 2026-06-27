@@ -44,6 +44,13 @@ const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
 /// not a battlefield `ReplacementDefinition`, but it must still participate in
 /// CR 616 ordering against AddCounter replacements such as Doubling Season.
 const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
+/// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip (False Peace / Empty
+/// City Ruse — "skips all combat phases of their next turn"). The skip effect
+/// leaves no battlefield object, so it is a virtual BeginPhase replacement keyed
+/// on the affected player (whose `PlayerId` is encoded into the sentinel
+/// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
+/// being `Active` for the active player on a combat phase.
+const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -75,6 +82,20 @@ fn umbra_armor_replacement_id(aura_id: ObjectId) -> ReplacementId {
 
 fn is_umbra_armor_replacement(rid: ReplacementId) -> bool {
     rid.index == UMBRA_ARMOR_DESTROY_INDEX
+}
+
+/// CR 614.10 + CR 614.10a: virtual replacement id for the turn-scoped combat
+/// skip. The affected `PlayerId` is encoded into the sentinel `ObjectId` the
+/// same way `compleated_replacement_id` carries its host object id.
+fn turn_scoped_combat_skip_replacement_id(player: PlayerId) -> ReplacementId {
+    ReplacementId {
+        source: ObjectId(player.0 as u64),
+        index: TURN_SCOPED_COMBAT_SKIP_INDEX,
+    }
+}
+
+fn is_turn_scoped_combat_skip_replacement(rid: ReplacementId) -> bool {
+    rid.index == TURN_SCOPED_COMBAT_SKIP_INDEX
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,6 +570,10 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
     if is_compleated_replacement(rid) {
         return "Compleated: enter with fewer loyalty counters".to_string();
+    }
+    if is_turn_scoped_combat_skip_replacement(rid) {
+        // CR 614.10: mandatory skip — static label, never offered as a choice.
+        return "Skip combat phase".to_string();
     }
     if is_umbra_armor_replacement(rid) {
         return state
@@ -4259,6 +4284,30 @@ pub fn find_applicable_replacements(
         }
     }
 
+    // CR 614.10 + CR 614.10a + CR 506.1: Turn-scoped combat-phase skip (False
+    // Peace / Empty City Ruse). When the active player has an `Active`
+    // turn-scoped combat skip and a combat-phase step is beginning, expose the
+    // virtual skip candidate so the CR 616 pipeline prevents the phase. Scoped
+    // strictly to the active (begin-phase) player + combat steps so it never
+    // over-matches; it persists for the whole turn (no `already_applied`
+    // consumption beyond the standard per-event guard).
+    if let ProposedEvent::BeginPhase {
+        player_id, phase, ..
+    } = event
+    {
+        if phase.is_combat()
+            && state
+                .combat_phase_skip_next_turn
+                .get(player_id.0 as usize)
+                .is_some_and(|skip| skip.active)
+        {
+            let rid = turn_scoped_combat_skip_replacement_id(*player_id);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+    }
+
     // CR 614.12: Self-replacement effects on a card entering the battlefield.
     // apply even though the card isn't on the battlefield yet. We must scan the
     // entering card in addition to battlefield/command zone permanents.
@@ -5281,6 +5330,17 @@ fn apply_single_replacement(
         return apply_umbra_armor_replacement(state, proposed, rid, events);
     }
 
+    // CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip — "skip [the combat
+    // phase]" is "instead of beginning it, do nothing." Yield `Prevented` so the
+    // pipeline turns the BeginPhase event into `ReplacementResult::Prevented`,
+    // which `advance_phase` consumes by not entering the phase. The marker is NOT
+    // consumed here: it persists `Active` for the whole turn so every combat
+    // phase that turn (including extra combat phases) is prevented; it is cleared
+    // at the start of the player's following turn in `start_next_turn`.
+    if is_turn_scoped_combat_skip_replacement(rid) {
+        return Err(ApplyResult::Prevented);
+    }
+
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
@@ -5769,6 +5829,12 @@ fn candidate_materiality(
             field: EventField::Count,
             commute: CommuteClass::Subtractive,
         };
+    }
+
+    // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
+    // so it is unconditional like the umbra-armor / shield-counter destroy.
+    if is_turn_scoped_combat_skip_replacement(rid) {
+        return CandidateMateriality::Unconditional;
     }
 
     match shield_counter_replacement_kind(rid) {

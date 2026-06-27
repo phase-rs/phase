@@ -2879,10 +2879,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             step,
             count,
+            scope,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("step".into(), format!("{step:?}")));
-            if !matches!(
+            // CR 614.10 + CR 614.10a: surface the turn-scoped variant; the
+            // occurrence-scoped default keeps the existing rows unchanged.
+            if matches!(scope, crate::types::ability::SkipScope::AllOfNextTurn) {
+                d.push(("scope".into(), "all of next turn".into()));
+            } else if !matches!(
                 count,
                 crate::types::ability::QuantityExpr::Fixed { value: 1 }
             ) {

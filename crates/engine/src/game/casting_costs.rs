@@ -29,6 +29,7 @@ use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources::{self, ManaSourceOption};
+use super::priority;
 use super::restrictions;
 use super::stack;
 
@@ -2591,8 +2592,7 @@ fn push_ability_entry(
         player,
         events,
     );
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
 }
@@ -5828,8 +5828,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         super::commander::record_commander_cast(state, object_id);
     }
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     events.push(GameEvent::SpellCast {
         card_id,
@@ -6277,8 +6276,7 @@ fn handle_resolution_cast_rejection(
     }
 
     // CR 601.2a: Priority returns to the would-be caster.
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::Priority { player })
 }
 
@@ -8090,7 +8088,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let any_color = super::casting::player_can_spend_as_any_color_for_payment(
         state,
         player,
-        source_id,
+        Some(source_id),
         effective_payment_context,
     );
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes

@@ -4071,6 +4071,11 @@ mod tests {
                 "Lim-Dul's Hex",
                 &["Enchantment"][..],
             ),
+            (
+                "Return target creature to its owner's hand unless its controller has you draw a card.",
+                "Decoy Gambit Bounce",
+                &["Instant"][..],
+            ),
         ] {
             let parsed = parse_named(oracle, name, types);
             assert!(

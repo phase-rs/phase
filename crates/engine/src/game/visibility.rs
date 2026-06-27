@@ -660,6 +660,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_planar_deck = Arc::new(Vec::new());
+            pool.registered_scheme_deck = Arc::new(Vec::new());
+            pool.current_scheme_deck = Arc::new(Vec::new());
         }
     }
 

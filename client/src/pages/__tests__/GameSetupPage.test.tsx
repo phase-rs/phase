@@ -17,6 +17,7 @@
  * test only exercises the warning-chip render condition.
  */
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -106,9 +107,9 @@ function setActiveDeck(deckName: string): void {
   localStorage.setItem(ACTIVE_DECK_KEY, deckName);
 }
 
-function renderGameSetupPage() {
+function renderGameSetupPage(initialEntry = "/game-setup") {
   return render(
-    <MemoryRouter initialEntries={["/game-setup"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
         <Route path="/" element={<div>Home</div>} />
@@ -129,12 +130,49 @@ beforeEach(() => {
     usePreferencesStore.getState().ensureAiSeatCount(1);
     usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
     usePreferencesStore.getState().setCedhMode(false);
+    usePreferencesStore.setState({
+      lastFormat: null,
+      lastPlayerCount: 2,
+      lastMatchType: "Bo1",
+    });
   });
 });
 
 afterEach(cleanup);
 
 describe("GameSetupPage — cEDH bracket warning chip", () => {
+  it("does not offer Two-Headed Giant in the solo format picker", async () => {
+    const user = userEvent.setup();
+    renderGameSetupPage();
+
+    await user.click(await screen.findByRole("button", { name: /Commander/i }));
+
+    expect(screen.queryByRole("button", { name: "Two-Headed Giant" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Free-for-All/i })).toBeInTheDocument();
+  });
+
+  it("ignores a Two-Headed Giant URL format on the solo setup page", async () => {
+    renderGameSetupPage("/game-setup?format=TwoHeadedGiant");
+
+    expect(await screen.findByText("Commander")).toBeInTheDocument();
+    expect(screen.queryByText("Two-Headed Giant")).not.toBeInTheDocument();
+  });
+
+  it("does not restore a stale Two-Headed Giant solo preference", async () => {
+    act(() => {
+      usePreferencesStore.setState({
+        lastFormat: "TwoHeadedGiant",
+        lastPlayerCount: 4,
+        lastMatchType: "Bo3",
+      });
+    });
+
+    renderGameSetupPage();
+
+    expect(await screen.findByText("Commander")).toBeInTheDocument();
+    expect(screen.queryByText("Two-Headed Giant")).not.toBeInTheDocument();
+  });
+
   it("shows the warning chip when the human deck is non-cEDH and cEDH mode is on", async () => {
     // Deck with bracket 2 (Core) — not cEDH-legal.
     seedDeck("My Deck", 2);

@@ -236,6 +236,13 @@ export class EngineWorkerClient {
     });
   }
 
+  async projectSeatView(stateJson: string): Promise<unknown> {
+    return this.request<unknown>({
+      type: "projectSeatView",
+      stateJson,
+    });
+  }
+
   async resolveAll(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],

@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 152,
+      "date": "2026-06-26",
+      "title": "Cast from graveyard & exile, right in your hand",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Equipment that enters the battlefield already attached to a creature now attaches correctly instead of falling off\n• Mishra, Eminent One — the token copy it makes becomes a 4/4 named Mishra's Warform with its own name, so it no longer dies to the legend rule alongside the original\n• Nested Shambler now makes a number of tokens equal to its power including buffs — a pumped Shambler finally makes the full count\n• Riptide Shapeshifter and Heirloom Blade now dig to the correct creature type\n• Dominaria's Judgment grants each color of protection only when you control the matching basic land (white with a Plains, blue with an Island, and so on)\n• Limited Resources only stops players from playing lands once ten or more lands are on the battlefield, not before\n• Claws of Gix, Curie, and Master Transmuter can now be activated even when the permanent you sacrifice, exile, or return was paying for the ability's mana — mana is tapped first\n• Lava Blister, Blazing Salvo, and Molten Influence now offer their \"unless you deal damage to yourself\" alternative and resolve it correctly\n• Lim-Dul's Hex now offers its \"unless a player pays\" choice\n• Dragonfire Blade's equip-cost color discount now applies\n• Auras that read \"Enchant creature without flying\" can now legally target a creature\n• Accumulate Wisdom's alternate dig mode now works\n• Lagrella, the Magpie's enter-the-battlefield exile no longer stalls the game when exiling creatures controlled by different players\n• Creatures that enter with a dynamic number of extra +1/+1 counters — such as a count equal to another creature's toughness — now get them\n• \"Each opponent draws\" effects now correctly draw cards for your opponents\n• You can now tap your lands for mana during an opponent's turn to pay for instants and abilities\n\n⚔️ Combat & Gameplay\n• Big token boards no longer crawl — passing priority, declaring attackers, untapping, and combat legality checks are dramatically faster on boards with hundreds of creatures (for example Squirrel decks powered by Cryptolith Rite)\n\n🖥️ Interface\n• Cards you can cast from your graveyard and exile — flashback, escape, foretell, adventure, and more — now fan out as colored wings on either side of your hand: exile on the left, graveyard on the right, all on one continuous arc. Flick them up to cast\n• Slime Against Humanity and other \"any number of copies\" cards can now be added without limit to Commander decks instead of being capped\n\n🤖 AI\n• The AI no longer gets stuck when a spell it lined up turns out to be uncastable — it recovers and keeps playing",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520294592186945656"
+    },
+    {
       "id": 151,
       "date": "2026-06-26",
       "title": "iOS crash fixes, deck folders & Rooms",

@@ -56,6 +56,7 @@
     "seatPlayer": "Spieler",
     "seatOpen": "Frei",
     "seatAi": "KI ({{difficulty}})",
+    "teamLabel": "Team {{number}}",
     "waiting": "Warten…",
     "seatLabel": "Platz {{id}}",
     "addAi": "KI hinzufügen",

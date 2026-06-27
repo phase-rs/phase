@@ -99,10 +99,10 @@ use crate::types::ability::{
     PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
     ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition, ZoneOwner,
+    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope, StaticCondition,
+    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -6864,6 +6864,7 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
                 target: TargetFilter::Controller,
                 step,
                 count: QuantityExpr::Fixed { value: 1 },
+                scope: SkipScope::NextOccurrence,
             }));
         }
     }
@@ -6897,6 +6898,7 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
                 target,
                 step,
                 count: QuantityExpr::Fixed { value: 1 },
+                scope: SkipScope::NextOccurrence,
             }));
         }
     }
@@ -6913,13 +6915,33 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
     let (after_verb_lower, _) = alt((tag::<_, _, OracleError<'_>>(" skips "), tag(" skip ")))
         .parse(after_target_lower)
         .ok()?;
-    let (after_next_lower, _) = alt((
-        tag::<_, _, OracleError<'_>>("their next "),
-        tag("your next "),
+
+    // CR 614.10 + CR 614.10a: recognize the turn-scoped variant ("skips all
+    // combat phases of their next turn" — False Peace / Empty City Ruse) before
+    // the occurrence-scoped ("their/your next <step>") tail. The turn-scoped
+    // branch binds a `CombatPhase` skip to the player's entire next turn
+    // (`AllOfNextTurn`); the occurrence-scoped branch keeps the single-step
+    // `NextOccurrence` behavior.
+    let ((step, scope), rest) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all combat phases of their next turn"),
+        tag("all combat phases of your next turn"),
     ))
     .parse(after_verb_lower)
-    .ok()?;
-    let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+    {
+        (
+            (StepSkipTarget::CombatPhase, SkipScope::AllOfNextTurn),
+            rest,
+        )
+    } else {
+        let (after_next_lower, _) = alt((
+            tag::<_, _, OracleError<'_>>("their next "),
+            tag("your next "),
+        ))
+        .parse(after_verb_lower)
+        .ok()?;
+        let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+        ((step, SkipScope::NextOccurrence), rest)
+    };
     if !rest.trim().trim_end_matches('.').is_empty() {
         return None;
     }
@@ -6928,6 +6950,7 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
         target,
         step,
         count: QuantityExpr::Fixed { value: 1 },
+        scope,
     }))
 }
 
@@ -22106,6 +22129,12 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless) {
         return Some(cost);
     }
+    // CR 118.12a + CR 121.3a: "unless its controller has you draw a card"
+    // (Decoy Gambit) — the controller may have the spell's controller draw
+    // instead of the primary effect.
+    if let Some(cost) = parse_unless_have_you_draw_cost(after_unless) {
+        return Some(cost);
+    }
     // CR 118.12 / CR 119.4 / CR 608.2c: non-mana alternative costs — "pays N
     // life", "sacrifices a [filter]", "discards a card", and `or`-disjunctions
     // thereof. Normalize the counter subject to the "they" pronoun the shared
@@ -22241,6 +22270,33 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     })
 }
 
+/// CR 118.12a + CR 121.3a: "unless [that object's|its] controller has you draw
+/// a card" (Decoy Gambit) — the targeted permanent's controller may have the
+/// spell's controller draw instead of the primary effect. "You" is the printed
+/// controller (`OriginalController`), not the payer.
+fn parse_unless_have_you_draw_cost(after_unless: &str) -> Option<AbilityCost> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature's controller has "),
+        tag("its controller has "),
+        tag("that permanent's controller has "),
+        tag("that spell's controller has "),
+    ))
+    .parse(after_unless)
+    .ok()?;
+    all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("you draw a card"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(AbilityCost::EffectCost {
+        effect: Box::new(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::OriginalController,
+        }),
+    })
+}
+
 fn extract_resolution_unless_pay_modifier(
     text: &str,
     player_scope: Option<&PlayerFilter>,
@@ -22283,6 +22339,16 @@ fn extract_resolution_unless_pay_modifier(
         nom_primitives::scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
     {
         if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::ParentTargetController,
+                }),
+            );
+        }
+        if let Some(cost) = parse_unless_have_you_draw_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
             return (
                 cleaned,
@@ -28519,6 +28585,35 @@ mod tests {
                     ..
                 } => {}
                 other => panic!("expected DealDamage 6 to payer, got {other:?}"),
+            },
+            other => panic!("expected EffectCost, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12a + CR 121.3a: Decoy Gambit — bounce unless controller has you draw.
+    #[test]
+    fn decoy_gambit_unless_have_you_draw_a_card() {
+        let def = parse_effect_chain(
+            "Return target creature to its owner's hand unless its controller has you draw a card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Bounce { .. }),
+            "primary effect should remain Bounce, got {:?}",
+            def.effect
+        );
+        let unless_pay = def
+            .unless_pay
+            .as_ref()
+            .expect("Decoy Gambit bounce line must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        match &unless_pay.cost {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::OriginalController,
+                } => {}
+                other => panic!("expected Draw 1 to OriginalController, got {other:?}"),
             },
             other => panic!("expected EffectCost, got {other:?}"),
         }
@@ -51550,10 +51645,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(target, &TargetFilter::Controller);
         assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
@@ -51572,10 +51669,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(target, &TargetFilter::Player);
         assert_eq!(step, &StepSkipTarget::Step(Phase::Draw));
         assert_eq!(
@@ -51599,10 +51698,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(target, &TargetFilter::TriggeringPlayer);
         assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
@@ -51621,10 +51722,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(target, &TargetFilter::ParentTarget);
         assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
@@ -51643,10 +51746,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(target, &TargetFilter::DefendingPlayer);
         assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
@@ -51668,10 +51773,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         assert_eq!(
             target,
             &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
@@ -51681,6 +51788,55 @@ mod tests {
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
         );
+    }
+
+    /// CR 614.10 + CR 614.10a: "Target player skips all combat phases of their
+    /// next turn." — False Peace (POR). Turn-scoped combat skip: target Player,
+    /// CombatPhase step, `AllOfNextTurn` scope.
+    #[test]
+    fn false_peace_skips_all_combat_phases_of_next_turn() {
+        let def = parse_effect_chain(
+            "Target player skips all combat phases of their next turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            scope,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Player);
+        assert_eq!(step, &StepSkipTarget::CombatPhase);
+        assert_eq!(scope, &SkipScope::AllOfNextTurn);
+    }
+
+    /// CR 614.10 + CR 614.10a: "Target opponent skips all combat phases of their
+    /// next turn." — Empty City Ruse (PTK). Turn-scoped combat skip: target
+    /// Opponent, CombatPhase step, `AllOfNextTurn` scope.
+    #[test]
+    fn empty_city_ruse_skips_all_combat_phases_of_next_turn() {
+        let def = parse_effect_chain(
+            "Target opponent skips all combat phases of their next turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            scope,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(step, &StepSkipTarget::CombatPhase);
+        assert_eq!(scope, &SkipScope::AllOfNextTurn);
     }
 
     /// CR 500.11: "That player skips their next combat phase" — Blinding Angel's
@@ -51696,10 +51852,12 @@ mod tests {
             target,
             step,
             count,
+            scope,
         } = &*def.effect
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
+        assert_eq!(scope, &SkipScope::NextOccurrence);
         // "That player" without trigger context defaults to ParentTarget.
         assert_eq!(target, &TargetFilter::ParentTarget);
         assert_eq!(step, &StepSkipTarget::CombatPhase);

@@ -156,6 +156,38 @@ pub enum AssistState {
     Committed { helper: PlayerId, generic: u32 },
 }
 
+/// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
+/// player. Backs `GameState::combat_phase_skip_next_turn` (False Peace / Empty
+/// City Ruse: "skips all combat phases of their next turn").
+///
+/// CR 614.10a: stacked skips are independent — two resolved effects make the
+/// player skip combat on their next *two* non-skipped turns ("one effect will be
+/// satisfied in skipping the first occurrence, while the other will remain"). So
+/// the model is a count, not a tri-state: `pending` is the number of armed skips
+/// not yet bound to a turn, and `active` marks the player's current turn as a
+/// bound skip turn. The axes are orthogonal — while a turn is `active`, further
+/// `pending` skips wait for subsequent turns.
+///
+/// Lifecycle, advanced in `start_next_turn` for the player whose turn begins:
+/// - a skip effect resolves -> `pending += 1`
+/// - that player's previous bound turn ended -> `active = false` (skip satisfied)
+/// - this turn isn't itself skipped and `pending > 0` -> `pending -= 1`, `active = true`
+///
+/// While `active`, a virtual replacement effect prevents every combat phase of
+/// the bound turn (CR 614.10: "skip" == "instead of doing this, do nothing").
+/// `Default` (`pending: 0`, `active: false`) is "no skip armed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CombatPhaseSkipState {
+    /// CR 614.10a: armed turn-scoped combat skips that have not yet bound to a
+    /// turn; each waits past skipped turns for its own non-skipped turn.
+    #[serde(default)]
+    pub pending: u32,
+    /// True while the player's current turn is a bound combat-skip turn; the
+    /// replacement layer prevents every combat phase of that turn.
+    #[serde(default)]
+    pub active: bool,
+}
+
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2262,9 +2294,10 @@ pub struct PhyrexianShard {
 }
 
 /// Per-player deck pool — registered (initial) and current (live) card
-/// lists for main deck, sideboard, and commander zone.
+/// lists for main deck, sideboard, command-zone deck components, and
+/// supplementary payloads carried across match games.
 ///
-/// All six `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
+/// All `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
 /// `GameState::clone()` shares the underlying deck slice via refcount
 /// bump instead of deep-cloning every card's `CardFace` (and its nested
 /// `Vec<AbilityDefinition>`) on every AI search-node clone. Mutations
@@ -2289,6 +2322,16 @@ pub struct PlayerDeckPool {
     pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 901.15a: Registered shared Planechase planar deck payload. Only the
+    /// PlayerId(0) pool carries the communal deck, matching `DeckPayload`.
+    #[serde(default)]
+    pub registered_planar_deck: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 904.3: Registered Archenemy scheme deck payload. The configured
+    /// archenemy's pool carries the shared scheme deck.
+    #[serde(default)]
+    pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -2758,8 +2801,9 @@ pub enum WaitingFor {
     /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
     /// `finish_mulligans`.
     ///
-    /// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled
-    /// (the format lacks team semantics).
+    /// CR 103.5d + CR 805.3a + CR 810.2: shared-team-turn mulligans are
+    /// represented in the same simultaneous-decision model; every player
+    /// remains independently pending until their own keep/mulligan decision.
     MulliganDecision {
         pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a
@@ -5897,6 +5941,24 @@ pub struct GameState {
     /// is consumed only when the named step would otherwise happen.
     #[serde(default)]
     pub steps_to_skip: Vec<HashMap<Phase, u32>>,
+
+    /// CR 614.10 + CR 614.10a: Per-player turn-scoped combat-phase skip state.
+    /// Drives "skips all combat phases of their next turn" (False Peace / Empty
+    /// City Ruse). Unlike `steps_to_skip` (a finite per-step counter), this is a
+    /// turn-bound marker resolved as a virtual replacement effect on every combat
+    /// phase of the bound turn.
+    ///
+    /// State machine (per active player, advanced in `start_next_turn`):
+    /// - `Pending`: set when the skip effect resolves; the skip is *armed* but
+    ///   has not yet attached to a turn. Per CR 614.10a it waits past any
+    ///   skipped turns and binds to the player's first non-skipped turn.
+    /// - `Active`: promoted from `Pending` once the player's bound (non-skipped)
+    ///   turn actually begins. While `Active`, the replacement layer prevents
+    ///   every combat phase that turn (including extra combat phases).
+    /// - `None`: cleared at the start of the player's *following* turn, after the
+    ///   bound turn has ended. A turn that was `Active` becomes `None`.
+    #[serde(default)]
+    pub combat_phase_skip_next_turn: Vec<CombatPhaseSkipState>,
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
@@ -6904,6 +6966,11 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 901.9 / CR 116.2i: Number of planar die special actions each player
+    /// has taken this turn. Effect-caused planar die rolls do not increment
+    /// this counter.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub planar_die_actions_this_turn: HashMap<PlayerId, u32>,
     /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
     /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
     /// that are set in motion turn face up and stay in the command zone, NOT here.
@@ -7345,36 +7412,23 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        // CR 810.4 + CR 810.11: `FormatConfig::starting_life` is the TEAM's
-        // shared total in a team-based format (Two-Headed Giant: 30, not 30
-        // per player / 60 per team). `game::players::team_life_total` derives
-        // the shared total by summing each living teammate's own `life`
-        // field, so the individual starting values must already split the
-        // shared total rather than each duplicating it. The engine currently
-        // only models 2-player teams (seats paired {0,1}, {2,3}, ... — see
-        // `game::players::teammates`/`team_index`), so the split is an even
-        // halving; CR 810.11 (3+-player teams) would need this to divide by
-        // the actual team size instead.
-        let per_player_life = if config.team_based {
-            config.starting_life / 2
-        } else {
-            config.starting_life
-        };
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: per_player_life,
+                life: config.starting_life_for_player(PlayerId(i)),
                 ..Player::default()
             })
             .collect();
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
+        let starting_player = config.starting_player();
+        let archenemy = config.archenemy_player();
 
         GameState {
             turn_number: 0,
-            active_player: PlayerId(0),
+            active_player: starting_player,
             phase: Phase::Untap,
             players,
-            priority_player: PlayerId(0),
+            priority_player: starting_player,
             turn_decision_controller: None,
             objects: im::HashMap::default(),
             next_object_id: 1,
@@ -7391,7 +7445,7 @@ impl GameState {
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
             waiting_for: WaitingFor::Priority {
-                player: PlayerId(0),
+                player: starting_player,
             },
             has_pending_cast: false,
             lands_played_this_turn: 0,
@@ -7439,6 +7493,10 @@ impl GameState {
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
+            combat_phase_skip_next_turn: vec![
+                CombatPhaseSkipState::default();
+                player_count as usize
+            ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             seat_order,
@@ -7455,7 +7513,7 @@ impl GameState {
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
             game_number: default_game_number(),
-            current_starting_player: PlayerId(0),
+            current_starting_player: starting_player,
             next_game_chooser: None,
             deck_pools: Vec::new(),
             outside_game_cards_brought_in: Vec::new(),
@@ -7593,8 +7651,9 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
-            archenemy: None,
+            archenemy,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
@@ -7908,6 +7967,7 @@ impl PartialEq for GameState {
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
+            && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
             && self.seat_order == other.seat_order
@@ -8042,6 +8102,7 @@ impl PartialEq for GameState {
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.planar_die_actions_this_turn == other.planar_die_actions_this_turn
             && self.scheme_deck == other.scheme_deck
             && self.archenemy == other.archenemy
     }

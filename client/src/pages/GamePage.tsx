@@ -128,6 +128,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
+import { formatMetadata, isSoloSetupFormat } from "../data/formatRegistry.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
@@ -149,6 +150,28 @@ type ZoneRailStyle = CSSProperties & {
 
 function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
   return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
+}
+
+function isDirectSoloRouteMode(rawMode: string | null): boolean {
+  return ![
+    "p2p-host",
+    "p2p-join",
+    "draft-match",
+    "spectate",
+    "host",
+    "join",
+  ].includes(rawMode ?? "");
+}
+
+function isDirectSoloFormat(format: GameFormat): boolean {
+  const metadata = formatMetadata(format);
+  return Boolean(metadata && isSoloSetupFormat(metadata));
+}
+
+function directSoloFormatConfig(format: GameFormat | null) {
+  if (!format) return undefined;
+  if (!isDirectSoloFormat(format)) return undefined;
+  return FORMAT_DEFAULTS[format];
 }
 
 /**
@@ -209,10 +232,15 @@ export function GamePage() {
   // but TypeScript's narrowing produces a fresh binding that the linter
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
-  const formatConfig = useMemo(
-    () => savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
-    [formatParam, savedFormatConfig],
-  );
+  const formatConfig = useMemo(() => {
+    if (isDirectSoloRouteMode(rawMode)) {
+      if (savedFormatConfig && isDirectSoloFormat(savedFormatConfig.format)) {
+        return savedFormatConfig;
+      }
+      return directSoloFormatConfig(formatParam);
+    }
+    return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
+  }, [formatParam, rawMode, savedFormatConfig]);
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(

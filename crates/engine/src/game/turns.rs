@@ -19,6 +19,7 @@ use crate::types::zones::Zone;
 use super::combat;
 use super::combat_damage;
 use super::day_night;
+use super::priority;
 use super::turn_control;
 use super::zones;
 
@@ -418,8 +419,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
 
     // CR 117.3a: Active player receives priority at the beginning of most steps and phases.
     state.priority_player = turn_control::turn_decision_maker(state);
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
@@ -433,7 +433,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // they set the top scheme of their scheme deck in motion (a turn-based action
     // that doesn't use the stack). No-op outside an Archenemy game, when the active
     // player isn't the archenemy, or when the scheme deck is empty.
-    if next == Phase::PreCombatMain && state.archenemy == Some(state.active_player) {
+    if next == Phase::PreCombatMain
+        && super::topology::archenemy(state) == Some(state.active_player)
+    {
         crate::game::archenemy::set_in_motion(state, events);
     }
 }
@@ -449,10 +451,12 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.pending_team_draw_step.clear();
 
     let completed_player = state.active_player;
+    let completed_turn_key =
+        super::topology::normalize_shared_turn_recipient(state, completed_player);
     if state.turn_decision_controller.is_some() {
         let mut grant_extra_turn_after = false;
         state.scheduled_turn_controls.retain(|scheduled| {
-            if scheduled.target_player != completed_player {
+            if scheduled.target_player != completed_turn_key {
                 return true;
             }
             if Some(scheduled.controller) == state.turn_decision_controller {
@@ -473,17 +477,19 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // in APNAP order). `is_extra_turn` flows into the replacement pipeline so
     // condition-gated skip effects (e.g., Stranglehold) can observe it.
     let is_extra_turn = if let Some(extra_turn_player) = state.extra_turns.pop() {
-        state.active_player = extra_turn_player;
+        state.active_player =
+            super::topology::normalize_shared_turn_recipient(state, extra_turn_player);
         true
     } else {
-        state.active_player = super::players::next_player(state, state.active_player);
+        state.active_player = super::topology::next_turn_representative(state, state.active_player);
         false
     };
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
     // Days). This is a fast path for "you skip your next turn" that doesn't need
     // the replacement pipeline — there's no event-context predicate to evaluate.
-    let idx = state.active_player.0 as usize;
+    let skip_player = super::topology::normalize_shared_turn_recipient(state, state.active_player);
+    let idx = skip_player.0 as usize;
     if idx < state.turns_to_skip.len() && state.turns_to_skip[idx] > 0 {
         state.turns_to_skip[idx] -= 1;
         // Recursively start the next turn (skipping this one entirely).
@@ -528,7 +534,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(scheduled) = state
         .scheduled_turn_controls
         .iter()
-        .rfind(|scheduled| scheduled.target_player == state.active_player)
+        .rfind(|scheduled| {
+            scheduled.target_player
+                == super::topology::normalize_shared_turn_recipient(state, state.active_player)
+        })
         .copied()
     {
         state.turn_decision_controller = Some(scheduled.controller);
@@ -536,12 +545,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // Reset priority
     state.priority_player = turn_control::turn_decision_maker(state);
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     // Reset per-turn counters
     // CR 305.2: Reset per-turn land play count.
     state.lands_played_this_turn = 0;
+    // CR 901.9 / CR 116.2i: planar die special-action costs reset each turn.
+    state.planar_die_actions_this_turn.clear();
     // CR 603.4: Snapshot spell count for werewolf "last turn" conditions before resetting.
     state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
     // CR 500.1: Reset per-turn spell cast counters.
@@ -608,6 +618,17 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.attacked_defenders_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
+    // CR 614.10 + CR 614.10a + CR 500.11: A turn-scoped combat skip that was
+    // bound (`active`) to this player's PREVIOUS (now-ended) turn is satisfied —
+    // release the binding so this new turn has normal combat unless another
+    // pending skip rebinds below. `idx` is the player whose turn is beginning.
+    // Only the `active` binding is cleared — any still-`pending` skips have not
+    // yet bound to a turn and must survive (CR 614.10a: the second of two stacked
+    // skips waits for the next occurrence), to be promoted below if this turn
+    // isn't itself skipped.
+    if let Some(slot) = state.combat_phase_skip_next_turn.get_mut(idx) {
+        slot.active = false;
+    }
     state.end_steps_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.attacker_declarations_this_turn.clear();
@@ -674,6 +695,21 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.cards_drawn_this_step = 0;
         player.speed_trigger_used_this_turn = false;
         player.bending_types_this_turn.clear();
+    }
+
+    // CR 614.10 + CR 614.10a + CR 500.11: Bind one pending turn-scoped combat
+    // skip to this turn now that the active player's first non-skipped turn has
+    // actually begun. This runs AFTER the per-turn reset region (so the `active`
+    // flag it sets is not immediately re-cleared) and AFTER the `turns_to_skip`
+    // fast-path early-return above (so per CR 614.10a the skip binds only to a
+    // turn that isn't itself skipped). Consume one `pending` skip and mark the
+    // turn `active`; any remaining pending skips wait for subsequent turns. While
+    // `active`, the replacement layer prevents every combat phase of this turn.
+    if let Some(slot) = state.combat_phase_skip_next_turn.get_mut(idx) {
+        if slot.pending > 0 {
+            slot.pending -= 1;
+            slot.active = true;
+        }
     }
 
     // CR 302.6: At the start of a player's turn, any permanent they have
@@ -1281,7 +1317,7 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     if state.pending_team_draw_step.is_empty() {
         state.pending_team_draw_step.push(state.active_player);
-        if state.format_config.team_based {
+        if state.format_config.topology().has_shared_team_turns() {
             state
                 .pending_team_draw_step
                 .extend(super::players::teammates(state, state.active_player));
@@ -2203,7 +2239,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::card_type::Supertype;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::sync::Arc;
 
@@ -4731,6 +4767,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn execute_draw_archenemy_hero_team_draws_all_living_heroes() {
+        let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 4, 0);
+        state.active_player = PlayerId(1);
+        let archenemy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme Boss Draw".to_string(),
+            Zone::Library,
+        );
+        let hero_cards: Vec<ObjectId> = (1u8..=3)
+            .map(|seat| {
+                create_object(
+                    &mut state,
+                    CardId(10 + u64::from(seat)),
+                    PlayerId(seat),
+                    format!("Hero {seat} Draw"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        let result = execute_draw(&mut state, &mut events);
+
+        assert!(result.is_none(), "no replacement pause expected here");
+        assert!(state.players[0].library.contains(&archenemy_card));
+        for (offset, card) in hero_cards.iter().enumerate() {
+            assert!(state.players[offset + 1].hand.contains(card));
+        }
+    }
+
+    #[test]
+    fn execute_draw_archenemy_turn_draws_only_archenemy() {
+        let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 4, 0);
+        state.active_player = PlayerId(0);
+        let archenemy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Archenemy Draw".to_string(),
+            Zone::Library,
+        );
+        let hero_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hero Draw".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let result = execute_draw(&mut state, &mut events);
+
+        assert!(result.is_none(), "no replacement pause expected here");
+        assert!(state.players[0].hand.contains(&archenemy_card));
+        assert!(state.players[1].library.contains(&hero_card));
+    }
+
     /// CR 805.4b + CR 616.1: regression for the resumption gap flagged in
     /// review — if the active player's draw-step draw paused on a
     /// competing-replacement choice and was then resumed (popping the active
@@ -6611,6 +6707,57 @@ mod tests {
     }
 
     #[test]
+    fn two_headed_giant_natural_turn_advances_to_opposing_team() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(2));
+    }
+
+    #[test]
+    fn two_headed_giant_rotated_order_advances_to_next_team_representative() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        crate::game::engine::start_game_with_starting_player(&mut state, PlayerId(1));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)]
+        );
+        assert_eq!(state.active_player, PlayerId(2));
+
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(0));
+    }
+
+    #[test]
+    fn free_for_all_natural_turn_still_advances_seat_by_seat() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(1));
+    }
+
+    #[test]
     fn controlled_turn_uses_controller_then_grants_extra_turn_afterward() {
         let mut state = setup();
         state.active_player = PlayerId(0);
@@ -6637,6 +6784,40 @@ mod tests {
         assert_eq!(state.turn_decision_controller, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
+    }
+
+    #[test]
+    fn shared_team_control_retires_non_anchor_completed_turn() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.seat_order = vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)];
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(2);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.turn_number = 1;
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(0),
+                controller: PlayerId(2),
+                grant_extra_turn_after: false,
+            });
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.turn_decision_controller, None);
+        assert!(state.scheduled_turn_controls.is_empty());
+
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(0));
+        assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.priority_player, PlayerId(0));
     }
 
     #[test]

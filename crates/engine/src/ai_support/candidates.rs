@@ -2723,6 +2723,14 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     let stack_empty = state.stack.is_empty();
     let is_active = state.active_player == player;
 
+    if crate::game::planechase::can_roll_planar_die(state, player) {
+        actions.push(candidate(
+            GameAction::RollPlanarDie,
+            TacticalClass::Utility,
+            Some(player),
+        ));
+    }
+
     if is_main_phase
         && stack_empty
         && is_active
@@ -4427,6 +4435,7 @@ mod tests {
         FilterProp, ManaContribution, ManaProduction, QuantityExpr, SacrificeCost,
         StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -4463,6 +4472,29 @@ mod tests {
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Prepare),
         }
+    }
+
+    #[test]
+    fn two_hg_priority_actions_offer_single_pass_for_team_representative() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let pass_candidates: Vec<_> = candidate_actions(&state)
+            .into_iter()
+            .filter(|candidate| matches!(candidate.action, GameAction::PassPriority))
+            .collect();
+        assert_eq!(pass_candidates.len(), 1);
+        assert_eq!(pass_candidates[0].metadata.actor, Some(PlayerId(0)));
+
+        let pass_actions = crate::ai_support::legal_actions(&state)
+            .into_iter()
+            .filter(|action| matches!(action, GameAction::PassPriority))
+            .count();
+        assert_eq!(pass_actions, 1);
     }
 
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must

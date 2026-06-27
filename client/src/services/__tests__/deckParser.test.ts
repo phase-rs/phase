@@ -3,6 +3,7 @@ import {
   parseDeckFile,
   exportDeckFile,
   parseMtgaDeck,
+  exportMtgaDeck,
   detectAndParseDeck,
   deriveImportedDeckName,
   repairParsedDeck,
@@ -142,6 +143,33 @@ Deck
     expect(result.sideboard).toEqual([]);
     expect(result.main).toHaveLength(1);
   });
+
+  it('parses planar deck sections without mixing them into main or sideboard', () => {
+    const content = `[Main]
+4 Lightning Bolt
+[Planar Deck]
+1 The Aether Flues
+1 Spatial Merging`;
+    const result = parseDeckFile(content);
+    expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
+  });
+
+  it('parses scheme deck sections without mixing them into main or sideboard', () => {
+    const content = `[Main]
+4 Lightning Bolt
+[Scheme Deck]
+1 Your Puny Minds Cannot Fathom
+1 My Genius Knows No Bounds`;
+    const result = parseDeckFile(content);
+    expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.scheme_deck).toEqual([
+      'Your Puny Minds Cannot Fathom',
+      'My Genius Knows No Bounds',
+    ]);
+  });
 });
 
 describe('parseMtgaDeck', () => {
@@ -278,6 +306,17 @@ Sideboard
     expect(repaired.sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
     expect(expandParsedDeck(repaired).sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
   });
+
+  it('preserves planar decks through repair and expansion', () => {
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    });
+
+    expect(repaired.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
+    expect(expandParsedDeck(repaired).planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
+  });
 });
 
 describe('detectAndParseDeck', () => {
@@ -323,6 +362,20 @@ Sideboard
     expect(result.sideboard).toEqual([
       { count: 3, name: 'Red Elemental Blast' },
     ]);
+  });
+
+  it('detects simple Deck/Planar Deck sections and preserves planar cards', () => {
+    const content = `Deck
+4 Lightning Bolt
+
+Planar Deck
+1 The Aether Flues
+1 Spatial Merging`;
+    const result = detectAndParseDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+    ]);
+    expect(result.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
   });
 
   it('parses MTGO TLR exports with SIDEBOARD colon and trailing commander', () => {
@@ -476,6 +529,58 @@ Deck
     });
     expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+
+  it('exports planar deck sections that round-trip through the parser', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    };
+    const exported = exportDeckFile(deck);
+    expect(exported).toBe(
+      '[Main]\n4 Lightning Bolt\n[Planar Deck]\n1 The Aether Flues\n1 Spatial Merging\n',
+    );
+    expect(parseDeckFile(exported)).toEqual(deck);
+  });
+
+  it('exports scheme deck sections that round-trip through the parser', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportDeckFile(deck);
+    expect(exported).toBe(
+      '[Main]\n4 Lightning Bolt\n[Scheme Deck]\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
+    );
+    expect(parseDeckFile(exported)).toEqual(deck);
+  });
+
+  it('exports planar deck sections in MTGA format', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    };
+    const exported = exportMtgaDeck(deck);
+    expect(exported).toBe(
+      'Deck\n4 Lightning Bolt\n\nPlanar Deck\n1 The Aether Flues\n1 Spatial Merging\n',
+    );
+    expect(parseMtgaDeck(exported)).toEqual(deck);
+  });
+
+  it('exports scheme deck sections in MTGA format', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportMtgaDeck(deck);
+    expect(exported).toBe(
+      'Deck\n4 Lightning Bolt\n\nScheme Deck\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
+    );
+    expect(parseMtgaDeck(exported)).toEqual(deck);
   });
 });
 

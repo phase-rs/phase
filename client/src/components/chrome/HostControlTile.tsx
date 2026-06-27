@@ -77,14 +77,24 @@ function SeatRow({
   const kickLabel = slot.name || t("hostControl.fallbackPlayerName", { number: slot.playerId + 1 });
   const aiSeat = slot.kind.type === "Ai" ? slot.kind : null;
   const selectedDeckKey = aiSeat ? deckChoiceKey(aiSeat.data.deck) : "";
+  const teamLabel = slot.teamInfo
+    ? t("hostControl.teamLabel", { number: slot.teamInfo.teamIndex + 1 })
+    : null;
   return (
     <div className="py-1">
       <div className="flex items-center justify-between gap-2">
         <span className={`text-sm ${isOpen ? "italic text-slate-500" : "text-slate-300"}`}>
           {isOpen ? t("hostControl.waiting") : slot.name || t("hostControl.seatLabel", { id: slot.playerId })}
         </span>
-        <span className={`text-xs font-medium ${seatColor(slot.kind)}`}>
-          {seatLabel(slot.kind, t)}
+        <span className="flex shrink-0 items-center gap-1">
+          {teamLabel && (
+            <span className="rounded border border-white/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-slate-400">
+              {teamLabel}
+            </span>
+          )}
+          <span className={`text-xs font-medium ${seatColor(slot.kind)}`}>
+            {seatLabel(slot.kind, t)}
+          </span>
         </span>
       </div>
       {canEdit && slot.playerId !== 0 && (

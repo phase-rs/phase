@@ -135,7 +135,7 @@ fn handle_unlock_room_door(
     casting::pay_special_action_mana_cost(
         state,
         player,
-        object_id,
+        Some(object_id),
         &cost,
         crate::types::mana::SpecialAction::UnlockDoor,
         events,
@@ -1650,6 +1650,7 @@ fn apply_action(
         | GameAction::CastSpellAsMadness { .. }
         | GameAction::CancelCast
         | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
         | GameAction::PayUnlessCost { .. }
         | GameAction::PayCombatTax { .. } => {
             state.lands_tapped_for_mana.remove(&actor);
@@ -1817,6 +1818,18 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+        }
+        (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
+            // does not use the stack; the escalating cost is charged before the
+            // roll and effect-caused rolls do not increment the counter.
+            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
+            WaitingFor::Priority { player: *player }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -3166,7 +3179,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         Some(&activation_ctx),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -3186,7 +3199,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         spell_ctx.as_ref(),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -4442,7 +4455,7 @@ fn apply_action(
         (
             WaitingFor::BetweenGamesSideboard { player, .. },
             GameAction::SubmitSideboard { main, sideboard },
-        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard)
+        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard, &mut events)
             .map_err(EngineError::InvalidAction)?,
         (
             WaitingFor::BetweenGamesChoosePlayDraw { player, .. },
@@ -4953,8 +4966,7 @@ fn apply_action(
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
                 triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
                 // behind this distribute-among trigger so each independent
                 // instance reaches the stack (issue #416).
@@ -5508,8 +5520,13 @@ fn handle_play_land(
     // `turn_resource_owner` stays correct for turn-control effects (CR 723,
     // e.g. Mindslaver), which always act on the active player's own
     // resources regardless of who submits the choice — that path is
-    // unaffected since it never sets `team_based`.
-    let player = if state.format_config.team_based {
+    // unaffected since it never uses shared team turns.
+    let player = if state.format_config.topology().has_shared_team_turns() {
+        if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
+            return Err(EngineError::ActionNotAllowed(
+                "Only the active team may play lands during its turn".to_string(),
+            ));
+        }
         acting_player
     } else {
         turn_control::turn_resource_owner(state)
@@ -5526,7 +5543,7 @@ fn handle_play_land(
     // their own allowance); the legacy single-counter `lands_played_this_turn`
     // is correct outside team-based formats, where only the active player
     // ever plays lands during their own turn.
-    let lands_played = if state.format_config.team_based {
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
         state
             .players
             .iter()
@@ -5813,8 +5830,7 @@ fn handle_play_land(
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
                     }
-                    state.priority_passes.clear();
-                    state.priority_pass_count = 0;
+                    priority::clear_priority_passes(state);
                     events.push(GameEvent::LandPlayed {
                         object_id,
                         player_id: player,
@@ -5842,8 +5858,7 @@ fn handle_play_land(
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
             }
-            state.priority_passes.clear();
-            state.priority_pass_count = 0;
+            priority::clear_priority_passes(state);
 
             events.push(GameEvent::LandPlayed {
                 object_id,
@@ -5871,8 +5886,7 @@ fn handle_play_land(
     player_data.lands_played_this_turn += 1;
 
     // Reset priority passes (action was taken)
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     events.push(GameEvent::LandPlayed {
         object_id,
@@ -6306,8 +6320,7 @@ fn handle_equip_activation(
         ));
     }
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::EquipTarget {
         player,
         equipment_id,
@@ -6420,8 +6433,7 @@ fn handle_crew_activation(
     }
 
     let _ = events; // No events emitted during activation
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::CrewVehicle {
         player,
         vehicle_id,
@@ -6453,8 +6465,7 @@ fn push_keyword_action(
         },
         events,
     );
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     WaitingFor::Priority { player }
 }
 
@@ -6631,8 +6642,7 @@ fn handle_station_activation(
     }
 
     let _ = events; // No events emitted during activation (cost payment happens at resolution).
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::StationTarget {
         player,
         spacecraft_id,
@@ -6809,8 +6819,7 @@ fn handle_saddle_activation(
     }
 
     let _ = events;
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::SaddleMount {
         player,
         mount_id,
@@ -7016,6 +7025,12 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, PlayerId(0));
     }
 
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        // CR 904.6: The archenemy takes the first turn. Default Archenemy does
+        // not run the CR 103.1 starting-player contest.
+        return start_game_with_starting_player(state, archenemy);
+    }
+
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
     // starting player. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
@@ -7046,8 +7061,12 @@ pub fn start_game_with_starting_player(
 ) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
 
-    if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
         state.match_config.match_type = MatchType::Bo1;
     }
 
@@ -7084,6 +7103,7 @@ pub fn start_game_with_starting_player(
         }
     } else {
         // No cards to mulligan with, skip straight to game
+        crate::game::planechase::reveal_starting_plane(state);
         turns::auto_advance(state, &mut events)
     };
 
@@ -7104,19 +7124,22 @@ pub fn start_game_with_starting_player(
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
 
     events.push(GameEvent::GameStarted);
 
     state.turn_number = 1;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
+    state.active_player = starting_player;
+    state.priority_player = starting_player;
+    state.current_starting_player = starting_player;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
-        player_id: PlayerId(0),
+        player_id: starting_player,
         turn_number: 1,
     });
 
+    crate::game::planechase::reveal_starting_plane(state);
     let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
     bump_state_revision(state);
@@ -7286,6 +7309,19 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
     }
 
     #[test]
@@ -9088,6 +9124,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn archenemy_hero_team_each_hero_plays_own_land_only() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let land1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(2),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let archenemy_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&archenemy_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(2);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(2),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land2,
+                card_id: CardId(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[2].lands_played_this_turn, 1);
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::PlayLand {
+                object_id: archenemy_land,
+                card_id: CardId(3),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "archenemy must not play a land during the hero team's turn"
+        );
+        assert!(state.players[0].hand.contains(&archenemy_land));
+    }
+
     /// CR 614.1c discriminating test (fail-first): a land played through the
     /// real `PlayLand` action must receive the `EntersWithAdditionalCounters`
     /// static snapshot ("permanents you control enter with an additional +1/+1
@@ -9888,6 +10022,167 @@ mod tests {
         assert!(result.is_ok(), "P0 pass should succeed: {result:?}");
     }
 
+    #[test]
+    fn two_hg_empty_stack_two_team_passes_advance_and_return_priority() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert_ne!(state.phase, Phase::PreCombatMain);
+        assert!(state.priority_passes.is_empty());
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn two_hg_non_empty_stack_two_team_passes_resolve_top_object() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.push_back(no_op_stack_entry(1, PlayerId(0)));
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert!(state.stack.is_empty());
+        assert!(second
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn two_hg_controlled_team_turn_routes_teammate_priority_to_controller() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(2)),
+            "CR 117.6 + CR 805.5b move priority from the active team to the opposing team representative"
+        );
+        assert_eq!(
+            state.priority_player,
+            PlayerId(2),
+            "public submitter should be the opposing team representative after the active team passes"
+        );
+
+        let teammate_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            matches!(teammate_result, Err(EngineError::WrongPlayer)),
+            "active-team teammate must not submit after team-level priority has moved to P2: {teammate_result:?}"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            controller_result.is_ok(),
+            "opposing representative should submit for their team's priority: {controller_result:?}"
+        );
+    }
+
+    #[test]
+    fn non_team_controlled_turn_only_routes_active_player() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for the active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(1)),
+            "non-team controlled turns must not route unrelated players through the controller"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            matches!(controller_result, Err(EngineError::WrongPlayer)),
+            "controller must not submit for the next non-team opponent: {controller_result:?}"
+        );
+
+        let next_player_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            next_player_result.is_ok(),
+            "next non-team player should submit for themselves: {next_player_result:?}"
+        );
+    }
+
     /// Regression: Concede self-authenticates via its own `player_id`, but
     /// `actor` must still match that `player_id` so one player cannot
     /// concede another. CR 104.3a: *a player* may concede at any time.
@@ -9915,6 +10210,8 @@ mod tests {
     #[test]
     fn tap_land_for_mana_produces_correct_color() {
         let mut state = setup_game_at_main_phase();
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
 
         let land_id = create_object(
             &mut state,
@@ -9926,8 +10223,23 @@ mod tests {
         {
             let obj = state.objects.get_mut(&land_id).unwrap();
             obj.card_types.core_types.push(CoreType::Land);
-            obj.card_types.subtypes.push("Forest".to_string());
             obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
         }
 
         let result = apply_as_current(
@@ -9937,6 +10249,8 @@ mod tests {
         .unwrap();
 
         assert!(state.objects[&land_id].tapped);
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+        assert_eq!(state.priority_pass_count, 1);
         assert_eq!(
             state.players[0]
                 .mana_pool
@@ -25107,6 +25421,75 @@ mod mdfc_land_tests {
             "explicit starting player path must emit no contest event"
         );
         assert_eq!(state.current_starting_player, PlayerId(1));
+    }
+
+    #[test]
+    fn archenemy_starting_life_and_first_turn_use_configured_archenemy() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(2));
+        let mut state = GameState::new(config, 4, 7);
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(state.players[2].life, 40);
+        assert_eq!(state.players[3].life, 20);
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let result = start_game(&mut state);
+
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::StartingPlayerContest { .. })),
+            "Archenemy must not run the starting-player contest"
+        );
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
+    }
+
+    #[test]
+    fn two_hg_team_identity_survives_starting_player_rotation() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+
+        start_game_with_starting_player(&mut state, PlayerId(1));
+
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)]
+        );
+        assert!(!crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(1)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(2)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(3)
+        ));
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            30
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(1)),
+            30
+        );
     }
 
     /// Empty seat order keeps the PlayerId(0) fast path and emits no contest.

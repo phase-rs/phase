@@ -349,6 +349,9 @@ pub enum SpecialAction {
     /// this engine), so a mana restricted to this action is conservatively
     /// unspendable rather than over-permitted — see the type-level note above.
     TurnFaceUp,
+    /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
+    /// planar die as a Planechase special action.
+    RollPlanarDie,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or

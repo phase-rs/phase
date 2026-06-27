@@ -1842,5 +1842,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

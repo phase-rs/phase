@@ -141,6 +141,7 @@ pub mod stickers;
 mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
+pub mod topology;
 pub mod transform;
 pub mod trigger_index;
 pub(crate) mod trigger_matchers;
@@ -165,8 +166,9 @@ pub use deck_loading::{
 pub use deck_validation::{
     can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    validate_deck_for_format, validate_name_deck_for_format, CompatibilityCheck,
-    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
+    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
+    UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,
