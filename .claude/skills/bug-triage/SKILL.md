@@ -320,7 +320,7 @@ The reviewer must read the diff (`git show <sha>`) with fresh context and apply 
 - Card-specific fixes that should have been modeled as reusable building blocks
 
 If the reviewer flags issues:
-- Send them back to the implementer via `SendMessage` (if still alive) for inline fix in a follow-up commit
+- Send them back to the implementer via `SendMessage` for inline fix in a follow-up commit. The implementer now carries `SendMessage` too, so it acknowledges receipt and reports when the fix lands — a reliable liveness signal. If it has already been gracefully shut (`shutdown_request`) or crashed and cannot ack, re-spawn a fresh executor with the findings instead.
 - Re-spawn isolated review on the fixup commit's diff
 - Repeat until the review is clean (typically 1-2 rounds in practice)
 

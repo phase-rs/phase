@@ -899,6 +899,7 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "aiUnsupportedFormat": "{{format}} ist für das Hosten von Mehrspielerpartien verfügbar, aber KI-Partien werden dafür noch nicht unterstützt.",
     "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
     "cedhWarningUntagged": "ohne Bracket",
     "bracketViolation": {

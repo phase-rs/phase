@@ -1014,12 +1014,77 @@ static MANA_READINESS_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// `can_activate_mana_ability_now` pre-clone gate and the `batch_eligible_siblings`
 /// sibling filter, so both agree on readiness without each cloning + recursing
 /// the whole game state (the O(N!) cause when N batchable sources are present).
+/// CR 602.5 + CR 604.1: hoistable existence gates for the two whole-battlefield
+/// activation-prohibition scans inside [`mana_ability_ready_without_simulation`].
+///
+/// `is_blocked_by_cant_be_activated` (CR 602.5, City of Solitude class) and
+/// `is_blocked_by_cant_activate_during` (CR 117.1b) each iterate every
+/// battlefield static. Calling them per mana source turns the board-global mana
+/// availability sweep into O(N^2) (~700 Cryptolith-Rite tokens × ~700 statics).
+/// Computing presence ONCE and gating each scan collapses the sweep to O(N) when
+/// no such static exists (the overwhelming common case). Mirrors
+/// `combat::CombatStaticGates`. Uses `game_functioning_statics` (a superset of
+/// the precise `battlefield_active_statics` the scans use) so a `false` gate is a
+/// sound skip; a `true` gate falls through to the exact per-source scan.
+#[derive(Debug, Clone, Copy)]
+pub struct ManaActivationGates {
+    has_cant_be_activated: bool,
+    has_cant_activate_during: bool,
+}
+
+impl ManaActivationGates {
+    /// One `game_functioning_statics` sweep computing both presence flags.
+    pub fn compute(state: &GameState) -> Self {
+        let mut gates = ManaActivationGates {
+            has_cant_be_activated: false,
+            has_cant_activate_during: false,
+        };
+        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+            match def.mode {
+                crate::types::statics::StaticMode::CantBeActivated { .. } => {
+                    gates.has_cant_be_activated = true
+                }
+                crate::types::statics::StaticMode::CantActivateDuring { .. } => {
+                    gates.has_cant_activate_during = true
+                }
+                _ => {}
+            }
+            if gates.has_cant_be_activated && gates.has_cant_activate_during {
+                break;
+            }
+        }
+        gates
+    }
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
+) -> bool {
+    // Single-call entry: compute the gates once (one battlefield scan) and
+    // delegate. The board-sweep caller (`derive_display_state`) hoists the gates
+    // across all sources via `..._gated` instead.
+    let gates = ManaActivationGates::compute(state);
+    mana_ability_ready_without_simulation_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        &gates,
+    )
+}
+
+fn mana_ability_ready_without_simulation_gated(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
@@ -1065,11 +1130,17 @@ fn mana_ability_ready_without_simulation(
         return false;
     }
     // CR 602.5: CantBeActivated (City of Solitude class) blocks activation.
-    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+    // CR 604.1: gated existence check hoisted across the board sweep — the
+    // per-source full-battlefield scan only runs when such a static exists.
+    if gates.has_cant_be_activated
+        && super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def)
+    {
         return false;
     }
     // CR 602.5 + CR 117.1b: CantActivateDuring blocks activation this turn.
-    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+    if gates.has_cant_activate_during
+        && super::casting::is_blocked_by_cant_activate_during(state, player, ability_def)
+    {
         return false;
     }
     // CR 604 + CR 605.3b: Static activation restrictions must currently hold.
@@ -1102,11 +1173,41 @@ pub fn can_activate_mana_ability_now(
     ability_index: usize,
     ability_def: &AbilityDefinition,
 ) -> bool {
+    // Single-call entry: compute the activation-prohibition gates once and
+    // delegate. Board-wide sweeps use `..._gated` to hoist them across sources.
+    let gates = ManaActivationGates::compute(state);
+    can_activate_mana_ability_now_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        &gates,
+    )
+}
+
+/// Gated variant of [`can_activate_mana_ability_now`]: the caller supplies
+/// once-computed [`ManaActivationGates`] so a board-global mana sweep does not
+/// re-scan the battlefield for activation-prohibition statics per source.
+pub fn can_activate_mana_ability_now_gated(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    gates: &ManaActivationGates,
+) -> bool {
     #[cfg(test)]
     MANA_READINESS_CALLS.fetch_add(1, Ordering::Relaxed);
 
-    if !mana_ability_ready_without_simulation(state, player, source_id, ability_index, ability_def)
-    {
+    if !mana_ability_ready_without_simulation_gated(
+        state,
+        player,
+        source_id,
+        ability_index,
+        ability_def,
+        gates,
+    ) {
         return false;
     }
     // CR 605.3a + CR 106.12 + CR 107.6: When the cheap gate already conclusively
@@ -9175,6 +9276,71 @@ mod tests {
         assert_eq!(state.players[1].mana_pool.total(), 0);
         assert!(!state.objects.get(&forest).unwrap().tapped);
         assert!(events.is_empty());
+    }
+
+    /// Perf-gate correctness (`ManaActivationGates`, Fix A): when a
+    /// CantActivateDuring (City of Solitude class) static is present the hoisted
+    /// gate flag is set, so the per-source readiness scan must still run and
+    /// report the mana ability UNAVAILABLE. Exercises the `gate=true` arm of
+    /// `mana_ability_ready_without_simulation_gated` that the board-global mana
+    /// display sweep depends on — without this the fast tests only cover the
+    /// `gate=false` (no-prohibition) arm.
+    #[test]
+    fn can_activate_mana_ability_now_respects_cant_activate_during_via_gate() {
+        use crate::types::statics::{ActivationExemption, CastingProhibitionCondition};
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        state.active_player = p0; // NOT p1's turn
+        state.phase = Phase::PreCombatMain;
+
+        // P0 controls a City of Solitude analogue (AllPlayers /
+        // NotDuringAffectedPlayersTurn / exemption: None).
+        let prohibitor = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "City of Solitude".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohibitor)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantActivateDuring {
+                who: ProhibitionScope::AllPlayers,
+                when: CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+                exemption: ActivationExemption::None,
+            }));
+
+        let forest = create_object(
+            &mut state,
+            CardId(2),
+            p1,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let mana_ability = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&forest).unwrap().abilities)
+            .push(mana_ability.clone());
+
+        // gate=true arm: prohibition exists → scan runs → unavailable on P0's turn.
+        assert!(
+            !can_activate_mana_ability_now(&state, p1, forest, 0, &mana_ability),
+            "City of Solitude must make P1's mana ability unavailable on P0's turn (gate=true)"
+        );
+
+        // Control: on the affected player's own turn the prohibition lifts.
+        state.active_player = p1;
+        assert!(
+            can_activate_mana_ability_now(&state, p1, forest, 0, &mana_ability),
+            "on the affected player's own turn the mana ability is available again"
+        );
     }
 
     // ---------------------------------------------------------------

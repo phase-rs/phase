@@ -4,13 +4,14 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, opt, peek, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase,
+    inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -1881,6 +1882,38 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
         }
     }
 
+    (None, text.to_string())
+}
+
+/// CR 608.2c: Strip trailing "if it has the [least|greatest] <property> among
+/// <filter>" from a targeted spell effect (Wretched Banquet class).
+pub(super) fn strip_superlative_target_conditional(
+    text: &str,
+) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    let suffix_sep = " if ";
+    let mut best: Option<(usize, AbilityCondition)> = None;
+    for (idx, _) in lower.match_indices(suffix_sep) {
+        let suffix_orig = &text[idx + suffix_sep.len()..];
+        let suffix_lower = &lower[idx + suffix_sep.len()..];
+        if let Some((condition, rest)) = nom_on_lower(suffix_orig, suffix_lower, |input| {
+            terminated(
+                parse_spell_target_superlative_suffix,
+                (opt(tag(".")), multispace0),
+            )
+            .parse(input)
+        }) {
+            if rest.is_empty() {
+                best = Some((idx, condition));
+            }
+        }
+    }
+    if let Some((split_at, condition)) = best {
+        return (
+            Some(condition),
+            text[..split_at].trim_end_matches('.').trim().to_string(),
+        );
+    }
     (None, text.to_string())
 }
 
@@ -5702,6 +5735,70 @@ mod tests {
             Some(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::effect_performed())
             })
+        );
+    }
+
+    #[test]
+    fn strip_superlative_target_conditional_least_power() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+
+        let (condition, body) = strip_superlative_target_conditional(
+            "Destroy target creature if it has the least power among creatures.",
+        );
+        assert_eq!(body, "Destroy target creature");
+        let Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) = condition
+        else {
+            panic!("expected QuantityCheck, got {condition:?}");
+        };
+        assert_eq!(comparator, Comparator::LE);
+        assert_eq!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                }
+            }
+        );
+        assert_eq!(
+            rhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Min,
+                    property: ObjectProperty::Power,
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn strip_superlative_target_conditional_plural_subject() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+
+        let (condition, body) = strip_superlative_target_conditional(
+            "Destroy those creatures if they have the greatest toughness among creatures.",
+        );
+        assert_eq!(body, "Destroy those creatures");
+        let Some(AbilityCondition::QuantityCheck {
+            comparator, rhs, ..
+        }) = condition
+        else {
+            panic!("expected QuantityCheck, got {condition:?}");
+        };
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(
+            rhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Toughness,
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                }
+            }
         );
     }
 

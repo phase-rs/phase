@@ -4162,6 +4162,32 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: Wretched Banquet — least-power destroy gate must parse without
+    /// swallowing the intervening-if clause.
+    #[test]
+    fn wretched_banquet_least_power_destroy_parses_without_swallow() {
+        let parsed = parse_named(
+            "Destroy target creature if it has the least power among creatures.",
+            "Wretched Banquet",
+            &["Sorcery"],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "expected one spell ability");
+        match &parsed.abilities[0].condition {
+            Some(crate::types::ability::AbilityCondition::QuantityCheck { comparator, .. }) => {
+                assert_eq!(*comparator, crate::types::ability::Comparator::LE)
+            }
+            other => panic!("expected QuantityCheck least-power gate, got: {other:?}"),
+        }
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::SwallowedClause { .. })),
+            "Wretched Banquet must not swallow the least-power gate: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// CR 702.34a + CR 601.2f: Visions of Ruin — flashback cost plus commander-MV
     /// "cast this way" reduction must parse without swallowing either clause.
     #[test]

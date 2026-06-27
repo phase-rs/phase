@@ -899,6 +899,7 @@
     "startMatch": "Démarrer le match",
     "startMatchWithOpponents": "Démarrer le match ({{count}} adv.)",
     "deckNotLegal": "Le deck n'est pas légal en {{format}}.",
+    "aiUnsupportedFormat": "{{format}} est disponible pour héberger des parties multijoueur, mais les parties contre l'IA ne sont pas encore prises en charge.",
     "cedhWarning": "Votre deck est de bracket {{bracket}} face à une IA cEDH — attendez-vous à perdre vite.",
     "cedhWarningUntagged": "non défini",
     "bracketViolation": {

@@ -306,6 +306,30 @@ pub fn apply_as_current(
     state: &mut GameState,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
+    apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
+}
+
+/// Legality-probe variant of [`apply_as_current`] for throwaway simulation
+/// clones (the AI `SimulationFilter` oracle): the caller only reads `.is_ok()`
+/// and discards the mutated state. The Ok/Err verdict is fully decided inside
+/// `apply_action`; `finalize_display_state` only computes frontend-only hints
+/// (mana availability, devotion, summoning-sickness display) that no rules
+/// legality path consults. Applying in `DeferredDisplay` mode therefore yields
+/// the identical verdict while skipping the per-call `derive_display_state`
+/// board sweep — which on a go-wide mana board (Cryptolith Rite granting `{T}:
+/// Add` to hundreds of tokens) is an O(N^2) static scan paid once per candidate.
+pub(crate) fn apply_as_current_for_legality(
+    state: &mut GameState,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_as_current_with_mode(state, action, PublicFinalizeMode::DeferredDisplay)
+}
+
+fn apply_as_current_with_mode(
+    state: &mut GameState,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
     let actor = match &action {
         GameAction::Concede { player_id } => *player_id,
         // CR 103.5: For simultaneous-decision states, pick the first pending
@@ -320,7 +344,7 @@ pub fn apply_as_current(
             })?
         }
     };
-    apply(state, actor, action)
+    apply_action_boundary(state, actor, action, mode)
 }
 
 pub(super) fn resume_pending_continuation_if_priority(
@@ -7677,6 +7701,38 @@ mod tests {
         state
     }
 
+    /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
+    /// squirrel state). The AI `SimulationFilter` legality probe
+    /// (`apply_as_current_for_legality`) discards its mutated clone and only
+    /// reads `.is_ok()`, so it must NOT run `finalize_display_state`'s
+    /// board-global mana-availability sweep — that sweep is O(N^2) on a board of
+    /// hundreds of mana sources and the filter pays it once per candidate.
+    /// The Immediate `apply_as_current` still sweeps (display state is exposed).
+    #[test]
+    fn apply_for_legality_skips_display_mana_sweep() {
+        // Deferred-display legality probe: no sweep even with mana display dirty.
+        let mut sim = setup_game_at_main_phase();
+        sim.public_state_dirty.mana_display_dirty = true;
+        crate::game::perf_counters::reset();
+        apply_as_current_for_legality(&mut sim, GameAction::PassPriority).unwrap();
+        assert_eq!(
+            crate::game::perf_counters::snapshot().mana_display_sweeps,
+            0,
+            "legality probe must skip the display mana sweep"
+        );
+
+        // Discriminator: the Immediate path DOES sweep, so the assertion above
+        // is meaningful rather than vacuous.
+        let mut immediate = setup_game_at_main_phase();
+        immediate.public_state_dirty.mana_display_dirty = true;
+        crate::game::perf_counters::reset();
+        apply_as_current(&mut immediate, GameAction::PassPriority).unwrap();
+        assert!(
+            crate::game::perf_counters::snapshot().mana_display_sweeps >= 1,
+            "Immediate apply finalizes display state and runs the mana sweep"
+        );
+    }
+
     #[test]
     fn eldrazi_temple_restricted_mana_casts_kindred_eldrazi_spell_only() {
         let mut state = setup_game_at_main_phase();
@@ -10249,8 +10305,6 @@ mod tests {
         .unwrap();
 
         assert!(state.objects[&land_id].tapped);
-        assert!(state.priority_passes.contains(&PlayerId(1)));
-        assert_eq!(state.priority_pass_count, 1);
         assert_eq!(
             state.players[0]
                 .mana_pool

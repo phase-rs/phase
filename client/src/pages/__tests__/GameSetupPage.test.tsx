@@ -141,24 +141,32 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("GameSetupPage — cEDH bracket warning chip", () => {
-  it("does not offer Two-Headed Giant in the solo format picker", async () => {
+  it("offers implemented multiplayer variants in the format picker", async () => {
     const user = userEvent.setup();
     renderGameSetupPage();
 
     await user.click(await screen.findByRole("button", { name: /Commander/i }));
 
-    expect(screen.queryByRole("button", { name: "Two-Headed Giant" })).not.toBeInTheDocument();
+    expect(screen.getByText("Two-Headed Giant")).toBeInTheDocument();
+    expect(screen.getByText("Planechase")).toBeInTheDocument();
+    expect(screen.getByText("Archenemy")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Free-for-All/i })).toBeInTheDocument();
   });
 
-  it("ignores a Two-Headed Giant URL format on the solo setup page", async () => {
+  it("accepts a Two-Headed Giant URL format on the setup page", async () => {
     renderGameSetupPage("/game-setup?format=TwoHeadedGiant");
 
-    expect(await screen.findByText("Commander")).toBeInTheDocument();
-    expect(screen.queryByText("Two-Headed Giant")).not.toBeInTheDocument();
+    expect(await screen.findByText("Two-Headed Giant")).toBeInTheDocument();
   });
 
-  it("does not restore a stale Two-Headed Giant solo preference", async () => {
+  it("accepts Planechase on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=Planechase");
+
+    expect(await screen.findByText("Planechase")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
+  it("restores a Two-Headed Giant setup preference", async () => {
     act(() => {
       usePreferencesStore.setState({
         lastFormat: "TwoHeadedGiant",
@@ -169,8 +177,7 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
 
     renderGameSetupPage();
 
-    expect(await screen.findByText("Commander")).toBeInTheDocument();
-    expect(screen.queryByText("Two-Headed Giant")).not.toBeInTheDocument();
+    expect(await screen.findByText("Two-Headed Giant")).toBeInTheDocument();
   });
 
   it("shows the warning chip when the human deck is non-cEDH and cEDH mode is on", async () => {

@@ -19943,11 +19943,15 @@ pub(crate) fn parse_effect_chain_ir(
         let (counter_cond, text) = strip_counter_conditional(&text);
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
+        // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest
+        // <property> among <filter>" (Wretched Banquet class).
+        let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
         let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
         let (cast_from_zone, text) = if condition.is_none()
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
         {
             strip_cast_from_zone_conditional(&text)
@@ -19958,6 +19962,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
         {
@@ -19969,6 +19974,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
@@ -19983,6 +19989,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
@@ -19997,6 +20004,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
@@ -20012,6 +20020,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
@@ -20030,6 +20039,7 @@ pub(crate) fn parse_effect_chain_ir(
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
@@ -20045,6 +20055,7 @@ pub(crate) fn parse_effect_chain_ir(
         let condition = condition
             .or(counter_cond)
             .or(mv_cond)
+            .or(superlative_target_cond)
             .or(target_supertype_cond)
             .or(if_you_do)
             .or(cast_from_zone)
@@ -51276,6 +51287,119 @@ mod tests {
             }
             other => panic!("expected TargetMatchesFilter condition, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn wretched_banquet_least_power_condition() {
+        let def = parse_effect_chain(
+            "Destroy target creature if it has the least power among creatures.",
+            AbilityKind::Spell,
+        );
+        match def.condition {
+            Some(AbilityCondition::QuantityCheck {
+                lhs,
+                comparator,
+                rhs,
+            }) => {
+                assert_eq!(comparator, Comparator::LE);
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        }
+                    }
+                );
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate {
+                            function: AggregateFunction::Min,
+                            property: ObjectProperty::Power,
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        }
+                    }
+                );
+            }
+            other => panic!("expected QuantityCheck least-power gate, got: {other:?}"),
+        }
+        assert!(
+            matches!(*def.effect, Effect::Destroy { .. }),
+            "expected Destroy effect, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn wretched_banquet_least_power_evaluates_per_target() {
+        use crate::game::effects::evaluate_condition;
+        use crate::game::zones;
+        use crate::types::ability::{ResolvedAbility, TargetRef};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        let def = parse_effect_chain(
+            "Destroy target creature if it has the least power among creatures.",
+            AbilityKind::Spell,
+        );
+        let cond = def.condition.expect("expected least-power condition");
+
+        let mut state = GameState::new_two_player(42);
+        let weak = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "1/1".to_string(),
+            Zone::Battlefield,
+        );
+        let mid = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "2/2".to_string(),
+            Zone::Battlefield,
+        );
+        let strong = zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "3/3".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, power) in [(weak, 1), (mid, 2), (strong, 3)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.toughness = Some(power);
+        }
+
+        let ability_for = |target| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        assert!(
+            evaluate_condition(&cond, &state, &ability_for(weak)),
+            "1/1 tied for least power must pass"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &ability_for(mid)),
+            "2/2 is not least power"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &ability_for(strong)),
+            "3/3 is not least power"
+        );
     }
 
     // --- "The owner of target X" parser tests ---
