@@ -213,15 +213,19 @@ export function openPhaseSocket(
         return;
       }
 
-      // Send our ClientHello back. After this the socket is a live phase
-      // session; hand it off to the caller.
+      const clientProtocolVersion =
+        info.mode === "LobbyOnly" ? info.protocolVersion : PROTOCOL_VERSION;
+
+      // Send our ClientHello back. For LobbyOnly brokers in the rollout
+      // window, echo the accepted broker protocol so an older deployed worker
+      // does not reject a newer local-dev client as a future protocol.
       ws.send(
         JSON.stringify({
           type: "ClientHello",
           data: {
             client_version: __APP_VERSION__,
             build_commit: __BUILD_HASH__,
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: clientProtocolVersion,
           },
         }),
       );

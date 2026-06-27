@@ -101,7 +101,7 @@ describe("openPhaseSocket", () => {
     expect(socket.serverInfo.mode).toBe("LobbyOnly");
     expect(socket.serverInfo.protocolVersion).toBe(9);
     expect(ws.send).toHaveBeenCalledWith(
-      expect.stringContaining('"type":"ClientHello"'),
+      expect.stringContaining('"protocol_version":9'),
     );
   });
 
