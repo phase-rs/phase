@@ -899,6 +899,7 @@
     "startMatch": "Empezar partida",
     "startMatchWithOpponents": "Empezar partida ({{count}} op.)",
     "deckNotLegal": "El mazo no es legal en {{format}}.",
+    "aiUnsupportedFormat": "{{format}} está disponible para alojar partidas multijugador, pero las partidas contra IA aún no son compatibles.",
     "cedhWarning": "Tu mazo es de bracket {{bracket}} contra una IA cEDH: prepárate para perder rápido.",
     "cedhWarningUntagged": "sin etiqueta",
     "bracketViolation": {

@@ -497,11 +497,11 @@ export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
   return FORMAT_REGISTRY.find((m) => m.format === format);
 }
 
-export function isSoloSetupFormat(metadata: FormatMetadata): boolean {
-  return !metadata.default_config.team_based && metadata.format !== "Planechase";
-}
+export const SETUP_FORMATS = FORMAT_REGISTRY;
 
-export const SOLO_SETUP_FORMATS = FORMAT_REGISTRY.filter(isSoloSetupFormat);
+export function isSetupFormat(metadata: FormatMetadata): boolean {
+  return SETUP_FORMATS.includes(metadata);
+}
 
 export function isDeckConstructionFormat(metadata: FormatMetadata): boolean {
   return metadata.group !== "Multiplayer" || metadata.format === "Planechase";

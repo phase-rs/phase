@@ -899,6 +899,7 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "aiUnsupportedFormat": "{{format}} jest dostępny do hostowania gier wieloosobowych, ale mecze z AI nie są jeszcze obsługiwane.",
     "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
     "cedhWarningUntagged": "bez bracketu",
     "bracketViolation": {

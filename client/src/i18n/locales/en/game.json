@@ -933,6 +933,7 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "aiUnsupportedFormat": "{{format}} is available for multiplayer hosting, but AI matches are not supported for it yet.",
     "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
     "cedhWarningUntagged": "untagged",
     "bracketViolation": {

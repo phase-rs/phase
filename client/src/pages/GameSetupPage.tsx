@@ -6,8 +6,8 @@ import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapte
 import {
   formatMetadata,
   formatSuppliesDeck,
-  isSoloSetupFormat,
-  SOLO_SETUP_FORMATS,
+  isSetupFormat,
+  SETUP_FORMATS,
 } from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -49,9 +49,9 @@ const GROUP_DOT_TONE: Record<FormatGroup, string> = {
   Multiplayer: "bg-emerald-300",
 };
 
-function soloSetupDefaults(format: GameFormat): FormatConfig | null {
+function setupDefaults(format: GameFormat): FormatConfig | null {
   const metadata = formatMetadata(format);
-  if (!metadata || !isSoloSetupFormat(metadata)) return null;
+  if (!metadata || !isSetupFormat(metadata)) return null;
   return metadata.default_config;
 }
 
@@ -108,15 +108,15 @@ export function GameSetupPage() {
 
     // Allow direct format entry via ?format= search param
     const fmtParam = searchParams.get("format") as GameFormat | null;
-    if (fmtParam && soloSetupDefaults(fmtParam)) {
+    if (fmtParam && setupDefaults(fmtParam)) {
       applyFormat(fmtParam);
       return;
     }
 
     // Restore last-used format, or default to Commander
-    const restoredLastFormat = lastFormat && soloSetupDefaults(lastFormat) ? lastFormat : null;
+    const restoredLastFormat = lastFormat && setupDefaults(lastFormat) ? lastFormat : null;
     const fmt = restoredLastFormat ?? "Commander";
-    const defaults = soloSetupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
+    const defaults = setupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
     setPlayerCount(restoredLastFormat ? lastPlayerCount : defaults.min_players);
@@ -124,7 +124,7 @@ export function GameSetupPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applyFormat(format: GameFormat) {
-    const defaults = soloSetupDefaults(format);
+    const defaults = setupDefaults(format);
     if (!defaults) return;
     setSelectedFormat(format);
     setFormatConfig(defaults);
@@ -530,6 +530,12 @@ export function GameSetupPage() {
                 </div>
               )}
 
+              {!formatSupportsAi && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {t("gameSetup.aiUnsupportedFormat", { format: selectedFormat })}
+                </div>
+              )}
+
               {/* Separator */}
               <div className="border-t border-white/8" />
 
@@ -568,7 +574,7 @@ export function GameSetupPage() {
       >
         <div className="pb-4 lg:pb-6">
           <FormatPicker
-            formats={SOLO_SETUP_FORMATS}
+            formats={SETUP_FORMATS}
             onFormatSelect={(format) => {
               applyFormat(format);
               setFormatPickerOpen(false);

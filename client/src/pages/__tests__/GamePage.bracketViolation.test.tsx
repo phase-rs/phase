@@ -127,7 +127,7 @@ vi.mock("../../stores/gameStore", () => ({
 // importing the real module.
 vi.mock("../../stores/multiplayerStore", () => ({
   useMultiplayerStore: mockUseMultiplayerStore,
-  FORMAT_DEFAULTS: new Proxy({}, { get: () => ({}) }),
+  FORMAT_DEFAULTS: new Proxy({}, { get: (_target, key) => ({ format: String(key) }) }),
 }));
 
 vi.mock("../../hooks/usePlayerId", () => ({
@@ -235,16 +235,22 @@ afterEach(() => {
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {
-  it("does not pass Two-Headed Giant to GameProvider for a direct local URL", () => {
+  it("passes Two-Headed Giant to GameProvider for a direct local URL", () => {
     renderGamePage("/game/test-game-123?format=TwoHeadedGiant&players=4");
 
-    expect(capturedFormatConfig?.format).not.toBe("TwoHeadedGiant");
+    expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
   });
 
-  it("does not pass Two-Headed Giant to GameProvider for a direct AI URL", () => {
+  it("passes Two-Headed Giant to GameProvider for a direct AI URL", () => {
     renderGamePage("/game/test-game-123?mode=ai&format=TwoHeadedGiant&players=4");
 
-    expect(capturedFormatConfig?.format).not.toBe("TwoHeadedGiant");
+    expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
+  });
+
+  it("passes Planechase to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=Planechase&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("Planechase");
   });
 
   it("renders the blocking modal when bracketViolation flag is true", async () => {

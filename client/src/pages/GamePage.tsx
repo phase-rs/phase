@@ -128,7 +128,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
-import { formatMetadata, isSoloSetupFormat } from "../data/formatRegistry.ts";
+import { formatMetadata, isSetupFormat } from "../data/formatRegistry.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
@@ -163,14 +163,14 @@ function isDirectSoloRouteMode(rawMode: string | null): boolean {
   ].includes(rawMode ?? "");
 }
 
-function isDirectSoloFormat(format: GameFormat): boolean {
+function isDirectSetupFormat(format: GameFormat): boolean {
   const metadata = formatMetadata(format);
-  return Boolean(metadata && isSoloSetupFormat(metadata));
+  return Boolean(metadata && isSetupFormat(metadata));
 }
 
-function directSoloFormatConfig(format: GameFormat | null) {
+function directSetupFormatConfig(format: GameFormat | null) {
   if (!format) return undefined;
-  if (!isDirectSoloFormat(format)) return undefined;
+  if (!isDirectSetupFormat(format)) return undefined;
   return FORMAT_DEFAULTS[format];
 }
 
@@ -234,10 +234,10 @@ export function GamePage() {
   // self-documenting.
   const formatConfig = useMemo(() => {
     if (isDirectSoloRouteMode(rawMode)) {
-      if (savedFormatConfig && isDirectSoloFormat(savedFormatConfig.format)) {
+      if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
         return savedFormatConfig;
       }
-      return directSoloFormatConfig(formatParam);
+      return directSetupFormatConfig(formatParam);
     }
     return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
   }, [formatParam, rawMode, savedFormatConfig]);
