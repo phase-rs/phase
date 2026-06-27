@@ -5,7 +5,13 @@ export type DeckChoice =
   | { type: "Named"; data: string }
   | {
       type: "DeckList";
-      data: { main_deck: string[]; sideboard: string[]; commander: string[] };
+      data: {
+        main_deck: string[];
+        sideboard: string[];
+        commander: string[];
+        planar_deck?: string[];
+        scheme_deck?: string[];
+      };
     };
 
 export type SeatKind =

@@ -679,6 +679,9 @@ fn guard_full_create_game_settings_inbound(
 ) -> Result<u8, String> {
     let pc = fields.player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
     lobby_broker::validate_create_game_settings_inbound_fields(&fields)?;
+    if let Some(format_config) = fields.format_config {
+        format_config.validate_for_player_count(pc)?;
+    }
     guard_create_ai_seats(ai_seats, pc)?;
     lobby_broker::validate_deck_payload("deck", fields.deck)?;
     Ok(pc)
@@ -2444,6 +2447,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             sideboard: deck.sideboard,
             commander: deck.commander,
             planar_deck: deck.planar_deck,
+            scheme_deck: deck.scheme_deck,
             attraction_deck: deck.attraction_deck,
             contraption_deck: deck.contraption_deck,
             sticker_sheets: deck.sticker_sheets,
@@ -3527,6 +3531,7 @@ async fn handle_client_message(
                     password: password.as_deref(),
                     timer_seconds,
                     player_count: requested_player_count,
+                    format_config: format_config.as_ref(),
                     room_name: room_name.as_deref(),
                     host_peer_id: host_peer_id.as_deref(),
                     draft_metadata: draft_metadata.as_ref(),
@@ -3590,6 +3595,7 @@ async fn handle_client_message(
                     &deck.sideboard,
                     &deck.commander,
                     &deck.planar_deck,
+                    &deck.scheme_deck,
                     &deck.signature_spell,
                     fc.format,
                     Some(match_config.match_type),
@@ -3641,6 +3647,7 @@ async fn handle_client_message(
                         &ai_deck_data.sideboard,
                         &ai_deck_data.commander,
                         &ai_deck_data.planar_deck,
+                        &ai_deck_data.scheme_deck,
                         &ai_deck_data.signature_spell,
                         fc.format,
                         Some(match_config.match_type),
@@ -5979,6 +5986,7 @@ mod full_create_guard_tests {
             password: None,
             timer_seconds: None,
             player_count: 2,
+            format_config: None,
             room_name: None,
             host_peer_id,
             draft_metadata,
@@ -6028,6 +6036,19 @@ mod full_create_guard_tests {
             .unwrap_err();
 
         assert!(err.contains("draft_metadata.set_code"));
+    }
+
+    #[test]
+    fn full_create_guard_rejects_archenemy_seat_outside_player_count() {
+        let deck = deck();
+        let mut fields = fields(&deck, None, None);
+        let mut format_config = engine::types::format::FormatConfig::archenemy();
+        format_config.archenemy_player = Some(engine::types::player::PlayerId(2));
+        fields.format_config = Some(&format_config);
+
+        let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
+
+        assert!(err.contains("archenemy_player"));
     }
 
     #[test]

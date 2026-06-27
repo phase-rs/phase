@@ -18,6 +18,9 @@ pub struct DeckData {
     /// CR 901.15a: Supplementary Planechase planar deck as card names.
     #[serde(default)]
     pub planar_deck: Vec<String>,
+    /// CR 904.3: Supplementary Archenemy scheme deck as card names.
+    #[serde(default)]
+    pub scheme_deck: Vec<String>,
     /// Unstable Contraptions: supplementary Contraption deck as card names.
     #[serde(default)]
     pub contraption_deck: Vec<String>,

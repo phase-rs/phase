@@ -433,7 +433,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // they set the top scheme of their scheme deck in motion (a turn-based action
     // that doesn't use the stack). No-op outside an Archenemy game, when the active
     // player isn't the archenemy, or when the scheme deck is empty.
-    if next == Phase::PreCombatMain && state.archenemy == Some(state.active_player) {
+    if next == Phase::PreCombatMain
+        && super::topology::archenemy(state) == Some(state.active_player)
+    {
         crate::game::archenemy::set_in_motion(state, events);
     }
 }
@@ -2211,7 +2213,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::card_type::Supertype;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::sync::Arc;
 
@@ -4737,6 +4739,66 @@ mod tests {
             state.pending_team_draw_step.is_empty(),
             "the draw-step queue must be fully drained, not left with stale entries"
         );
+    }
+
+    #[test]
+    fn execute_draw_archenemy_hero_team_draws_all_living_heroes() {
+        let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 4, 0);
+        state.active_player = PlayerId(1);
+        let archenemy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme Boss Draw".to_string(),
+            Zone::Library,
+        );
+        let hero_cards: Vec<ObjectId> = (1u8..=3)
+            .map(|seat| {
+                create_object(
+                    &mut state,
+                    CardId(10 + u64::from(seat)),
+                    PlayerId(seat),
+                    format!("Hero {seat} Draw"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        let result = execute_draw(&mut state, &mut events);
+
+        assert!(result.is_none(), "no replacement pause expected here");
+        assert!(state.players[0].library.contains(&archenemy_card));
+        for (offset, card) in hero_cards.iter().enumerate() {
+            assert!(state.players[offset + 1].hand.contains(card));
+        }
+    }
+
+    #[test]
+    fn execute_draw_archenemy_turn_draws_only_archenemy() {
+        let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 4, 0);
+        state.active_player = PlayerId(0);
+        let archenemy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Archenemy Draw".to_string(),
+            Zone::Library,
+        );
+        let hero_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hero Draw".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let result = execute_draw(&mut state, &mut events);
+
+        assert!(result.is_none(), "no replacement pause expected here");
+        assert!(state.players[0].hand.contains(&archenemy_card));
+        assert!(state.players[1].library.contains(&hero_card));
     }
 
     /// CR 805.4b + CR 616.1: regression for the resumption gap flagged in

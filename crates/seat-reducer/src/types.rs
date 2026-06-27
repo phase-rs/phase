@@ -46,6 +46,22 @@ pub fn seat_team_info(format: &FormatConfig, seat_index: u8) -> Option<SeatTeamI
                 position_in_team: seat_index % team_size,
             })
         }
+        FormatTopology::OneVsMany { archenemy, .. } => {
+            if seat_index >= format.max_players {
+                return None;
+            }
+            if seat_index == archenemy.0 {
+                return Some(SeatTeamInfo {
+                    team_index: 0,
+                    position_in_team: 0,
+                });
+            }
+            let hero_position = (0..seat_index).filter(|seat| *seat != archenemy.0).count() as u8;
+            Some(SeatTeamInfo {
+                team_index: 1,
+                position_in_team: hero_position,
+            })
+        }
     }
 }
 
@@ -55,7 +71,7 @@ pub fn seat_team_info_for_seats(
 ) -> Vec<Option<SeatTeamInfo>> {
     match format.topology() {
         FormatTopology::IndividualSeats => Vec::new(),
-        FormatTopology::FixedTeams { .. } => (0..seat_count)
+        FormatTopology::FixedTeams { .. } | FormatTopology::OneVsMany { .. } => (0..seat_count)
             .map(|seat_index| seat_team_info(format, seat_index as u8))
             .collect(),
     }

@@ -24,7 +24,7 @@ import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
-import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
@@ -213,6 +213,7 @@ type ExpandedDeckWithTier = {
   sideboard: string[];
   commander: string[];
   planar_deck: string[];
+  scheme_deck: string[];
   signature_spell: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
@@ -276,6 +277,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       sideboard: [],
       commander: [],
       planar_deck: [],
+      scheme_deck: [],
       signature_spell: [],
       sticker_sheets: [],
       bracket_tier: "core",
@@ -304,6 +306,7 @@ async function buildLocalAiDeckList(
       sideboard: [],
       commander: [],
       planar_deck: [],
+      scheme_deck: [],
       signature_spell: [],
       sticker_sheets: [],
       bracket_tier: "core",
@@ -1209,9 +1212,9 @@ export function GameProvider({
       if (draftDeckRaw) {
         sessionStorage.removeItem(draftDeckKey);
         const deckList = JSON.parse(draftDeckRaw) as {
-          player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-          opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
-          ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+          player: ExpandedDeck;
+          opponent: ExpandedDeck;
+          ai_decks: ExpandedDeck[];
         };
         try {
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
@@ -1235,8 +1238,24 @@ export function GameProvider({
         const run = await loadDraftRun(draftId);
         if (run) {
           const deckList = {
-            player: { main_deck: run.playerDeck, sideboard: [] as string[], commander: [] as string[] },
-            opponent: { main_deck: run.opponentDeck, sideboard: [] as string[], commander: [] as string[] },
+            player: {
+              main_deck: run.playerDeck,
+              sideboard: [] as string[],
+              commander: [] as string[],
+              planar_deck: [] as string[],
+              scheme_deck: [] as string[],
+              sticker_sheets: [] as string[],
+              signature_spell: [] as string[],
+            },
+            opponent: {
+              main_deck: run.opponentDeck,
+              sideboard: [] as string[],
+              commander: [] as string[],
+              planar_deck: [] as string[],
+              scheme_deck: [] as string[],
+              sticker_sheets: [] as string[],
+              signature_spell: [] as string[],
+            },
             ai_decks: [],
           };
           try {

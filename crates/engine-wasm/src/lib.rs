@@ -567,6 +567,12 @@ pub fn initialize_game(
     };
     let count = player_count.unwrap_or(2);
     let game_format = format_config.format;
+    if let Err(reason) = format_config.validate_for_player_count(count) {
+        return to_js(&serde_json::json!({
+            "error": true,
+            "reasons": [reason],
+        }));
+    }
 
     let mut state = GameState::new(format_config, count, seed);
     state.debug_mode = true;
@@ -638,6 +644,7 @@ pub fn initialize_game(
                         &deck.sideboard,
                         &deck.commander,
                         &deck.planar_deck,
+                        &deck.scheme_deck,
                         &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
@@ -659,6 +666,7 @@ pub fn initialize_game(
                         &deck.sideboard,
                         &deck.commander,
                         &deck.planar_deck,
+                        &deck.scheme_deck,
                         &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
@@ -1380,6 +1388,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 commander: deck_data.commander,
                 attraction_deck: deck_data.attraction_deck,
                 planar_deck: deck_data.planar_deck,
+                scheme_deck: deck_data.scheme_deck,
                 contraption_deck: deck_data.contraption_deck,
                 sticker_sheets: deck_data.sticker_sheets,
                 signature_spell: deck_data.signature_spell,

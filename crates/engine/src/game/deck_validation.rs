@@ -22,6 +22,8 @@ pub struct DeckCompatibilityRequest {
     pub commander: Vec<String>,
     #[serde(default)]
     pub planar_deck: Vec<String>,
+    #[serde(default)]
+    pub scheme_deck: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker
     /// formats. Included in `all_deck_cards` so copy-count and identity checks are
     /// accurate regardless of which validation path is active.
@@ -261,6 +263,7 @@ pub fn validate_name_deck_for_format_with_sig(
         sideboard,
         commander,
         &[],
+        &[],
         signature_spell,
         selected_format,
         selected_match_type,
@@ -275,6 +278,7 @@ pub fn validate_name_deck_for_format_full(
     sideboard: &[String],
     commander: &[String],
     planar_deck: &[String],
+    scheme_deck: &[String],
     signature_spell: &[String],
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
@@ -285,6 +289,7 @@ pub fn validate_name_deck_for_format_full(
         sideboard: sideboard.to_vec(),
         commander: commander.to_vec(),
         planar_deck: planar_deck.to_vec(),
+        scheme_deck: scheme_deck.to_vec(),
         signature_spell: signature_spell.to_vec(),
         selected_format: Some(selected_format),
         selected_match_type,
@@ -521,6 +526,105 @@ fn evaluate_planechase(
     CompatibilityCheck {
         compatible: reasons.is_empty(),
         reasons,
+    }
+}
+
+fn evaluate_archenemy(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    if !(2..=6).contains(&request.player_count) {
+        reasons.push(format!(
+            "Archenemy requires 2 to 6 players (found {})",
+            request.player_count
+        ));
+    }
+    if !request.commander.is_empty() {
+        reasons.push("Archenemy decks do not use a commander slot".to_string());
+    }
+    if request.main_deck.len() < 60 {
+        reasons.push(format!(
+            "Main deck has {} cards (minimum 60)",
+            request.main_deck.len()
+        ));
+    }
+
+    let counts = combined_copy_counts(db, request);
+    let over_limit = copy_limit_violations(db, &counts, 4);
+    if !over_limit.is_empty() {
+        reasons.push(summarize_cards(
+            "More than 4 copies (main + sideboard combined)",
+            &over_limit,
+            6,
+        ));
+    }
+
+    if !request.scheme_deck.is_empty() {
+        validate_scheme_deck(db, &request.scheme_deck, &mut reasons);
+    }
+
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
+}
+
+fn validate_scheme_deck(db: &CardDatabase, scheme_deck: &[String], reasons: &mut Vec<String>) {
+    // CR 904.3: A scheme deck must contain at least twenty scheme cards and
+    // can't contain more than two copies of any card by English name.
+    if scheme_deck.len() < 20 {
+        reasons.push(format!(
+            "Scheme deck has {} cards (minimum 20)",
+            scheme_deck.len()
+        ));
+    }
+
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut non_scheme = BTreeSet::new();
+    let mut unsupported = BTreeSet::new();
+    for name in scheme_deck {
+        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+            continue;
+        };
+        *counts.entry(face.name.to_lowercase()).or_insert(0) += 1;
+        if !face.card_type.core_types.contains(&CoreType::Scheme) {
+            non_scheme.insert(face.name.clone());
+        }
+        if !crate::game::coverage::card_face_gaps(face).is_empty() {
+            unsupported.insert(face.name.clone());
+        }
+    }
+
+    let over_limit: BTreeSet<String> = counts
+        .into_iter()
+        .filter(|(_, count)| *count > 2)
+        .filter_map(|(name, count)| {
+            db.get_face_by_name(&name)
+                .map(|face| format!("{} ({count} copies)", face.name))
+        })
+        .collect();
+    if !over_limit.is_empty() {
+        reasons.push(summarize_cards(
+            "Scheme deck copy-limit violations",
+            &over_limit,
+            6,
+        ));
+    }
+    if !non_scheme.is_empty() {
+        reasons.push(summarize_cards(
+            "Scheme deck cards must be Scheme cards",
+            &non_scheme,
+            6,
+        ));
+    }
+    if !unsupported.is_empty() {
+        reasons.push(summarize_cards("Unsupported scheme cards", &unsupported, 6));
     }
 }
 
@@ -1599,6 +1703,18 @@ fn quick_planechase_check(
     }
 }
 
+fn quick_archenemy_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> QuickCheckResult {
+    let unknown_cards = collect_unknown_cards(db, request);
+    let check = evaluate_archenemy(db, request, &unknown_cards);
+    QuickCheckResult {
+        reason: check.reasons.into_iter().next(),
+        unknown_cards,
+    }
+}
+
 fn evaluate_selected_format_summary(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1653,6 +1769,7 @@ fn evaluate_selected_format_summary(
         GameFormat::Oathbreaker => quick_oathbreaker_check(db, request),
         GameFormat::Momir => quick_momir_check(db, request),
         GameFormat::Planechase => quick_planechase_check(db, request),
+        GameFormat::Archenemy => quick_archenemy_check(db, request),
         GameFormat::Brawl | GameFormat::HistoricBrawl => quick_brawl_check(
             db,
             request,
@@ -2034,6 +2151,13 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
+        GameFormat::Archenemy => {
+            let check = evaluate_archenemy(db, request, unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
     };
 
@@ -2143,6 +2267,11 @@ fn collect_unknown_cards(
         }
     }
     for name in &request.planar_deck {
+        if !card_is_known(db, name) {
+            unknown.insert(name.to_string());
+        }
+    }
+    for name in &request.scheme_deck {
         if !card_is_known(db, name) {
             unknown.insert(name.to_string());
         }
@@ -3055,12 +3184,143 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck,
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Planechase),
             selected_match_type: None,
             player_count,
             summary_only: false,
         }
+    }
+
+    fn insert_scheme_card(cards: &mut Map<String, Value>, name: &str) {
+        cards.insert(
+            name.to_lowercase(),
+            planechase_card_json(name, &[], &["Scheme"]),
+        );
+    }
+
+    fn insert_unsupported_scheme_card(cards: &mut Map<String, Value>, name: &str) {
+        let mut card = planechase_card_json(name, &[], &["Scheme"]);
+        card["abilities"] = serde_json::to_value(vec![crate::types::AbilityDefinition::new(
+            crate::types::AbilityKind::Spell,
+            crate::types::Effect::unimplemented("scheme_test", "unsupported scheme test"),
+        )])
+        .unwrap();
+        cards.insert(name.to_lowercase(), card);
+    }
+
+    fn archenemy_test_db() -> CardDatabase {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        for index in 1..=20 {
+            insert_scheme_card(&mut cards, &format!("Scheme {index}"));
+        }
+        insert_unsupported_scheme_card(&mut cards, "Unsupported Scheme");
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn scheme_names(count: usize) -> Vec<String> {
+        (1..=count).map(|index| format!("Scheme {index}")).collect()
+    }
+
+    fn archenemy_request(scheme_deck: Vec<String>) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck,
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Archenemy),
+            selected_match_type: None,
+            player_count: 4,
+            summary_only: false,
+        }
+    }
+
+    #[test]
+    fn archenemy_accepts_valid_twenty_card_scheme_deck() {
+        let db = archenemy_test_db();
+        let request = archenemy_request(scheme_names(20));
+        let check = evaluate_archenemy(&db, &request, &BTreeSet::new());
+
+        assert!(check.compatible, "reasons: {:?}", check.reasons);
+    }
+
+    #[test]
+    fn archenemy_rejects_short_scheme_deck() {
+        let db = archenemy_test_db();
+        let request = archenemy_request(scheme_names(19));
+        let check = evaluate_archenemy(&db, &request, &BTreeSet::new());
+
+        assert!(!check.compatible);
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("minimum 20")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn archenemy_rejects_third_scheme_copy() {
+        let db = archenemy_test_db();
+        let mut scheme_deck = scheme_names(18);
+        scheme_deck.extend(["Scheme 1".to_string(), "Scheme 1".to_string()]);
+        let request = archenemy_request(scheme_deck);
+        let check = evaluate_archenemy(&db, &request, &BTreeSet::new());
+
+        assert!(!check.compatible);
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("copy-limit")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn archenemy_rejects_non_scheme_in_scheme_deck() {
+        let db = archenemy_test_db();
+        let mut scheme_deck = scheme_names(19);
+        scheme_deck.push("Legal Standard".to_string());
+        let request = archenemy_request(scheme_deck);
+        let check = evaluate_archenemy(&db, &request, &BTreeSet::new());
+
+        assert!(!check.compatible);
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("must be Scheme")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn archenemy_rejects_unsupported_scheme() {
+        let db = archenemy_test_db();
+        let mut scheme_deck = scheme_names(19);
+        scheme_deck.push("Unsupported Scheme".to_string());
+        let request = archenemy_request(scheme_deck);
+        let check = evaluate_archenemy(&db, &request, &BTreeSet::new());
+
+        assert!(!check.compatible);
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Unsupported scheme cards")),
+            "reasons: {:?}",
+            check.reasons
+        );
     }
 
     #[test]
@@ -3284,6 +3544,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3309,6 +3570,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3386,6 +3648,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3408,6 +3671,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3433,6 +3697,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -3459,6 +3724,7 @@ mod tests {
             sideboard: vec!["Legal Standard".to_string()],
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3488,6 +3754,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo3),
@@ -3519,6 +3786,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3545,6 +3813,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3617,6 +3886,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["PDH Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
@@ -3690,6 +3960,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Rare Creature".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
@@ -3762,6 +4033,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Uncommon Sorcery".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
@@ -3789,6 +4061,7 @@ mod tests {
                 "Legal Commander".to_string(),
             ],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -3813,6 +4086,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
@@ -3843,6 +4117,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo1),
@@ -3854,6 +4129,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: Some(MatchType::Bo1),
@@ -3890,6 +4166,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pioneer),
             selected_match_type: None,
@@ -3908,6 +4185,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -3928,6 +4206,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -3952,6 +4231,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -3977,6 +4257,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -3995,6 +4276,7 @@ mod tests {
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -4015,6 +4297,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
@@ -4049,6 +4332,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pauper),
             selected_match_type: None,
@@ -4073,6 +4357,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -4103,6 +4388,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
@@ -4121,6 +4407,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legendary Planeswalker".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
@@ -4139,6 +4426,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
@@ -4164,6 +4452,7 @@ mod tests {
                 "Partner Commander".to_string(),
             ],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
@@ -4186,6 +4475,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
@@ -4208,6 +4498,7 @@ mod tests {
             sideboard: expand("Plains", 10),
             commander: vec!["White Tiny Leader".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
@@ -4246,6 +4537,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["White Tiny Leader".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
@@ -4274,6 +4566,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Ajani, Nacatl Pariah".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
@@ -4302,6 +4595,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::HistoricBrawl),
             selected_match_type: None,
@@ -4703,6 +4997,7 @@ mod tests {
             sideboard: vec![],
             commander: vec![],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4734,6 +5029,7 @@ mod tests {
             sideboard: vec![],
             commander: vec![],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4751,6 +5047,7 @@ mod tests {
             sideboard: vec![],
             commander: vec![],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
@@ -4768,6 +5065,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: vec!["Big Spell".to_string()],
             selected_format: Some(GameFormat::Oathbreaker),
             selected_match_type: None,
@@ -4800,6 +5098,7 @@ mod tests {
             sideboard: vec![],
             commander: vec![],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
@@ -4819,6 +5118,7 @@ mod tests {
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4842,6 +5142,7 @@ mod tests {
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4867,6 +5168,7 @@ mod tests {
             sideboard: expand("Legal Standard", 2),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4890,6 +5192,7 @@ mod tests {
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4913,6 +5216,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4964,6 +5268,7 @@ mod tests {
             sideboard: expand("Relentless Rats", 15),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -4988,6 +5293,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5013,6 +5319,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5075,6 +5382,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5101,6 +5409,7 @@ mod tests {
             sideboard: vec!["Plains".to_string()],
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5127,6 +5436,7 @@ mod tests {
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
@@ -5149,6 +5459,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: Some(MatchType::Bo3),
@@ -5178,6 +5489,7 @@ mod tests {
             sideboard: vec![],
             commander: vec!["Test Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5280,6 +5592,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5304,6 +5617,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5328,6 +5642,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5356,6 +5671,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
@@ -5415,6 +5731,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
@@ -5443,6 +5760,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
@@ -5476,6 +5794,7 @@ mod tests {
             sideboard: Vec::new(),
             commander: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Momir),
             selected_match_type: None,

@@ -2294,6 +2294,12 @@ pub struct PlayerDeckPool {
     /// PlayerId(0) pool carries the communal deck, matching `DeckPayload`.
     #[serde(default)]
     pub registered_planar_deck: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 904.3: Registered Archenemy scheme deck payload. The configured
+    /// archenemy's pool carries the shared scheme deck.
+    #[serde(default)]
+    pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -7356,25 +7362,23 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        // CR 810.4: `FormatConfig::starting_life` is the team's shared total
-        // in Two-Headed Giant (30), so each seat starts with its topology-derived
-        // share and `game::players::team_life_total` folds the team back to 30.
-        let per_player_life = config.starting_life_for_seat();
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: per_player_life,
+                life: config.starting_life_for_player(PlayerId(i)),
                 ..Player::default()
             })
             .collect();
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
+        let starting_player = config.starting_player();
+        let archenemy = config.archenemy_player();
 
         GameState {
             turn_number: 0,
-            active_player: PlayerId(0),
+            active_player: starting_player,
             phase: Phase::Untap,
             players,
-            priority_player: PlayerId(0),
+            priority_player: starting_player,
             turn_decision_controller: None,
             objects: im::HashMap::default(),
             next_object_id: 1,
@@ -7391,7 +7395,7 @@ impl GameState {
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
             waiting_for: WaitingFor::Priority {
-                player: PlayerId(0),
+                player: starting_player,
             },
             has_pending_cast: false,
             lands_played_this_turn: 0,
@@ -7455,7 +7459,7 @@ impl GameState {
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
             game_number: default_game_number(),
-            current_starting_player: PlayerId(0),
+            current_starting_player: starting_player,
             next_game_chooser: None,
             deck_pools: Vec::new(),
             outside_game_cards_brought_in: Vec::new(),
@@ -7595,7 +7599,7 @@ impl GameState {
             planar_controller: None,
             planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
-            archenemy: None,
+            archenemy,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),

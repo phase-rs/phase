@@ -25,6 +25,7 @@ export interface DeckData {
   sideboard: string[];
   commander?: string[];
   planar_deck?: string[];
+  scheme_deck?: string[];
   sticker_sheets?: string[];
 }
 
@@ -33,7 +34,7 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

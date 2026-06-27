@@ -155,6 +155,21 @@ Deck
     expect(result.sideboard).toEqual([]);
     expect(result.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
   });
+
+  it('parses scheme deck sections without mixing them into main or sideboard', () => {
+    const content = `[Main]
+4 Lightning Bolt
+[Scheme Deck]
+1 Your Puny Minds Cannot Fathom
+1 My Genius Knows No Bounds`;
+    const result = parseDeckFile(content);
+    expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.scheme_deck).toEqual([
+      'Your Puny Minds Cannot Fathom',
+      'My Genius Knows No Bounds',
+    ]);
+  });
 });
 
 describe('parseMtgaDeck', () => {
@@ -529,6 +544,19 @@ Deck
     expect(parseDeckFile(exported)).toEqual(deck);
   });
 
+  it('exports scheme deck sections that round-trip through the parser', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportDeckFile(deck);
+    expect(exported).toBe(
+      '[Main]\n4 Lightning Bolt\n[Scheme Deck]\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
+    );
+    expect(parseDeckFile(exported)).toEqual(deck);
+  });
+
   it('exports planar deck sections in MTGA format', () => {
     const deck = {
       main: [{ count: 4, name: 'Lightning Bolt' }],
@@ -538,6 +566,19 @@ Deck
     const exported = exportMtgaDeck(deck);
     expect(exported).toBe(
       'Deck\n4 Lightning Bolt\n\nPlanar Deck\n1 The Aether Flues\n1 Spatial Merging\n',
+    );
+    expect(parseMtgaDeck(exported)).toEqual(deck);
+  });
+
+  it('exports scheme deck sections in MTGA format', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportMtgaDeck(deck);
+    expect(exported).toBe(
+      'Deck\n4 Lightning Bolt\n\nScheme Deck\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
     );
     expect(parseMtgaDeck(exported)).toEqual(deck);
   });

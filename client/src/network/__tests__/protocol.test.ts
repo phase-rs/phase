@@ -94,6 +94,18 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     await expect(decodeWireMessage(new Uint8Array())).rejects.toThrow(/empty/);
   });
 
+  it("rejects stale setup wire protocol versions", () => {
+    expect(() => validateMessage({
+      type: "game_setup",
+      wireProtocolVersion: 3,
+      assignedPlayerId: 1,
+      playerToken: "token-123",
+      state: {} as GameState,
+      events: [],
+      legalActions: [],
+    })).toThrow(/Wire protocol mismatch/);
+  });
+
   // (e) Compressed payload still gates through validateMessage so unknown
   // message types are rejected, not silently passed through.
   it("decode runs validateMessage — unknown type rejected", async () => {

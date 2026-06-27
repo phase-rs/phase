@@ -85,10 +85,19 @@ export type P2PAdapterEvent =
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
+interface DeckSeatPayload {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck?: string[];
+  scheme_deck?: string[];
+  bracket_tier?: string;
+}
+
 interface DeckListPayload {
-  player: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
-  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string }>;
+  player: DeckSeatPayload;
+  opponent: DeckSeatPayload;
+  ai_decks: DeckSeatPayload[];
   /** AI difficulty strings per seat. See `DeckList.ai_difficulties` in engine. */
   ai_difficulties?: string[];
 }
@@ -877,7 +886,7 @@ export class P2PHostAdapter implements EngineAdapter {
         guestDeckRaw,
       )
         ? guestDeckRaw
-        : { main_deck: [], sideboard: [], commander: [] };
+        : { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] };
 
       const token = crypto.randomUUID();
       this.playerTokens.set(pid, token);

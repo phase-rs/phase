@@ -14,6 +14,20 @@ fn opponent(player: PlayerId) -> PlayerId {
     }
 }
 
+fn bo3_sideboard_players(state: &GameState) -> Vec<PlayerId> {
+    if crate::game::topology::archenemy(state).is_some() {
+        state.deck_pools.iter().map(|pool| pool.player).collect()
+    } else {
+        vec![PlayerId(0), PlayerId(1)]
+    }
+}
+
+fn next_unsubmitted_sideboard_player(state: &GameState) -> Option<PlayerId> {
+    bo3_sideboard_players(state)
+        .into_iter()
+        .find(|player| !state.sideboard_submitted.contains(player))
+}
+
 fn total_count(entries: &[DeckEntry]) -> u32 {
     entries.iter().map(|e| e.count).sum()
 }
@@ -102,6 +116,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             commander: (*p.current_commander).clone(),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: (*p.registered_scheme_deck).clone(),
             contraption_deck: Vec::new(),
             sticker_sheets: state
                 .players
@@ -121,6 +136,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             commander: (*p0.current_commander).clone(),
             attraction_deck: Vec::new(),
             planar_deck: (*p0.registered_planar_deck).clone(),
+            scheme_deck: (*p0.registered_scheme_deck).clone(),
             contraption_deck: Vec::new(),
             sticker_sheets: state.players[0].sticker_sheets.clone(),
             signature_spell: (*p0.current_signature_spell).clone(),
@@ -132,6 +148,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             commander: (*p1.current_commander).clone(),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
+            scheme_deck: (*p1.registered_scheme_deck).clone(),
             contraption_deck: Vec::new(),
             sticker_sheets: state.players[1].sticker_sheets.clone(),
             signature_spell: (*p1.current_signature_spell).clone(),
@@ -154,20 +171,33 @@ pub fn handle_game_over_transition(state: &mut GameState) {
         _ => return,
     };
 
-    if state.match_config.match_type != MatchType::Bo3 || state.players.len() != 2 {
+    let archenemy = crate::game::topology::archenemy(state);
+    if state.match_config.match_type != MatchType::Bo3
+        || (state.players.len() != 2 && archenemy.is_none())
+    {
         state.match_phase = MatchPhase::Completed;
         return;
     }
 
-    match winner {
-        Some(PlayerId(0)) => {
-            state.match_score.p0_wins = state.match_score.p0_wins.saturating_add(1)
+    if let Some(archenemy) = archenemy {
+        match winner {
+            Some(winner) if winner == archenemy => {
+                state.match_score.p0_wins = state.match_score.p0_wins.saturating_add(1)
+            }
+            Some(_) => state.match_score.p1_wins = state.match_score.p1_wins.saturating_add(1),
+            None => state.match_score.draws = state.match_score.draws.saturating_add(1),
         }
-        Some(PlayerId(1)) => {
-            state.match_score.p1_wins = state.match_score.p1_wins.saturating_add(1)
+    } else {
+        match winner {
+            Some(PlayerId(0)) => {
+                state.match_score.p0_wins = state.match_score.p0_wins.saturating_add(1)
+            }
+            Some(PlayerId(1)) => {
+                state.match_score.p1_wins = state.match_score.p1_wins.saturating_add(1)
+            }
+            Some(_) => {}
+            None => state.match_score.draws = state.match_score.draws.saturating_add(1),
         }
-        Some(_) => {}
-        None => state.match_score.draws = state.match_score.draws.saturating_add(1),
     }
 
     let match_complete = state.match_score.p0_wins >= 2 || state.match_score.p1_wins >= 2;
@@ -179,11 +209,15 @@ pub fn handle_game_over_transition(state: &mut GameState) {
     state.match_phase = MatchPhase::BetweenGames;
     state.game_number = state.game_number.saturating_add(1);
     state.sideboard_submitted.clear();
-    state.next_game_chooser = match winner {
-        Some(w) => Some(opponent(w)),
-        None => state
-            .next_game_chooser
-            .or(Some(state.current_starting_player)),
+    state.next_game_chooser = if let Some(archenemy) = archenemy {
+        Some(archenemy)
+    } else {
+        match winner {
+            Some(w) => Some(opponent(w)),
+            None => state
+                .next_game_chooser
+                .or(Some(state.current_starting_player)),
+        }
     };
     state.waiting_for = WaitingFor::BetweenGamesSideboard {
         player: PlayerId(0),
@@ -197,6 +231,7 @@ pub fn handle_submit_sideboard(
     player: PlayerId,
     main: Vec<DeckCardCount>,
     sideboard: Vec<DeckCardCount>,
+    events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
     if state.match_phase != MatchPhase::BetweenGames {
         return Err("Cannot submit sideboard outside BetweenGames phase".to_string());
@@ -241,9 +276,10 @@ pub fn handle_submit_sideboard(
         state.sideboard_submitted.push(player);
     }
 
-    let waiting_for = if state.sideboard_submitted.contains(&PlayerId(0))
-        && state.sideboard_submitted.contains(&PlayerId(1))
-    {
+    let waiting_for = if next_unsubmitted_sideboard_player(state).is_none() {
+        if let Some(archenemy) = crate::game::topology::archenemy(state) {
+            return restart_between_games_with_starting_player(state, archenemy, archenemy, events);
+        }
         let chooser = state.next_game_chooser.unwrap_or(PlayerId(0));
         WaitingFor::BetweenGamesChoosePlayDraw {
             player: chooser,
@@ -252,11 +288,43 @@ pub fn handle_submit_sideboard(
         }
     } else {
         WaitingFor::BetweenGamesSideboard {
-            player: opponent(player),
+            player: next_unsubmitted_sideboard_player(state).unwrap_or_else(|| opponent(player)),
             game_number: state.game_number,
             score: state.match_score,
         }
     };
+    state.waiting_for = waiting_for.clone();
+    Ok(waiting_for)
+}
+
+fn restart_between_games_with_starting_player(
+    state: &mut GameState,
+    chooser: PlayerId,
+    starting_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    let payload = deck_payload_from_current_pools(state)?;
+
+    let mut next_state = GameState::new(
+        state.format_config.clone(),
+        state.players.len() as u8,
+        state.rng_seed.wrapping_add(state.game_number as u64 + 1),
+    );
+    next_state.match_config = state.match_config;
+    next_state.match_phase = MatchPhase::InGame;
+    next_state.match_score = state.match_score;
+    next_state.game_number = state.game_number;
+    next_state.current_starting_player = starting_player;
+    // If the game is drawn, this chooser gets to choose again. Archenemy fixes
+    // the chooser/starter to the archenemy per CR 904.6.
+    next_state.next_game_chooser = Some(chooser);
+
+    load_deck_into_state(&mut next_state, &payload);
+    let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
+    events.extend(start.events);
+
+    let waiting_for = start.waiting_for.clone();
+    *state = next_state;
     state.waiting_for = waiting_for.clone();
     Ok(waiting_for)
 }
@@ -280,29 +348,7 @@ pub fn handle_choose_play_draw(
     } else {
         opponent(chooser)
     };
-    let payload = deck_payload_from_current_pools(state)?;
-
-    let mut next_state = GameState::new(
-        state.format_config.clone(),
-        state.players.len() as u8,
-        state.rng_seed.wrapping_add(state.game_number as u64 + 1),
-    );
-    next_state.match_config = state.match_config;
-    next_state.match_phase = MatchPhase::InGame;
-    next_state.match_score = state.match_score;
-    next_state.game_number = state.game_number;
-    next_state.current_starting_player = starting_player;
-    // If the game is drawn, this chooser gets to choose again.
-    next_state.next_game_chooser = Some(chooser);
-
-    load_deck_into_state(&mut next_state, &payload);
-    let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
-    events.extend(start.events);
-
-    let waiting_for = start.waiting_for.clone();
-    *state = next_state;
-    state.waiting_for = waiting_for.clone();
-    Ok(waiting_for)
+    restart_between_games_with_starting_player(state, chooser, starting_player, events)
 }
 
 #[cfg(test)]
@@ -437,6 +483,7 @@ mod tests {
             ..Default::default()
         }];
 
+        let mut events = Vec::new();
         let bad_main_size = handle_submit_sideboard(
             &mut state,
             PlayerId(0),
@@ -448,6 +495,7 @@ mod tests {
                 name: "B".to_string(),
                 count: 1,
             }],
+            &mut events,
         );
         assert!(bad_main_size.is_err());
 
@@ -462,6 +510,7 @@ mod tests {
                 name: "C".to_string(),
                 count: 1,
             }],
+            &mut events,
         );
         assert!(bad_pool.is_err());
     }

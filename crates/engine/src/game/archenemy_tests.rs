@@ -282,7 +282,7 @@ fn begin_precombat_main_sets_scheme_in_motion() {
     // the active player = archenemy must set the top scheme in motion.
     use crate::types::phase::Phase;
 
-    let mut state = GameState::new_two_player(7);
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 2, 7);
     let arch = PlayerId(0);
     state.active_player = arch;
     let scheme = synthesized_scheme_face(vec![], vec![], vec![]);
@@ -305,7 +305,7 @@ fn begin_precombat_main_sets_scheme_in_motion() {
     );
 
     // A non-archenemy active player's precombat main does NOT set in motion.
-    let mut state2 = GameState::new_two_player(7);
+    let mut state2 = GameState::new(crate::types::FormatConfig::archenemy(), 2, 7);
     let arch2 = PlayerId(0);
     let non_arch = PlayerId(1);
     state2.active_player = non_arch;
@@ -338,7 +338,7 @@ fn ongoing_scheme_static_applies_only_while_face_up() {
     // `active_zones = [Command]` onto the scheme's static (the command-zone static
     // scan would never include it). After abandon the scheme leaves the active
     // command-zone view, so its static no longer applies.
-    let mut state = GameState::new_two_player(7);
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 2, 7);
     let arch = PlayerId(0);
     let mut scheme_static = StaticDefinition::new(StaticMode::Continuous);
     scheme_static.description = Some("scheme-static-marker".to_string());
@@ -695,7 +695,7 @@ fn set_in_motion_collects_trigger_exactly_once() {
     use crate::types::actions::GameAction;
     use crate::types::phase::Phase;
 
-    let mut state = GameState::new_two_player(7);
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy(), 2, 7);
     let arch = PlayerId(0);
     state.turn_number = 2; // not turn 1, so the Draw step is not skipped
     state.active_player = arch;

@@ -4455,7 +4455,7 @@ fn apply_action(
         (
             WaitingFor::BetweenGamesSideboard { player, .. },
             GameAction::SubmitSideboard { main, sideboard },
-        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard)
+        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard, &mut events)
             .map_err(EngineError::InvalidAction)?,
         (
             WaitingFor::BetweenGamesChoosePlayDraw { player, .. },
@@ -5522,6 +5522,11 @@ fn handle_play_land(
     // resources regardless of who submits the choice — that path is
     // unaffected since it never uses shared team turns.
     let player = if state.format_config.topology().has_shared_team_turns() {
+        if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
+            return Err(EngineError::ActionNotAllowed(
+                "Only the active team may play lands during its turn".to_string(),
+            ));
+        }
         acting_player
     } else {
         turn_control::turn_resource_owner(state)
@@ -7020,6 +7025,12 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, PlayerId(0));
     }
 
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        // CR 904.6: The archenemy takes the first turn. Default Archenemy does
+        // not run the CR 103.1 starting-player contest.
+        return start_game_with_starting_player(state, archenemy);
+    }
+
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
     // starting player. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
@@ -7050,8 +7061,12 @@ pub fn start_game_with_starting_player(
 ) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
 
-    if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
         state.match_config.match_type = MatchType::Bo1;
     }
 
@@ -7109,16 +7124,18 @@ pub fn start_game_with_starting_player(
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
 
     events.push(GameEvent::GameStarted);
 
     state.turn_number = 1;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
+    state.active_player = starting_player;
+    state.priority_player = starting_player;
+    state.current_starting_player = starting_player;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
-        player_id: PlayerId(0),
+        player_id: starting_player,
         turn_number: 1,
     });
 
@@ -9107,6 +9124,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn archenemy_hero_team_each_hero_plays_own_land_only() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let land1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(2),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let archenemy_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&archenemy_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(2);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(2),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land2,
+                card_id: CardId(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[2].lands_played_this_turn, 1);
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::PlayLand {
+                object_id: archenemy_land,
+                card_id: CardId(3),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "archenemy must not play a land during the hero team's turn"
+        );
+        assert!(state.players[0].hand.contains(&archenemy_land));
+    }
+
     /// CR 614.1c discriminating test (fail-first): a land played through the
     /// real `PlayLand` action must receive the `EntersWithAdditionalCounters`
     /// static snapshot ("permanents you control enter with an additional +1/+1
@@ -10108,8 +10223,23 @@ mod tests {
         {
             let obj = state.objects.get_mut(&land_id).unwrap();
             obj.card_types.core_types.push(CoreType::Land);
-            obj.card_types.subtypes.push("Forest".to_string());
             obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
         }
 
         let result = apply_as_current(
@@ -25291,6 +25421,40 @@ mod mdfc_land_tests {
             "explicit starting player path must emit no contest event"
         );
         assert_eq!(state.current_starting_player, PlayerId(1));
+    }
+
+    #[test]
+    fn archenemy_starting_life_and_first_turn_use_configured_archenemy() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(2));
+        let mut state = GameState::new(config, 4, 7);
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(state.players[2].life, 40);
+        assert_eq!(state.players[3].life, 20);
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let result = start_game(&mut state);
+
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::StartingPlayerContest { .. })),
+            "Archenemy must not run the starting-player contest"
+        );
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
     }
 
     #[test]

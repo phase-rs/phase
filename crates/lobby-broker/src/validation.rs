@@ -312,7 +312,7 @@ mod tests {
     use super::*;
     use crate::inbound_guard::{
         guard_inbound, MAX_DECK_CARD_NAME_LEN, MAX_MAIN_DECK_ENTRIES, MAX_PLANAR_DECK_ENTRIES,
-        MAX_SIDEBOARD_ENTRIES,
+        MAX_SCHEME_DECK_ENTRIES, MAX_SIDEBOARD_ENTRIES,
     };
     use crate::protocol::{DraftLobbyMetadata, LobbyClientMessage as M};
     use engine::starter_decks::DeckData;
@@ -540,5 +540,25 @@ mod tests {
         }
         let err = guard_inbound(&msg).unwrap_err();
         assert!(err.contains("planar_deck[0]"));
+    }
+
+    #[test]
+    fn guard_rejects_oversized_scheme_deck() {
+        let mut msg = create_with("Alice");
+        if let M::CreateGameWithSettings { deck, .. } = &mut msg {
+            deck.scheme_deck = vec!["Scheme".to_string(); MAX_SCHEME_DECK_ENTRIES + 1];
+        }
+        let err = guard_inbound(&msg).unwrap_err();
+        assert!(err.contains("scheme_deck"));
+    }
+
+    #[test]
+    fn guard_rejects_invalid_scheme_deck_card_name() {
+        let mut msg = join_with("Bob");
+        if let M::JoinGameWithPassword { deck, .. } = &mut msg {
+            deck.scheme_deck = vec!["Bad\u{0007}Scheme".to_string()];
+        }
+        let err = guard_inbound(&msg).unwrap_err();
+        assert!(err.contains("scheme_deck[0]"));
     }
 }

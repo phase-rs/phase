@@ -91,6 +91,7 @@ export function useDeckBuilder({
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
     ...(deck.planar_deck ?? []),
+    ...(deck.scheme_deck ?? []),
     ...commanders,
   ]);
 
@@ -145,6 +146,8 @@ export function useDeckBuilder({
       "//",
       ...(deck.planar_deck ?? []),
       "//",
+      ...(deck.scheme_deck ?? []),
+      "//",
       ...commanders,
     ].join("|"),
     [deck, commanders],
@@ -155,6 +158,7 @@ export function useDeckBuilder({
       currentDeck.main.length === 0
       && currentDeck.sideboard.length === 0
       && (currentDeck.planar_deck?.length ?? 0) === 0
+      && (currentDeck.scheme_deck?.length ?? 0) === 0
     ) {
       setCompatibility(null);
       return;
@@ -416,6 +420,7 @@ export function useDeckBuilder({
       main: deduplicateEntries(next.main ?? []),
       sideboard: deduplicateEntries(next.sideboard ?? []),
       planar_deck: next.planar_deck ? [...next.planar_deck] : undefined,
+      scheme_deck: next.scheme_deck ? [...next.scheme_deck] : undefined,
       companion: next.companion,
     });
     setCommanders(next.commander ?? []);

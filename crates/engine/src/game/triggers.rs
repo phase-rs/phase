@@ -1165,6 +1165,26 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
+fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+    if state.format_config.topology().has_shared_team_turns() {
+        super::topology::apnap_team_rank(state, controller)
+    } else {
+        let apnap = crate::game::players::apnap_order(state);
+        apnap_rank(&apnap, controller)
+    }
+}
+
+fn trigger_order_controller(state: &GameState, controller: PlayerId) -> PlayerId {
+    if state.format_config.topology().has_shared_team_turns() {
+        // CR 805.6 / CR 805.7 + CR 603.3b: APNAP choices are made by teams in
+        // shared-team-turn games. Keep each trigger's real controller intact;
+        // only the ordering prompt is assigned to the team's representative.
+        super::topology::priority_pass_representative(state, controller)
+    } else {
+        controller
+    }
+}
+
 /// CR 603.2 + CR 603.3b: Collect every triggered ability matching `events`,
 /// apply trigger doubling, and return the contexts sorted into APNAP stack
 /// placement order (active player first / bottom of stack, then each non-active
@@ -2881,15 +2901,12 @@ fn collect_pending_triggers(
     apply_trigger_doubling(state, &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
-    // CR 603.3b + CR 101.4: Stack-placement order is full APNAP turn order
-    // (active player first / lowest on stack, then each non-active player in
-    // turn order) — not a binary active/non-active split, which mis-orders 2+
-    // non-active players in multiplayer. Within the same controller, seed the
-    // ordering prompt by timestamp.
-    let apnap = crate::game::players::apnap_order(state);
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is full
+    // APNAP turn order. Shared-team-turn formats rank/order by team while
+    // preserving the real trigger controller on each pending trigger.
     pending.sort_by_key(|t| {
         (
-            apnap_rank(&apnap, t.pending.controller),
+            trigger_apnap_rank(state, t.pending.controller),
             t.pending.timestamp,
         )
     });
@@ -3429,9 +3446,9 @@ fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     })
 }
 
-/// CR 603.3b: Partition `pending` by controller (preserving the APNAP
+/// CR 603.3b: Partition `pending` by ordering controller (preserving the APNAP
 /// placement order produced by `collect_pending_triggers`), populate
-/// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller,
+/// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller/team,
 /// and return either the first ordering prompt (earliest APNAP unordered group) or
 /// `NoChoiceNeeded` when no group requires a choice.
 ///
@@ -3448,10 +3465,10 @@ fn begin_trigger_ordering(
 ) -> TriggerOrderingDisposition {
     use crate::types::game_state::{PendingTriggerOrder, TriggerOrderGroup};
 
-    // Partition by controller while preserving the input (placement) order.
+    // Partition by ordering controller while preserving the input (placement) order.
     let mut groups: Vec<TriggerOrderGroup> = Vec::new();
     for ctx in pending {
-        let controller = ctx.pending.controller;
+        let controller = trigger_order_controller(state, ctx.pending.controller);
         if let Some(last) = groups.last_mut() {
             if last.controller == controller {
                 last.triggers.push(ctx);
@@ -4734,11 +4751,9 @@ pub fn check_state_triggers(state: &mut GameState) {
         return;
     }
 
-    // CR 603.3b + CR 101.4: Full APNAP stack-placement order for state triggers
-    // (active player lowest, then each non-active player in turn order),
-    // tiebroken by timestamp.
-    let apnap = crate::game::players::apnap_order(state);
-    pending.sort_by_key(|t| (apnap_rank(&apnap, t.controller), t.timestamp));
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Full APNAP stack-placement order
+    // for state triggers, ranking shared-turn teams as the APNAP actors.
+    pending.sort_by_key(|t| (trigger_apnap_rank(state, t.controller), t.timestamp));
 
     let mut events_out = Vec::new();
     for trigger in pending {
@@ -4838,13 +4853,12 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     let mut new_events = Vec::new();
 
-    // CR 603.3b + CR 101.4: Full APNAP stack-placement order — active player's
-    // triggers go lowest, then each non-active player's triggers in turn order.
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Full APNAP stack-placement order
+    // by player, or by team in shared-team-turn formats.
     // The old `state.turn_number` tiebreaker was constant across this batch, so
     // dropping it changes nothing; `sort_by_key` is stable, preserving the
     // prior same-controller ordering before stack placement.
-    let apnap = crate::game::players::apnap_order(state);
-    to_fire.sort_by_key(|(trigger, _)| apnap_rank(&apnap, trigger.controller));
+    to_fire.sort_by_key(|(trigger, _)| trigger_apnap_rank(state, trigger.controller));
 
     // CR 603.3 + CR 603.3d + CR 601.2c: Dispatch each firing delayed trigger
     // through the shared trigger dispatcher rather than a bare stack push. The
@@ -25541,6 +25555,75 @@ mod dedup_regression_tests {
         assert!(
             state.pending_trigger_order.is_some(),
             "a live ordering pass must back the prompt"
+        );
+    }
+
+    #[test]
+    fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 42);
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.phase = Phase::Upkeep;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let make_ctx = |source: ObjectId, controller: PlayerId, description: &str| {
+            let ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(0),
+                controller,
+            );
+            PendingTriggerContext::single(PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability,
+                timestamp: source.0 as u32,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: None,
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: Some(description.to_string()),
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+            })
+        };
+
+        let disposition = begin_trigger_ordering(
+            &mut state,
+            vec![
+                make_ctx(ObjectId(1), PlayerId(1), "Hero one trigger."),
+                make_ctx(ObjectId(2), PlayerId(2), "Hero two trigger."),
+            ],
+        );
+
+        let TriggerOrderingDisposition::PromptForChoice(prompt) = disposition else {
+            panic!("hero-team trigger group must prompt for ordering");
+        };
+        assert!(matches!(
+            *prompt,
+            WaitingFor::OrderTriggers {
+                player: PlayerId(1),
+                ..
+            }
+        ));
+        let order = state.pending_trigger_order.as_ref().unwrap();
+        assert_eq!(order.groups.len(), 1);
+        assert_eq!(order.groups[0].controller, PlayerId(1));
+        assert_eq!(
+            order.groups[0]
+                .triggers
+                .iter()
+                .map(|ctx| ctx.pending.controller)
+                .collect::<Vec<_>>(),
+            vec![PlayerId(1), PlayerId(2)]
         );
     }
 

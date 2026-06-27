@@ -183,6 +183,10 @@ pub fn apnap_order_from(
         ) => state.active_player,
     };
 
+    if state.format_config.topology().has_shared_team_turns() {
+        return super::topology::apnap_order_from(state, start_player);
+    }
+
     let start_idx = seat_order
         .iter()
         .position(|&id| id == start_player)
@@ -299,7 +303,7 @@ where
 {
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = super::topology::team_dedup_key(state, pid);
+        let key = super::topology::shared_resource_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -320,7 +324,7 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::team_members(state, player)
+    super::topology::shared_resource_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
@@ -332,7 +336,7 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// for the player and their (living) teammates. Non-team formats degenerate
 /// to the player's own count.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    super::topology::team_members(state, player)
+    super::topology::shared_resource_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
@@ -716,6 +720,19 @@ mod tests {
         assert_eq!(team_poison_total(&state, PlayerId(1)), 15);
         // Opposing team is unaffected.
         assert_eq!(team_poison_total(&state, PlayerId(2)), 0);
+    }
+
+    #[test]
+    fn archenemy_life_and_poison_are_individual_not_shared_by_side() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 0);
+        state.players[1].poison_counters = 6;
+        state.players[2].poison_counters = 9;
+
+        assert_eq!(team_life_total(&state, PlayerId(0)), 40);
+        assert_eq!(team_life_total(&state, PlayerId(1)), 20);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 20);
+        assert_eq!(team_poison_total(&state, PlayerId(1)), 6);
+        assert_eq!(team_poison_total(&state, PlayerId(2)), 9);
     }
 
     // --- aggregate_over_teams ---

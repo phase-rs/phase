@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::LegalityFormat;
+use crate::types::player::PlayerId;
 
 /// Broad grouping used by the UI to visually cluster related formats
 /// (constructed, commander-style, multiplayer). Frontends may key color
@@ -52,6 +53,9 @@ pub enum GameFormat {
     HistoricBrawl,
     FreeForAll,
     TwoHeadedGiant,
+    /// CR 904: Default Archenemy — one archenemy faces a team of heroes using
+    /// shared team turns (CR 805), with a single scheme deck (CR 904.3).
+    Archenemy,
     /// CR 901: Planechase using the single communal planar deck option
     /// (CR 901.15a), plus normal 60-card player decks.
     Planechase,
@@ -114,6 +118,10 @@ pub enum FormatTopology {
         team_count: u8,
         turn_structure: TurnStructure,
     },
+    OneVsMany {
+        archenemy: PlayerId,
+        turn_structure: TurnStructure,
+    },
 }
 
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
@@ -129,6 +137,10 @@ pub struct FormatConfig {
     pub commander_damage_threshold: Option<u8>,
     pub range_of_influence: Option<u8>,
     pub team_based: bool,
+    /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
+    /// designated as the archenemy and takes the first turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy_player: Option<PlayerId>,
     /// Engine-derived predicate: true when the format uses a commander card
     /// and the commander-damage state-based action (CR 903.10a / CR 704.5u).
     /// Covers Commander, Duel Commander, Pauper Commander, Brawl, and
@@ -156,6 +168,9 @@ impl FormatTopology {
         matches!(
             self,
             FormatTopology::FixedTeams {
+                turn_structure: TurnStructure::SharedTeamTurns,
+                ..
+            } | FormatTopology::OneVsMany {
                 turn_structure: TurnStructure::SharedTeamTurns,
                 ..
             }
@@ -186,6 +201,7 @@ impl GameFormat {
             | GameFormat::Oathbreaker
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
             | GameFormat::Planechase
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
@@ -220,6 +236,7 @@ impl GameFormat {
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
             GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Limited => SideboardPolicy::Unlimited,
         }
@@ -295,6 +312,7 @@ impl GameFormat {
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
             GameFormat::TwoHeadedGiant => "Two-Headed Giant",
+            GameFormat::Archenemy => "Archenemy",
             GameFormat::Planechase => "Planechase",
             GameFormat::Momir => "Momir's Madness",
         }
@@ -452,6 +470,14 @@ impl GameFormat {
                 default_config: FormatConfig::two_headed_giant(),
             },
             FormatMetadata {
+                format: GameFormat::Archenemy,
+                label: "Archenemy",
+                short_label: "ARC",
+                description: "One archenemy against a team of heroes",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::archenemy(),
+            },
+            FormatMetadata {
                 format: GameFormat::Planechase,
                 label: "Planechase",
                 short_label: "PLC",
@@ -487,6 +513,10 @@ impl FormatConfig {
                 team_count: 2,
                 turn_structure: TurnStructure::SharedTeamTurns,
             },
+            GameFormat::Archenemy => FormatTopology::OneVsMany {
+                archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
             _ if self.team_based => FormatTopology::FixedTeams {
                 team_size: 2,
                 team_count: 2,
@@ -502,7 +532,51 @@ impl FormatConfig {
             FormatTopology::FixedTeams { team_size, .. } => {
                 self.starting_life / i32::from(team_size)
             }
+            FormatTopology::OneVsMany { .. } => self.starting_life,
         }
+    }
+
+    pub fn starting_life_for_player(&self, player: PlayerId) -> i32 {
+        match self.topology() {
+            FormatTopology::IndividualSeats => self.starting_life,
+            FormatTopology::FixedTeams { team_size, .. } => {
+                self.starting_life / i32::from(team_size)
+            }
+            // CR 904.5: The archenemy starts at 40 life; each other player
+            // starts at 20. This is not a shared life total.
+            FormatTopology::OneVsMany { archenemy, .. } => {
+                if player == archenemy {
+                    40
+                } else {
+                    20
+                }
+            }
+        }
+    }
+
+    pub fn archenemy_player(&self) -> Option<PlayerId> {
+        match self.topology() {
+            FormatTopology::OneVsMany { archenemy, .. } => Some(archenemy),
+            FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => None,
+        }
+    }
+
+    pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
+        if self.format == GameFormat::Archenemy {
+            let archenemy = self.archenemy_player().unwrap_or(PlayerId(0));
+            if archenemy.0 >= player_count {
+                return Err(format!(
+                    "archenemy_player must be less than player_count ({player_count})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn starting_player(&self) -> PlayerId {
+        // CR 904.6: The archenemy takes the first turn instead of a randomly
+        // determined player. Non-Archenemy formats keep the legacy default.
+        self.archenemy_player().unwrap_or(PlayerId(0))
     }
 
     pub fn standard() -> Self {
@@ -517,6 +591,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -535,6 +610,7 @@ impl FormatConfig {
             commander_damage_threshold: Some(21),
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -625,6 +701,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -647,6 +724,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -682,6 +760,7 @@ impl FormatConfig {
             commander_damage_threshold: Some(21),
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -708,6 +787,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -728,6 +808,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -751,6 +832,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: true,
             allow_debug_actions: false,
@@ -769,6 +851,7 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: true,
+            archenemy_player: None,
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -790,6 +873,28 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            archenemy_player: None,
+            uses_commander: false,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+        }
+    }
+
+    /// CR 904.1-904.11: Default Archenemy, not Supervillain Rumble (CR 904.12)
+    /// and not Archenemy Commander (CR 904.13).
+    pub fn archenemy() -> Self {
+        FormatConfig {
+            format: GameFormat::Archenemy,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 6,
+            deck_size: 60,
+            singleton: false,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            archenemy_player: Some(PlayerId(0)),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -832,6 +937,7 @@ impl FormatConfig {
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
             GameFormat::TwoHeadedGiant => Self::two_headed_giant(),
+            GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
         }
@@ -1063,6 +1169,7 @@ mod tests {
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),
             FormatConfig::two_headed_giant(),
+            FormatConfig::archenemy(),
             FormatConfig::limited(),
         ];
         for config in configs {
@@ -1185,6 +1292,25 @@ mod tests {
             .expect("Limited must be in registry");
         assert_eq!(entry.group, FormatGroup::Limited);
         assert_eq!(entry.short_label, "LIM");
+    }
+
+    #[test]
+    fn archenemy_registry_entry_uses_default_topology() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Archenemy)
+            .expect("Archenemy must be in registry");
+        assert_eq!(entry.group, FormatGroup::Multiplayer);
+        assert_eq!(entry.short_label, "ARC");
+        assert_eq!(entry.default_config, FormatConfig::archenemy());
+        assert_eq!(entry.default_config.min_players, 2);
+        assert_eq!(entry.default_config.max_players, 6);
+        assert_eq!(entry.default_config.deck_size, 60);
+        assert!(entry.default_config.command_zone);
+        assert!(!entry.default_config.team_based);
+        assert_eq!(entry.default_config.commander_damage_threshold, None);
+        assert_eq!(entry.default_config.archenemy_player(), Some(PlayerId(0)));
     }
 
     #[test]

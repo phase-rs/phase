@@ -47,6 +47,7 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "Archenemy"
   | "Planechase"
   | "Limited"
   | "Momir";
@@ -81,6 +82,8 @@ export interface FormatConfig {
    * fixed-deck formats client-side.
    */
   supplies_fixed_deck?: boolean;
+  /** Configured archenemy seat for default Archenemy. Absent outside Archenemy. */
+  archenemy_player?: PlayerId | null;
   /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
@@ -1848,6 +1851,13 @@ export interface PlanechaseView {
   can_roll: boolean;
 }
 
+export interface ArchenemyView {
+  archenemy: PlayerId;
+  scheme_deck_count: number;
+  active_scheme_ids?: ObjectId[];
+  hero_player_ids?: PlayerId[];
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -1905,6 +1915,8 @@ export interface DerivedViews {
   pending_payment_remaining?: ManaCost;
   /** Engine-authored Planechase state and planar-die legality. */
   planechase?: PlanechaseView | null;
+  /** Engine-authored Archenemy state. */
+  archenemy?: ArchenemyView | null;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

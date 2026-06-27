@@ -143,6 +143,16 @@ pub struct PlanechaseView {
     pub can_roll: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchenemyView {
+    pub archenemy: PlayerId,
+    pub scheme_deck_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_scheme_ids: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hero_player_ids: Vec<PlayerId>,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -215,6 +225,12 @@ pub struct DerivedViews {
     /// zone objects or recomputing planar-die legality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planechase: Option<PlanechaseView>,
+
+    /// CR 904: Engine-authored Archenemy presentation state. The frontend
+    /// renders this directly instead of deriving active schemes from command
+    /// zone objects or recomputing side membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<ArchenemyView>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -400,6 +416,24 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             current_roll_cost: crate::game::planechase::planar_die_roll_cost(state, roll_player),
             can_roll: can_viewer_roll,
         });
+    }
+
+    if state.format_config.format == GameFormat::Archenemy {
+        if let Some(archenemy) = crate::game::topology::archenemy(state) {
+            let hero_player_ids = state
+                .seat_order
+                .iter()
+                .copied()
+                .find(|&player| player != archenemy)
+                .map(|hero| crate::game::topology::team_members(state, hero))
+                .unwrap_or_default();
+            views.archenemy = Some(ArchenemyView {
+                archenemy,
+                scheme_deck_count: state.scheme_deck.len(),
+                active_scheme_ids: crate::game::archenemy::active_schemes(state),
+                hero_player_ids,
+            });
+        }
     }
 
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate

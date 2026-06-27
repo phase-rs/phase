@@ -1,4 +1,5 @@
 use crate::types::format::FormatTopology;
+use crate::types::format::GameFormat;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 
@@ -9,6 +10,13 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => TeamId(player.0),
         FormatTopology::FixedTeams { team_size, .. } => TeamId(player.0 / team_size),
+        FormatTopology::OneVsMany { archenemy, .. } => {
+            if player == archenemy {
+                TeamId(0)
+            } else {
+                TeamId(1)
+            }
+        }
     }
 }
 
@@ -33,16 +41,35 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
                 .filter(|&id| team_id(state, id) == team && super::players::is_alive(state, id))
                 .collect()
         }
+        FormatTopology::OneVsMany { archenemy, .. } => {
+            if player == archenemy {
+                state
+                    .seat_order
+                    .iter()
+                    .copied()
+                    .filter(|&id| id == archenemy && super::players::is_alive(state, id))
+                    .collect()
+            } else {
+                state
+                    .seat_order
+                    .iter()
+                    .copied()
+                    .filter(|&id| id != archenemy && super::players::is_alive(state, id))
+                    .collect()
+            }
+        }
     }
 }
 
 pub(crate) fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => Vec::new(),
-        FormatTopology::FixedTeams { .. } => team_members(state, player)
-            .into_iter()
-            .filter(|&id| id != player)
-            .collect(),
+        FormatTopology::FixedTeams { .. } | FormatTopology::OneVsMany { .. } => {
+            team_members(state, player)
+                .into_iter()
+                .filter(|&id| id != player)
+                .collect()
+        }
     }
 }
 
@@ -52,6 +79,99 @@ pub(crate) fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) 
 
 pub(crate) fn team_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
     team_id(state, player)
+}
+
+pub(crate) fn archenemy(state: &GameState) -> Option<PlayerId> {
+    match state.format_config.topology() {
+        FormatTopology::OneVsMany { archenemy, .. } => Some(archenemy),
+        FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => None,
+    }
+}
+
+/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Two-Headed Giant shares life,
+/// poison, and team loss. Default Archenemy uses shared turns (CR 805) but not
+/// these shared-resource rules.
+pub(crate) fn has_two_headed_giant_shared_resources(state: &GameState) -> bool {
+    matches!(state.format_config.format, GameFormat::TwoHeadedGiant)
+}
+
+pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    if has_two_headed_giant_shared_resources(state) {
+        team_members(state, player)
+    } else if super::players::is_alive(state, player) {
+        vec![player]
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
+    if has_two_headed_giant_shared_resources(state) {
+        team_id(state, player)
+    } else {
+        TeamId(player.0)
+    }
+}
+
+pub(crate) fn apnap_choice_groups(state: &GameState) -> Vec<Vec<PlayerId>> {
+    apnap_choice_groups_from(state, state.active_player)
+}
+
+pub(crate) fn apnap_choice_groups_from(
+    state: &GameState,
+    start_player: PlayerId,
+) -> Vec<Vec<PlayerId>> {
+    let seat_order = &state.seat_order;
+    let len = seat_order.len();
+    if len == 0 {
+        return Vec::new();
+    }
+
+    if !state.format_config.topology().has_shared_team_turns() {
+        let start_idx = seat_order
+            .iter()
+            .position(|&id| id == start_player)
+            .unwrap_or(0);
+        return (0..len)
+            .filter_map(|offset| {
+                let candidate = seat_order[(start_idx + offset) % len];
+                super::players::is_alive(state, candidate).then_some(vec![candidate])
+            })
+            .collect();
+    }
+
+    let start_idx = seat_order
+        .iter()
+        .position(|&id| id == start_player)
+        .unwrap_or(0);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut groups = Vec::new();
+    for offset in 0..len {
+        let candidate = seat_order[(start_idx + offset) % len];
+        if !super::players::is_alive(state, candidate) {
+            continue;
+        }
+        let key = team_dedup_key(state, candidate);
+        if seen.insert(key) {
+            groups.push(team_members(state, candidate));
+        }
+    }
+    groups
+}
+
+pub(crate) fn apnap_order_from(state: &GameState, start_player: PlayerId) -> Vec<PlayerId> {
+    apnap_choice_groups_from(state, start_player)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn apnap_team_rank(state: &GameState, player: PlayerId) -> usize {
+    let groups = apnap_choice_groups(state);
+    groups
+        .iter()
+        .position(|group| group.contains(&player))
+        .unwrap_or(groups.len())
 }
 
 pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerId) -> PlayerId {
@@ -150,6 +270,35 @@ mod tests {
         assert_eq!(
             priority_pass_participants(&state),
             vec![PlayerId(1), PlayerId(2)]
+        );
+    }
+
+    #[test]
+    fn archenemy_team_members_by_side_for_supported_player_counts() {
+        for player_count in [2, 4, 6] {
+            let state = GameState::new(FormatConfig::archenemy(), player_count, 42);
+
+            assert_eq!(archenemy(&state), Some(PlayerId(0)));
+            assert_eq!(team_members(&state, PlayerId(0)), vec![PlayerId(0)]);
+
+            let heroes: Vec<PlayerId> = (1..player_count).map(PlayerId).collect();
+            assert_eq!(team_members(&state, PlayerId(1)), heroes);
+        }
+    }
+
+    #[test]
+    fn archenemy_team_members_exclude_eliminated_heroes() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 6, 42);
+        state.players[2].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(2));
+
+        assert_eq!(
+            team_members(&state, PlayerId(1)),
+            vec![PlayerId(1), PlayerId(3), PlayerId(4), PlayerId(5)]
+        );
+        assert_eq!(
+            teammates(&state, PlayerId(1)),
+            vec![PlayerId(3), PlayerId(4), PlayerId(5)]
         );
     }
 }

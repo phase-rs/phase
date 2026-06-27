@@ -42,9 +42,11 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
         leaving_set.insert(player);
-        for teammate in players::teammates(state, player) {
-            if players::is_alive(state, teammate) {
-                leaving_set.insert(teammate);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    leaving_set.insert(teammate);
+                }
             }
         }
     }
@@ -59,9 +61,11 @@ pub fn eliminate_players_simultaneously(
         do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        for teammate in players::teammates(state, player) {
-            if players::is_alive(state, teammate) {
-                do_eliminate(state, teammate, &leaving_set, events);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    do_eliminate(state, teammate, &leaving_set, events);
+                }
             }
         }
     }
@@ -504,7 +508,25 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|p| p.id)
         .collect();
 
-    if state.format_config.topology().has_shared_team_turns() {
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        let archenemy_alive = living.contains(&archenemy);
+        let living_heroes: Vec<PlayerId> = living
+            .iter()
+            .copied()
+            .filter(|&pid| pid != archenemy)
+            .collect();
+        let winner = if archenemy_alive && living_heroes.is_empty() {
+            Some(archenemy)
+        } else if !archenemy_alive && !living_heroes.is_empty() {
+            living_heroes.first().copied()
+        } else if !archenemy_alive && living_heroes.is_empty() {
+            None
+        } else {
+            return;
+        };
+        events.push(GameEvent::GameOver { winner });
+        state.waiting_for = WaitingFor::GameOver { winner };
+    } else if super::topology::has_two_headed_giant_shared_resources(state) {
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));
@@ -562,6 +584,12 @@ mod tests {
 
     fn setup_2hg() -> GameState {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state
+    }
+
+    fn setup_archenemy() -> GameState {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
         state.turn_number = 1;
         state
     }
@@ -894,6 +922,52 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_hero_loss_eliminates_only_that_hero() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn archenemy_wins_after_all_heroes_are_eliminated() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(3), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_loss_uses_persistent_topology_after_runtime_state_cleared() {
+        let mut state = setup_archenemy();
+        state.archenemy = None;
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
             }
         ));
     }

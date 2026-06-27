@@ -61,12 +61,14 @@ function asDeckPayload(deck: HostingDeck): {
   sideboard: string[];
   commander: string[];
   planar_deck: string[];
+  scheme_deck: string[];
 } {
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
     planar_deck: deck.planar_deck ?? [],
+    scheme_deck: deck.scheme_deck ?? [],
   };
 }
 
@@ -147,6 +149,7 @@ export interface HostingDeck {
   sideboard: string[];
   commander: string[];
   planar_deck?: string[];
+  scheme_deck?: string[];
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
@@ -470,10 +473,11 @@ export function isLobbyEntryCompatible(
   return hostBuildCommit === __BUILD_HASH__;
 }
 
-/** True when the client's wire-protocol matches the server's. */
+/** True when the client's wire-protocol can speak to the server's advertised mode. */
 export function isServerCompatible(info: ServerInfo | null): boolean {
   if (!info) return false;
-  return info.protocolVersion === PROTOCOL_VERSION;
+  const minProtocol = info.mode === "LobbyOnly" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION;
+  return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
 }
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
@@ -959,7 +963,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           const adapter = new P2PHostAdapter(
             {
               player: asDeckPayload(deck),
-              opponent: { main_deck: [], sideboard: [], commander: [] },
+              opponent: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
               ai_decks: [],
             },
             host.peer,
