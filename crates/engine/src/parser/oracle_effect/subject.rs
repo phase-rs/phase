@@ -805,16 +805,20 @@ fn try_parse_source_and_other_restriction_clause(
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
 
-    // Split off the shared restriction predicate (keep "can't"/"cannot" on the
-    // predicate side so it routes through the standard restriction builder).
-    // Structural TextPair boundary split, identical to the generic " can't "/
-    // " cannot " split in try_parse_subject_restriction_clause below.
-    let pos = tp.find(" can't ").or_else(|| tp.find(" cannot "))?; // allow-noncombinator: TextPair structural boundary split, not parsing dispatch (PATTERNS.md §9)
-    let (subject_tp, predicate_tp) = tp.split_at(pos);
-    let subject = subject_tp.original.trim();
-    let predicate = predicate_tp.original[1..].trim();
+    // Use nom `take_until + alt` to locate the " can't " / " cannot " predicate
+    // boundary. Per the nom-combinator mandate, parsing recognition is expressed
+    // with combinators on first write — `take_until` finds the predicate marker
+    // without string-method dispatch.
+    let ((), predicate_with_space) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value((), take_until::<_, _, OracleError<'_>>(" can't ")),
+            value((), take_until::<_, _, OracleError<'_>>(" cannot ")),
+        ))
+        .parse(input)
+    })?;
+    let subject = text[..text.len() - predicate_with_space.len()].trim();
+    let predicate = predicate_with_space.trim_start();
 
     // Class gate: only the can't-be-blocked evasion grant participates.
     if !is_cant_be_blocked_restriction_predicate(&predicate.to_lowercase()) {
