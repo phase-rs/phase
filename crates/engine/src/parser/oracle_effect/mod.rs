@@ -63,7 +63,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
-use nom::multi::{many1, separated_list1};
+use nom::multi::{many1, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -16011,6 +16011,17 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    // Two distinct grammar shapes carry a cast-permission mana-value ceiling:
+    // Beseech's post-value suffix ("...mana value is N or less") and the
+    // "with mana value <comparator> <quantity>" pre-value prefix used by Cosmic
+    // Cube. They cannot share a comparator combinator (suffix vs. prefix), so
+    // dispatch over two sub-combinators.
+    parse_beseech_mv_constraint(lower).or_else(|| parse_with_mana_value_constraint(lower))
+}
+
+/// Beseech-family constraint: `... if that spell's mana value is N or less`.
+/// Post-value suffix comparator (`or less`/`or greater`, else equality).
+fn parse_beseech_mv_constraint(lower: &str) -> Option<CastPermissionConstraint> {
     type E<'a> = OracleError<'a>;
     let (tail, _) = take_until::<_, _, E>("if that spell's mana value is ")
         .parse(lower)
@@ -16027,6 +16038,44 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     } else {
         Comparator::EQ
     };
+    Some(CastPermissionConstraint::ManaValue { comparator, value })
+}
+
+/// Cosmic-Cube-family constraint: `... with mana value <comparator> <quantity> ...`.
+/// CR 202.3: mana value is the comparison subject. CR 601.2e: the ceiling gates
+/// cast legality (re-checked at finalization once the resulting MV is known).
+/// The comparator is a PRE-value prefix; the quantity may be a dynamic aggregate
+/// (e.g. "the greatest power among attacking creatures you control") whose
+/// combinator returns the trailing remainder ("... without paying its mana
+/// cost") for the caller to ignore — class-general, no card-specific delimiter.
+fn parse_with_mana_value_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    type E<'a> = OracleError<'a>;
+    // Skip any preamble up to the mana-value anchor, then consume the anchor.
+    let (after_anchor, _) = many_till(
+        anychar,
+        alt((tag::<_, _, E>("with mana value "), tag("of mana value "))),
+    )
+    .parse(lower)
+    .ok()?;
+    // Dedicated PREFIX comparator (longest-match first: LE/GE before LT/GT, EQ last).
+    let (after_comparator, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, E>("less than or equal to ")),
+        value(Comparator::GE, tag("greater than or equal to ")),
+        value(Comparator::LT, tag("less than ")),
+        value(Comparator::GT, tag("greater than ")),
+        value(Comparator::EQ, tag("equal to ")),
+    ))
+    .parse(after_anchor)
+    .ok()?;
+    // Quantity: dynamic aggregate/ref first (remainder-returning), then fixed N / X.
+    let (_, value) = alt((
+        map(nom_quantity::parse_quantity_ref, |qty| QuantityExpr::Ref {
+            qty,
+        }),
+        nom_quantity::parse_quantity_expr_number,
+    ))
+    .parse(after_comparator)
+    .ok()?;
     Some(CastPermissionConstraint::ManaValue { comparator, value })
 }
 
@@ -23266,6 +23315,165 @@ mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::AttachmentKind;
+
+    // ── MSH-F Sub-Plan A: Cosmic Cube — dynamic mana-value cast permission ──
+
+    /// Recursively find the first `CastFromZone` effect's constraint in an
+    /// ability tree (effect → sub_ability → else_ability). Returns
+    /// `Some(constraint)` when a `CastFromZone` is present, `None` otherwise.
+    fn find_cast_from_zone_constraint(
+        ad: &AbilityDefinition,
+    ) -> Option<Option<CastPermissionConstraint>> {
+        if let Effect::CastFromZone { constraint, .. } = ad.effect.as_ref() {
+            return Some(constraint.clone());
+        }
+        ad.sub_ability
+            .as_deref()
+            .and_then(find_cast_from_zone_constraint)
+            .or_else(|| {
+                ad.else_ability
+                    .as_deref()
+                    .and_then(find_cast_from_zone_constraint)
+            })
+    }
+
+    /// A0: the aggregate quantity combinator (`parse_quantity_ref`, the
+    /// delegation target) consumes only `the greatest power among attacking
+    /// creatures you control` and RETURNS the trailing
+    /// `without paying its mana cost` remainder. The round-1 delegation target
+    /// (`parse_quantity_ref_with_context`) gates on a snapshot suffix and would
+    /// yield `None` on this trailing text. Revert-fail: switching to the gated
+    /// combinator makes `rest` non-empty rejection collapse the constraint.
+    #[test]
+    fn cosmic_cube_aggregate_quantity_returns_trailing_suffix() {
+        let (rest, qty) = nom_quantity::parse_quantity_ref(
+            "the greatest power among attacking creatures you control without paying its mana cost",
+        )
+        .expect("aggregate quantity must parse, leaving the trailing suffix");
+        assert_eq!(rest, " without paying its mana cost");
+        assert!(
+            matches!(
+                qty,
+                QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            ),
+            "expected Max-power aggregate, got {qty:?}"
+        );
+    }
+
+    /// A1 (direct seam): the new `with mana value <comparator> <quantity>`
+    /// branch produces a dynamic `ManaValue` constraint. Revert-fail: without
+    /// `parse_with_mana_value_constraint`, `parse_cast_permission_constraint`
+    /// only knows the Beseech suffix form and returns `None`.
+    #[test]
+    fn cosmic_cube_constraint_parses_dynamic_mana_value_ceiling() {
+        let constraint = parse_cast_permission_constraint(
+            "you may cast a spell from among them with mana value less than or equal to \
+             the greatest power among attacking creatures you control without paying its mana cost",
+        );
+        match constraint {
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function: AggregateFunction::Max,
+                                property: ObjectProperty::Power,
+                                ..
+                            },
+                    },
+            }) => {}
+            other => panic!("expected dynamic ManaValue{{LE, Max-power aggregate}}, got {other:?}"),
+        }
+    }
+
+    /// A1 negative/fixed: the same prefix grammar accepts a fixed numeric
+    /// ceiling and a `greater than` comparator. Guards comparator ordering and
+    /// the `Fixed` fallback arm.
+    #[test]
+    fn with_mana_value_constraint_fixed_and_comparators() {
+        assert_eq!(
+            parse_cast_permission_constraint("with mana value less than or equal to 4"),
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }),
+        );
+        assert_eq!(
+            parse_cast_permission_constraint("with mana value greater than or equal to 3"),
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }),
+        );
+        // "less than" (strict) must NOT be shadowed by "less than or equal to".
+        assert_eq!(
+            parse_cast_permission_constraint("with mana value less than 5"),
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LT,
+                value: QuantityExpr::Fixed { value: 5 },
+            }),
+        );
+    }
+
+    /// A1 regression guard: the Beseech post-value suffix form is untouched by
+    /// the refactor (still dispatched by `parse_beseech_mv_constraint`).
+    #[test]
+    fn beseech_suffix_constraint_unchanged_after_refactor() {
+        assert_eq!(
+            parse_cast_permission_constraint("if that spell's mana value is 4 or less"),
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }),
+        );
+    }
+
+    /// A1 (full line): Cosmic Cube's whole attack trigger lowers to a
+    /// `CastFromZone` whose `constraint` carries the dynamic ceiling. Revert-fail:
+    /// today the constraint serializes as `null` (verified in card-data.json).
+    #[test]
+    fn cosmic_cube_full_trigger_carries_dynamic_constraint() {
+        let parsed = parse_oracle_text(
+            "Ward {2}\nWhenever you attack, look at the top six cards of your library. \
+             You may cast a spell from among them with mana value less than or equal to \
+             the greatest power among attacking creatures you control without paying its \
+             mana cost. Put the rest on the bottom of your library in a random order.",
+            "Cosmic Cube",
+            &["Ward".to_string()],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find_map(|t| {
+                t.execute
+                    .as_deref()
+                    .and_then(find_cast_from_zone_constraint)
+            })
+            .expect("Cosmic Cube must lower to a CastFromZone effect");
+        match trigger {
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                property: ObjectProperty::Power,
+                                ..
+                            },
+                    },
+            }) => {}
+            other => panic!(
+                "Cosmic Cube CastFromZone constraint must be the dynamic MV ceiling, got {other:?}"
+            ),
+        }
+    }
 
     /// CR 510.1a + CR 613.11: The Kingpin of Crime's attack ability — "Whenever you
     /// attack, you may pay 2 life. If you do, until end of turn, creatures you
@@ -50478,7 +50686,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known: prefix-form 'For each [unrecognized clause], <body>' fails to thread subject onto Pump target — body Pump retains target=Any sentinel because parse_for_each_clause doesn't recognize 'counter removed' and the strip_for_each_prefix bail-out short-circuits subject threading. Tracked as a follow-up."]
     fn for_each_prefix_pump_threads_self_ref_target() {
         // Blademane Baku: "For each counter removed, this creature gets +2/+0
         // until end of turn" — prefix-form for-each. The Pump's target should
@@ -50486,6 +50693,13 @@ mod tests {
         let def = parse_effect_chain(
             "For each counter removed, this creature gets +2/+0 until end of turn",
             AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount,
+            }),
+            "repeat_for should scale by counters removed in the activation cost"
         );
         match &*def.effect {
             Effect::Pump { target, .. } => {

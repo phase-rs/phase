@@ -1339,13 +1339,32 @@ pub(crate) fn handle_sacrifice_for_cost(
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(obj) = state.objects.get(&first) {
+        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
+            object_id: first,
+            lki: obj.snapshot_for_mana_spent(),
+        }) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(snapshot.clone());
+            // CR 400.7d: also stamp the spell object on the stack directly. A
+            // permanent spell whose only cost-paid-object reference lives in an
+            // ETB *trigger* (Adipose Offspring's "where X is the sacrificed
+            // creature's toughness") has no on-resolve Spell ability, so the
+            // ability-gated normalization in `stack::resolve` is skipped and the
+            // pipeline's `CastLinkSnapshot` would otherwise capture `None`.
+            // Stamping the stack object here fulfills the "already-stamped"
+            // contract that the resolution epilogue relies on for ability-less
+            // permanent spells, so the snapshot survives `reset_for_battlefield_entry`.
+            //
+            // Gated to spell casts only: activated-ability sacrifice costs share
+            // this resolver (`activation_ability_index` is set), but their
+            // `object_id` is the source permanent, whose own cast provenance must
+            // not be overwritten. A spell cast leaves this field `None`.
+            if pending.activation_ability_index.is_none() {
+                if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
+                    spell_obj.cast_cost_paid_object = Some(snapshot);
+                }
+            }
         }
     }
 

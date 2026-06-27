@@ -971,7 +971,40 @@ fn damage_done_applier(
             let new_amount = match modification {
                 DamageModification::Double => amount.saturating_mul(2),
                 DamageModification::Triple => amount.saturating_mul(3),
-                DamageModification::Plus { value } => amount.saturating_add(value),
+                // CR 614.1a + CR 120 + CR 107.1b: additive damage modification.
+                // The added magnitude is a game quantity resolved each time the
+                // replacement applies, clamped >= 0 (CR 107.1b). A `Fixed` value
+                // (Torbran, Artist's Talent, Rankle and Torbran, I Call for
+                // Slaughter) needs no source object; a `Ref` (Hawkeye's "~'s
+                // power") reads the object-hosted source's live characteristics
+                // via `rid.source`. The controller authority mirrors
+                // `damage_modification_for_rid`'s discriminator (CR 109.4):
+                // object-hosted replacements derive it from the host's zone,
+                // pending-registry replacements (ObjectId(0) sentinel) carry it
+                // on the definition. `damage_modification_for_rid` returns an
+                // owned clone, so this immutable `resolve_quantity` read does
+                // not conflict with the `&mut state` applier (mirrors the
+                // `SetToSourcePower` arm).
+                DamageModification::Plus { value } => {
+                    let controller = if rid.source == ObjectId(0) {
+                        state
+                            .pending_damage_replacements
+                            .get(rid.index)
+                            .and_then(|r| r.source_controller)
+                            .unwrap_or(PlayerId(0))
+                    } else {
+                        state
+                            .objects
+                            .get(&rid.source)
+                            .map(replacement_source_player)
+                            .unwrap_or(PlayerId(0))
+                    };
+                    let added = crate::game::quantity::resolve_quantity(
+                        state, &value, controller, rid.source,
+                    )
+                    .max(0) as u32;
+                    amount.saturating_add(added)
+                }
                 // CR 615.1 + CR 614.1a: Saturating subtract. `Minus { value: u32::MAX }`
                 // is the continuous prevent-all sentinel — yields 0 for any amount and
                 // is not consumed (continuous, not shield-style).
@@ -7232,8 +7265,11 @@ mod tests {
 
         let furnace_of_rath = ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .damage_modification(DamageModification::Double);
-        let torbran = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 2 });
+        let torbran = ReplacementDefinition::new(ReplacementEvent::DamageDone).damage_modification(
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 },
+            },
+        );
 
         let mut state = GameState::new_two_player(42);
         let mut src1 = GameObject::new(
@@ -9692,9 +9728,131 @@ mod tests {
         }
     }
 
+    /// MSH-F Sub-Plan B (B2): the additive damage offset reads the replacement
+    /// source's LIVE power through the full `replace_event` pipeline. Hawkeye
+    /// (the source) power 2 + a 3-damage noncombat source you control →
+    /// opponent takes 5; raising Hawkeye's power to 4 makes the next event add 4
+    /// (proves a live re-read, not a snapshot). Combat damage and damage to your
+    /// own permanent are NOT amplified (NoncombatOnly + opponent target filter).
+    /// Revert-fail: with the parser/type lift reverted the offset is frozen to
+    /// `Fixed(0)`, so the opponent would take 3 on both events.
+    #[test]
+    fn damage_applier_plus_dynamic_source_power_is_live() {
+        use crate::types::ability::{
+            ControllerRef, ObjectScope, QuantityExpr, QuantityRef, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+
+        // Hawkeye-shaped replacement: +X where X is the source's (Hawkeye's)
+        // current power; only noncombat damage to an opponent / their permanents.
+        let repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::Plus {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            })
+            .combat_scope(CombatDamageScope::NoncombatOnly)
+            .damage_source_filter(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Opponent,
+            });
+
+        // Hawkeye = ObjectId(10), controlled by P0, power 2.
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.objects.get_mut(&ObjectId(10)).unwrap().power = Some(2);
+
+        // A noncombat damage source P0 controls (ObjectId(50)).
+        let mut src = GameObject::new(
+            ObjectId(50),
+            CardId(2),
+            PlayerId(0),
+            "Ping".to_string(),
+            Zone::Battlefield,
+        );
+        src.power = Some(1);
+        state.objects.insert(ObjectId(50), src);
+        state.battlefield.push_back(ObjectId(50));
+
+        let noncombat_to_opp = || ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        // Power 2 → 3 + 2 = 5.
+        match replace_event(&mut state, noncombat_to_opp(), &mut events) {
+            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 5, "3 + live Hawkeye power(2)")
+            }
+            other => panic!("expected modified damage, got {other:?}"),
+        }
+
+        // Raise Hawkeye's power to 4 → the next event re-reads it live: 3 + 4 = 7.
+        state.objects.get_mut(&ObjectId(10)).unwrap().power = Some(4);
+        match replace_event(&mut state, noncombat_to_opp(), &mut events) {
+            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 7, "live re-read: 3 + Hawkeye power(4)")
+            }
+            other => panic!("expected modified damage, got {other:?}"),
+        }
+
+        // NEGATIVE: combat damage is not amplified (NoncombatOnly scope).
+        let combat = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            applied: HashSet::new(),
+        };
+        match replace_event(&mut state, combat, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3, "combat damage must not be amplified")
+            }
+            other => panic!("expected unmodified combat damage, got {other:?}"),
+        }
+
+        // NEGATIVE: noncombat damage to YOUR OWN permanent is not amplified
+        // (target filter is opponent-only).
+        let mut own = GameObject::new(
+            ObjectId(60),
+            CardId(3),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        own.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(ObjectId(60), own);
+        state.battlefield.push_back(ObjectId(60));
+        let to_own = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(60)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        match replace_event(&mut state, to_own, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(
+                    amount, 3,
+                    "damage to your own permanent must not be amplified"
+                )
+            }
+            other => panic!("expected unmodified self-damage, got {other:?}"),
+        }
+    }
+
     #[test]
     fn damage_applier_plus() {
-        let repl = damage_repl(DamageModification::Plus { value: 2 });
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 2 },
+        });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
         let mut events = Vec::new();
         let rid = ReplacementId {
@@ -9885,11 +10043,12 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_blocks_self() {
-        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
-            DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Opponent,
-            },
-        );
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 2 },
+        })
+        .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::Opponent,
+        });
         // Replacement on P0's object
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -9908,11 +10067,12 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_allows_opponent() {
-        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
-            DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Opponent,
-            },
-        );
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 2 },
+        })
+        .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::Opponent,
+        });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Damage targets P1 (opponent) — should match
@@ -9931,11 +10091,12 @@ mod tests {
     #[test]
     fn damage_target_filter_opponent_allows_opponents_permanent() {
         use crate::types::card_type::CoreType;
-        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
-            DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Opponent,
-            },
-        );
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 2 },
+        })
+        .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::Opponent,
+        });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Add opponent's creature
@@ -11016,11 +11177,12 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_only() {
-        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
-            DamageTargetFilter::Player {
-                player: DamageTargetPlayerScope::Opponent,
-            },
-        );
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 1 },
+        })
+        .damage_target_filter(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Opponent,
+        });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Damage to opponent (P1) — should match
@@ -11078,11 +11240,12 @@ mod tests {
 
     #[test]
     fn damage_target_filter_controller_only() {
-        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
-            DamageTargetFilter::Player {
-                player: DamageTargetPlayerScope::Controller,
-            },
-        );
+        let repl = damage_repl(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 1 },
+        })
+        .damage_target_filter(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Controller,
+        });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
         let registry = build_replacement_registry();
 

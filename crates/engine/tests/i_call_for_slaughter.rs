@@ -22,8 +22,8 @@ use engine::game::effects::add_target_replacement;
 use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ControllerRef, DamageModification, Duration, Effect, ReplacementDefinition, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    ControllerRef, DamageModification, Duration, Effect, QuantityExpr, ReplacementDefinition,
+    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -35,7 +35,9 @@ use engine::types::zones::Zone;
 /// The replacement the parser emits for the scheme's "plus 1" clause.
 fn slaughter_replacement() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .damage_modification(DamageModification::Plus { value: 1 })
+        .damage_modification(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 1 },
+        })
         .damage_source_filter(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::You),
         ))

@@ -3598,6 +3598,44 @@ fn parse_anaphoric_status_predicate(
     Ok((rest, (subject, negated, prop)))
 }
 
+/// CR 702.119a-c: Recognize "[possessive subject] emerge cost was paid" as an
+/// `AbilityCondition::CastVariantPaid { Emerge }`. Only Emerge routes through the
+/// generic instead path (`ConditionInstead`, token-reproduction body); the
+/// pre-existing sneak / ninjutsu / surge / spectacle / prowl "instead" cards keep
+/// their established `strip_additional_cost_conditional` (Route-2 →
+/// `CastVariantPaidInstead`) path, so the membership filter prevents any
+/// regression. Dispatch is nom `tag()`, never contains/find. `lower` is the
+/// already-lowercased condition fragment with any leading "if " stripped.
+fn parse_cast_variant_cost_paid_condition(lower: &str) -> Option<AbilityCondition> {
+    use crate::parser::oracle_trigger::CAST_VARIANT_COST_PAID_PHRASES;
+    // Optional possessive subject ("this creature's" / "this spell's" /
+    // "this permanent's" / "its" / "~'s") — normalization, not dispatch.
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("this creature's "),
+        tag("this spell's "),
+        tag("this permanent's "),
+        tag("its "),
+        tag("~'s "),
+        tag("~’s "),
+    )))
+    .parse(lower)
+    .ok()?;
+    CAST_VARIANT_COST_PAID_PHRASES
+        .iter()
+        .filter(|&&(_, variant)| variant == CastVariantPaid::Emerge)
+        .find_map(|&(phrase, variant)| {
+            let (rest, _) = tag::<_, _, OracleError<'_>>(phrase).parse(input).ok()?;
+            // CR 603.4: allow an optional "this turn" tail, then require the
+            // fragment to be fully consumed so partial matches don't leak.
+            let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
+                .parse(rest)
+                .ok()?;
+            rest.trim()
+                .is_empty()
+                .then_some(AbilityCondition::CastVariantPaid { variant })
+        })
+}
+
 pub(super) fn try_nom_condition_as_ability_condition(
     text: &str,
     ctx: &mut ParseContext,
@@ -3633,6 +3671,13 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     if let Some(condition) = parse_entered_or_cast_from_zone_ability_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 702.119a-c: "[possessive] emerge cost was paid" → CastVariantPaid { Emerge },
+    // routing Adipose Offspring's "instead create X of those tokens" body through
+    // the ConditionInstead token-reproduction path.
+    if let Some(condition) = parse_cast_variant_cost_paid_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -5008,6 +5053,43 @@ mod tests {
             })
         ));
         assert_eq!(body, "draw a card.");
+    }
+
+    /// CR 702.119a-c: "[possessive] emerge cost was paid" lowers to
+    /// `CastVariantPaid { Emerge }` across the possessive-subject variants, and
+    /// the membership filter rejects the other cast-variant phrases so their
+    /// established Route-2 (`CastVariantPaidInstead`) handling is untouched.
+    #[test]
+    fn parse_cast_variant_cost_paid_condition_recognizes_emerge_only() {
+        for subject in [
+            "emerge cost was paid",
+            "this creature's emerge cost was paid",
+            "its emerge cost was paid",
+            "this spell's emerge cost was paid",
+            "this creature's emerge cost was paid this turn",
+        ] {
+            assert_eq!(
+                parse_cast_variant_cost_paid_condition(subject),
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Emerge,
+                }),
+                "{subject:?} must lower to CastVariantPaid {{ Emerge }}"
+            );
+        }
+        // Membership filter: non-emerge cast-variant phrases keep their Route-2
+        // (`strip_additional_cost_conditional` → `CastVariantPaidInstead`) path.
+        for other in [
+            "this creature's spectacle cost was paid",
+            "its surge cost was paid",
+            "prowl cost was paid",
+            "this creature's emerge cost was reduced",
+        ] {
+            assert_eq!(
+                parse_cast_variant_cost_paid_condition(other),
+                None,
+                "{other:?} must not be claimed by the emerge instead recognizer"
+            );
+        }
     }
 
     #[test]

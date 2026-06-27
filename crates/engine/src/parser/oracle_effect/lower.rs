@@ -11,8 +11,9 @@ use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
-    parse_cda_quantity, parse_cda_quantity_with_context, parse_for_each_clause,
-    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context, parse_quantity_ref,
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -1653,12 +1654,52 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     let (_, tail) = nom_on_lower(after, &after_lower, |i| {
         value((), tag("of those tokens")).parse(i)
     })?;
+    // CR 107.3 / CR 107.3c: when the count is the placeholder X and a trailing
+    // ", where X is <expr>" clause defines it, the value of X is defined by the
+    // card's own text — bind the count to that clause (e.g. Adipose Offspring's
+    // "the sacrificed creature's toughness" → Toughness { CostPaidObject }, The
+    // Final Days' "the number of creature cards in your graveyard") rather than
+    // to any {X} in the spell's mana cost. Absent the clause, X falls back to
+    // the spell's announced {X} (Starnheim Unleashed, Conqueror's Pledge).
+    if matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { .. }
+        }
+    ) {
+        if let Some(bound) = parse_trailing_where_x_quantity(tail) {
+            return Some(bound);
+        }
+    }
     // Accept end, or a comma/whitespace-prefixed modifier.
     if tail.is_empty() || matches!(tail.chars().next(), Some(' ' | ',' | '.')) {
         Some(count)
     } else {
         None
     }
+}
+
+/// CR 107.3c: parse a trailing ", where X is <quantity>" clause into the bound
+/// `QuantityExpr` it defines, reusing the shared quantity combinators. Returns
+/// `None` when the tail carries no such clause (the count then keeps its prior
+/// reading). Event-context quantities ("the sacrificed creature's toughness")
+/// are tried before the general CDA quantities so cost-paid-object possessives
+/// bind to `ObjectScope::CostPaidObject`.
+fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
+    let lower = tail.to_lowercase();
+    // Optional leading separator (", " / " ") then the defining clause keyword,
+    // all dispatched via nom combinators.
+    let (_, rest) = nom_on_lower(tail, &lower, |i| {
+        value((), (opt(tag(",")), multispace0, tag("where x is "))).parse(i)
+    })?;
+    // Structural trailing-period cleanup on the already clause-delimited
+    // quantity text before delegating to the quantity combinators (mirrors
+    // `parse_where_x_quantity_expression`).
+    let expr = rest.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup, not dispatch
+    if expr.is_empty() {
+        return None;
+    }
+    parse_event_context_quantity(expr).or_else(|| parse_cda_quantity(expr))
 }
 
 /// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
@@ -7088,10 +7129,10 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
-        value_quantity_clause_owns_this_turn_suffix,
+        match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+        parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
+        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
@@ -7103,6 +7144,55 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 107.3c: the "create N of those tokens" anaphor binds its count to a
+    /// trailing ", where X is <expr>" clause when present (Adipose Offspring and
+    /// The Final Days), and otherwise keeps the spell's announced {X}
+    /// (Starnheim Unleashed / Conqueror's Pledge).
+    #[test]
+    fn match_create_of_those_tokens_binds_trailing_where_x_clause() {
+        // CR 107.3c: cost-paid-object possessive → Toughness { CostPaidObject }.
+        let adipose = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the sacrificed creature's toughness",
+        );
+        assert_eq!(
+            match_create_of_those_tokens(&adipose),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+
+        // Boy-scout: The Final Days' graveyard-creature-count where-clause.
+        let final_days = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the number of creature cards in your \
+             graveyard",
+        );
+        assert!(
+            matches!(
+                match_create_of_those_tokens(&final_days),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount { .. }
+                })
+            ),
+            "graveyard creature-count where-clause must bind, got {:?}",
+            match_create_of_those_tokens(&final_days)
+        );
+
+        // No where-clause → the count stays the spell's announced {X}.
+        let bare = Effect::unimplemented("create", "create x of those tokens");
+        assert_eq!(
+            match_create_of_those_tokens(&bare),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        );
+    }
 
     // CR 101.4 + CR 608.2c: the comma-prefixed per-player imperative scope ("for
     // each player, <imperative> ... that player controls") strips to PlayerFilter::All

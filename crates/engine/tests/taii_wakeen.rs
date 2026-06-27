@@ -230,7 +230,7 @@ mod a2_runtime {
     use engine::game::replacement::{replace_event, ReplacementResult};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        CombatDamageScope, ControllerRef, DamageModification, Duration, Effect,
+        CombatDamageScope, ControllerRef, DamageModification, Duration, Effect, QuantityExpr,
         ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::game_state::GameState;
@@ -245,7 +245,9 @@ mod a2_runtime {
     /// time via `chosen_x`.
     fn a2_replacement() -> ReplacementDefinition {
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 0 })
+            .damage_modification(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 },
+            })
             .combat_scope(CombatDamageScope::NoncombatOnly)
             .damage_source_filter(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
@@ -311,7 +313,9 @@ mod a2_runtime {
         );
         assert_eq!(
             pending.damage_modification,
-            Some(DamageModification::Plus { value: 2 }),
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            }),
             "announced X=2 must be frozen into the Plus value (CR 107.3a)"
         );
 
@@ -352,7 +356,9 @@ mod a2_runtime {
         install_a2(&mut state, 0);
         assert_eq!(
             state.pending_damage_replacements[0].damage_modification,
-            Some(DamageModification::Plus { value: 0 }),
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 }
+            }),
             "X=0 freezes to Plus 0"
         );
 

@@ -2554,6 +2554,18 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    // CR 608.2c + CR 122.1: bare "counter[s] removed" (Blademane Baku) — an
+    // activated ability whose cost removed counters scales the effect without
+    // an explicit "this way". Dispatches to `PreviousEffectAmount`, same runtime
+    // channel as "counter removed this way" (Coalition Relic class).
+    let lower = clause.to_ascii_lowercase();
+    if all_consuming(parse_counters_removed_phrase)
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(QuantityRef::PreviousEffectAmount);
+    }
+
     // CR 406.6 + CR 607.1 + CR 614.1c: "[type phrase] card(s) exiled with it/~"
     // -- a count of the linked-exile set (cards exiled with this source, e.g.
     // via Delve) restricted to a type phrase. Murktide Regent's ETB counter
@@ -3459,6 +3471,14 @@ mod tests {
         // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
         // counter type. Must produce the same dispatch.
         let qty = parse_for_each_clause("storage counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_bare_counter_removed_is_previous_effect_amount() {
+        // Blademane Baku: "For each counter removed, this creature gets +2/+0
+        // until end of turn" — no "this way" suffix on the activated tail.
+        let qty = parse_for_each_clause("counter removed").unwrap();
         assert_eq!(qty, QuantityRef::PreviousEffectAmount);
     }
 

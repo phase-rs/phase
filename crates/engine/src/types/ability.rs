@@ -6079,6 +6079,11 @@ pub enum CastVariantPaid {
     /// "if its prowl cost was paid" intervening-if (Latchkey Faerie, Oona's
     /// Blackguard-style prowl payoffs).
     Prowl,
+    /// CR 702.119a-c: Emerge alternative cast cost was paid (a creature was
+    /// sacrificed and the reduced emerge mana cost paid). Read by the "if its
+    /// emerge cost was paid, instead …" intervening-if / instead clauses
+    /// (Adipose Offspring).
+    Emerge,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -11094,6 +11099,27 @@ impl TargetFilter {
         }
     }
 
+    /// CR 400.7d + CR 608.2k: True when this filter tree references the
+    /// cost-paid object (`TargetFilter::CostPaidObject`) at any structural
+    /// position — directly, or nested inside `And`/`Or`/`Not`/
+    /// `TrackedSetFiltered` composition. Mirrors `references_exiled_by_source`,
+    /// but uses `any` for `Or` because the consumer (the emerge cost-paid-object
+    /// propagation gate in `game::triggers`) needs to detect *any* reference to
+    /// the cost-paid object so the `cast_cost_paid_object` snapshot is propagated
+    /// whenever it could be read at resolution — not whether the filter as a
+    /// whole is a context-ref for target-slot purposes.
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            TargetFilter::CostPaidObject => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+                .iter()
+                .any(TargetFilter::references_cost_paid_object),
+            TargetFilter::Not { filter } => filter.references_cost_paid_object(),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_cost_paid_object(),
+            _ => false,
+        }
+    }
+
     pub fn contains_source_attachment_host(&self) -> bool {
         match self {
             TargetFilter::Typed(TypedFilter { properties, .. }) => properties
@@ -15911,8 +15937,12 @@ pub enum DamageModification {
     Double,
     /// amount * 3 (e.g. Fiery Emancipation)
     Triple,
-    /// amount + value (e.g. Torbran, +2)
-    Plus { value: u32 },
+    /// CR 614.1a + CR 120: amount + value, where the added magnitude is a
+    /// `QuantityExpr` resolved against the replacement source at application
+    /// time. `Fixed { value }` covers static offsets (Torbran +2, Artist's
+    /// Talent +2); a `Ref` carries a live game quantity ("...plus X, where X is
+    /// ~'s power" — Hawkeye, Young Avenger).
+    Plus { value: QuantityExpr },
     /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1).
     /// CR 615.1 + CR 614.1a: Continuous prevention statics ("prevent that damage")
     /// emit `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for any
