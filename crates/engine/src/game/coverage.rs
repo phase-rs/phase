@@ -1226,7 +1226,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
             };
-            format!("{color:?} mana symbols in {scope_str}'s mana cost")
+            match color {
+                Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
+                None => format!("colored mana symbols in {scope_str}'s mana cost"),
+            }
         }
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
@@ -1710,6 +1713,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
                 fmt_target(filter),
                 fmt_quantity(count)
             )
+        }
+        ManaProduction::AnyCombinationOfObjectColors { count, scope } => {
+            let subject = match scope {
+                ObjectScope::Target => "target's",
+                _ => "object's",
+            };
+            format!("{} any combo of {subject} colors", fmt_quantity(count))
         }
         ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }

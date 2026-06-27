@@ -710,6 +710,29 @@ pub(crate) fn mana_choice_prompt(
                 None
             }
         }
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All — each of the produced mana
+        // is freely chosen among the scoped object's colors (dynamic, mirrors
+        // AnyCombination but with a runtime-resolved option set). Surface the
+        // AnyCombination prompt only when the object has more than one color; 0 or
+        // 1 color needs no prompt (CR 106.5 empty → no mana; single auto-picks).
+        ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
+            let options = super::effects::mana::object_colors_for_scope(state, ability, *scope)
+                .iter()
+                .map(mana_color_to_type)
+                .collect::<Vec<_>>();
+            if options.len() <= 1 {
+                return None;
+            }
+            let ability = ability?;
+            let count =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                    .len();
+            if count > 0 {
+                Some(ManaChoicePrompt::AnyCombination { count, options })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

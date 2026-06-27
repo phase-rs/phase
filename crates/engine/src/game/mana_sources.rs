@@ -684,6 +684,10 @@ pub fn display_land_mana_pips(
                     push(&mut pips, ManaPip::OneOfColors(colors));
                 }
             }
+            // CR 106.1 + CR 202.2c: Omnath, Locus of All — colors are read from a
+            // target object resolved at trigger-resolution time, not from this
+            // permanent's frame, so there is no static pip to display here.
+            ManaProduction::AnyCombinationOfObjectColors { .. } => {}
             // CR 603.7c + CR 106.3: Resolves only inside a TapsForMana
             // trigger; outside a trigger context there is no pre-resolution
             // pip to display, so contribute nothing.
@@ -1070,6 +1074,11 @@ fn profile_kind_from_production(
             }
         }
         ManaProduction::TriggerEventManaType => None,
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All — a one-shot triggered mana
+        // effect, never an activatable mana ability tapped during cost payment.
+        // No target-bound object exists in this profile context, so it surfaces
+        // no activatable profile (CR 106.5).
+        ManaProduction::AnyCombinationOfObjectColors { .. } => None,
         _ => {
             let types =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, resolved);
@@ -1735,6 +1744,11 @@ fn mana_options_from_production(
                 .map(mana_color_to_type)
                 .collect()
         }
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All — colors come from a target
+        // object bound at trigger resolution, not available in this mana-source
+        // enumeration context (no target / no ability). Contributes no option set
+        // (CR 106.5), mirroring TriggerEventManaType.
+        ManaProduction::AnyCombinationOfObjectColors { .. } => Vec::new(),
         // CR 603.7c + CR 106.3: "add one mana of any type that land produced"
         // resolves only inside a triggered ability (TapsForMana). For the mana
         // source enumeration path (cost-payment auto-tap, direct activation),

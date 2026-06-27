@@ -2178,6 +2178,34 @@ fn parse_triggering_spell_targets_filter_ability_condition(text: &str) -> Option
     }
 }
 
+/// CR 608.2d + CR 107.4 + CR 202.1: Recognize "it has N or more colored mana
+/// symbols in its mana cost" (Omnath, Locus of All — "You may reveal that card
+/// if it has three or more colored mana symbols in its mana cost") into a
+/// quantity-comparison condition on the target object. `color: None` counts each
+/// colored mana symbol once regardless of color (CR 107.4a/107.4e/107.4f). The
+/// comparator is a typed axis (GE here); "or fewer"/"exactly" variants are future
+/// arms and must not be baked into the condition variant.
+fn parse_colored_mana_symbol_count_target_condition(text: &str) -> Option<AbilityCondition> {
+    let mut parser = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("it has "),
+        terminated(
+            nom_primitives::parse_number,
+            tag(" or more colored mana symbols in its mana cost"),
+        ),
+    ));
+    let (_, n) = parser.parse(text).ok()?;
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ManaSymbolsInManaCost {
+                scope: ObjectScope::Target,
+                color: None,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: n as i32 },
+    })
+}
+
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
@@ -2188,6 +2216,13 @@ pub(super) fn strip_suffix_conditional(
     };
 
     let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+    // CR 608.2d: "it has " is in NON_REHOMEABLE_CONDITION_PREFIXES, so this
+    // source-referential mana-symbol eligibility check must be recognized BEFORE
+    // the rehomeable bail or it would never run. effect_prefix/effect_text are
+    // not computed yet, so return the stripped effect text directly.
+    if let Some(cond) = parse_colored_mana_symbol_count_target_condition(condition_text) {
+        return (Some(cond), text[..if_pos].trim().to_string());
+    }
     if !condition_text_is_rehomeable(condition_text) {
         return (None, text.to_string());
     }
@@ -5165,6 +5200,50 @@ mod tests {
         );
         assert_eq!(text, "Counter target spell");
         assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
+    }
+
+    /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
+    /// that card if it has three or more colored mana symbols in its mana cost"
+    /// re-homes the eligibility check as a `QuantityCheck` (GE) over the target's
+    /// colored-mana-symbol count (`color: None`), and the optional-reveal effect
+    /// text is stripped. The recognizer must run BEFORE the rehomeable bail since
+    /// "it has " is in NON_REHOMEABLE_CONDITION_PREFIXES.
+    #[test]
+    fn parse_colored_mana_symbol_count_condition_rehomes_eligibility() {
+        let cond = parse_colored_mana_symbol_count_target_condition(
+            "it has three or more colored mana symbols in its mana cost",
+        )
+        .expect("should parse the colored-mana-symbol eligibility condition");
+        assert_eq!(
+            cond,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSymbolsInManaCost {
+                        scope: ObjectScope::Target,
+                        color: None,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        let (cond, text) = strip_suffix_conditional(
+            "You may reveal that card if it has three or more colored mana symbols in its mana cost",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "You may reveal that card");
+        assert!(matches!(
+            cond,
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                ..
+            })
+        ));
+
+        // Negative: a different number still parses (typed comparator/count axis),
+        // and an unrelated "it has" predicate does not falsely match.
+        assert!(parse_colored_mana_symbol_count_target_condition("it has flying").is_none());
     }
 
     #[test]

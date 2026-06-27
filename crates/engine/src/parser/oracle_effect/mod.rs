@@ -18210,6 +18210,12 @@ fn mana_production_with_count(
         ManaProduction::OpponentLandColors { .. } => {
             Some(ManaProduction::OpponentLandColors { count })
         }
+        ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
+            Some(ManaProduction::AnyCombinationOfObjectColors {
+                count,
+                scope: *scope,
+            })
+        }
         ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
             Some(ManaProduction::AnyTypeProduceableBy {
                 count,

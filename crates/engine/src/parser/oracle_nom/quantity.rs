@@ -3359,7 +3359,13 @@ fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<
     let (rest, _) = tag(" in ").parse(rest)?;
     let (rest, scope) = parse_object_possessive_scope(rest)?;
     let (rest, _) = tag(" mana cost").parse(rest)?;
-    Ok((rest, QuantityRef::ManaSymbolsInManaCost { scope, color }))
+    Ok((
+        rest,
+        QuantityRef::ManaSymbolsInManaCost {
+            scope,
+            color: Some(color),
+        },
+    ))
 }
 
 /// CR 105.1 + CR 601.2f: "for each color[s] of <object>" — scoped object-color
@@ -5365,7 +5371,7 @@ mod tests {
             q,
             QuantityRef::ManaSymbolsInManaCost {
                 scope: crate::types::ability::ObjectScope::Recipient,
-                color: ManaColor::White,
+                color: Some(ManaColor::White),
             }
         );
         assert_eq!(rest, "");

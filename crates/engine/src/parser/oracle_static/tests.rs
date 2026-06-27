@@ -11106,7 +11106,7 @@ fn static_for_each_mana_symbol_in_its_mana_cost_emits_recipient_symbol_count() {
         &QuantityExpr::Ref {
             qty: QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
-                color: ManaColor::White,
+                color: Some(ManaColor::White),
             },
         }
     );
@@ -11116,7 +11116,7 @@ fn static_for_each_mana_symbol_in_its_mana_cost_emits_recipient_symbol_count() {
             value: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSymbolsInManaCost {
                     scope: ObjectScope::Recipient,
-                    color: ManaColor::White,
+                    color: Some(ManaColor::White),
                 }
             }
         }

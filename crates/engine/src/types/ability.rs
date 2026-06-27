@@ -1313,6 +1313,20 @@ pub enum ManaProduction {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 106.1 + CR 106.5 + CR 202.2c: Produce `count` mana, each freely chosen
+    /// among the colors of an object identified by `scope` (Omnath, Locus of All:
+    /// "add three mana in any combination of its colors"). Unlike the static
+    /// `AnyCombination` (whose `color_options` are fixed at parse time), the color
+    /// set here is computed dynamically at resolution time from the scoped object's
+    /// colors (CR 202.2c). Its analog is the dynamic-color family
+    /// (`AnyOneColorAmongPermanents` / `DistinctColorsAmongPermanents`), not the
+    /// static `AnyCombination`. If the object has no colors, CR 106.5 applies and
+    /// no mana is produced.
+    AnyCombinationOfObjectColors {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        scope: ObjectScope,
+    },
     /// CR 106.7 + CR 106.1b: Produce N mana of any **type** (W/U/B/R/G/C) that a
     /// land matching `land_filter` could produce. Differs from
     /// `OpponentLandColors` in that the choice axis is the full type set
@@ -1463,6 +1477,11 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
                     },
+                    AnyCombinationOfObjectColors {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        scope: ObjectScope,
+                    },
                     AnyTypeProduceableBy {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
@@ -1538,6 +1557,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     },
                     ManaProductionHelper::OpponentLandColors { count } => {
                         ManaProduction::OpponentLandColors { count }
+                    }
+                    ManaProductionHelper::AnyCombinationOfObjectColors { count, scope } => {
+                        ManaProduction::AnyCombinationOfObjectColors { count, scope }
                     }
                     ManaProductionHelper::AnyTypeProduceableBy { count, land_filter } => {
                         ManaProduction::AnyTypeProduceableBy { count, land_filter }
@@ -4110,9 +4132,16 @@ pub enum QuantityRef {
     /// `ManaCostShard::contributes_to`. `Recipient` preserves per-affected
     /// layer boosts such as "gets +1/+1 for each white mana symbol in its mana
     /// cost" by binding to the object currently receiving the effect.
+    ///
+    /// `color: Some(c)` counts symbols contributing to color `c`. `color: None`
+    /// counts each colored mana symbol once regardless of color — per
+    /// CR 107.4a/107.4e/107.4f a hybrid or Phyrexian symbol is a single colored
+    /// symbol even though it is all of its component colors, so e.g.
+    /// `{G/W}{G/W}` counts as 2. Used by "three or more colored mana symbols in
+    /// its mana cost" eligibility checks (Omnath, Locus of All).
     ManaSymbolsInManaCost {
         scope: ObjectScope,
-        color: ManaColor,
+        color: Option<ManaColor>,
     },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
@@ -18964,6 +18993,61 @@ mod tests {
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
+    }
+
+    /// CR 107.4 + CR 202.1: `ManaSymbolsInManaCost.color` is now
+    /// `Option<ManaColor>`. `None` (count each colored symbol once) and
+    /// `Some(color)` (per-color count) both round-trip. serde renders
+    /// `Some(White)` as the bare `"color":"White"`, identical to the pre-change
+    /// non-optional form, so legacy payloads deserialize to `Some(White)`.
+    #[test]
+    fn mana_symbols_in_mana_cost_optional_color_serde_roundtrip() {
+        let none_ref = QuantityRef::ManaSymbolsInManaCost {
+            scope: ObjectScope::Target,
+            color: None,
+        };
+        let json = serde_json::to_string(&none_ref).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).unwrap(),
+            none_ref
+        );
+
+        let some_ref = QuantityRef::ManaSymbolsInManaCost {
+            scope: ObjectScope::Recipient,
+            color: Some(ManaColor::White),
+        };
+        let json = serde_json::to_string(&some_ref).unwrap();
+        assert!(json.contains("\"color\":\"White\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).unwrap(),
+            some_ref
+        );
+    }
+
+    /// CR 106.1 + CR 202.2c: the dynamic-color `AnyCombinationOfObjectColors`
+    /// mana production round-trips through the custom `ManaProduction` (de)serializer.
+    #[test]
+    fn any_combination_of_object_colors_serde_roundtrip() {
+        let mp = ManaProduction::AnyCombinationOfObjectColors {
+            count: QuantityExpr::Fixed { value: 3 },
+            scope: ObjectScope::Target,
+        };
+        let json = serde_json::to_string(&mp).unwrap();
+        let back: ManaProduction = serde_json::from_str(&json).unwrap();
+        assert_eq!(mp, back);
+
+        // count defaults to one when omitted (default_quantity_one).
+        let defaulted: ManaProduction = serde_json::from_str(
+            r#"{"type":"AnyCombinationOfObjectColors","scope":{"type":"Target"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            defaulted,
+            ManaProduction::AnyCombinationOfObjectColors {
+                count: default_quantity_one(),
+                scope: ObjectScope::Target,
+            }
+        );
     }
 
     #[test]

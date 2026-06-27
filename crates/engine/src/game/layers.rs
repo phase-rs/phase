@@ -6916,7 +6916,7 @@ mod tests {
             let qty = QuantityExpr::Ref {
                 qty: QuantityRef::ManaSymbolsInManaCost {
                     scope: crate::types::ability::ObjectScope::Recipient,
-                    color: ManaColor::White,
+                    color: Some(ManaColor::White),
                 },
             };
             obj.static_definitions.push(

@@ -6991,6 +6991,12 @@ fn production_override_for_option(
         | crate::types::ability::ManaProduction::ChoiceAmongExiledColors { .. }
         | crate::types::ability::ManaProduction::OpponentLandColors { .. }
         | crate::types::ability::ManaProduction::AnyTypeProduceableBy { .. }
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All is a one-shot triggered mana
+        // effect, not an activatable mana source the cost payer taps, so this is
+        // unreachable for the only current printing. Grouped with the dynamic
+        // any-color producers: each produced unit picks a single color, so the
+        // chosen option maps to a SingleColor override.
+        | crate::types::ability::ManaProduction::AnyCombinationOfObjectColors { .. }
         | crate::types::ability::ManaProduction::AnyInCommandersColorIdentity { .. } => Some(
             crate::types::game_state::ProductionOverride::SingleColor(option.mana_type),
         ),

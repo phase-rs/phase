@@ -4,7 +4,7 @@ use crate::game::{mana_payment, mana_sources};
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
     ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
-    ManaSpendRestriction, ResolvedAbility,
+    ManaSpendRestriction, ObjectScope, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -503,6 +503,24 @@ fn resolve_mana_types_impl(
             };
             vec![first; amount]
         }
+        // CR 106.1 + CR 106.5 + CR 202.2c: Omnath, Locus of All — "add three mana
+        // in any combination of its colors." The color set is the scoped object's
+        // colors (dynamic, mirroring AnyOneColorAmongPermanents), not a static
+        // option list. This is the no-override default path; the per-unit free
+        // choice is surfaced by `mana_choice_prompt` (ManaChoicePrompt::AnyCombination)
+        // when the object has more than one color. Without an override the colors
+        // are cycled, mirroring the static AnyCombination default. CR 106.5: a
+        // colorless / unbound object produces no mana.
+        ManaProduction::AnyCombinationOfObjectColors { count, scope } => {
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            let color_options = object_colors_for_scope(state, ability, *scope);
+            if color_options.is_empty() {
+                return Vec::new();
+            }
+            (0..amount)
+                .map(|index| mana_color_to_type(&color_options[index % color_options.len()]))
+                .collect()
+        }
         // CR 106.7 + CR 106.1b: Reflecting Pool class — produce N mana of any
         // type (W/U/B/R/G/C) that a land matching `land_filter` could produce.
         // Without an explicit choice override (auto-tap during cost payment, or
@@ -631,6 +649,41 @@ fn resolve_mana_types_impl(
 /// present among permanents matching `filter`. Colorless permanents contribute
 /// nothing. Used by both the mana ability resolver and `mana_sources` so that
 /// cost-payment and direct activation see the same option set.
+/// CR 202.2c + CR 106.5: Colors of the object identified by `scope`, for an
+/// `AnyCombinationOfObjectColors` mana production (Omnath, Locus of All). Reads
+/// the object's current `color` (zone-independent — correct after the revealed
+/// card is put into hand, per CR 400.7j), returned in stable WUBRG order. Empty
+/// when the scope binds no object or the object is colorless (CR 106.5). Only
+/// `ObjectScope::Target` has a printing today; other scopes bind no object.
+pub(crate) fn object_colors_for_scope(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    scope: ObjectScope,
+) -> Vec<ManaColor> {
+    let obj_id = match scope {
+        ObjectScope::Target => ability.and_then(|a| {
+            a.targets.iter().find_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                _ => None,
+            })
+        }),
+        _ => None,
+    };
+    let Some(obj) = obj_id.and_then(|id| state.objects.get(&id)) else {
+        return Vec::new();
+    };
+    [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
+    .into_iter()
+    .filter(|c| obj.color.contains(c))
+    .collect()
+}
+
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -788,6 +841,65 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    /// CR 106.1 + CR 106.5 + CR 202.2c: `AnyCombinationOfObjectColors` (Omnath,
+    /// Locus of All) draws its colors from the target object. A monocolored
+    /// target needs no prompt — `resolve` produces `count` mana of that color
+    /// directly; a colorless target produces no mana (CR 106.5). (The multicolor
+    /// prompt→produce flow is covered by the `omnath_tests` runtime suite.)
+    #[test]
+    fn any_combination_of_object_colors_uses_target_colors_and_empty_when_colorless() {
+        let mk_ability = |target: ObjectId| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::AnyCombinationOfObjectColors {
+                        count: QuantityExpr::Fixed { value: 3 },
+                        scope: crate::types::ability::ObjectScope::Target,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        // Monocolored (Black) target → three black mana, no prompt.
+        let mut state = GameState::new_two_player(42);
+        let mono = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&mono).unwrap().color = vec![ManaColor::Black];
+        let mut events = Vec::new();
+        resolve(&mut state, &mk_ability(mono), &mut events).unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "a single-color object needs no prompt"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 3);
+        assert_eq!(state.players[0].mana_pool.total(), 3);
+
+        // CR 106.5: colorless target → no prompt, no mana.
+        let mut state2 = GameState::new_two_player(42);
+        let colorless = create_object(
+            &mut state2,
+            CardId(2),
+            PlayerId(0),
+            "CL".to_string(),
+            Zone::Hand,
+        );
+        state2.objects.get_mut(&colorless).unwrap().color = vec![];
+        let mut events2 = Vec::new();
+        resolve(&mut state2, &mk_ability(colorless), &mut events2).unwrap();
+        assert_eq!(state2.players[0].mana_pool.total(), 0);
     }
 
     #[test]
