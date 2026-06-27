@@ -631,7 +631,7 @@ fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
         })
 }
 
-fn parse_graveyard_keyword_continuation(
+pub(crate) fn parse_graveyard_keyword_continuation(
     text: &str,
     kind: GraveyardGrantedKeywordKind,
 ) -> Option<Keyword> {

@@ -430,6 +430,7 @@ mod krark_thumb_coin_flip;
 mod kutzils_flanker_mode_one_counter;
 mod lathiel_end_step_counters_repro;
 mod leyline_taps_for_mana_repro;
+mod lightning_dart_disjunctive_color_instead;
 mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
 mod living_death_replacement_redirect_2932;

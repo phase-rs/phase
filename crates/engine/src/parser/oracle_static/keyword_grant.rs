@@ -27,6 +27,27 @@ pub(crate) enum RuleStaticPredicate {
     MayPlayAdditionalLand,
 }
 
+/// CR 702.34a / CR 702.138a / CR 702.187b / CR 702.97 / CR 702.141: maps the
+/// leading keyword token of a graveyard-cast-keyword grant ("flashback",
+/// "escape", "mayhem", "scavenge", "encore") to its `GraveyardGrantedKeywordKind`.
+/// Single authority for the keyword-word → kind dispatch, shared by the static
+/// "each ... has <kw>" clause below and the targeted/imperative grant front door
+/// in `oracle_effect` so both forms recognize the same keyword set.
+pub(crate) fn parse_graveyard_granted_keyword_kind(
+    input: &str,
+) -> OracleResult<'_, GraveyardGrantedKeywordKind> {
+    alt((
+        value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
+        value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
+        value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+        // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
+        // Wire Surgeons (encore) grant activated graveyard keywords.
+        value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
+        value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
+    ))
+    .parse(input)
+}
+
 pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     text: &str,
 ) -> Option<(TargetFilter, GraveyardGrantedKeywordKind, String)> {
@@ -41,18 +62,11 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     let subject = subject.trim();
     let keyword_text = keyword_text.trim().trim_end_matches('.').to_string();
 
-    let kind = nom_on_lower(&keyword_text, &keyword_text.to_lowercase(), |i| {
-        alt((
-            value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
-            value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
-            value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
-            // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
-            // Wire Surgeons (encore) grant activated graveyard keywords.
-            value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
-            value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
-        ))
-        .parse(i)
-    })?
+    let kind = nom_on_lower(
+        &keyword_text,
+        &keyword_text.to_lowercase(),
+        parse_graveyard_granted_keyword_kind,
+    )?
     .0;
 
     let (filter, remainder) = parse_type_phrase(subject);

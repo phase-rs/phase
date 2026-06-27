@@ -1181,16 +1181,27 @@ fn parse_target_color_condition(
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_anaphoric_subject(input)?;
     let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
-    let (rest, color) = nom_primitives::parse_color(rest)?;
+    let (rest, first_color) = nom_primitives::parse_color(rest)?;
+    // CR 105.2: Disjunctive color condition — "white or blue" etc.
+    let (rest, second_color) =
+        opt(preceded(tag(" or "), nom_primitives::parse_color)).parse(rest)?;
+    let mut filters: Vec<_> = std::iter::once(first_color)
+        .chain(second_color)
+        .map(|color| {
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+            )
+        })
+        .collect();
+    let filter = if filters.len() > 1 {
+        TargetFilter::Or { filters }
+    } else {
+        filters.pop().unwrap()
+    };
     Ok((
         rest,
         maybe_negate(
-            AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(
-                    TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
-                ),
-                use_lki,
-            },
+            AbilityCondition::TargetMatchesFilter { filter, use_lki },
             negated,
         ),
     ))

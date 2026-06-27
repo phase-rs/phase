@@ -10,6 +10,7 @@ use nom::Parser;
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_exile_top_each_library_with_collection_counter,
+    try_parse_grant_graveyard_keyword_to_target,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
@@ -999,6 +1000,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 AbilityKind::Spell,
             )
             .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            .or_else(|| {
+                // CR 702.138a: triggered one-shot grant of escape to a target
+                // graveyard card whose compound cost rides a continuation sentence
+                // (Desdemona, Freedom's Edge). Fail-closed: declines unless the
+                // whole two-sentence shape parses, so a card with an unparsed
+                // target filter stays an honest Unimplemented rather than misparsing.
+                try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
             .or_else(|| {
                 // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
                 // mode1; or mode2" on a single line (no bullet-line modes). Grenzo,
