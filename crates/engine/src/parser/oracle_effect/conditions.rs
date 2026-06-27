@@ -17,7 +17,9 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{parse_type_phrase, parse_zone_word};
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
+use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
+use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
@@ -2711,9 +2713,6 @@ pub(super) fn try_parse_dig_instead_alternative(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    use super::sequence::parse_dig_from_among;
-    use crate::parser::oracle_ir::ast::ContinuationAst;
-
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
@@ -2727,50 +2726,71 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
 
-    let (condition_fragment, raw_body) = split_leading_conditional(text)?;
-    let condition_lower = condition_fragment.to_lowercase();
-    let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
-        value((), tag("if ")).parse(i)
-    })
-    .map(|((), rest)| rest)
-    .unwrap_or(&condition_fragment)
-    .trim();
+    let (cond_text, body_rest, has_instead_marker) =
+        if let Some((condition_fragment, raw_body)) = split_leading_conditional(text) {
+            let condition_lower = condition_fragment.to_lowercase();
+            let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
+                value((), tag("if ")).parse(i)
+            })
+            .map(|((), rest)| rest)
+            .unwrap_or(&condition_fragment)
+            .trim()
+            .to_string();
 
-    // Strip "you may instead " / "instead " / "you may " from the body to get
-    // the bare reveal-from-among clause. Composed with nom combinators; the
-    // "you may instead" arm is first so it wins over "you may ". Some cards
-    // print the replacement marker at the end instead ("put two ... instead"),
-    // so accept a trailing marker as the same alternative-selection grammar.
-    let trimmed_body = raw_body.trim_end_matches('.').trim();
-    let body_lower = trimmed_body.to_lowercase();
-    let (prefix_had_instead, body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
-        alt((
-            value(true, tag::<_, _, OracleError<'_>>("you may instead ")),
-            value(true, tag("instead ")),
-            value(false, tag("you may ")),
-        ))
-        .parse(i)
-    })
-    .unwrap_or((false, trimmed_body));
+            // Strip "you may instead " / "instead " / "you may " from the body to
+            // get the bare reveal-from-among clause. Composed with nom combinators;
+            // the "you may instead" arm is first so it wins over "you may ". Some
+            // cards print the replacement marker at the end instead ("put two ...
+            // instead"), so accept a trailing marker as the same alternative grammar.
+            let trimmed_body = raw_body.trim_end_matches('.').trim();
+            let body_lower = trimmed_body.to_lowercase();
+            let (prefix_had_instead, body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
+                alt((
+                    value(true, tag::<_, _, OracleError<'_>>("you may instead ")),
+                    value(true, tag("instead ")),
+                    value(false, tag("you may ")),
+                ))
+                .parse(i)
+            })
+            .unwrap_or((false, trimmed_body));
 
-    let body_rest_lower = body_rest.to_lowercase();
-    let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
-    let (body_rest, suffix_had_instead) =
-        if let Some((before, after)) = body_rest_pair.split_around(" instead") {
-            if after.original.trim().is_empty() {
-                (before.original.trim(), true)
-            } else {
-                (body_rest, false)
-            }
+            let body_rest_lower = body_rest.to_lowercase();
+            let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
+            let (body_rest, suffix_had_instead) =
+                if let Some((before, after)) = body_rest_pair.split_around(" instead") {
+                    if after.original.trim().is_empty() {
+                        (before.original.trim(), true)
+                    } else {
+                        (body_rest, false)
+                    }
+                } else {
+                    (body_rest, false)
+                };
+            (
+                cond_text,
+                body_rest.to_string(),
+                prefix_had_instead || suffix_had_instead,
+            )
+        } else if let Some((cond_text, effect_text)) = split_inverted_instead_clause(text) {
+            let trimmed_body = effect_text.trim_end_matches('.').trim();
+            let body_lower = trimmed_body.to_lowercase();
+            let body_rest = nom_on_lower(trimmed_body, &body_lower, |i| {
+                value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
+            })
+            .map(|((), rest)| rest)
+            .unwrap_or(trimmed_body)
+            .trim()
+            .to_string();
+            (cond_text, body_rest, true)
         } else {
-            (body_rest, false)
+            return None;
         };
-    if !prefix_had_instead && !suffix_had_instead {
+    if !has_instead_marker {
         return None;
     }
 
     let body_rest_lower = body_rest.to_lowercase();
-    let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
+    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest)?;
     let ContinuationAst::DigFromAmong {
         quantity: alt_quantity,
         filter: alt_filter,
@@ -2786,10 +2806,10 @@ pub(super) fn try_parse_dig_instead_alternative(
     // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
     // to the number of seen cards.
     let (alt_keep_count, alt_up_to) = match alt_quantity {
-        crate::parser::oracle_ir::ast::PutCount::All => (Some(u32::MAX), false),
-        crate::parser::oracle_ir::ast::PutCount::AnyNumber => (Some(u32::MAX), true),
-        crate::parser::oracle_ir::ast::PutCount::Up(n) => (Some(n), true),
-        crate::parser::oracle_ir::ast::PutCount::Exactly(n) => (Some(n), false),
+        PutCount::All => (Some(u32::MAX), false),
+        PutCount::AnyNumber => (Some(u32::MAX), true),
+        PutCount::Up(n) => (Some(n), true),
+        PutCount::Exactly(n) => (Some(n), false),
     };
 
     // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
@@ -2797,11 +2817,11 @@ pub(super) fn try_parse_dig_instead_alternative(
     // selection runs from else_ability when Teamwork wasn't paid. Appended
     // last — the teamwork phrase is disjoint from all four arms above, so the
     // ordering is purely defensive.
-    let condition = parse_additional_cost_instead_condition_fragment(cond_text)
-        .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
-        .or_else(|| parse_condition_text(cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(cond_text))
-        .or_else(|| parse_cast_using_teamwork_condition_text(cond_text))?;
+    let condition = parse_additional_cost_instead_condition_fragment(&cond_text)
+        .or_else(|| try_nom_condition_as_ability_condition(&cond_text, ctx))
+        .or_else(|| parse_condition_text(&cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(&cond_text))
+        .or_else(|| parse_cast_using_teamwork_condition_text(&cond_text))?;
 
     // Clone the preceding Dig's source (top N) and reveal-mode, apply alternative
     // selection parameters. `rest_destination` prefers the alternative's inline value

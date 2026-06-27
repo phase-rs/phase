@@ -4056,6 +4056,11 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             .parse(after_put)
             {
                 PutCount::AnyNumber
+            } else if all_consuming(alt((tag::<_, _, OracleError<'_>>("all"), tag("each"))))
+                .parse(after_put)
+                .is_ok()
+            {
+                PutCount::All
             } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
@@ -7144,6 +7149,33 @@ mod tests {
                 reveal_verb: false,
             })
         );
+    }
+
+    #[test]
+    fn put_mass_of_them_into_hand_is_all() {
+        for text in [
+            "Put all of them into your hand.",
+            "Put each of them into your hand.",
+            "Put all of those cards into your hand.",
+            "Put each of those cards into your hand.",
+        ] {
+            let dig = make_dig_effect();
+            let result = parse_followup_continuation_ast(text, &dig, &mut ParseContext::default());
+            assert_eq!(
+                result,
+                Some(ContinuationAst::DigFromAmong {
+                    quantity: PutCount::All,
+                    filter: TargetFilter::Any,
+                    destination: Some(Zone::Hand),
+                    rest_destination: None,
+                    enters_under: None,
+                    face_down_profile: None,
+                    enter_tapped: false,
+                    reveal_verb: false,
+                }),
+                "{text}"
+            );
+        }
     }
 
     #[test]

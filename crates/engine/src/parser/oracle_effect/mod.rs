@@ -24860,6 +24860,81 @@ mod tests {
     }
 
     #[test]
+    fn accumulate_wisdom_inverted_instead_keeps_all_with_lesson_threshold() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Put one of those cards into your hand and the rest on the bottom of your library in any order. Put each of those cards into your hand instead if there are three or more Lesson cards in your graveyard.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected conditional Accumulate Wisdom Dig, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, Some(u32::MAX));
+        assert!(!*up_to);
+        assert_eq!(*filter, TargetFilter::Any);
+        assert_eq!(*destination, Some(Zone::Hand));
+
+        let Some(AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                            filter: None,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) = &def.condition
+        else {
+            panic!(
+                "expected Lesson graveyard threshold, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*zone, ZoneRef::Graveyard);
+        assert_eq!(*scope, CountScope::Controller);
+        assert_eq!(card_types, &vec![TypeFilter::Subtype("Lesson".to_string())]);
+
+        let base = def
+            .else_ability
+            .as_deref()
+            .expect("base Accumulate Wisdom Dig must be stored as else_ability");
+        let Effect::Dig {
+            count: base_count,
+            keep_count: base_keep_count,
+            up_to: base_up_to,
+            filter: base_filter,
+            destination: base_destination,
+            rest_destination: base_rest_destination,
+            ..
+        } = &*base.effect
+        else {
+            panic!("expected base Accumulate Wisdom Dig, got {:?}", base.effect);
+        };
+        assert_eq!(*base_count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*base_keep_count, Some(1));
+        assert!(!*base_up_to);
+        assert_eq!(*base_filter, TargetFilter::Any);
+        assert_eq!(*base_destination, Some(Zone::Hand));
+        assert_eq!(*base_rest_destination, Some(Zone::Library));
+    }
+
+    #[test]
     fn consult_the_star_charts_kicked_branch_keeps_two_of_those_cards() {
         let def = parse_effect_chain(
             "Look at the top X cards of your library, where X is the number of lands you control. Put one of those cards into your hand. If this spell was kicked, put two of those cards into your hand instead. Put the rest on the bottom of your library in a random order.",
