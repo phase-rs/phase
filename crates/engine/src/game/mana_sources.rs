@@ -466,15 +466,40 @@ pub fn activatable_land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, true)
+    land_mana_options(state, object_id, controller, true, true, None)
 }
 
-pub(crate) fn auto_tap_land_mana_options(
+/// Indexed arity of `activatable_land_mana_options`: the board-global
+/// activatable sweep precomputes the TapsForMana trigger-source list once
+/// (`taps_for_mana_trigger_sources`) and threads it through each land, avoiding
+/// a per-land full-battlefield scan. Byte-identical to the per-land form.
+pub(crate) fn activatable_land_mana_options_indexed(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    aura_sources: &[ObjectId],
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, false)
+    land_mana_options(state, object_id, controller, true, true, Some(aura_sources))
+}
+
+/// Auto-tap land mana options for the board-global cost sweep. The sweep
+/// precomputes the TapsForMana trigger-source list once
+/// (`taps_for_mana_trigger_sources`) and threads it through each land, avoiding
+/// a per-land full-battlefield scan. Byte-identical to a per-land form.
+pub(crate) fn auto_tap_land_mana_options_indexed(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    aura_sources: &[ObjectId],
+) -> Vec<ManaSourceOption> {
+    land_mana_options(
+        state,
+        object_id,
+        controller,
+        true,
+        false,
+        Some(aura_sources),
+    )
 }
 
 /// Return display pips for a land based on mana abilities that are currently
@@ -1286,6 +1311,11 @@ fn land_mana_options(
     controller: PlayerId,
     require_untapped: bool,
     require_current_payability: bool,
+    // Precomputed TapsForMana trigger-source list for the board-global sweeps;
+    // `None` means compute it for this land (single-land / display / test
+    // callers). Byte-identical either way — the indexed and full scans visit the
+    // same trigger-bearing permanents.
+    aura_sources: Option<&[ObjectId]>,
 ) -> Vec<ManaSourceOption> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -1354,7 +1384,11 @@ fn land_mana_options(
     // mana ability at resolution time. `atomic_combination` includes the full
     // output (land + aura) for planner coverage checks; `production_override_for_option`
     // caps it to the land's own portion when dispatching the land's own ability.
-    for (aura_id, aura_choices) in taps_for_mana_aura_bonus(state, object_id, controller) {
+    let aura_bonus = match aura_sources {
+        Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),
+        None => taps_for_mana_aura_bonus(state, object_id, controller),
+    };
+    for (aura_id, aura_choices) in aura_bonus {
         // aura_choices: [ManaType; N] where N=1 for Fixed, N=5 for any-color.
         // Cross-product: replace each option with N options (one per choice).
         options = options
@@ -1896,13 +1930,49 @@ pub(crate) fn opponent_land_color_options(
 /// Callers use `aura_object_id` to build `taps_for_mana_overrides` on the
 /// resulting `ManaSourceOption` so the resolver can thread the chosen color
 /// into the aura's triggered mana ability at inline resolution time.
+/// Battlefield objects carrying at least one `TapsForMana` trigger. The hot
+/// board-global auto-tap / activatable sweeps compute this list ONCE before
+/// their per-land loop and thread it into `taps_for_mana_aura_bonus_indexed`,
+/// turning a per-land full-battlefield scan into a per-land walk over only the
+/// (usually tiny) set of trigger-bearing permanents.
+pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
+    crate::game::perf_counters::record_mana_aura_trigger_scan();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|obj| {
+                obj.trigger_definitions
+                    .iter_all()
+                    .any(|trigger| trigger.mode == TriggerMode::TapsForMana)
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn taps_for_mana_aura_bonus(
     state: &GameState,
     land_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<(ObjectId, Vec<ManaType>)> {
+    let sources = taps_for_mana_trigger_sources(state);
+    taps_for_mana_aura_bonus_indexed(state, land_id, controller, &sources)
+}
+
+/// Indexed arity of `taps_for_mana_aura_bonus`: iterates only the precomputed
+/// `sources` (trigger-bearing permanents) instead of the whole battlefield.
+/// Byte-identical to the full scan — preserves the `land_id` self-skip, the
+/// per-source `taps_for_mana_card_matches` card-identity authority, and the
+/// deliberate absence of a controller filter (Aura-Theft semantics).
+pub(crate) fn taps_for_mana_aura_bonus_indexed(
+    state: &GameState,
+    land_id: ObjectId,
+    controller: PlayerId,
+    sources: &[ObjectId],
+) -> Vec<(ObjectId, Vec<ManaType>)> {
     let mut per_aura: Vec<(ObjectId, Vec<ManaType>)> = Vec::new();
-    for &object_id in state.battlefield.iter() {
+    for &object_id in sources.iter() {
         // Skip the land itself — we're looking for OTHER permanents whose
         // TapsForMana trigger fires when `land_id` is tapped.
         if object_id == land_id {
@@ -3469,6 +3539,92 @@ mod tests {
         assert!(taps_for_mana_aura_bonus(&state, forest, PlayerId(0)).is_empty());
     }
 
+    /// Item B (revert-failing perf): the board-global auto-tap sweep computes the
+    /// TapsForMana trigger-source list ONCE before its per-land loop, not once
+    /// per land. With K lands and one Wild-Growth aura, exactly one
+    /// battlefield trigger-source scan runs. Pre-fix every land re-scanned the
+    /// whole battlefield inside `land_mana_options` (K scans).
+    #[test]
+    fn auto_tap_sweep_scans_aura_sources_once() {
+        const K: u64 = 5;
+        let mut state = GameState::new_two_player(42);
+        let mut forests = Vec::new();
+        for i in 0..K {
+            let forest = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(0);
+            forests.push(forest);
+        }
+        attach_taps_for_mana_aura(&mut state, forests[0], PlayerId(0), ManaColor::Green);
+
+        let cost = crate::types::mana::ManaCost::Cost {
+            shards: Vec::new(),
+            generic: 2,
+        };
+        let mut events = Vec::new();
+        crate::game::perf_counters::reset();
+        crate::game::casting_costs::auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &cost,
+            &mut events,
+            None,
+        );
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            snap.mana_aura_trigger_scans, 1,
+            "one trigger-source scan for the whole sweep (revert-failing: pre-fix = K)"
+        );
+    }
+
+    /// Item B byte-identical: the indexed arity over a precomputed source list
+    /// detects exactly the same auras as the full wrapper, including the
+    /// deliberate no-controller-filter (an opponent-controlled aura still folds
+    /// in, Aura-Theft semantics) and two-auras-on-one-land.
+    #[test]
+    fn taps_for_mana_aura_bonus_indexed_matches_full_scan_with_two_auras() {
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        // One opponent-controlled aura (no controller filter) + one own aura.
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(1), ManaColor::Green);
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Blue);
+
+        let full = taps_for_mana_aura_bonus(&state, forest, PlayerId(0));
+        let sources = taps_for_mana_trigger_sources(&state);
+        let indexed = taps_for_mana_aura_bonus_indexed(&state, forest, PlayerId(0), &sources);
+
+        assert_eq!(
+            full.len(),
+            2,
+            "both auras fold in regardless of controller (no controller filter)"
+        );
+        assert_eq!(
+            full, indexed,
+            "indexed arity is byte-identical to the full wrapper"
+        );
+    }
+
     /// Issue #4265 regression: `auto_tap_land_mana_options` for a Forest
     /// enchanted by Wild Growth must return a single `atomic_combination`
     /// containing `[Green, Green]` so the autotap planner treats the whole
@@ -3494,7 +3650,8 @@ mod tests {
         let wild_growth =
             attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
 
-        let options = auto_tap_land_mana_options(&state, forest, PlayerId(0));
+        let sources = taps_for_mana_trigger_sources(&state);
+        let options = auto_tap_land_mana_options_indexed(&state, forest, PlayerId(0), &sources);
         assert_eq!(options.len(), 1, "one option per tap");
         let opt = &options[0];
         assert_eq!(opt.mana_type, ManaType::Green);
@@ -3694,7 +3851,8 @@ mod tests {
         }
         let fertile_ground = attach_any_color_aura(&mut state, forest, PlayerId(0));
 
-        let options = auto_tap_land_mana_options(&state, forest, PlayerId(0));
+        let sources = taps_for_mana_trigger_sources(&state);
+        let options = auto_tap_land_mana_options_indexed(&state, forest, PlayerId(0), &sources);
         // Forest subtype fallback = one base option {G}.
         // Fertile Ground fans out × 5 → five options.
         assert_eq!(options.len(), 5, "Forest + Fertile Ground = 5 options");

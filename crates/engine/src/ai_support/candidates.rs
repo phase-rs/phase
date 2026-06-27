@@ -3093,6 +3093,33 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
 
     // CR 702.61a: Crew/Saddle/Station are activated abilities — blocked by split second.
     if !split_second_active {
+        // Loop-invariant hoist: the set of this player's untapped creatures (and
+        // the crew-eligible subset) is identical for every Vehicle/Mount/
+        // Spacecraft, so compute it once instead of re-scanning the whole
+        // battlefield per permanent. Each per-permanent check below still applies
+        // its own `cid != obj_id` self-exclusion, so behavior is byte-identical.
+        crate::game::perf_counters::record_crew_eligibility_scan();
+        let untapped_creatures: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&cid| {
+                state.objects.get(&cid).is_some_and(|c| {
+                    c.controller == player
+                        && !c.tapped
+                        && c.card_types.core_types.contains(&CoreType::Creature)
+                })
+            })
+            .collect();
+        // CR 702.122a: Crew additionally excludes creatures with a "can't crew"
+        // static (card-identity authority `object_has_cant_crew`, which depends
+        // only on the creature id). Saddle/Station have no such restriction.
+        let crew_eligible: Vec<ObjectId> = untapped_creatures
+            .iter()
+            .copied()
+            .filter(|&cid| !crate::game::static_abilities::object_has_cant_crew(state, cid))
+            .collect();
+
         // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
         // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
         // it can be activated any time the controller has priority.
@@ -3112,17 +3139,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                             {
                                 break;
                             }
-                            let has_eligible = state.battlefield.iter().any(|&cid| {
-                                cid != obj_id
-                                    && state.objects.get(&cid).is_some_and(|c| {
-                                        c.controller == player
-                                            && !c.tapped
-                                            && c.card_types.core_types.contains(&CoreType::Creature)
-                                            && !crate::game::static_abilities::object_has_cant_crew(
-                                                state, cid,
-                                            )
-                                    })
-                            });
+                            // CR 702.122a: a Vehicle can't crew itself, so exclude
+                            // `obj_id` (a crewed Vehicle is an artifact creature).
+                            let has_eligible = crew_eligible.iter().any(|&cid| cid != obj_id);
                             if has_eligible {
                                 actions.push(candidate(
                                     GameAction::CrewVehicle {
@@ -3156,14 +3175,10 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     {
                         continue;
                     }
-                    let has_eligible = state.battlefield.iter().any(|&cid| {
-                        cid != obj_id
-                            && state.objects.get(&cid).is_some_and(|c| {
-                                c.controller == player
-                                    && !c.tapped
-                                    && c.card_types.core_types.contains(&CoreType::Creature)
-                            })
-                    });
+                    // CR 702.171a: Saddle taps "any number of OTHER untapped
+                    // creatures", so the Mount can't saddle itself — preserve the
+                    // `cid != obj_id` self-skip.
+                    let has_eligible = untapped_creatures.iter().any(|&cid| cid != obj_id);
                     if has_eligible {
                         actions.push(candidate(
                             GameAction::SaddleMount {
@@ -3195,14 +3210,10 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     {
                         continue;
                     }
-                    let has_eligible = state.battlefield.iter().any(|&cid| {
-                        cid != obj_id
-                            && state.objects.get(&cid).is_some_and(|c| {
-                                c.controller == player
-                                    && !c.tapped
-                                    && c.card_types.core_types.contains(&CoreType::Creature)
-                            })
-                    });
+                    // CR 702.184a: Station taps "ANOTHER untapped creature you
+                    // control", so the Spacecraft can't station itself — preserve
+                    // the `cid != obj_id` self-skip.
+                    let has_eligible = untapped_creatures.iter().any(|&cid| cid != obj_id);
                     if has_eligible {
                         actions.push(candidate(
                             GameAction::ActivateStation {
@@ -3526,10 +3537,20 @@ fn attacker_actions(
     // requirements independently rather than obeying the CR 508.1d maximum, so
     // no target this builder picks can survive filtering. Fixing that is a
     // validator concern (CR 508.1d max-satisfaction), not a generator one.
+    // Loop-invariant hoist: `attackable_player_targets` depends only on `state`
+    // (immutable during this filter), so compute it once instead of per creature
+    // inside `creature_must_attack`. Mirrors `declare_attackers_with_bands`.
+    let attackable = crate::game::combat::attackable_player_targets(state);
     let forced: Vec<(ObjectId, AttackTarget)> = valid_attacker_ids
         .iter()
         .copied()
-        .filter(|&id| crate::game::combat::creature_must_attack(state, id))
+        .filter(|&id| {
+            crate::game::combat::creature_must_attack_with_attackable_players(
+                state,
+                id,
+                &attackable,
+            )
+        })
         .filter_map(|id| {
             let obj = state.objects.get(&id)?;
             let must_attack_players =
@@ -4520,6 +4541,212 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Item C: crew/saddle/station eligibility hoist ───────────────────────
+
+    fn crew_priority_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.stack.clear();
+        state
+    }
+
+    fn add_crew_vehicle(state: &mut GameState, id: u64, controller: PlayerId) -> ObjectId {
+        let v = create_object(
+            state,
+            CardId(id),
+            controller,
+            "Vehicle".into(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&v).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.keywords.push(Keyword::Crew {
+            power: 1,
+            once_per_turn: None,
+        });
+        v
+    }
+
+    fn add_untapped_creature(state: &mut GameState, id: u64, controller: PlayerId) -> ObjectId {
+        let c = create_object(
+            state,
+            CardId(id),
+            controller,
+            "Creature".into(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&c).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        c
+    }
+
+    fn has_crew(actions: &[CandidateAction]) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a.action, GameAction::CrewVehicle { .. }))
+    }
+
+    fn has_saddle(actions: &[CandidateAction]) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a.action, GameAction::SaddleMount { .. }))
+    }
+
+    /// Item C (revert-failing perf): the crew/saddle/station eligibility pass
+    /// scans the battlefield ONCE per `priority_actions` call, independent of the
+    /// number of Vehicles. Pre-fix each Vehicle re-scanned the whole battlefield
+    /// (V scans).
+    #[test]
+    fn crew_eligibility_scanned_once_regardless_of_vehicle_count() {
+        let mut state = crew_priority_state();
+        for i in 0..4 {
+            add_crew_vehicle(&mut state, 100 + i, PlayerId(0));
+        }
+        add_untapped_creature(&mut state, 200, PlayerId(0));
+        add_untapped_creature(&mut state, 201, PlayerId(0));
+
+        crate::game::perf_counters::reset();
+        let _ = priority_actions(&state, PlayerId(0));
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            snap.crew_eligibility_scans, 1,
+            "one eligibility scan for all Vehicles (revert-failing: pre-fix = V)"
+        );
+    }
+
+    /// Item C behavior: Crew is offered iff an untapped, non-cant-crew OTHER
+    /// creature exists.
+    #[test]
+    fn crew_offered_only_with_eligible_other_creature() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "no creatures → no Crew offer"
+        );
+
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        assert!(
+            has_crew(&priority_actions(&state, PlayerId(0))),
+            "an untapped creature enables the Crew offer"
+        );
+
+        state.objects.get_mut(&creature).unwrap().tapped = true;
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a tapped-only board offers no Crew"
+        );
+    }
+
+    /// Item C behavior (set divergence): when every other untapped creature
+    /// can't crew, the Crew offer is suppressed but the Saddle offer (which has
+    /// no cant-crew restriction) survives — `crew_eligible` is empty while
+    /// `untapped_creatures` is not. This is exactly the case where the two
+    /// precomputed sets diverge.
+    #[test]
+    fn cant_crew_creatures_block_crew_but_not_saddle() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+
+        // A Saddle Mount that is itself a creature but can't crew.
+        let mount = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Mount".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mount).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Saddle(1));
+            obj.static_definitions.push(StaticDefinition::new(
+                crate::types::statics::StaticMode::CantCrew,
+            ));
+        }
+
+        // A second untapped creature, also can't crew — so `crew_eligible` is
+        // empty, but it still provides a non-self saddler for the Mount.
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                crate::types::statics::StaticMode::CantCrew,
+            ));
+
+        let actions = priority_actions(&state, PlayerId(0));
+        assert!(
+            !has_crew(&actions),
+            "every untapped creature can't crew → no Crew offer"
+        );
+        assert!(
+            has_saddle(&actions),
+            "Saddle has no cant-crew restriction — still offered (sets diverge)"
+        );
+    }
+
+    /// Item C behavior (self-exclusion): a Vehicle that is itself the only
+    /// untapped creature can't crew itself (`cid != obj_id`).
+    #[test]
+    fn crew_self_exclusion_when_vehicle_is_only_untapped_creature() {
+        let mut state = crew_priority_state();
+        let vehicle = add_crew_vehicle(&mut state, 100, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&vehicle).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+        }
+
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a Vehicle can't crew itself (self-exclusion preserved)"
+        );
+    }
+
+    /// Item E (revert-failing perf): the engine AI attacker enumeration computes
+    /// the attackable-player set ONCE for the whole forced-attacker filter, not
+    /// once per candidate creature. Pre-fix each creature's `creature_must_attack`
+    /// recomputed it (K sweeps).
+    #[test]
+    fn attacker_candidates_sweep_attackable_players_once() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let c = create_object(
+                &mut state,
+                CardId(300 + i),
+                PlayerId(0),
+                "Goaded".into(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&c).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.goaded_by.insert(PlayerId(1));
+            ids.push(c);
+        }
+        let targets = vec![AttackTarget::Player(PlayerId(1))];
+
+        crate::game::perf_counters::reset();
+        let _ = attacker_actions(&state, PlayerId(0), &ids, &targets);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            snap.attackable_player_sweeps, 1,
+            "one attackable-player sweep for the whole enumeration (revert-failing: pre-fix = K)"
+        );
     }
 
     #[test]

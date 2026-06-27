@@ -14,6 +14,10 @@ pub struct PerfCounterSnapshot {
     pub stack_batched_entries: u64,
     pub stack_inert_noop_batches: u64,
     pub stack_inert_noop_entries: u64,
+    pub legal_actions_spell_cost_sweeps: u64,
+    pub mana_aura_trigger_scans: u64,
+    pub crew_eligibility_scans: u64,
+    pub attackable_player_sweeps: u64,
 }
 
 thread_local! {
@@ -41,6 +45,10 @@ thread_local! {
         stack_batched_entries: 0,
         stack_inert_noop_batches: 0,
         stack_inert_noop_entries: 0,
+        legal_actions_spell_cost_sweeps: 0,
+        mana_aura_trigger_scans: 0,
+        crew_eligibility_scans: 0,
+        attackable_player_sweeps: 0,
     }) };
 }
 
@@ -96,6 +104,22 @@ pub fn record_stack_inert_noop_batch(entries: u32) {
         s.stack_inert_noop_batches += 1;
         s.stack_inert_noop_entries += u64::from(entries);
     });
+}
+
+pub fn record_legal_actions_spell_cost_sweep() {
+    with_mut(|s| s.legal_actions_spell_cost_sweeps += 1);
+}
+
+pub fn record_mana_aura_trigger_scan() {
+    with_mut(|s| s.mana_aura_trigger_scans += 1);
+}
+
+pub fn record_crew_eligibility_scan() {
+    with_mut(|s| s.crew_eligibility_scans += 1);
+}
+
+pub fn record_attackable_player_sweep() {
+    with_mut(|s| s.attackable_player_sweeps += 1);
 }
 
 pub fn snapshot() -> PerfCounterSnapshot {

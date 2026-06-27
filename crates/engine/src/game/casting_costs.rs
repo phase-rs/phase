@@ -6520,6 +6520,11 @@ fn auto_tap_mana_sources_inner(
         ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
     };
 
+    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
+    // every land in this board-global sweep, so compute it once instead of
+    // re-scanning the whole battlefield per land inside `land_mana_options`.
+    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
+
     // Build list of activatable mana options for ALL permanents this player controls.
     // CR 605.1b: Non-land permanents can have mana abilities.
     let mut available: Vec<ManaSourceOption> = state
@@ -6538,7 +6543,12 @@ fn auto_tap_mana_sources_inner(
             // payable from the current pool; Phase 3 pays those sub-costs from
             // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::auto_tap_land_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_land_mana_options_indexed(
+                    state,
+                    oid,
+                    player,
+                    &aura_sources,
+                ))
             } else {
                 Some(mana_sources::auto_tap_mana_options(state, oid, player))
             }

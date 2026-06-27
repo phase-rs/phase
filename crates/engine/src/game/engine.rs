@@ -453,7 +453,10 @@ fn active_until_stack_empty_requester(state: &GameState) -> Option<PlayerId> {
 fn priority_player_has_meaningful_action(state: &GameState) -> bool {
     let mut probe = state.clone();
     probe.auto_pass.clear();
-    let actions = crate::ai_support::legal_actions(&probe);
+    // The probe always has `waiting_for == Priority` at both call sites, so the
+    // flat priority-action path is byte-identical to what `legal_actions` yielded
+    // — it drops only the unused spell-cost object-walk and grouped-map build.
+    let actions = crate::ai_support::flat_priority_actions(&probe);
     crate::ai_support::has_meaningful_priority_action(&probe, &actions)
 }
 
@@ -844,6 +847,43 @@ mod auto_pass_decision_tests {
         assert!(
             state.auto_pass.contains_key(&PlayerId(0)),
             "requester's session stays active while waiting on opponent action"
+        );
+    }
+
+    /// Item A (revert-failing perf): the auto-pass meaningful-action probe takes
+    /// the flat priority-action path, which skips the `legal_actions_full`
+    /// spell-cost object-walk entirely. Pre-fix the probe called
+    /// `legal_actions` → `legal_actions_full`, bumping the spell-cost sweep
+    /// counter once per probe; post-fix it does zero sweeps. The probe still
+    /// detects the meaningful activated ability (byte-identical verdict).
+    #[test]
+    fn priority_probe_skips_spell_cost_sweep() {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 30_000, PlayerId(1));
+        add_non_mana_activated_artifact(&mut state, PlayerId(0));
+
+        crate::game::perf_counters::reset();
+        let meaningful = priority_player_has_meaningful_action(&state);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            meaningful,
+            "probe detects the castable Draw activation (verdict preserved)"
+        );
+        assert_eq!(
+            snap.legal_actions_spell_cost_sweeps, 0,
+            "flat probe path takes no spell-cost sweep (revert-failing: pre-fix = 1)"
+        );
+    }
+
+    /// Item A behavior parity: with only `PassPriority` available the probe
+    /// reports no meaningful action, identical to pre-change.
+    #[test]
+    fn priority_probe_false_when_only_pass_available() {
+        let state = priority_state();
+        assert!(
+            !priority_player_has_meaningful_action(&state),
+            "an empty board with only PassPriority has no meaningful action"
         );
     }
 
