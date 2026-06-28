@@ -78,6 +78,7 @@ fn player_context_target(
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTargetOwner
     ) {
         Some(TargetRef::Player(super::resolve_player_for_context_ref(
             state,

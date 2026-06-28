@@ -5404,12 +5404,21 @@ fn apply_single_replacement(
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
                 ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
             };
-            // CR 510.2 + CR 615.13: A `Prevention::All` shield firing inside an
-            // active combat-damage batch must NOT stash its rider per-source —
-            // the rider fires once post-batch (`combat_damage.rs`) against the
-            // summed prevented amount. Suppress the per-event stash here so the
-            // batch step owns the single continuation.
+            // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
+            // resolving spell (e.g. Inkshield) captures a `runtime_execute`
+            // rider at resolution time and fires it once post-batch against the
+            // aggregate prevented amount. Suppress the per-event stash here for
+            // such shields so `fire_combat_prevention_riders` owns the single
+            // continuation.
+            //
+            // Static permanent-ability shields (e.g. Weeping Angel's "prevent
+            // that damage and that creature's owner shuffles it into their
+            // library") only carry an `execute` AST template — no
+            // `runtime_execute`. These must fire per-event inline so the event
+            // target (`PostReplacementDamageTarget`) is correctly populated for
+            // each victim creature. Do NOT suppress their stash.
             let batched_combat_all_shield = state.combat_prevention_tally.is_some()
+                && repl_def.runtime_execute.is_some()
                 && matches!(
                     repl_def.shield_kind,
                     ShieldKind::Prevention {
@@ -5446,24 +5455,38 @@ fn apply_single_replacement(
                                     .clone()
                                     .map(PostReplacementContinuation::Template);
                             }
-                            // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
-                            // PutCounter/ChangeZone) in the sub_ability chain to find
-                            // the first non-modifier work. Covers both the existing
+                            // CR 615.5: for Damage event replacements, `ChangeZone`
+                            // (and other effects classified as "event modifiers") in
+                            // the follow-up chain are SIDE EFFECTS of the prevention
+                            // — they do not modify the damage event itself. Stash the
+                            // full `def` chain so every link (ChangeZone → Shuffle,
+                            // etc.) fires as a post-replacement continuation.
+                            //
+                            // Without this guard, `first_non_modifier_ability` skips
+                            // the ChangeZone prefix (treating it as a Damage-event
+                            // modifier, which has no meaning) and stashes only the
+                            // Shuffle tail — leaving the creature on the battlefield.
+                            //
+                            // CR 614.1c: for non-Damage events, walk past modifier-
+                            // only effects (Tap/Untap/PutCounter/ChangeZone) to find
+                            // the first non-modifier work. Covers the existing
                             // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
                             // back) and composed replacements like Tap → BecomeCopy
                             // (Vesuva "enter tapped as a copy").
-                            match EventModifiers::first_non_modifier_ability(Some(def)) {
-                                Some(real_work) => Some(PostReplacementContinuation::Template(
-                                    Box::new(real_work.clone()),
-                                )),
-                                None if !is_damage
-                                    && EventModifiers::has_only_event_modifier(Some(def)) =>
-                                {
-                                    None
+                            if is_damage {
+                                Some(PostReplacementContinuation::Template(Box::new(def.clone())))
+                            } else {
+                                match EventModifiers::first_non_modifier_ability(Some(def)) {
+                                    Some(real_work) => Some(PostReplacementContinuation::Template(
+                                        Box::new(real_work.clone()),
+                                    )),
+                                    None if EventModifiers::has_only_event_modifier(Some(def)) => {
+                                        None
+                                    }
+                                    _ => Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    ))),
                                 }
-                                _ => Some(PostReplacementContinuation::Template(Box::new(
-                                    def.clone(),
-                                ))),
                             }
                         })
                     }

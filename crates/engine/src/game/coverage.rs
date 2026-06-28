@@ -514,6 +514,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "prevented event source's controller".into()
         }
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
+        TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::Neighbor { direction } => match direction {

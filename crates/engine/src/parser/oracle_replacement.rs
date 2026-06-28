@@ -7128,17 +7128,42 @@ fn parse_damage_prevention_replacement(
     };
 
     // --- 3. Extract damage target filter ---
-    // "to you" → player only, "to target creature" → creature only
-    let damage_target_filter = if nom_primitives::scan_contains(working_lower, "dealt to you")
-        || nom_primitives::scan_contains(working_lower, "deal to you")
-    {
-        Some(damage_target_controller())
-    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature") {
-        Some(DamageTargetFilter::CreatureOnly)
-    } else {
-        // "prevent all combat damage" with no target → any target
-        None
-    };
+    // CR 615.1a: scope the shield to its recipient. `recipient_from_event` marks
+    // whether the recipient is an event-determined OBJECT (vs. the shield
+    // controller or a spell target slot) — that signal gates the follow-up
+    // object/owner-anaphor rewrite in step 5 below.
+    let (damage_target_filter, recipient_from_event): (Option<DamageTargetFilter>, bool) =
+        if nom_primitives::scan_contains(working_lower, "dealt to you")
+            || nom_primitives::scan_contains(working_lower, "deal to you")
+        {
+            // CR 615.1a: Recipient is the shield controller; not an event anaphor.
+            (Some(damage_target_controller()), false)
+        } else if nom_primitives::scan_contains(working_lower, "dealt to target creature") {
+            // CR 615.7: spell-targeted prevention — recipient is the spell's
+            // target slot, NOT an event anaphor. Must NOT mark event-driven so
+            // a follow-up `ParentTarget` keeps inheriting the spell target
+            // (Test of Faith).
+            (Some(DamageTargetFilter::CreatureOnly), false)
+        } else {
+            // CR 614.1a / CR 615.5: typed event recipient anchored at the
+            // recipient clause ("would deal [combat] damage to a creature" /
+            // "dealt to an opponent"). Anchoring (not whole-text scanning)
+            // prevents a follow-up rider's recipient-shaped phrase from being
+            // misbound as the scope.
+            match parse_damage_recipient_scope(working_lower) {
+                // Object recipient (any non-player filter: CreatureOnly,
+                // planeswalker, battle, etc.) → a follow-up object anaphor
+                // binds to the event recipient (and its owner anaphor to that
+                // recipient's owner). Guarding on `!Player` rather than
+                // hardcoding `CreatureOnly` keeps this composable as new
+                // non-player `DamageTargetFilter` variants are added.
+                Some(tf) if !matches!(tf, DamageTargetFilter::Player { .. }) => (Some(tf), true),
+                // Player recipient (or none) → scope the shield, but the
+                // object/owner-anaphor rewrite does not apply (player follow-ups
+                // are handled elsewhere).
+                other => (other, false),
+            }
+        };
 
     // CR 301.5 + CR 303.4 + CR 615.1a: Damage prevention scoped to the source's
     // attached creature ("equipped creature" / "enchanted creature"). The dedicated
@@ -7200,7 +7225,11 @@ fn parse_damage_prevention_replacement(
     // below uses this signal to distinguish the Vigor cohort (rewrite
     // `ParentTarget` → `PostReplacementDamageTarget`) from the spell-driven
     // cohort (keep `ParentTarget` for the real spell target).
-    let recipient_is_event_filter = valid_card_filter.is_some();
+    // CR 615.5 + CR 608.2c: An object-typed event recipient ("to a creature")
+    // makes the follow-up's object anaphors ("it" / "that creature") refer to
+    // the prevented event's damage recipient, exactly like a typed `valid_card`
+    // does — so the cohort-2 anaphor rewrite must fire for it too.
+    let recipient_is_event_filter = valid_card_filter.is_some() || recipient_from_event;
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
@@ -7290,6 +7319,31 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
         .or_else(|| parse_damage_recipient_after_prefix(working_lower, "would deal damage to "))
 }
 
+/// CR 615.1a / CR 615.5: Extract the typed damage-recipient SCOPE from a
+/// prevention shield's recipient clause, anchored at the
+/// "would deal [combat] damage to "/"dealt to " recipient prefix. Mirrors
+/// `parse_damage_recipient_after_prefix` (which returns the `valid_card`
+/// `TargetFilter` form) but returns a `DamageTargetFilter` via the shared
+/// `parse_damage_target_phrase` combinator.
+///
+/// ANCHORING at the recipient prefix — instead of scanning the whole normalized
+/// text with `parse_damage_target_filter` — prevents a follow-up rider that
+/// itself contains a recipient-shaped phrase (e.g. "...deal that much damage to
+/// a creature you control") from being misbound as the shield's recipient
+/// scope. Builds for the class, not the card.
+fn parse_damage_recipient_scope(working_lower: &str) -> Option<DamageTargetFilter> {
+    // `parse_damage_target_phrase` consumes the leading "to <recipient>"; the
+    // anchor prefix therefore stops just before "to ".
+    ["would deal combat damage ", "would deal damage ", "dealt "]
+        .into_iter()
+        .find_map(|prefix| {
+            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+                let (after_prefix, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
+                parse_damage_target_phrase(after_prefix)
+            })
+        })
+}
+
 fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
         let (after_to, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
@@ -7376,12 +7430,48 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// a typed `valid_card_filter` signal) — spell-driven prevention with a real
 /// `target creature` slot must keep its `ParentTarget` binding intact (Test
 /// of Faith).
+///
+/// CR 108.3 + CR 400.3: Also rewrites the owner anaphor "that creature's owner"
+/// (`ParentTargetOwner` → `PostReplacementDamageTargetOwner`). Because the
+/// shared `each_target_filter_mut` walker deliberately does NOT visit
+/// `Effect::Shuffle` (extending it would regress `Shuffle { target:
+/// TriggeringPlayer }` cards — Thada Adel, Acquisitor; Earwig Squad), the
+/// `Shuffle.target` anaphor is rewritten LOCALLY in the body — covering Weeping
+/// Angel's "...and that creature's owner shuffles it into their library".
 fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
-    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
-        if matches!(f, TargetFilter::ParentTarget) {
-            *f = TargetFilter::PostReplacementDamageTarget;
+    // The shared walker rewrites every target-bearing effect arm it visits. It
+    // does NOT visit `Effect::Shuffle` — deliberately: four callers of
+    // `each_target_filter_mut` (e.g. `replace_player_anaphor_with_parent_target`)
+    // rewrite `TriggeringPlayer`/`ParentTargetController`/`ParentTarget`, the exact
+    // refs a `Shuffle` carries, so adding a `Shuffle` arm there would regress
+    // unrelated cards (Thada Adel, Acquisitor; Earwig Squad — both carry
+    // `Shuffle { target: TriggeringPlayer }`). The `Shuffle.target` anaphor is
+    // therefore rewritten LOCALLY below, scoped to this prevention follow-up.
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| match f {
+        TargetFilter::ParentTarget => *f = TargetFilter::PostReplacementDamageTarget,
+        // CR 108.3 + CR 400.3: owner anaphor on a walker-visited effect
+        // (forward-looking class coverage, e.g. a future `ChangeZone {
+        // target: ParentTargetOwner }` follow-up).
+        TargetFilter::ParentTargetOwner => {
+            *f = TargetFilter::PostReplacementDamageTargetOwner;
         }
+        _ => {}
     });
+    // CR 615.5 + CR 108.3 + CR 400.3: `Effect::Shuffle` is intentionally excluded
+    // from the shared `each_target_filter_mut` walker (see above) — rewrite its
+    // target LOCALLY here, scoped narrowly to this prevention follow-up walker,
+    // mirroring the codebase's existing narrowly-scoped target-rewrite precedent.
+    // "that creature's owner shuffles it into their library" → the prevented
+    // event's damage recipient (object) / that recipient's owner.
+    if let Effect::Shuffle { target } = def.effect.as_mut() {
+        match target {
+            TargetFilter::ParentTarget => *target = TargetFilter::PostReplacementDamageTarget,
+            TargetFilter::ParentTargetOwner => {
+                *target = TargetFilter::PostReplacementDamageTargetOwner;
+            }
+            _ => {}
+        }
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_parent_target_to_post_replacement_damage_target(sub);
     }
@@ -8573,6 +8663,154 @@ mod tests {
             *def.effect,
             Effect::DealDamage {
                 target: TargetFilter::Any,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn weeping_angel_prevention_scopes_to_creature_and_rewrites_anaphors() {
+        // CR 615.1a + CR 615.5 + CR 108.3: the recipient clause "to a creature"
+        // scopes the shield to creatures (so unblocked combat damage to a player
+        // is NOT prevented — CR 510.1b), and the follow-up's object/owner
+        // anaphors rebind to the prevented event's damage recipient and that
+        // recipient's owner.
+        let def = parse_replacement_line(
+            "If this creature would deal combat damage to a creature, prevent that \
+             damage and that creature's owner shuffles it into their library.",
+            "Weeping Angel",
+        )
+        .expect("Weeping Angel prevention shield should parse");
+
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::CreatureOnly)
+        );
+
+        let execute = def.execute.as_ref().expect("prevention follow-up");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::PostReplacementDamageTarget,
+                    owner_library: true,
+                    ..
+                }
+            ),
+            "ChangeZone must move the damaged creature to its owner's library, got {:?}",
+            execute.effect
+        );
+        let shuffle = execute.sub_ability.as_ref().expect("shuffle sub-ability");
+        assert!(
+            matches!(
+                &*shuffle.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::PostReplacementDamageTargetOwner
+                }
+            ),
+            "Shuffle must resolve to the recipient's owner, got {:?}",
+            shuffle.effect
+        );
+    }
+
+    #[test]
+    fn parse_damage_recipient_scope_extracts_anchored_scopes() {
+        // CR 615.1a: building-block coverage — the anchored recipient extractor
+        // maps each recipient phrase to its typed scope for the whole prevention
+        // class, not just Weeping Angel.
+        assert_eq!(
+            parse_damage_recipient_scope(
+                "if ~ would deal combat damage to a creature, prevent that damage."
+            ),
+            Some(DamageTargetFilter::CreatureOnly)
+        );
+        assert_eq!(
+            parse_damage_recipient_scope(
+                "if ~ would deal damage to an opponent, prevent that damage."
+            ),
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Opponent
+            })
+        );
+        assert_eq!(
+            parse_damage_recipient_scope("prevent all damage that would be dealt to a player."),
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Any
+            })
+        );
+        // No recipient clause → no scope (shield prevents all; behavior unchanged).
+        assert_eq!(
+            parse_damage_recipient_scope("prevent all combat damage this turn."),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_damage_recipient_scope_anchors_at_recipient_clause_not_rider() {
+        // The recipient scope must come from the "would deal ... damage to <X>"
+        // clause, NOT from a recipient-shaped phrase in a follow-up rider. Here
+        // the recipient is an opponent; the rider mentions "to a creature".
+        // Anchoring returns Player{Opponent}; a whole-text scan would wrongly
+        // return CreatureOnly from the rider.
+        let text = "if ~ would deal combat damage to an opponent, prevent that damage. \
+                    ~ deals that much damage to a creature.";
+        assert_eq!(
+            parse_damage_recipient_scope(text),
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Opponent
+            })
+        );
+    }
+
+    #[test]
+    fn rewrite_prevention_followup_rewrites_owner_and_shuffle_anaphors() {
+        // CR 108.3 + CR 400.3: the local Shuffle-target rewrite remaps the owner
+        // anaphor, the walker remaps owner anaphors on visited effects, and a
+        // `Shuffle { TriggeringPlayer }` (the Thada Adel / Earwig Squad cohort)
+        // is left UNTOUCHED — proving the rewrite is scoped to Parent* anaphors.
+        let mut owner_shuffle = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetOwner,
+            },
+        );
+        rewrite_parent_target_to_post_replacement_damage_target(&mut owner_shuffle);
+        assert!(matches!(
+            *owner_shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::PostReplacementDamageTargetOwner
+            }
+        ));
+
+        // Control: TriggeringPlayer must survive (BLOCKING-fix regression guard).
+        let mut triggering = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer,
+            },
+        );
+        rewrite_parent_target_to_post_replacement_damage_target(&mut triggering);
+        assert!(matches!(
+            *triggering.effect,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        ));
+
+        // Walker-visited owner anaphor (e.g. a Draw) is also rewritten.
+        let mut draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTargetOwner,
+            },
+        );
+        rewrite_parent_target_to_post_replacement_damage_target(&mut draw);
+        assert!(matches!(
+            *draw.effect,
+            Effect::Draw {
+                target: TargetFilter::PostReplacementDamageTargetOwner,
                 ..
             }
         ));
