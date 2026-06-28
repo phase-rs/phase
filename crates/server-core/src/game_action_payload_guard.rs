@@ -415,6 +415,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::HarmonizeTap { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
+        | GameAction::RollPlanarDie
         | GameAction::DiscoverChoice { .. }
         | GameAction::CascadeChoice { .. }
         | GameAction::RippleChoice { .. }

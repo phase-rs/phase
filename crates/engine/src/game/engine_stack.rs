@@ -13,7 +13,7 @@ use super::casting_targets::extract_distribution_total;
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
-use super::{casting, triggers};
+use super::{casting, priority, triggers};
 
 pub(super) fn finalize_trigger_target_selection(
     state: &mut GameState,
@@ -51,8 +51,7 @@ pub(super) fn finalize_trigger_target_selection(
                 // keep `pending_trigger_entry` set until division completes.
                 triggers::mutate_pending_trigger_entry(state, &trigger.ability);
                 state.pending_trigger = Some(trigger);
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 return WaitingFor::DistributeAmong {
                     player: controller,
                     total,
@@ -69,8 +68,7 @@ pub(super) fn finalize_trigger_target_selection(
     // `pending_trigger_entry` so the resolver may now fire this entry.
     triggers::finalize_pending_trigger_entry(state, &trigger.ability);
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
     // stack, drain any siblings that were deferred because this one needed
     // input (e.g., the second Boggart Prankster's "you attack" trigger waiting

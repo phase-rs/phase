@@ -253,6 +253,29 @@ describe("AudioManager", () => {
     expect(mockCreateBufferSource).toHaveBeenCalledTimes(2);
   });
 
+  it("playSfxForStep maps grouped flurry to DamageDealt and ignores displayOnly LifeChanged", async () => {
+    audioManager.warmUp();
+    await audioManager.preloadSfx();
+    mockCreateBufferSource.mockClear();
+
+    audioManager.playSfxForStep([
+      {
+        event: {
+          type: "GroupedDamageFlurry",
+          data: { player_id: 0, source_ids: [1, 2], total_damage: 2, hit_count: 2 },
+        },
+        duration: 900,
+      },
+      {
+        event: { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
+        duration: 300,
+        displayOnly: true,
+      },
+    ]);
+
+    expect(mockCreateBufferSource).toHaveBeenCalledTimes(1);
+  });
+
   // --- startMusic / setContext ---
 
   it("setContext to battlefield creates HTMLAudioElement and plays", () => {

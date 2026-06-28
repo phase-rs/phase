@@ -547,6 +547,7 @@ pub fn resume_begin_game_abilities(
     }
 
     state.resolving_begin_game_abilities = false;
+    crate::game::planechase::reveal_starting_plane(state);
     turns::auto_advance(state, events)
 }
 

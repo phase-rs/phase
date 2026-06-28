@@ -207,6 +207,20 @@ pub fn game_functioning_statics(
         })
 }
 
+/// CR 604.1: loop-invariant existence gate. True iff any currently-functioning
+/// static (battlefield permanent or CR 114.4 command-zone emblem; CR 702.26b
+/// phased-out excluded) has a mode matching `predicate`. Combat/untap legality
+/// loops hoist this ONCE before iterating N permanents so the per-permanent
+/// `check_static_ability` re-scan (itself O(N)) is skipped when no such static
+/// exists, collapsing O(N^2) to O(N). When one exists the loop falls through to
+/// the exact existing per-permanent check, so verdicts are unchanged.
+pub fn any_functioning_static_mode(
+    state: &GameState,
+    predicate: impl Fn(&StaticMode) -> bool,
+) -> bool {
+    game_functioning_statics(state).any(|(_, def)| predicate(&def.mode))
+}
+
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.
 ///
 /// Applies only the CR 702.26b phased-out gate and the CR 114.4

@@ -1226,7 +1226,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
             };
-            format!("{color:?} mana symbols in {scope_str}'s mana cost")
+            match color {
+                Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
+                None => format!("colored mana symbols in {scope_str}'s mana cost"),
+            }
         }
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
@@ -1484,6 +1487,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
         }
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
+        QuantityRef::TimesCostPaidThisResolution => {
+            "times the repeated optional cost was paid this resolution".into()
+        }
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
         }
@@ -1707,6 +1713,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
                 fmt_target(filter),
                 fmt_quantity(count)
             )
+        }
+        ManaProduction::AnyCombinationOfObjectColors { count, scope } => {
+            let subject = match scope {
+                ObjectScope::Target => "target's",
+                _ => "object's",
+            };
+            format!("{} any combo of {subject} colors", fmt_quantity(count))
         }
         ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }
@@ -2893,10 +2906,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             step,
             count,
+            scope,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("step".into(), format!("{step:?}")));
-            if !matches!(
+            // CR 614.10 + CR 614.10a: surface the turn-scoped variant; the
+            // occurrence-scoped default keeps the existing rows unchanged.
+            if matches!(scope, crate::types::ability::SkipScope::AllOfNextTurn) {
+                d.push(("scope".into(), "all of next turn".into()));
+            } else if !matches!(
                 count,
                 crate::types::ability::QuantityExpr::Fixed { value: 1 }
             ) {
@@ -3543,6 +3561,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
+        SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
     }
 }
@@ -5468,7 +5487,20 @@ fn is_modal_header_line(lower: &str) -> bool {
         "choose any number",
         "choose x.",
     ];
-    CHOOSE_PHRASES.iter().any(|p| lower.contains(p))
+    if CHOOSE_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // CR 700.2 + CR 107.3m: a dynamic modal header ("choose up to X —",
+    // "choose up to that many.") plus its bulleted modes is one logical unit;
+    // fold the bullets into the header so a parsed modal (1 parent + N
+    // children) is not miscounted as N+1 dropped Oracle lines. The cap is a
+    // resolution- or cast-time value (CR 107.3m for cast X), not a fixed word.
+    // A loose substring match here cannot false-green a card on its own — the
+    // load-bearing honesty gate is the Modal_DynamicMaxDropped swallow detector,
+    // and a non-modal "choose up to X <nouns>" selection clause has no bullets
+    // to fold (so folding leaves its line count unchanged).
+    const DYNAMIC_CHOOSE_HEADERS: &[&str] = &["choose up to x", "choose up to that many"];
+    DYNAMIC_CHOOSE_HEADERS.iter().any(|p| lower.contains(p))
 }
 
 /// Strip structural formatting prefixes from an Oracle line, returning the
@@ -6445,6 +6477,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("AdditionalCostPaymentCountFor", Handled)
         }
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
+        QuantityRef::TimesCostPaidThisResolution => ("TimesCostPaidThisResolution", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
@@ -6581,6 +6614,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
+        StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }
 }
 
@@ -11222,6 +11256,46 @@ mod tests {
                     \u{2022} Return target nonland permanent card from your graveyard to the battlefield.";
         // 1 modal header; both bullets fold into the header.
         assert_eq!(count_effective_oracle_lines(text), 1);
+    }
+
+    /// CR 700.2 + CR 107.3m: dynamic modal headers ("choose up to X —",
+    /// "choose up to that many.") must fold their bullets like any other modal
+    /// header, so a parsed modal (1 parent + N children) is not miscounted as
+    /// N+1 dropped Oracle lines. Revert discriminator: dropping the
+    /// `DYNAMIC_CHOOSE_HEADERS` arm in `is_modal_header_line` leaves the header
+    /// unrecognized — the Ruinous case returns 6 (not 2) and the "that many"
+    /// case returns 4 (not 1), failing these assertions.
+    #[test]
+    fn count_effective_oracle_lines_folds_dynamic_modal_headers() {
+        // Ruinous shape (em-dash "choose up to X —"): enters line + dynamic
+        // header + 4 bullets → 2 (enters line + folded header).
+        let ruinous = "The Ruinous Wrecking Crew enters with X +1/+1 counters on it.\n\
+                       When The Ruinous Wrecking Crew enters, choose up to X \u{2014}\n\
+                       \u{2022} Discard a card, then draw a card.\n\
+                       \u{2022} Target opponent loses 2 life.\n\
+                       \u{2022} Destroy target token.\n\
+                       \u{2022} Each player sacrifices a creature of their choice.";
+        assert_eq!(count_effective_oracle_lines(ruinous), 2);
+
+        // Hawkeye shape (period "choose up to that many."): dynamic header + 3
+        // bullets → 1 (folded header).
+        let that_many = "Choose up to that many.\n\
+                         \u{2022} Net \u{2014} Target creature can't block this turn.\n\
+                         \u{2022} Explosive \u{2014} Deals 2 damage to target player.\n\
+                         \u{2022} Boomerang \u{2014} Discard a card, then draw a card.";
+        assert_eq!(count_effective_oracle_lines(that_many), 1);
+
+        // Hostile (A1): a NON-modal "choose up to that many <nouns>" selection
+        // clause with 0 bullets is unchanged by the recognizer — there are no
+        // bullets to fold (Heroic Feast text, one paragraph).
+        let heroic_feast = "Choose up to that many target creatures you control. \
+                            Put a +1/+1 counter on each of them.";
+        assert_eq!(count_effective_oracle_lines(heroic_feast), 1);
+
+        // Regression guard: a FIXED "choose up to two —" header still folds its
+        // own 2 bullets (the existing word-cardinal path is unaffected).
+        let fixed = "Choose up to two \u{2014}\n\u{2022} Draw a card.\n\u{2022} You gain 2 life.";
+        assert_eq!(count_effective_oracle_lines(fixed), 1);
     }
 
     #[test]

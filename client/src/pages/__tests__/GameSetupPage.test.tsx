@@ -17,6 +17,7 @@
  * test only exercises the warning-chip render condition.
  */
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -106,9 +107,9 @@ function setActiveDeck(deckName: string): void {
   localStorage.setItem(ACTIVE_DECK_KEY, deckName);
 }
 
-function renderGameSetupPage() {
+function renderGameSetupPage(initialEntry = "/game-setup") {
   return render(
-    <MemoryRouter initialEntries={["/game-setup"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
         <Route path="/" element={<div>Home</div>} />
@@ -129,12 +130,56 @@ beforeEach(() => {
     usePreferencesStore.getState().ensureAiSeatCount(1);
     usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
     usePreferencesStore.getState().setCedhMode(false);
+    usePreferencesStore.setState({
+      lastFormat: null,
+      lastPlayerCount: 2,
+      lastMatchType: "Bo1",
+    });
   });
 });
 
 afterEach(cleanup);
 
 describe("GameSetupPage — cEDH bracket warning chip", () => {
+  it("offers implemented multiplayer variants in the format picker", async () => {
+    const user = userEvent.setup();
+    renderGameSetupPage();
+
+    await user.click(await screen.findByRole("button", { name: /Commander/i }));
+
+    expect(screen.getByText("Two-Headed Giant")).toBeInTheDocument();
+    expect(screen.getByText("Planechase")).toBeInTheDocument();
+    expect(screen.getByText("Archenemy")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Free-for-All/i })).toBeInTheDocument();
+  });
+
+  it("accepts a Two-Headed Giant URL format on the setup page", async () => {
+    renderGameSetupPage("/game-setup?format=TwoHeadedGiant");
+
+    expect(await screen.findByText("Two-Headed Giant")).toBeInTheDocument();
+  });
+
+  it("accepts Planechase on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=Planechase");
+
+    expect(await screen.findByText("Planechase")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
+  it("restores a Two-Headed Giant setup preference", async () => {
+    act(() => {
+      usePreferencesStore.setState({
+        lastFormat: "TwoHeadedGiant",
+        lastPlayerCount: 4,
+        lastMatchType: "Bo3",
+      });
+    });
+
+    renderGameSetupPage();
+
+    expect(await screen.findByText("Two-Headed Giant")).toBeInTheDocument();
+  });
+
   it("shows the warning chip when the human deck is non-cEDH and cEDH mode is on", async () => {
     // Deck with bracket 2 (Core) — not cEDH-legal.
     seedDeck("My Deck", 2);

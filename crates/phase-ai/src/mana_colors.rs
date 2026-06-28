@@ -84,6 +84,9 @@ pub(crate) fn collect_mana_production_colors(
         | ManaProduction::AnyInCommandersColorIdentity { .. }
         | ManaProduction::DistinctColorsAmongPermanents { .. }
         | ManaProduction::AnyOneColorAmongPermanents { .. }
+        // CR 202.2c: Omnath, Locus of All — colors come from a target object
+        // resolved at trigger time, not known from the card alone.
+        | ManaProduction::AnyCombinationOfObjectColors { .. }
         | ManaProduction::TriggerEventManaType => {}
     }
 }

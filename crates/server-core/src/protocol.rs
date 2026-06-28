@@ -12,7 +12,16 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-pub use lobby_broker::{MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION};
+/// Full game wire protocol version. Kept numerically aligned with the lobby
+/// broker while state/action messages share the same WebSocket protocol enum.
+pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
+
+/// Minimum protocol version accepted by full game servers. Planechase changed
+/// game-state/action payload shape, so stale clients must not join full games.
+pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
+
+/// Minimum protocol version accepted by lobby-only brokers.
+pub const LOBBY_MIN_SUPPORTED_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_PROTOCOL;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -50,7 +59,7 @@ pub struct AiSeatRequest {
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
 pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
 
-pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatView};
+pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
 
 /// Info about a single player slot in a waiting room, sent to all connected players.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +68,8 @@ pub struct PlayerSlotInfo {
     pub player_id: u8,
     pub name: String,
     pub kind: SeatKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_info: Option<SeatTeamInfo>,
     #[serde(default)]
     pub reserved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1795,8 +1806,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_9() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+    fn protocol_version_is_11() {
+        assert_eq!(PROTOCOL_VERSION, 11);
     }
 
     #[test]

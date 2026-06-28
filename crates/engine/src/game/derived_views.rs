@@ -22,6 +22,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
 };
@@ -131,6 +132,27 @@ pub struct PlayerStatusView {
     pub source: Option<ObjectId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanechaseView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_plane: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planar_controller: Option<PlayerId>,
+    pub planar_deck_count: usize,
+    pub current_roll_cost: ManaCost,
+    pub can_roll: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchenemyView {
+    pub archenemy: PlayerId,
+    pub scheme_deck_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_scheme_ids: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hero_player_ids: Vec<PlayerId>,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -197,6 +219,18 @@ pub struct DerivedViews {
     /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 901: Engine-authored Planechase presentation state. The frontend
+    /// renders this directly instead of deriving the active plane from command
+    /// zone objects or recomputing planar-die legality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planechase: Option<PlanechaseView>,
+
+    /// CR 904: Engine-authored Archenemy presentation state. The frontend
+    /// renders this directly instead of deriving active schemes from command
+    /// zone objects or recomputing side membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<ArchenemyView>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -367,6 +401,39 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
     if let Some(viewer) = viewer {
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+    }
+
+    if state.format_config.format == GameFormat::Planechase {
+        let roll_player = crate::game::turn_control::priority_seat(state);
+        let can_viewer_roll = viewer.is_some_and(|viewer| {
+            crate::game::turn_control::authorized_submitter_for_player(state, roll_player) == viewer
+                && crate::game::planechase::can_roll_planar_die(state, roll_player)
+        });
+        views.planechase = Some(PlanechaseView {
+            active_plane: crate::game::planechase::active_plane(state),
+            planar_controller: state.planar_controller,
+            planar_deck_count: state.planar_deck.len(),
+            current_roll_cost: crate::game::planechase::planar_die_roll_cost(state, roll_player),
+            can_roll: can_viewer_roll,
+        });
+    }
+
+    if state.format_config.format == GameFormat::Archenemy {
+        if let Some(archenemy) = crate::game::topology::archenemy(state) {
+            let hero_player_ids = state
+                .seat_order
+                .iter()
+                .copied()
+                .find(|&player| player != archenemy)
+                .map(|hero| crate::game::topology::team_members(state, hero))
+                .unwrap_or_default();
+            views.archenemy = Some(ArchenemyView {
+                archenemy,
+                scheme_deck_count: state.scheme_deck.len(),
+                active_scheme_ids: crate::game::archenemy::active_schemes(state),
+                hero_player_ids,
+            });
+        }
     }
 
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
@@ -851,11 +918,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
+    use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, ZoneChangeRecord,
+        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
 
@@ -945,6 +1016,57 @@ mod tests {
         assert_eq!(from_p1[0].commander, cmd_p1);
         assert_eq!(from_p2.len(), 1);
         assert_eq!(from_p2[0].damage, 11);
+    }
+
+    #[test]
+    fn planechase_can_roll_view_uses_controlled_priority_seat() {
+        let controller = PlayerId(0);
+        let controlled = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::planechase(), 2, 7);
+        state.active_player = controlled;
+        state.priority_player = controller;
+        state.turn_decision_controller = Some(controller);
+        state.waiting_for = WaitingFor::Priority { player: controlled };
+        state.phase = Phase::PreCombatMain;
+        state.planar_controller = Some(controlled);
+        state.planar_die_actions_this_turn.insert(controller, 2);
+
+        let plane = create_object(
+            &mut state,
+            CardId(9000),
+            controlled,
+            "Controlled Turn Plane".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&plane)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Plane);
+        state.command_zone.push_back(plane);
+
+        let controller_view = derive_views(&state, Some(controller))
+            .planechase
+            .expect("Planechase view should be present");
+        assert_eq!(
+            controller_view.current_roll_cost,
+            ManaCost::generic(0),
+            "roll cost must be derived from the controlled active seat, not the submitter"
+        );
+        assert!(
+            controller_view.can_roll,
+            "authorized turn controller should see the planar-die action"
+        );
+
+        let controlled_view = derive_views(&state, Some(controlled))
+            .planechase
+            .expect("Planechase view should be present");
+        assert!(
+            !controlled_view.can_roll,
+            "controlled seat is not the authorized human submitter during turn control"
+        );
     }
 
     /// Partner commanders (two commanders under the same controller) must

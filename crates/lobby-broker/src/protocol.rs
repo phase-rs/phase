@@ -30,11 +30,11 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 11;
 
-/// Minimum protocol version accepted at the hello handshake. The window is
-/// "current and previous" by policy, so a release-vs-preview deployment can
-/// coexist in the same lobby server during rollout.
+/// Minimum protocol version accepted by lobby-only brokers at the hello
+/// handshake. Lobby traffic has a one-version rollout window; full game servers
+/// may choose a stricter floor when state/action payloads change.
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 
 /// Public-lobby view of a single registered game. Populated by the server,

@@ -9,7 +9,6 @@ import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
-import { BASIC_LAND_NAMES } from "../../constants/game";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
@@ -28,9 +27,6 @@ interface DeckStackProps {
   /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
   format?: GameFormat;
-  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. Returns
-   *  the format default (4 / 1) unless the card prints an override. */
-  getEffectiveCap: (name: string) => number;
   /** Whether the main deck is sub-grouped by card type or by color. */
   groupMode: GroupMode;
 }
@@ -436,7 +432,6 @@ export function DeckStack({
   onRemoveCommander,
   onCardHover,
   format,
-  getEffectiveCap,
   groupMode,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
@@ -452,17 +447,8 @@ export function DeckStack({
     || sections.main.length > 0
     || sections.sideboard.length > 0;
   const canAddCard = useMemo(
-    () => (item: DeckStackItem) => {
-      if (item.section !== "main") return false;
-      // CR 100.2a / CR 903.5b: basic lands are always addable; every other card
-      // is capped at its engine-resolved effective limit (4 / 1 default, raised
-      // by "any number" / "up to N" overrides). Mirrors the guard inside
-      // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
-      // disagree with the hook's add path.
-      if (BASIC_LAND_NAMES.has(item.name)) return true;
-      return item.count < getEffectiveCap(item.name);
-    },
-    [getEffectiveCap],
+    () => (item: DeckStackItem) => item.section === "main",
+    [],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);

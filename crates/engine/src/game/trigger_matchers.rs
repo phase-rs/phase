@@ -139,6 +139,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::ManaExpend => match_mana_expend,
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
         TriggerMode::AttacksOrBlocks => match_attacks_or_blocks,
+        // CR 702.55c: ETB half only on the battlefield; haunted-dies half is synthesized
+        // into exile as `HauntedCreatureDies`.
+        TriggerMode::EntersOrHauntedCreatureDies => match_changes_zone,
         TriggerMode::Crewed | TriggerMode::BecomesCrewed => match_vehicle_crewed,
         TriggerMode::Stationed => match_stationed,
         TriggerMode::Saddled | TriggerMode::BecomesSaddled => match_saddled,
@@ -417,6 +420,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // Compound: attacks or blocks — fires on attack or block events
     r.insert(TriggerMode::AttacksOrBlocks, match_attacks_or_blocks);
+
+    // CR 702.55c: haunt creature ETB half — haunted-dies half is synthesized in exile.
+    r.insert(TriggerMode::EntersOrHauntedCreatureDies, match_changes_zone);
 
     // CR 702.26c: Phasing triggers fire when a permanent phases in.
     r.insert(TriggerMode::PhaseIn, match_phase_in);
@@ -2340,10 +2346,28 @@ pub(super) fn match_becomes_target(
                 *object_id == source_id
             }
         }
+        // CR 115.1 + CR 603.2e: a player becomes the target. Two independent ways a
+        // becomes-target trigger can fire on a player target, kept apart because
+        // `valid_target` is overloaded as the EFFECT-target slot:
+        //   (1) PURE player subject (no object axis) — e.g. "Whenever you become the
+        //       target of a spell". The subject filter lives in `valid_target`; the
+        //       retained `valid_card.is_none()` guard prevents an OBJECT-subject
+        //       trigger whose EFFECT targets a player (Venerated Rotpriest: "...a
+        //       creature you control becomes the target..., target opponent gets a
+        //       poison counter") from over-firing on a player target.
+        //   (2) MIXED "a player or <permanent>" subject (Loki) — the SUBJECT's player
+        //       leaf is routed to `valid_subject_player`, distinct from the effect
+        //       slot, so it fires on a player target even though `valid_card` carries
+        //       the permanent half.
         TargetRef::Player(player_id) => {
-            trigger.valid_card.is_none()
+            let pure_player_subject = trigger.valid_card.is_none()
                 && trigger.valid_target.is_some()
-                && valid_player_matches(trigger, state, *player_id, source_id)
+                && valid_player_matches(trigger, state, *player_id, source_id);
+            let mixed_subject_player = trigger
+                .valid_subject_player
+                .as_ref()
+                .is_some_and(|filter| player_matches_filter(filter, state, *player_id, source_id));
+            pure_player_subject || mixed_subject_player
         }
     }
 }
@@ -10031,6 +10055,227 @@ mod tests {
             trigger_owner,
             &state
         ));
+    }
+
+    /// Build Loki, God of Mischief's runtime trigger shape: ability-only,
+    /// you-controlled source; SUBJECT player leaf in `valid_subject_player`
+    /// (distinct from the effect-target `valid_target`); battlefield-scoped
+    /// permanent leaf in `valid_card`.
+    fn loki_trigger() -> TriggerDefinition {
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_subject_player = Some(TargetFilter::Player);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Permanent).properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]),
+        ));
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: Some(ControllerRef::You),
+            tag: None,
+            kind: None,
+        });
+        trigger
+    }
+
+    /// §8.a POSITIVE — an ability you control targeting a battlefield permanent OR
+    /// a player both fire Loki's mixed-subject trigger.
+    /// CR 115.1 + CR 603.2e: the object and player axes are independent. The
+    /// player-target assertion FLIPS to a failure on the unpatched matcher (the old
+    /// Player arm required `valid_card.is_none()`, silently dropping Loki's player
+    /// half) — this is the discriminating assertion for the matcher fix.
+    #[test]
+    fn becomes_target_loki_fires_on_both_permanent_and_player() {
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+                                                                     // Loki (trigger owner) and a battlefield creature, both controlled by the
+                                                                     // ability's controller (PlayerId(1)) so the "you control" source matches.
+        let loki = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Loki, God of Mischief".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&permanent) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let trigger = loki_trigger();
+
+        // Permanent target → matches via valid_card.
+        let obj_event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(permanent),
+            source_id: ability_id,
+        };
+        assert!(
+            match_becomes_target(&obj_event, &trigger, loki, &state),
+            "an ability you control targeting a battlefield permanent must fire Loki"
+        );
+
+        // Player target → matches via valid_target (the relaxed Player arm). On the
+        // unpatched matcher this returns false because valid_card.is_some().
+        let player_event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(1)),
+            source_id: ability_id,
+        };
+        assert!(
+            match_becomes_target(&player_event, &trigger, loki, &state),
+            "an ability you control targeting a player must fire Loki via the relaxed Player arm"
+        );
+    }
+
+    /// §8.c.1 NEGATIVE — source is a SPELL, not an ability. Loki's
+    /// `valid_source = StackAbility{..}` rejects a stack spell (CR 115.1a).
+    /// Discrimination: had the parser reused the spell-or-ability `Or` source, the
+    /// spell would match and this would wrongly return true.
+    #[test]
+    fn becomes_target_loki_rejects_spell_source() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // instant spell, controller PlayerId(0)
+        let loki = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Loki, God of Mischief".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&permanent) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let trigger = loki_trigger();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(permanent),
+            source_id: spell_id,
+        };
+        assert!(
+            !match_becomes_target(&event, &trigger, loki, &state),
+            "a spell source must NOT fire Loki's ability-only trigger"
+        );
+    }
+
+    /// §8.c.2 NEGATIVE — ability you do NOT control. The controller axis
+    /// (`StackAbility{controller: Some(You)}`) rejects an opponent's ability.
+    /// Discrimination: dropping the controller from the filter makes this pass.
+    #[test]
+    fn becomes_target_loki_rejects_opponent_controlled_ability() {
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+                                                                     // Loki is controlled by PlayerId(0); the targeting ability by PlayerId(1).
+        let loki = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Loki, God of Mischief".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&permanent) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let trigger = loki_trigger();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(permanent),
+            source_id: ability_id,
+        };
+        assert!(
+            !match_becomes_target(&event, &trigger, loki, &state),
+            "an opponent-controlled ability must NOT fire Loki's you-controlled trigger"
+        );
+    }
+
+    /// §8.c.3 NEGATIVE — targeted card is in a GRAVEYARD, not on the battlefield.
+    /// CR 110.1: a permanent exists only on the battlefield, so the battlefield zone
+    /// gate on the permanent leaf rejects a targeted graveyard creature card.
+    /// Discrimination: remove the `InZone{Battlefield}` prop and this passes — this
+    /// is the test that justifies the §3c battlefield gate.
+    #[test]
+    fn becomes_target_loki_rejects_graveyard_card_target() {
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let loki = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Loki, God of Mischief".to_string(),
+            Zone::Battlefield,
+        );
+        // A creature CARD in the graveyard — also a TargetRef::Object with a
+        // creature core type, but NOT a permanent (CR 110.1).
+        let graveyard_card = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        if let Some(obj) = state.objects.get_mut(&graveyard_card) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let trigger = loki_trigger();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(graveyard_card),
+            source_id: ability_id,
+        };
+        assert!(
+            !match_becomes_target(&event, &trigger, loki, &state),
+            "a targeted graveyard creature card is not a permanent and must NOT fire Loki"
+        );
+    }
+
+    /// REGRESSION FENCE (BLOCKER) — an OBJECT-subject becomes-target trigger whose
+    /// EFFECT targets a player (Venerated Rotpriest: "Whenever a creature you control
+    /// becomes the target of a spell, target opponent gets a poison counter") must
+    /// NOT fire when a PLAYER becomes the target. The effect's "target opponent"
+    /// populates `valid_target = Player`, but the SUBJECT is object-only, so
+    /// `valid_subject_player` is None and the player arm must stay silent.
+    ///
+    /// Discrimination: this is exactly the over-fire the reviewer reproduced. If the
+    /// matcher's Player arm read `valid_target` (the effect slot) instead of
+    /// `valid_subject_player`, Rotpriest would over-fire on any player targeted by
+    /// any spell and this assertion would flip to a panic.
+    #[test]
+    fn becomes_target_object_subject_with_player_targeting_effect_does_not_fire_on_player() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // spell, controller PlayerId(0)
+        let rotpriest = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Venerated Rotpriest".to_string(),
+            Zone::Battlefield,
+        );
+        // Rotpriest's parsed shape: object SUBJECT in valid_card, player EFFECT-target
+        // in valid_target, and NO valid_subject_player.
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player); // effect "target opponent"
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+        assert!(trigger.valid_subject_player.is_none());
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(1)),
+            source_id: spell_id,
+        };
+        assert!(
+            !match_becomes_target(&event, &trigger, rotpriest, &state),
+            "an object-subject trigger whose EFFECT targets a player must NOT fire when a PLAYER is targeted"
+        );
     }
 
     #[test]

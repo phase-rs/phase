@@ -305,7 +305,11 @@ fn ascend_status(state: &GameState, player: PlayerId) -> AscendStatus {
 /// for entries pinned to this player via `SpecificPlayer { id }` whose
 /// modifications grant `StaticMode::CantLoseTheGame`. The battlefield scan
 /// handles the permanent-source path (Platinum Angel and friends).
-fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
+///
+/// `pub(crate)` so the live loop-shortcut firewall
+/// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) can reuse the same
+/// SBA-layer predicate rather than re-deriving the can't-lose check.
+pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     let from_permanent = state.battlefield.iter().any(|&id| {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
@@ -357,7 +361,7 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     let poison_loss = state.players.iter().any(|player| {
         // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
         !player.is_eliminated
-            && if state.format_config.team_based {
+            && if super::topology::has_two_headed_giant_shared_resources(state) {
                 super::players::team_poison_total(state, player.id) >= 15
             } else {
                 player.poison_counters >= 10
@@ -468,7 +472,7 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            if state.format_config.team_based {
+            if super::topology::has_two_headed_giant_shared_resources(state) {
                 super::players::team_poison_total(state, p.id) >= 15
             } else {
                 p.poison_counters >= 10
@@ -2395,6 +2399,36 @@ mod tests {
 
         check_state_based_actions(&mut state, &mut events);
 
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn archenemy_uses_individual_poison_threshold() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_hero_poison_loss_does_not_eliminate_team() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
+        state.players[1].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
     }
 

@@ -29,7 +29,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { createMessage } from "./lib/discord.ts";
+import { createMessage, crosspostMessage, discordGet } from "./lib/discord.ts";
 
 interface ChangelogEntry {
   id: number;
@@ -53,12 +53,15 @@ const STATE_PATH = path.join(ROOT, "scripts/changelog/state.json");
 
 // The header line the in-app body omits but the Discord post leads with — the
 // inverse of cleanBody()'s HEADER_RE filter in fetch-changelog.ts. The leading
-// emoji is env-configurable because a custom Discord emoji is a guild-scoped id
-// (`<:phase:1234…>`) — same no-hardcoded-ids rule as DISCORD_GUILD_ID — and
-// falls back to a plain emoji so a token-less or other-guild run still reads
-// sensibly. Bots must send custom emoji as `<:name:id>`; a bare `:name:`
-// shortcode posts as literal text.
-const HEADER_EMOJI = Bun.env.CHANGELOG_HEADER_EMOJI ?? "🎴";
+// emoji is env-configurable (same no-hardcoded-ids rule as DISCORD_GUILD_ID),
+// falling back to plain `🎴` so a token-less or other-guild run still reads
+// sensibly. A custom guild emoji is stored bracket-free as `name:id` — bots
+// must send it to the API as `<:name:id>` (a bare `:name:` only resolves in the
+// Discord client composer, not over REST), but the `<`/`>` would break
+// `set -a; source .env` (shell redirects), so we keep them out of .env and wrap
+// here. A literal Unicode emoji (no colon) is used verbatim.
+const rawEmoji = Bun.env.CHANGELOG_HEADER_EMOJI?.trim();
+const HEADER_EMOJI = rawEmoji ? (rawEmoji.includes(":") ? `<:${rawEmoji}>` : rawEmoji) : "🎴";
 const HEADER = `${HEADER_EMOJI} What's New in phase.rs`;
 // Discord rejects messages longer than 2000 characters.
 const DISCORD_MAX = 2000;
@@ -69,19 +72,38 @@ const channelId =
   args.find((a) => !a.startsWith("-")) ?? Bun.env.ANNOUNCEMENTS_CHANNEL_ID;
 
 /**
- * Pack lines into ≤limit-char chunks without ever splitting a line, so a bullet
- * or section header is never torn across two Discord messages. Changelog lines
- * are short (bullets, section headers), so per-line < limit always holds.
+ * Pack the post into ≤limit-char chunks, preferring to break at blank-line
+ * (section) boundaries so a "✨ Section" header is never stranded at the end of
+ * a message away from its bullets. Sections are packed whole; a single section
+ * larger than the limit falls back to line-packing (still never tearing a line)
+ * so it always fits.
  */
 function chunk(content: string, limit = DISCORD_MAX): string[] {
   const chunks: string[] = [];
   let current = "";
-  for (const line of content.split("\n")) {
-    if (current && current.length + 1 + line.length > limit) {
+
+  // Line-pack a single over-limit section, continuing from `current`.
+  const linePack = (block: string) => {
+    for (const line of block.split("\n")) {
+      if (current && current.length + 1 + line.length > limit) {
+        chunks.push(current);
+        current = line;
+      } else {
+        current = current ? `${current}\n${line}` : line;
+      }
+    }
+  };
+
+  for (const block of content.split("\n\n")) {
+    const sep = current ? 2 : 0; // the "\n\n" rejoining this block to current
+    if (current && current.length + sep + block.length > limit) {
       chunks.push(current);
-      current = line;
+      current = "";
+    }
+    if (block.length > limit) {
+      linePack(block);
     } else {
-      current = current ? `${current}\n${line}` : line;
+      current = current ? `${current}\n\n${block}` : block;
     }
   }
   if (current) chunks.push(current);
@@ -120,10 +142,10 @@ if (!Bun.env.DISCORD_BOT_TOKEN || !channelId) {
   process.exit(0);
 }
 
-let firstMessageId: string | undefined;
+const postedIds: string[] = [];
 for (const content of messages) {
   const posted = await createMessage(channelId, content);
-  firstMessageId ??= posted.id;
+  postedIds.push(posted.id);
 }
 
 // Record the watermark so a re-run is a no-op.
@@ -131,12 +153,25 @@ state.lastPostedId = entry.id;
 writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
 
 // Link the in-app entry back to the announcement (only possible with a guild id).
-if (Bun.env.DISCORD_GUILD_ID && firstMessageId && !entry.discordUrl) {
-  entry.discordUrl = `https://discord.com/channels/${Bun.env.DISCORD_GUILD_ID}/${channelId}/${firstMessageId}`;
+if (Bun.env.DISCORD_GUILD_ID && postedIds[0] && !entry.discordUrl) {
+  entry.discordUrl = `https://discord.com/channels/${Bun.env.DISCORD_GUILD_ID}/${channelId}/${postedIds[0]}`;
   writeFileSync(CHANGELOG_PATH, `${JSON.stringify({ entries }, null, 2)}\n`);
+}
+
+// Auto-publish: an Announcement/News channel (type 5) can crosspost each message
+// to follower servers — the "Share with your followers?" the Discord client
+// prompts for, done automatically. Other channel types have nothing to publish.
+const channel = await discordGet<{ type: number }>(`/channels/${channelId}`);
+let published = 0;
+if (channel.type === 5) {
+  for (const id of postedIds) {
+    await crosspostMessage(channelId, id);
+    published += 1;
+  }
 }
 
 console.log(
   `Posted entry #${entry.id} "${entry.title}" to #announcements as ${messages.length} message(s)` +
+    `${published ? `, published ${published} to followers` : ""}` +
     `${entry.discordUrl ? ` (linked ${entry.discordUrl})` : ""}.`,
 );

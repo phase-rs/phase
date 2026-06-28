@@ -112,6 +112,7 @@ describe("scryfallLegalityKey", () => {
 
     expect(scryfallLegalityKey("TinyLeaders")).toBeUndefined();
     expect(scryfallLegalityKey("FreeForAll")).toBeUndefined();
+    expect(scryfallLegalityKey("Archenemy")).toBeUndefined();
   });
 });
 

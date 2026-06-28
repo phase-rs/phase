@@ -56,11 +56,19 @@ let activeBrokerGameCode: string | null = null;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
 
-function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: string[]; commander: string[] } {
+function asDeckPayload(deck: HostingDeck): {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck: string[];
+  scheme_deck: string[];
+} {
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
+    planar_deck: deck.planar_deck ?? [],
+    scheme_deck: deck.scheme_deck ?? [],
   };
 }
 
@@ -70,6 +78,13 @@ function aiSeatDeckChoice(deckName: string | null): DeckChoice {
   }
   return { type: "Named", data: deckName };
 }
+
+function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
+  return settings.formatConfig.team_based || settings.formatConfig.format === "Planechase"
+    ? []
+    : settings.aiSeats;
+}
+
 // Prevents onclose from clearing session token after GameStarted
 let gameStartedFired = false;
 // Reconnection state for the hosting WebSocket
@@ -133,6 +148,8 @@ export interface HostingDeck {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  planar_deck?: string[];
+  scheme_deck?: string[];
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
@@ -229,6 +246,7 @@ interface MultiplayerState {
   playerNames: Map<number, string>;
   // PlayerId → avatar art crop URL (ephemeral — assigned at game start)
   playerAvatars: Map<number, string>;
+  compatibilityPlayerCount: number | null;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;
   // Action round-trip tracking (ephemeral — not persisted)
@@ -276,6 +294,7 @@ interface MultiplayerActions {
    * keyed `clearToast()`. Retained for full-reset paths. */
   clearAllToasts: () => void;
   setFormatConfig: (config: FormatConfig | null) => void;
+  setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
@@ -454,38 +473,19 @@ export function isLobbyEntryCompatible(
   return hostBuildCommit === __BUILD_HASH__;
 }
 
-/** True when the client's wire-protocol matches the server's. */
+/** True when the client's wire-protocol can speak to the server's advertised mode. */
 export function isServerCompatible(info: ServerInfo | null): boolean {
   if (!info) return false;
-  return info.protocolVersion === PROTOCOL_VERSION;
+  const minProtocol = info.mode === "LobbyOnly" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION;
+  return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
 }
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
 // Adding a user-selectable format only needs a registry entry; its default
-// config flows here automatically. TwoHeadedGiant isn't in the registry
-// (not user-selectable yet) but the enum variant is still valid and callers
-// may look it up, so it's appended explicitly.
-const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
-  format: "TwoHeadedGiant",
-  starting_life: 30,
-  min_players: 4,
-  max_players: 4,
-  deck_size: 60,
-  singleton: false,
-  command_zone: false,
-  commander_damage_threshold: null,
-  range_of_influence: null,
-  team_based: true,
-  uses_commander: false,
-  allow_debug_actions: false,
-};
-
-export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
-  ...(Object.fromEntries(
-    FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
-  ) as Record<Exclude<GameFormat, "TwoHeadedGiant">, FormatConfig>),
-  TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
-};
+// config flows here automatically.
+export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = Object.fromEntries(
+  FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
+) as Record<GameFormat, FormatConfig>;
 
 /**
  * Canonical official lobby URL, mirroring `DEFAULT_SERVER` in serverDetection.
@@ -514,6 +514,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       isSpectator: false,
       playerNames: new Map(),
       playerAvatars: new Map(),
+      compatibilityPlayerCount: null,
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
@@ -590,6 +591,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           state.toasts.size === 0 ? {} : { toasts: new Map() },
         ),
       setFormatConfig: (config) => set({ formatConfig: config }),
+      setCompatibilityPlayerCount: (count) =>
+        set({ compatibilityPlayerCount: count }),
       rememberHostConfig: (config) => set({ lastHostConfig: config }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
@@ -610,6 +613,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setLatency: (ms) => set({ latencyMs: ms }),
 
       startHosting: (settings, deck) => {
+        const aiSeats = effectiveAiSeats(settings);
         // Clean up any existing hosting session (server or P2P).
         closeHostWebSocket();
         disposeActiveP2PHost();
@@ -818,7 +822,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               player_count: settings.formatConfig.max_players,
               match_config: { match_type: settings.matchType },
               format_config: settings.formatConfig,
-              ai_seats: settings.aiSeats,
+              ai_seats: aiSeats,
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,
@@ -886,6 +890,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        const aiSeats = effectiveAiSeats(settings);
         closeHostWebSocket();
         clearWsSession();
         gameStartedFired = false;
@@ -943,7 +948,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               playerCount: settings.formatConfig.max_players,
               matchConfig: { match_type: settings.matchType },
               formatConfig: settings.formatConfig,
-              aiSeats: [],
+              aiSeats,
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
@@ -958,7 +963,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           const adapter = new P2PHostAdapter(
             {
               player: asDeckPayload(deck),
-              opponent: { main_deck: [], sideboard: [], commander: [] },
+              opponent: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
               ai_decks: [],
             },
             host.peer,
@@ -1021,7 +1026,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             serverInfo: null,
           });
 
-          for (const seat of settings.aiSeats) {
+          for (const seat of aiSeats) {
             await adapter.applySeatMutation({
               type: "SetKind",
               data: {

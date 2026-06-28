@@ -933,6 +933,7 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "aiUnsupportedFormat": "{{format}} is available for multiplayer hosting, but AI matches are not supported for it yet.",
     "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
     "cedhWarningUntagged": "untagged",
     "bracketViolation": {
@@ -1594,6 +1595,8 @@
     "crashBody": "phase.rs hit an internal error and can’t safely continue this action. Your last saved turn is preserved — reload to restore the game. <strong>Please report this</strong> so we can fix it.",
     "connectionTitle": "Engine connection lost",
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
+    "timeoutTitle": "Engine took too long",
+    "timeoutBody": "phase.rs couldn't finish computing this action within the time limit. This can happen on very complex boards (for example, hundreds of tokens). Your last saved turn is preserved — reload to restore the game, and consider exporting the state to report it.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
     "exportGameState": "Export Game State",
@@ -1842,5 +1845,20 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

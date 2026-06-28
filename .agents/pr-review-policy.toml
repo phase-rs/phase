@@ -1,0 +1,58 @@
+# Repo-level PR review policy. Keep contributor names, reviewer identities,
+# standings, and personal exceptions out of this committed file.
+
+[defaults]
+tier = "T2"
+
+[domain]
+rules_domain = "mtg-cr"
+
+[hard_stops]
+patterns = [
+  ".agents/skills/**",
+  ".claude/skills/**",
+  ".claude/agents/**",
+  ".github/workflows/**",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  "docs/AI-CONTRIBUTOR.md",
+  "Cargo.toml",
+  "client/package.json",
+  "client/src-tauri/build.rs",
+  "crates/**/build.rs",
+]
+
+[generated]
+patterns = [
+  "client/public/card-data*.json",
+  "client/public/coverage-*.json",
+  "client/public/scryfall-*.json",
+  "client/public/changelog*.json",
+  "data/mtgjson/**",
+  "triage/**",
+]
+
+[path_classes.frontend]
+patterns = [
+  "client/**",
+  "lobby-worker/**",
+]
+
+[path_classes.engine]
+patterns = [
+  "crates/engine/**",
+  "crates/phase-ai/**",
+  "crates/phase-server/**",
+]
+
+[path_classes.skill]
+patterns = [
+  ".agents/skills/**",
+  ".claude/skills/**",
+]
+
+[path_classes.github]
+patterns = [
+  ".github/**",
+]

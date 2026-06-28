@@ -156,6 +156,38 @@ pub enum AssistState {
     Committed { helper: PlayerId, generic: u32 },
 }
 
+/// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
+/// player. Backs `GameState::combat_phase_skip_next_turn` (False Peace / Empty
+/// City Ruse: "skips all combat phases of their next turn").
+///
+/// CR 614.10a: stacked skips are independent — two resolved effects make the
+/// player skip combat on their next *two* non-skipped turns ("one effect will be
+/// satisfied in skipping the first occurrence, while the other will remain"). So
+/// the model is a count, not a tri-state: `pending` is the number of armed skips
+/// not yet bound to a turn, and `active` marks the player's current turn as a
+/// bound skip turn. The axes are orthogonal — while a turn is `active`, further
+/// `pending` skips wait for subsequent turns.
+///
+/// Lifecycle, advanced in `start_next_turn` for the player whose turn begins:
+/// - a skip effect resolves -> `pending += 1`
+/// - that player's previous bound turn ended -> `active = false` (skip satisfied)
+/// - this turn isn't itself skipped and `pending > 0` -> `pending -= 1`, `active = true`
+///
+/// While `active`, a virtual replacement effect prevents every combat phase of
+/// the bound turn (CR 614.10: "skip" == "instead of doing this, do nothing").
+/// `Default` (`pending: 0`, `active: false`) is "no skip armed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CombatPhaseSkipState {
+    /// CR 614.10a: armed turn-scoped combat skips that have not yet bound to a
+    /// turn; each waits past skipped turns for its own non-skipped turn.
+    #[serde(default)]
+    pub pending: u32,
+    /// True while the player's current turn is a bound combat-skip turn; the
+    /// replacement layer prevents every combat phase of that turn.
+    #[serde(default)]
+    pub active: bool,
+}
+
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +366,10 @@ pub struct PendingNextSpellModifier {
     /// Optional filter for which spells this applies to (None = any spell).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spell_filter: Option<TargetFilter>,
+    /// Permanent that granted this modifier. Required for source-dependent spell
+    /// filters such as `IsChosenCreatureType` (CR 607.2d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
 }
 
 /// CR 601.2f: The kind of modification to apply to the next qualifying spell.
@@ -942,6 +978,30 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
+}
+
+/// CR 603.12a + CR 608.2c: A "you may pay {cost} up to N times. When you do,
+/// [reflexive]" process paused for one of its per-iteration optional-payment
+/// decisions (Hawkeye, Master Marksman — "Trick Arrows"). Unlike a generic
+/// `repeat_for` loop, each iteration's "you may" is offered SEPARATELY, the
+/// number of successful payments (K, accumulated in
+/// `GameState::optional_cost_payments_this_resolution`) sizes the reflexive
+/// modal (CR 700.2d), and the reflexive triggers EXACTLY ONCE for K >= 1
+/// (CR 603.12a) — never per payment. The resolution-time mana payment is
+/// synchronous (auto-tap, never pauses), so the only async boundaries are the
+/// per-iteration `OptionalEffectChoice` and the final `AbilityModeChoice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatedOptionalPayment {
+    /// The PayCost-only unit prompted (and, on accept, paid) this iteration —
+    /// `repeat_for`/`sub_ability` cleared so resolving it neither re-enters the
+    /// driver nor re-resolves the reflexive.
+    pub payment_unit: Box<crate::types::ability::ResolvedAbility>,
+    /// The reflexive sub-ability (the modal) resolved exactly once after the
+    /// loop, iff at least one payment succeeded (CR 603.12a).
+    pub reflexive: Box<crate::types::ability::ResolvedAbility>,
+    /// Number of further per-iteration payment prompts after the one currently
+    /// outstanding (the "up to N" budget minus the iterations already offered).
+    pub remaining: u32,
 }
 
 /// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
@@ -1664,6 +1724,36 @@ pub enum CastPaymentMode {
     Manual,
 }
 
+/// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
+/// non-mana cost last" detour a pending activation took, so
+/// `push_activated_ability_to_stack` knows whether `activation_cost` is the
+/// still-unpaid residual non-mana tail and which interactive sub-cost to
+/// re-surface. Replaces the former `x_residual_activation: bool`.
+///
+/// - `None`: no detour ran (direct path; `activation_cost`, if any, is the full
+///   cost handled by the standard payment fall-through).
+/// - `XMana`: the `{X}`-mana detour (`extract_x_mana_cost`) ran first; the
+///   residual is the non-self DISCARD tail still outstanding after mana payment.
+/// - `ManaLeg`: the non-X mana-leg detour ran first (CR 601.2g window opened on
+///   the intact board); the residual is a non-self battlefield-removal tail
+///   (Sacrifice / battlefield Exile / ReturnToHand) still outstanding after
+///   mana payment.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ActivationResidual {
+    #[default]
+    None,
+    XMana,
+    ManaLeg,
+}
+
+impl ActivationResidual {
+    /// `true` iff no residual detour was taken. Used as the serde
+    /// `skip_serializing_if` predicate so the default does not hit the wire.
+    pub fn is_none(&self) -> bool {
+        matches!(self, ActivationResidual::None)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -1780,17 +1870,17 @@ pub struct PendingCast {
     /// the generic amount they will pay at `finalize_cast`.
     #[serde(default)]
     pub assist_state: AssistState,
-    /// CR 601.2f + CR 601.2h: POSITIVE signal that this pending activation took
-    /// the `{X}`-mana detour (`extract_x_mana_cost` ran first), so its
-    /// `activation_cost` is the RESIDUAL non-mana tail that has NOT yet been
-    /// paid. `push_activated_ability_to_stack` re-surfaces a non-self discard
-    /// sub-cost only when this is set — the discard-FIRST detour leaves it
-    /// `false` because it already paid the discard before resuming. Set ONLY by
-    /// the X-residual detour in `handle_activate_ability`. Skipped on the wire
-    /// only when `false`; serialized when `true` so an activation paused
-    /// mid-payment keeps the signal across a multiplayer save/restore.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub x_residual_activation: bool,
+    /// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
+    /// non-mana cost last" detour this pending activation took, so its
+    /// `activation_cost` residual tail is paid correctly after mana payment. See
+    /// [`ActivationResidual`]. Set ONLY by the X-residual and mana-leg detours in
+    /// `handle_activate_ability`; the discard/sacrifice-FIRST detours leave it
+    /// `None` because they already paid the non-mana cost before resuming.
+    /// Skipped on the wire when `None` (legacy saves deserialize to `None`);
+    /// serialized otherwise so an activation paused mid-payment keeps the signal
+    /// across a multiplayer save/restore.
+    #[serde(default, skip_serializing_if = "ActivationResidual::is_none")]
+    pub activation_residual: ActivationResidual,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1843,7 +1933,7 @@ impl PendingCast {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: ActivationResidual::None,
         }
     }
 
@@ -2232,9 +2322,10 @@ pub struct PhyrexianShard {
 }
 
 /// Per-player deck pool — registered (initial) and current (live) card
-/// lists for main deck, sideboard, and commander zone.
+/// lists for main deck, sideboard, command-zone deck components, and
+/// supplementary payloads carried across match games.
 ///
-/// All six `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
+/// All `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
 /// `GameState::clone()` shares the underlying deck slice via refcount
 /// bump instead of deep-cloning every card's `CardFace` (and its nested
 /// `Vec<AbilityDefinition>`) on every AI search-node clone. Mutations
@@ -2259,6 +2350,16 @@ pub struct PlayerDeckPool {
     pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 901.15a: Registered shared Planechase planar deck payload. Only the
+    /// PlayerId(0) pool carries the communal deck, matching `DeckPayload`.
+    #[serde(default)]
+    pub registered_planar_deck: std::sync::Arc<Vec<DeckEntry>>,
+    /// CR 904.3: Registered Archenemy scheme deck payload. The configured
+    /// archenemy's pool carries the shared scheme deck.
+    #[serde(default)]
+    pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -2728,8 +2829,9 @@ pub enum WaitingFor {
     /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
     /// `finish_mulligans`.
     ///
-    /// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled
-    /// (the format lacks team semantics).
+    /// CR 103.5d + CR 805.3a + CR 810.2: shared-team-turn mulligans are
+    /// represented in the same simultaneous-decision model; every player
+    /// remains independently pending until their own keep/mulligan decision.
     MulliganDecision {
         pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a
@@ -5707,6 +5809,28 @@ pub struct GameState {
     /// must not break AI-search dedup on semantically-identical positions.
     #[serde(skip)]
     pub static_source_index: StaticSourceIndex,
+    /// CR 732.2a loop-shortcut detection ring (PR-3). A bounded FIFO of recent
+    /// post-resolution NORMALIZED board snapshots, captured at the post-pipeline frame
+    /// of `game::engine::pass_priority_once_with_pipeline` (after
+    /// `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at
+    /// the SBA-reconciliation seam (`game::engine::reconcile_terminal_result`). A
+    /// self-refilling MANDATORY cascade drives the engine one resolution per `apply()`
+    /// with no call-local window (the per-beat single-apply drive), so the window that
+    /// detects the loop MUST persist across `apply()` calls — hence on `GameState`.
+    ///
+    /// TRANSIENT DERIVED STATE — `#[serde(skip, default)]`. It is never serialized: it
+    /// is rebuilt deterministically from play and is a pure optimization over the
+    /// existing CR 704.5a SBA (which already ends every realistic-life drain), so
+    /// losing it across a save/load/MP-snapshot boundary only defers the shortcut by a
+    /// few resolutions — never changes a winner. Snapshots are `Arc`-shared so the
+    /// frequent `GameState::clone` (AI search, §9 probes) pays O(ring.len()) refcount
+    /// bumps, not deep copies. INTENTIONALLY omitted from `impl PartialEq for GameState`
+    /// (derived state, like `static_source_index`/`static_gate_truth` — both
+    /// `#[serde(skip)]` AND eq-excluded; NOT `public_state_dirty`/`state_revision`/
+    /// `layers_dirty`, which are `serde(skip)` but ARE compared in `eq`) so AI-search
+    /// dedup on semantically-identical positions is unaffected.
+    #[serde(skip, default)]
+    pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<GameState>>,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -5891,6 +6015,24 @@ pub struct GameState {
     /// is consumed only when the named step would otherwise happen.
     #[serde(default)]
     pub steps_to_skip: Vec<HashMap<Phase, u32>>,
+
+    /// CR 614.10 + CR 614.10a: Per-player turn-scoped combat-phase skip state.
+    /// Drives "skips all combat phases of their next turn" (False Peace / Empty
+    /// City Ruse). Unlike `steps_to_skip` (a finite per-step counter), this is a
+    /// turn-bound marker resolved as a virtual replacement effect on every combat
+    /// phase of the bound turn.
+    ///
+    /// State machine (per active player, advanced in `start_next_turn`):
+    /// - `Pending`: set when the skip effect resolves; the skip is *armed* but
+    ///   has not yet attached to a turn. Per CR 614.10a it waits past any
+    ///   skipped turns and binds to the player's first non-skipped turn.
+    /// - `Active`: promoted from `Pending` once the player's bound (non-skipped)
+    ///   turn actually begins. While `Active`, the replacement layer prevents
+    ///   every combat phase that turn (including extra combat phases).
+    /// - `None`: cleared at the start of the player's *following* turn, after the
+    ///   bound turn has ended. A turn that was `Active` becomes `None`.
+    #[serde(default)]
+    pub combat_phase_skip_next_turn: Vec<CombatPhaseSkipState>,
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
@@ -6379,6 +6521,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeat_iteration: Option<PendingRepeatIteration>,
 
+    /// CR 603.12a + CR 608.2c: A repeated-optional-payment process (Hawkeye,
+    /// Master Marksman — "you may pay {1} up to three times. When you do, choose
+    /// up to that many.") paused for one of its per-iteration payment decisions.
+    /// Carries the PayCost-only unit, the reflexive modal to resolve once after
+    /// the loop, and the remaining payment budget. Driven by
+    /// `resolve_repeated_optional_payment_choice` on each `DecideOptionalEffect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_repeated_optional_payment: Option<Box<PendingRepeatedOptionalPayment>>,
+
     /// CR 614.12b + CR 614.1c + CR 614.13: Pending multi-target `ChangeZone`
     /// iteration loop paused mid-flight because one of the moving objects
     /// triggered a per-permanent replacement choice. Drained by
@@ -6703,6 +6854,35 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub exiled_from_hand_this_resolution: u32,
 
+    /// CR 603.12a: Number of times the controller has paid a repeated optional
+    /// cost ("you may pay {C} up to N times") during the CURRENT ability
+    /// resolution. Read by `QuantityRef::TimesCostPaidThisResolution` to size a
+    /// reflexive "choose up to that many" modal (Hawkeye, Master Marksman /
+    /// Tranquil Frillback class). Incremented once per successful payment by the
+    /// repeated-optional-payment driver in `resolve_chain_body`, and cleared at
+    /// the `depth == 0` prelude of `resolve_ability_chain` so each top-level
+    /// resolution starts at 0.
+    ///
+    /// This counter is nonzero AT the per-iteration `WaitingFor::OptionalEffectChoice`
+    /// pause: `resolve_repeated_optional_payment_choice` increments K and THEN
+    /// sets `waiting_for` and returns, so each `DecideOptionalEffect` is a
+    /// SEPARATE `apply()` call with K already nonzero. That pause is a serde
+    /// boundary — the persistence layer (`to_persisted`/`from_persisted`,
+    /// single-player save/load, multiplayer host-resume) can serialize the state
+    /// between two payment prompts. Because the paired continuation
+    /// `pending_repeated_optional_payment` is serialized-when-`Some` and
+    /// eq-included precisely to survive that pause, K must survive it too — a
+    /// roundtrip restoring K=0 would collapse the reflexive modal cap (CR 700.2d)
+    /// below the payments actually made, denying the player modes they paid for.
+    ///
+    /// Therefore K mirrors `exiled_from_hand_this_resolution` EXACTLY (the
+    /// resolution-local u32 counter observable at a pause), NOT `static_gate_truth`
+    /// (which is genuinely derived and recomputable via `refresh_static_gate_truth`):
+    /// `#[serde(default, skip_serializing_if = "is_zero_u32")]` (serialized
+    /// only when nonzero, so a roundtrip is faithful) and INCLUDED in `PartialEq`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub optional_cost_payments_this_resolution: u32,
+
     /// CR 725: The current monarch, if any. At the beginning of the monarch's end step,
     /// the monarch draws a card. When a creature deals combat damage to the monarch,
     /// the creature's controller becomes the monarch.
@@ -6898,6 +7078,11 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 901.9 / CR 116.2i: Number of planar die special actions each player
+    /// has taken this turn. Effect-caused planar die rolls do not increment
+    /// this counter.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub planar_die_actions_this_turn: HashMap<PlayerId, u32>,
     /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
     /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
     /// that are set in motion turn face up and stay in the command zone, NOT here.
@@ -7339,36 +7524,23 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        // CR 810.4 + CR 810.11: `FormatConfig::starting_life` is the TEAM's
-        // shared total in a team-based format (Two-Headed Giant: 30, not 30
-        // per player / 60 per team). `game::players::team_life_total` derives
-        // the shared total by summing each living teammate's own `life`
-        // field, so the individual starting values must already split the
-        // shared total rather than each duplicating it. The engine currently
-        // only models 2-player teams (seats paired {0,1}, {2,3}, ... — see
-        // `game::players::teammates`/`team_index`), so the split is an even
-        // halving; CR 810.11 (3+-player teams) would need this to divide by
-        // the actual team size instead.
-        let per_player_life = if config.team_based {
-            config.starting_life / 2
-        } else {
-            config.starting_life
-        };
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: per_player_life,
+                life: config.starting_life_for_player(PlayerId(i)),
                 ..Player::default()
             })
             .collect();
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
+        let starting_player = config.starting_player();
+        let archenemy = config.archenemy_player();
 
         GameState {
             turn_number: 0,
-            active_player: PlayerId(0),
+            active_player: starting_player,
             phase: Phase::Untap,
             players,
-            priority_player: PlayerId(0),
+            priority_player: starting_player,
             turn_decision_controller: None,
             objects: im::HashMap::default(),
             next_object_id: 1,
@@ -7385,7 +7557,7 @@ impl GameState {
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
             waiting_for: WaitingFor::Priority {
-                player: PlayerId(0),
+                player: starting_player,
             },
             has_pending_cast: false,
             lands_played_this_turn: 0,
@@ -7407,6 +7579,7 @@ impl GameState {
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
             static_source_index: StaticSourceIndex::default(),
+            loop_detect_ring: std::collections::VecDeque::new(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
@@ -7433,6 +7606,10 @@ impl GameState {
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
+            combat_phase_skip_next_turn: vec![
+                CombatPhaseSkipState::default();
+                player_count as usize
+            ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             seat_order,
@@ -7449,7 +7626,7 @@ impl GameState {
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
             game_number: default_game_number(),
-            current_starting_player: PlayerId(0),
+            current_starting_player: starting_player,
             next_game_chooser: None,
             deck_pools: Vec::new(),
             outside_game_cards_brought_in: Vec::new(),
@@ -7519,6 +7696,7 @@ impl GameState {
             public_revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_repeat_iteration: None,
+            pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
@@ -7560,6 +7738,7 @@ impl GameState {
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
             exiled_from_hand_this_resolution: 0,
+            optional_cost_payments_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
             epic_effects: Vec::new(),
@@ -7587,8 +7766,9 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
-            archenemy: None,
+            archenemy,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
@@ -7785,9 +7965,35 @@ impl GameState {
         clone.next_pip_id = 0;
         clone.layers_dirty = LayersDirty::full();
         clone.public_state_dirty = PublicStateDirty::all_dirty();
+        // PR-3 (Option C): snapshots stored in `loop_detect_ring` are produced BY this
+        // method, so without clearing here each stored snapshot would carry a clone of
+        // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
+        // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
+        clone.loop_detect_ring.clear();
         clone
     }
+
+    /// PR-3 (Option C): push one NORMALIZED post-resolution snapshot onto the
+    /// CR 732.2a loop-detection ring, evicting the oldest at `LOOP_DETECT_RING_CAP`.
+    /// The snapshot is `normalize_for_loop`d (its own ring cleared, see above) and
+    /// `Arc`-shared so storage is O(1) per element. Called only from the post-pipeline
+    /// frame behind the refill gate (`game::engine::pass_priority_once_with_pipeline`,
+    /// after `run_post_action_pipeline` places refilling triggers).
+    pub(crate) fn record_loop_detect_sample(&mut self) {
+        if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
+            self.loop_detect_ring.pop_front();
+        }
+        let snapshot = std::sync::Arc::new(self.normalize_for_loop());
+        self.loop_detect_ring.push_back(snapshot);
+    }
 }
+
+/// PR-3 (Option C): max retained CR 732.2a loop-detection snapshots. A determinate
+/// drain has period ≤ 2; 16 covers ≥ 8 cycles and any loop whose repeating phase
+/// begins within a 16-resolution preamble. A longer-period/longer-preamble loop
+/// simply falls back to the natural CR 704.5a SBA death (fail-safe — never a wrong
+/// win). Kept small because the live `GameState` carries it through every clone.
+const LOOP_DETECT_RING_CAP: usize = 16;
 
 /// CR 104.4b confirmation between two states that have BOTH already been
 /// `normalize_for_loop`d. Reuses `PartialEq` for the ~95 non-object fields and
@@ -7902,6 +8108,7 @@ impl PartialEq for GameState {
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
+            && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
             && self.seat_order == other.seat_order
@@ -7989,6 +8196,7 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
+            && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
             // `devour_eligible_snapshot` is INTENTIONALLY excluded from PartialEq.
             // It is a TRANSIENT mid-resolution carrier (CR 614.12a/13a): `Some`
@@ -8032,10 +8240,18 @@ impl PartialEq for GameState {
             && self.pending_optional_trigger_match_count
                 == other.pending_optional_trigger_match_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
+            // CR 603.12a: K is nonzero AT the per-iteration `OptionalEffectChoice`
+            // pause (a serde boundary across separate `apply()` calls). It is
+            // serialized-when-nonzero and eq-included — mirroring
+            // `exiled_from_hand_this_resolution` — so a save/restore mid-payment-loop
+            // preserves the reflexive modal cap (CR 700.2d).
+            && self.optional_cost_payments_this_resolution
+                == other.optional_cost_payments_this_resolution
             && self.lki_cache == other.lki_cache
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.planar_die_actions_this_turn == other.planar_die_actions_this_turn
             && self.scheme_deck == other.scheme_deck
             && self.archenemy == other.archenemy
     }
@@ -8491,7 +8707,7 @@ mod tests {
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
-                x_residual_activation: false,
+                activation_residual: ActivationResidual::None,
             })
         }
 
@@ -8830,7 +9046,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: ActivationResidual::None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
