@@ -10326,6 +10326,17 @@ pub enum Effect {
         followed_by: Vec<Phase>,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 508.1c + CR 611.2c: Optional attacker restriction for the combat
+        /// phase(s) this effect schedules. `Some(filter)` ("only X can attack
+        /// during that combat phase" — Last Night Together, Bumi) means only
+        /// creatures matching `filter` may be declared as attackers during that
+        /// phase, evaluated continuously at declaration (CR 611.2c, a
+        /// rules-modifying continuous effect). `None` = ordinary additional
+        /// combat. The parser may emit `ParentTarget` ("the chosen creatures");
+        /// the resolver concretizes it to a fixed tracked set (CR 608.2h — the
+        /// affected set is information determined once, at resolution).
+        #[serde(default)]
+        attacker_restriction: Option<TargetFilter>,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.

@@ -1105,6 +1105,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // CR 702.179c-d: fold trailing speed-floor sentences into the
             // preceding `ChangeSpeed` effect and drop the orphan node.
             crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
+            // CR 508.1c + CR 611.2c: fold a trailing "only X can attack during
+            // that combat phase" sentence into the preceding `AdditionalPhase`
+            // (Bumi, Unleashed — triggered additional combat) and drop the
+            // orphan node, mirroring the spell-effect path.
+            crate::parser::oracle_effect::fold_additional_combat_attacker_restriction(&mut ability);
             if modifiers.has_up_to {
                 ability.optional_targeting = true;
             }
@@ -25670,6 +25675,51 @@ mod tests {
             },
             other => panic!("expected Sacrifice effect, got {other:?}"),
         }
+    }
+
+    /// CR 508.1c + CR 611.2c: Bumi, Unleashed — a triggered additional combat
+    /// phase whose "Only land creatures can attack during that combat phase"
+    /// rider must fold onto the `AdditionalPhase` (Typed restriction,
+    /// re-evaluated continuously) rather than surfacing as an Unimplemented gap.
+    #[test]
+    fn triggered_additional_combat_folds_land_creature_attacker_restriction() {
+        let def = parse_trigger_line(
+            "Whenever Bumi deals combat damage to a player, untap all lands you control. \
+             After this phase, there is an additional combat phase. Only land creatures \
+             can attack during that combat phase.",
+            "Bumi, Unleashed",
+        );
+
+        let mut node = def.execute.as_deref();
+        let mut saw_restriction = false;
+        while let Some(ability) = node {
+            assert!(
+                !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+                "no Unimplemented node may remain after the fold"
+            );
+            if let Effect::AdditionalPhase {
+                phase: Phase::BeginCombat,
+                attacker_restriction: Some(TargetFilter::Typed(tf)),
+                ..
+            } = ability.effect.as_ref()
+            {
+                // "land creatures" → a typed land+creature filter (Bumi class).
+                assert!(
+                    tf.type_filters
+                        .contains(&crate::types::ability::TypeFilter::Land)
+                        && tf
+                            .type_filters
+                            .contains(&crate::types::ability::TypeFilter::Creature),
+                    "restriction must be the land-creature typed filter, got {tf:?}"
+                );
+                saw_restriction = true;
+            }
+            node = ability.sub_ability.as_deref();
+        }
+        assert!(
+            saw_restriction,
+            "the additional combat phase must carry a Typed land-creature restriction"
+        );
     }
 
     #[test]

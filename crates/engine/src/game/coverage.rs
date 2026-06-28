@@ -2926,6 +2926,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             after,
             followed_by,
             count,
+            attacker_restriction,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
@@ -2935,6 +2936,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), format!("{count:?}")));
+            }
+            if let Some(restriction) = attacker_restriction {
+                d.push((
+                    "only these can attack".into(),
+                    fmt_target(restriction),
+                ));
             }
         }
         Effect::Double {

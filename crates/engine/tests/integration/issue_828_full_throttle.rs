@@ -34,6 +34,7 @@ fn full_throttle_schedules_two_extra_combats_after_main_phase() {
         engine::types::game_state::ExtraPhase {
             anchor: Phase::PreCombatMain,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
         }
     );
     assert_eq!(
@@ -41,6 +42,7 @@ fn full_throttle_schedules_two_extra_combats_after_main_phase() {
         engine::types::game_state::ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
         },
         "the second extra combat must chain after the first combat ends"
     );

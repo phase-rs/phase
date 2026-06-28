@@ -725,6 +725,7 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -748,6 +749,7 @@ mod tests {
             state.extra_phases.push(ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
             });
         }
 
@@ -793,6 +795,7 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::Upkeep,
             phase: Phase::Upkeep,
+            attacker_restriction: None,
         });
 
         let v = ResourceVector::snapshot(&state);

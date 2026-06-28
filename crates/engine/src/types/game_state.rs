@@ -6040,6 +6040,14 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
+    /// attacker restriction (Last Night Together / Bumi), only creatures matching
+    /// this filter may be declared as attackers. Set on entering that
+    /// BeginCombat, cleared at end of combat (CR 511.3). `None` during ordinary
+    /// (unrestricted) combats.
+    #[serde(default)]
+    pub current_combat_attacker_restriction: Option<TargetFilter>,
+
     // N-player support
     #[serde(default)]
     pub seat_order: Vec<PlayerId>,
@@ -7310,12 +7318,18 @@ pub struct ScheduledTurnControl {
 /// LIFO ordering ("the most recently created phase will occur first") is
 /// preserved by scanning `extra_phases` from the end (`rposition`) for the
 /// first matching anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtraPhase {
     /// The phase after which this extra phase is inserted (CR 500.8).
     pub anchor: Phase,
     /// The phase to insert.
     pub phase: Phase,
+    /// CR 508.1c: Attacker restriction active while this scheduled combat phase
+    /// is current (concretized at resolution to `TrackedSet` / `Typed` /
+    /// `SpecificObject`). `None` for ordinary extra phases. Carried here so the
+    /// restriction activates exactly when (and only when) this phase begins.
+    #[serde(default)]
+    pub attacker_restriction: Option<TargetFilter>,
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
@@ -7607,6 +7621,7 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            current_combat_attacker_restriction: None,
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),
@@ -8106,6 +8121,8 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.current_combat_attacker_restriction
+                == other.current_combat_attacker_restriction
             && self.seat_order == other.seat_order
             && self.format_config == other.format_config
             && self.eliminated_players == other.eliminated_players
