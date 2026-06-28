@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 154,
+      "date": "2026-06-28",
+      "title": "Alchemy perpetual buffs arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Alchemy perpetual effects now persist — cards can perpetually get +N/+M or gain evergreen keywords\n• Baron Helmut Zemo works: Boast can exile black graveyard cards with enough black mana symbols, then copy and cast up to three of them\n• Public-vote cards can now collect votes, tally labels, and use the chosen player or winning vote in the rest of the effect\n• \"You or a permanent you control becomes the target\" triggers now fire for both players and permanents (Loki, God of Mischief)\n\n🛠️ Cards That Now Work Right\n• Omnath, Locus of All now checks the revealed card correctly, adds mana in that card's colors, and puts the card into your hand when you decline the reveal\n• The Incredible Hulk's attacking Enrage rider is now gated correctly and untaps Hulk before the extra combat phase\n• Incremental Growth now keeps its distinct \"another target\" choices instead of letting one creature receive every counter pile\n• Faith's Fetters and Bound by Moonsilver now lock the enchanted permanent, not the Aura itself\n• Guardian of Faith now prompts you to choose any number of other target creatures instead of phasing everything automatically\n• Haze Frog now prevents combat damage from other creatures only, so Haze Frog's own combat damage still works\n• Read the Runes now repeats the discard-or-sacrifice choice once for each card drawn\n• Desperate Gambit now asks you to choose a source you control and applies its prevention/replacement shield to that chosen source\n• Glamdring and similar \"has a keyword and gets +N/+M for each...\" effects now scale dynamically instead of flattening to a static bonus\n• Bounty of the Hunt now removes its temporary counters at the next cleanup step\n• Mana Severance no longer creates a duplicate exile instruction after searching your library\n• Aang, Swift Savior can now airbend spells on the stack\n• Exhumer Thrull's haunt payoff now remains one compound trigger\n• Activation limits like \"activate only during your turn and only once\" are now preserved (Loch Larent, Katara, Water Tribe's Hope)\n• Displaced Dinosaurs, River Song, River of Tears, and three-color target filters now parse correctly\n\n⚔️ Combat & Gameplay\n• Attachment loops are blocked — returned Equipment can no longer create illegal attachment cycles\n• Failed convoke payments restore the pending cast cleanly, so cancelling untaps your convoked creatures and returns the spell to hand\n• Source-state-gated chained effects now stay conditional instead of firing unconditionally\n\n🖥️ Interface\n• If the engine takes too long to answer, the client now recovers with a clear timeout message instead of freezing behind dead buttons\n\n🌍 Localization\n• The new engine-timeout recovery message is available across the supported app locales\n\n🤖 AI\n• Go-wide boards are much faster for the AI and legality checks — a large squirrel-board attacker step dropped from minutes to about a second in the regression probe",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520863154345611445"
+    },
+    {
       "id": 153,
       "date": "2026-06-27",
       "title": "Suspend arrives, plus Two-Headed Giant & Planechase",
