@@ -53,12 +53,15 @@ const STATE_PATH = path.join(ROOT, "scripts/changelog/state.json");
 
 // The header line the in-app body omits but the Discord post leads with — the
 // inverse of cleanBody()'s HEADER_RE filter in fetch-changelog.ts. The leading
-// emoji is env-configurable because a custom Discord emoji is a guild-scoped id
-// (`<:phase:1234…>`) — same no-hardcoded-ids rule as DISCORD_GUILD_ID — and
-// falls back to a plain emoji so a token-less or other-guild run still reads
-// sensibly. Bots must send custom emoji as `<:name:id>`; a bare `:name:`
-// shortcode posts as literal text.
-const HEADER_EMOJI = Bun.env.CHANGELOG_HEADER_EMOJI ?? "🎴";
+// emoji is env-configurable (same no-hardcoded-ids rule as DISCORD_GUILD_ID),
+// falling back to plain `🎴` so a token-less or other-guild run still reads
+// sensibly. A custom guild emoji is stored bracket-free as `name:id` — bots
+// must send it to the API as `<:name:id>` (a bare `:name:` only resolves in the
+// Discord client composer, not over REST), but the `<`/`>` would break
+// `set -a; source .env` (shell redirects), so we keep them out of .env and wrap
+// here. A literal Unicode emoji (no colon) is used verbatim.
+const rawEmoji = Bun.env.CHANGELOG_HEADER_EMOJI?.trim();
+const HEADER_EMOJI = rawEmoji ? (rawEmoji.includes(":") ? `<:${rawEmoji}>` : rawEmoji) : "🎴";
 const HEADER = `${HEADER_EMOJI} What's New in phase.rs`;
 // Discord rejects messages longer than 2000 characters.
 const DISCORD_MAX = 2000;
