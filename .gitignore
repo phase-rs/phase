@@ -26,6 +26,7 @@ client/src/wasm/*.wasm.d.ts
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .claude/projects/
+.pr-review/
 
 # Build output
 client/dist/
