@@ -109,7 +109,7 @@ describe("gameLoopController auto-pass authorization", () => {
     controller.dispose();
   });
 
-  it("cancels a scheduled local auto-pass when priority moves to the AI", async () => {
+  it("cancels a scheduled local auto-pass when priority moves away from the local player", async () => {
     const humanPriority = priority(0);
     storeState = {
       waitingFor: humanPriority,
@@ -120,7 +120,7 @@ describe("gameLoopController auto-pass authorization", () => {
       autoPassRecommended: true,
     };
 
-    const controller = createGameLoopController({ mode: "ai" });
+    const controller = createGameLoopController({ mode: "local" });
     controller.start();
 
     const aiPriority = priority(1);

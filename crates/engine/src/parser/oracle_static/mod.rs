@@ -55,7 +55,7 @@ mod prelude {
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
-    pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType};
+    pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
     pub(super) use crate::types::statics::{
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,

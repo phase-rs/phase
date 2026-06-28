@@ -20913,6 +20913,12 @@ pub(crate) fn parse_effect_chain_ir(
             // chunks inside it share the flag — the head "turn this creature face
             // up" clause (Etrata) needs it to lower to TurnFaceUp { SelfRef }.
             in_granted_activated_ability: ctx.in_granted_activated_ability,
+            // CR 107.4 + CR 603.4: the colored-mana-symbol cast qualifier (Namor)
+            // is a property of the whole trigger body, not of an individual chunk,
+            // so every chunk inside it must share the staged color — the "create
+            // that many tokens" chunk needs it to back-reference the cast spell's
+            // colored-pip count instead of the generic EventContextAmount.
+            pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;

@@ -946,6 +946,13 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
+    // CR 107.4 + CR 202.1 + CR 603.4: Stage the cast-trigger's colored-mana-symbol
+    // qualifier color (Namor) so a "create that many tokens" effect clause can
+    // back-reference the cast spell's colored-pip count instead of the generic
+    // EventContextAmount. Derived from the same condition/qualifier text whose
+    // spell qualifier becomes the trigger's `valid_card`.
+    let pending_mana_symbol_count_color =
+        extract_colored_mana_symbol_spell_qualifier(condition_text);
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
@@ -960,6 +967,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
+        pending_mana_symbol_count_color,
         ..Default::default()
     };
 
@@ -12198,6 +12206,38 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
 /// Shared with `oracle_effect::try_parse_when_next_event` (delayed-trigger variant
 /// of the same filter shape) — exposed as `pub(crate)` to keep the combinator
 /// definition in a single place.
+/// CR 107.4 + CR 202.1: Pure-nom recognizer for the spell-qualifier phrase
+/// "with one or more `<color>` mana symbol(s) in its mana cost"
+/// (Namor the Sub-Mariner — "Whenever you cast a noncreature spell with one or
+/// more blue mana symbols in its mana cost"). Returns the named `ManaColor`;
+/// the implied comparison is `Comparator::GE` against `1` ("one or more").
+///
+/// Reuses the shared atomic combinator `parse_color` rather than re-implementing
+/// color recognition or pip counting. This is a different grammatical position
+/// from `parse_colored_mana_symbol_count_target_condition` (a target eligibility
+/// condition, "it has N or more colored mana symbols in its mana cost"), so it
+/// is a separate recognizer that shares the atomics, not the call shape.
+fn parse_colored_mana_symbol_spell_qualifier(input: &str) -> OracleResult<'_, ManaColor> {
+    delimited(
+        tag("with one or more "),
+        nom_primitives::parse_color,
+        (tag(" mana symbol"), opt(tag("s")), tag(" in its mana cost")),
+    )
+    .parse(input)
+}
+
+/// CR 107.4 + CR 202.1: Pre-extraction helper for trigger plumbing. Locates the
+/// colored-mana-symbol spell qualifier inside finalized condition/qualifier text
+/// (e.g. the "noncreature spell with one or more blue mana symbols in its mana
+/// cost" valid-card phrase) and returns the named color so the effect-context can
+/// thread it to the token-count override (Namor "create that many" → EventSource
+/// pip count). Scans word boundaries so the qualifier need not begin the string.
+pub(crate) fn extract_colored_mana_symbol_spell_qualifier(text: &str) -> Option<ManaColor> {
+    let lower = text.to_lowercase();
+    nom_primitives::scan_preceded(&lower, parse_colored_mana_symbol_spell_qualifier)
+        .map(|(_, color, _)| color)
+}
+
 pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> {
     use crate::types::ability::{FilterProp, TypedFilter};
 
@@ -12274,6 +12314,23 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::InZone { zone }]),
             ));
+        }
+    }
+
+    // CR 107.4 + CR 202.1 + CR 603.2: "with one or more <color> mana symbol(s) in
+    // its mana cost" (Namor the Sub-Mariner). The implied comparison is
+    // Comparator::GE against 1 ("one or more"). Emits the colored-pip filter prop
+    // so the trigger's valid_card only matches spells with at least one such
+    // symbol, fixing the over-fire on every noncreature spell.
+    if let Ok((rest, color)) = parse_colored_mana_symbol_spell_qualifier(modifier) {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::ManaSymbolCount {
+                    color: Some(color),
+                    comparator: Comparator::GE,
+                    value: 1,
+                }],
+            )));
         }
     }
 
@@ -35173,7 +35230,9 @@ mod controlled_chosen_type_enters_tests {
 #[cfg(test)]
 mod enchanted_player_controls_tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -35239,5 +35298,129 @@ mod enchanted_player_controls_tests {
                 TypedFilter::land().controller(ControllerRef::EnchantedPlayer)
             ))
         );
+    }
+
+    /// CR 107.4 + CR 202.1 + CR 603.2 + CR 603.4 (issue #4370): Namor the
+    /// Sub-Mariner — "Whenever you cast a noncreature spell with one or more
+    /// blue mana symbols in its mana cost, create that many 1/1 blue Merfolk
+    /// creature tokens." (1) the trigger's `valid_card` must carry the
+    /// colored-pip constraint (`FilterProp::ManaSymbolCount { Blue, GE, 1 }`)
+    /// AND the noncreature type filter, so it does not over-fire on every
+    /// noncreature spell; (2) the "create that many" count must back-reference
+    /// the cast spell's blue-pip count (`ManaSymbolsInManaCost { EventSource,
+    /// Some(Blue) }`), not the generic `EventContextAmount` (which resolves to
+    /// 0 → zero tokens).
+    /// Collect every `Effect` reachable through the `sub_ability` chain.
+    fn collect_effects(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Walk an `And`/`Typed` valid_card looking for a `ManaSymbolCount` prop.
+    fn valid_card_has_blue_pip(f: &TargetFilter) -> bool {
+        use crate::types::mana::ManaColor;
+        match f {
+            TargetFilter::And { filters } => filters.iter().any(valid_card_has_blue_pip),
+            TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaSymbolCount {
+                        color: Some(ManaColor::Blue),
+                        comparator: Comparator::GE,
+                        value: 1,
+                    }
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn namor_blue_pip_cast_trigger_valid_card_and_token_count() {
+        use crate::types::ability::{Effect, ObjectScope, QuantityExpr, QuantityRef};
+        use crate::types::mana::ManaColor;
+
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell with one or more blue mana symbols in its mana cost, create that many 1/1 blue Merfolk creature tokens.",
+            "Namor the Sub-Mariner",
+        );
+
+        // (1) valid_card carries the blue-pip constraint so the trigger does not
+        // over-fire on every noncreature spell.
+        let vc = def.valid_card.as_ref().expect("Namor trigger valid_card");
+        assert!(
+            valid_card_has_blue_pip(vc),
+            "valid_card must contain ManaSymbolCount {{ Blue, GE, 1 }}, got {vc:?}"
+        );
+
+        // (2) token count back-references the blue-pip count of the cast spell.
+        let execute = def.execute.as_deref().expect("Namor trigger execute body");
+        let token_count = collect_effects(execute)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Token { count, .. } => Some(count.clone()),
+                _ => None,
+            })
+            .expect("Namor trigger should create tokens");
+        assert_eq!(
+            token_count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::EventSource,
+                    color: Some(ManaColor::Blue),
+                },
+            },
+            "token count must back-reference the cast spell's blue-pip count"
+        );
+    }
+
+    /// CR 603.2 (issue #4370): Leakage guard — a cast trigger WITHOUT a
+    /// colored-pip qualifier ("Whenever you cast a noncreature spell, create
+    /// that many ... tokens") must NOT pick up the Namor override: the count
+    /// stays `EventContextAmount` and the valid_card carries no
+    /// `ManaSymbolCount`. Confirms the override is gated on the staged color.
+    #[test]
+    fn cast_trigger_without_pip_qualifier_keeps_event_context_count() {
+        use crate::types::ability::{Effect, QuantityExpr, QuantityRef};
+
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell, create that many 1/1 blue Merfolk creature tokens.",
+            "Test Card",
+        );
+
+        // valid_card must NOT contain a ManaSymbolCount prop anywhere.
+        fn has_pip(f: &TargetFilter) -> bool {
+            match f {
+                TargetFilter::And { filters } => filters.iter().any(has_pip),
+                TargetFilter::Typed(tf) => tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::ManaSymbolCount { .. })),
+                _ => false,
+            }
+        }
+        if let Some(vc) = def.valid_card.as_ref() {
+            assert!(!has_pip(vc), "no ManaSymbolCount expected, got {vc:?}");
+        }
+
+        if let Some(execute) = def.execute.as_deref() {
+            if let Some(count) = collect_effects(execute).into_iter().find_map(|e| match e {
+                Effect::Token { count, .. } => Some(count.clone()),
+                _ => None,
+            }) {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "without a pip qualifier the count must stay EventContextAmount"
+                );
+            }
+        }
     }
 }

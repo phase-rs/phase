@@ -2837,6 +2837,19 @@ pub enum FilterProp {
         comparator: Comparator,
         count: u8,
     },
+    /// CR 107.4 + CR 202.1: Matches objects whose count of colored mana symbols
+    /// in the printed mana cost satisfies `comparator` against `value`.
+    /// `color: Some(c)` counts symbols contributing to color `c` (hybrid /
+    /// monocolored-hybrid / Phyrexian via `ManaCostShard::contributes_to`,
+    /// CR 107.4a/107.4e/107.4f); `color: None` counts each colored symbol once.
+    /// `value` is a printed constant. Filter sibling of
+    /// `QuantityRef::ManaSymbolsInManaCost`; both delegate the pip count to the
+    /// single counting authority `ManaCost::count_colored_pips`.
+    ManaSymbolCount {
+        color: Option<ManaColor>,
+        comparator: Comparator,
+        value: i32,
+    },
     /// Matches objects with a specific supertype (Basic, Legendary, Snow).
     HasSupertype {
         value: Supertype,

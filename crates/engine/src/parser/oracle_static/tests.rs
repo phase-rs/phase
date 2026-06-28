@@ -15291,6 +15291,130 @@ fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
     }
 }
 
+#[test]
+fn static_reduce_activated_ability_cost_dynamic_power() {
+    // Agatha of the Vile Cauldron, post `normalize_card_name_refs` ("Agatha's"
+    // → "~'s"): "Activated abilities of creatures you control cost {X} less to
+    // activate, where X is ~'s power. This effect can't reduce the mana in that
+    // cost to less than one mana." The `{X}` amount is the per-unit multiplier 1
+    // and the dynamic count is the source's power (CR 208.1 + CR 113.7).
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {X} less to activate, where X is ~'s power. This effect can't reduce the mana in that cost to less than one mana.",
+    )
+    .expect("Agatha dynamic activated-ability cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 1,
+            minimum_mana: Some(1),
+            dynamic_count: Some(QuantityRef::Power {
+                scope: ObjectScope::Source,
+            }),
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("expected creatures you control, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_where_x_is_source_power_yields_power_source_ref() {
+    // Amendment item 2: the dynamic referent combinator must map
+    // "{X} ... where X is ~'s power" → `QuantityRef::Power { scope: Source }`,
+    // with the per-unit amount pinned to 1. Drops the second sentence to prove
+    // the dynamic arm does not depend on the minimum-mana clause.
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {X} less to activate, where X is ~'s power.",
+    )
+    .expect("dynamic referent must parse without the minimum-mana clause");
+    match def.mode {
+        StaticMode::ReduceAbilityCost {
+            amount,
+            dynamic_count: Some(QuantityRef::Power { scope }),
+            ..
+        } => {
+            assert_eq!(scope, ObjectScope::Source);
+            assert_eq!(amount, 1);
+        }
+        other => panic!("expected dynamic Power{{Source}} reduction, got {other:?}"),
+    }
+}
+
+// --- Group B': Special-action (plot / unlock) cost reduction ---
+
+#[test]
+fn static_reduce_action_cost_plot() {
+    // Doc Aurlock, Grizzled Genius: "Plotting cards from your hand costs {2}
+    // less." (CR 116.2k / 702.170). Note the singular verb "costs".
+    let def = parse_static_line("Plotting cards from your hand costs {2} less.")
+        .expect("Doc Aurlock plot cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceActionCost {
+            action: SpecialAction::Plot,
+            mode: CostModifyMode::Reduce,
+            amount: 2,
+        }
+    );
+}
+
+#[test]
+fn static_reduce_action_cost_unlock() {
+    // Inquisitive Glimmer: "Unlock costs you pay cost {1} less." (CR 116.2m /
+    // 709.5e). The "cost" (not "costs") verb form.
+    let def = parse_static_line("Unlock costs you pay cost {1} less.")
+        .expect("Inquisitive Glimmer unlock cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceActionCost {
+            action: SpecialAction::UnlockDoor,
+            mode: CostModifyMode::Reduce,
+            amount: 1,
+        }
+    );
+}
+
+#[test]
+fn spell_cost_reduction_does_not_become_action_cost() {
+    // Discriminator: a spell-cost reduction (Inquisitive Glimmer L1) must route
+    // to `ModifyCost`, NEVER the special-action `ReduceActionCost`. Pins the
+    // plot/unlock subject tags so they don't over-match generic "cost {N} less".
+    let def = parse_static_line("Enchantment spells you cast cost {1} less to cast.")
+        .expect("spell cost reduction parses");
+    assert!(
+        matches!(def.mode, StaticMode::ModifyCost { .. }),
+        "spell cost reduction must be ModifyCost, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_reduce_action_cost_registry_round_trip() {
+    // CR 116.2: Display/from_str must round-trip the action + direction so a
+    // serialized special-action reduction does not silently decode wrong.
+    for (action, mode) in [
+        (SpecialAction::Plot, CostModifyMode::Reduce),
+        (SpecialAction::UnlockDoor, CostModifyMode::Reduce),
+        (SpecialAction::Plot, CostModifyMode::Raise),
+    ] {
+        let original = StaticMode::ReduceActionCost {
+            action,
+            mode,
+            amount: 2,
+        };
+        let encoded = original.to_string();
+        let decoded = encoded
+            .parse::<StaticMode>()
+            .expect("registry string parses back into a StaticMode");
+        assert_eq!(decoded, original, "round trip changed value: {encoded}");
+    }
+}
+
 // --- Group C: Spells you cast have keyword ---
 
 #[test]

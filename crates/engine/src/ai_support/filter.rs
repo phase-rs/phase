@@ -575,6 +575,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::NotColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::ToughnessGTPower

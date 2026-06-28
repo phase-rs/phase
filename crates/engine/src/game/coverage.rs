@@ -56,6 +56,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
+            // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
+            // special-action cost-reduction resolver
+            // (casting.rs::apply_special_action_cost_reduction), consulted at the
+            // plot activation and Room-door unlock payment sites. Not
+            // registry-keyed (SpecialAction is open value space).
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
@@ -712,6 +719,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     (Comparator::EQ, 1) => "monocolored".into(),
                     (Comparator::GE, 2) => "multicolored".into(),
                     _ => format!("colors {comparator:?} {count}").to_lowercase(),
+                };
+                parts.push(label);
+            }
+            FilterProp::ManaSymbolCount {
+                color,
+                comparator,
+                value,
+            } => {
+                let symbol = match color {
+                    Some(c) => format!("{c:?} mana symbol").to_lowercase(),
+                    None => "colored mana symbol".into(),
+                };
+                let label = match comparator {
+                    Comparator::GE => format!("≥{value} {symbol}"),
+                    Comparator::LE => format!("≤{value} {symbol}"),
+                    Comparator::GT => format!(">{value} {symbol}"),
+                    Comparator::LT => format!("<{value} {symbol}"),
+                    Comparator::EQ => format!("{value} {symbol}"),
+                    Comparator::NE => format!("≠{value} {symbol}"),
                 };
                 parts.push(label);
             }
