@@ -2980,10 +2980,8 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
     // engine has no dedicated target filter for "players who last chose <word>",
     // but this is still a player-scoped rule-static subject and must not cause
     // the embedded predicate to fall through to `static_structure`.
-    if let Some(rest) = tp.lower.strip_prefix("each player who last chose ") {
-        if !rest.trim().is_empty() {
-            return Some(TargetFilter::Player);
-        }
+    if parse_each_player_who_last_chose_subject(tp.lower).is_ok() {
+        return Some(TargetFilter::Player);
     }
 
     // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a
@@ -3029,6 +3027,19 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
     }
 
     None
+}
+
+fn parse_each_player_who_last_chose_subject(input: &str) -> OracleResult<'_, ()> {
+    use nom::bytes::complete::take_while1;
+
+    value(
+        (),
+        all_consuming(preceded(
+            tag("each player who last chose "),
+            take_while1(|c: char| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '\'')),
+        )),
+    )
+    .parse(input)
 }
 
 pub(crate) fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
