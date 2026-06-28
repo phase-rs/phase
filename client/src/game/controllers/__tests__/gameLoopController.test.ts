@@ -24,6 +24,7 @@ let waitingForSubscriber: (() => void) | null = null;
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: {
     getState: () => storeState,
+    setState: vi.fn(),
     subscribe: (_selector: unknown, callback: () => void) => {
       waitingForSubscriber = callback;
       return () => {

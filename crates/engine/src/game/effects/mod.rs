@@ -6832,10 +6832,18 @@ fn resolve_chain_body(
             if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
                 sub_with_context.source_id = forwarded_objects[0];
                 if matches!(sub.effect, Effect::Attach { .. }) {
-                    if !sub_with_context
-                        .targets
-                        .iter()
-                        .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                    let attach_target_is_last_created = matches!(
+                        &sub.effect,
+                        Effect::Attach {
+                            target: TargetFilter::LastCreated,
+                            ..
+                        }
+                    );
+                    if !attach_target_is_last_created
+                        && !sub_with_context
+                            .targets
+                            .iter()
+                            .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
                     {
                         sub_with_context
                             .targets
@@ -10817,6 +10825,94 @@ mod tests {
             vec![TargetRef::Object(creature)],
             "delayed exile must snapshot the returned creature"
         );
+    }
+
+    #[test]
+    fn forward_result_attach_to_last_created_uses_moved_object_as_attachment() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Ratonhnhake:ton".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Assassin Gauntlet".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let token = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&token)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.last_created_token_ids = vec![token];
+
+        let attach_to_token = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut return_equipment = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Equipment".to_string())],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(equipment)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(attach_to_token);
+        return_equipment.forward_result = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &return_equipment, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&equipment].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(token))
+        );
+        assert!(state.objects[&token].attachments.contains(&equipment));
+        assert_eq!(state.objects[&source].attached_to, None);
+        assert!(!state.objects[&equipment].attachments.contains(&source));
     }
 
     /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+

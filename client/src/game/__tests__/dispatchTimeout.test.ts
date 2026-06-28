@@ -108,4 +108,55 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     // The healthy path must never surface the engine-lost recovery prompt.
     expect(notifyEngineLost).not.toHaveBeenCalled();
   });
+
+  it("drops a queued local action when the waiting prompt changes before it runs", async () => {
+    const firstWaitingFor = { type: "Priority", data: { player: 0 } };
+    const nextWaitingFor = { type: "Priority", data: { player: 1 } };
+    const initialState = {
+      ...emptyState,
+      waiting_for: firstWaitingFor,
+      players: [{ id: 0 }, { id: 1 }],
+      objects: { 1: { id: 1 } },
+    } as unknown as GameState;
+    const nextState = {
+      ...initialState,
+      waiting_for: nextWaitingFor,
+      priority_player: 1,
+    } as unknown as GameState;
+    let releaseFirst!: () => void;
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<SubmitResult>((resolve) => {
+            releaseFirst = () => resolve({ events: [], log_entries: [] } as unknown as SubmitResult);
+          }),
+      )
+      .mockResolvedValue({ events: [], log_entries: [] } as unknown as SubmitResult);
+    const getState = vi
+      .fn<EngineAdapter["getState"]>()
+      .mockResolvedValue(nextState);
+    const getLegalActions = vi
+      .fn<EngineAdapter["getLegalActions"]>()
+      .mockResolvedValue({
+        actions: [{ type: "SelectCards", data: { cards: [] } }],
+        autoPassRecommended: false,
+      } as unknown as LegalActionsResult);
+
+    useGameStore.setState({
+      adapter: { submitAction, getState, getLegalActions } as unknown as EngineAdapter,
+      gameState: initialState,
+      waitingFor: firstWaitingFor as unknown as GameState["waiting_for"],
+      gameMode: "ai",
+    });
+
+    const first = dispatchAction({ type: "PassPriority" } as unknown as GameAction, 0);
+    const queued = dispatchAction({ type: "SelectCards", data: { cards: [] } } as unknown as GameAction, 0);
+
+    releaseFirst();
+    await expect(Promise.all([first, queued])).resolves.toEqual([undefined, undefined]);
+
+    expect(useGameStore.getState().waitingFor).toBe(nextWaitingFor);
+    expect(submitAction).toHaveBeenCalledTimes(1);
+  });
 });

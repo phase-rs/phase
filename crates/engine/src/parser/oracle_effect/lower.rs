@@ -1709,7 +1709,7 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
 fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
-    if let Some(sub) = def.sub_ability.as_ref() {
+    if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
             && matches!(
                 sub.condition,
@@ -1725,8 +1725,12 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
                 ..
             }
         );
+        let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
+            && rebind_attach_attachment_to_forwarded_source_if_last_created_target(&mut sub.effect);
         if parent_moves_to_battlefield
-            && (sub_is_attach_with_zone_changed_cond || sub_targets_moved_card(sub))
+            && (sub_is_attach_with_zone_changed_cond
+                || attach_uses_moved_card_as_attachment_to_last_created
+                || sub_targets_moved_card(sub))
         {
             def.forward_result = true;
         }
@@ -1737,6 +1741,24 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewire_result_anchored_subchain(else_branch);
     }
+}
+
+fn rebind_attach_attachment_to_forwarded_source_if_last_created_target(
+    effect: &mut Effect,
+) -> bool {
+    let Effect::Attach { attachment, target } = effect else {
+        return false;
+    };
+    if matches!(target, TargetFilter::LastCreated)
+        && matches!(
+            attachment,
+            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+        )
+    {
+        *attachment = TargetFilter::SelfRef;
+        return true;
+    }
+    false
 }
 
 /// CR 608.2c: True when a sub-ability anchors on the just-moved card via

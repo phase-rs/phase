@@ -57092,6 +57092,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn return_equipment_then_attach_it_to_last_created_token_forwards_returned_equipment() {
+        let def = parse_effect_chain(
+            "Create a 1/1 black Assassin creature token with menace. When you do, return target Equipment card from your graveyard to the battlefield, then attach it to that token.",
+            AbilityKind::Spell,
+        );
+
+        let token_sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected return sub-ability");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*token_sub.effect
+        else {
+            panic!("expected ChangeZone return, got {:?}", token_sub.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(
+            matches!(target, TargetFilter::Typed(_)),
+            "expected targeted Equipment card filter, got {target:?}"
+        );
+        assert!(
+            token_sub.forward_result,
+            "returned Equipment must become the Attach sub-ability source"
+        );
+
+        let attach = token_sub
+            .sub_ability
+            .as_ref()
+            .expect("expected attach sub-ability");
+        let Effect::Attach { attachment, target } = &*attach.effect else {
+            panic!("expected Attach, got {:?}", attach.effect);
+        };
+        assert_eq!(
+            *attachment,
+            TargetFilter::SelfRef,
+            "forward_result rebinds SelfRef to the returned Equipment"
+        );
+        assert_eq!(*target, TargetFilter::LastCreated);
+        assert_eq!(attach.condition, Some(AbilityCondition::WhenYouDo));
+    }
+
     /// Negative regression: Stoneforge Mystic-style "put an Equipment from
     /// your hand onto the battlefield" must NOT receive `forward_result:
     /// true` because the pattern has no Attach sub-ability — it's just a
