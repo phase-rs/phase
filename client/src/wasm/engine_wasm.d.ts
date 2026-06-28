@@ -236,6 +236,12 @@ export function load_card_database(json_str: string): number;
  */
 export function ping(): string;
 
+/**
+ * Project an authoritative seat view from Rust so frontend transports do not
+ * need to understand format topology details.
+ */
+export function project_seat_view(state_json: string): any;
+
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
 /**
@@ -365,6 +371,7 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
+    readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];

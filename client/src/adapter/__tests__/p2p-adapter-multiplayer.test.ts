@@ -11,7 +11,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PHostAdapter } from "../p2p-adapter";
+import { P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
+import type { FormatConfig } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
@@ -42,6 +43,7 @@ vi.mock("../../network/protocol", async (orig) => {
 // `vi.hoisted` lets us share these refs with the hoisted vi.mock factory.
 const mocks = vi.hoisted(() => {
   return {
+    initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
     getState: vi.fn(async () => ({ players: [], objects: {} })),
     getLegalActions: vi.fn(async () => ({
@@ -62,6 +64,25 @@ const mocks = vi.hoisted(() => {
       autoPassRecommended: false,
     })),
     getAiAction: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    projectSeatView: vi.fn(async (stateJson: string) => {
+      const state = JSON.parse(stateJson) as {
+        seats: Array<{ type: string }>;
+        format: FormatConfig;
+        gameStarted: boolean;
+      };
+      return {
+        seats: state.seats,
+        format: state.format,
+        teamInfo: state.format.team_based
+          ? state.seats.map((_seat, seatIndex) => ({
+            teamIndex: Math.floor(seatIndex / 2),
+            positionInTeam: seatIndex % 2,
+          }))
+          : undefined,
+        isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+        gameStarted: state.gameStarted,
+      };
+    }),
     applySeatMutation: vi.fn(async (_stateJson: string, _mutationJson: string) => ({
       state: {
         seats: [{ type: "HostHuman" }, { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } }],
@@ -99,6 +120,7 @@ const mockSubmitAction = mocks.submitAction;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeGame = mocks.initializeGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
+const mockProjectSeatView = mocks.projectSeatView;
 interface AsyncMockWithResolvedValueOnce {
   mockClear: () => void;
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
@@ -106,10 +128,44 @@ interface AsyncMockWithResolvedValueOnce {
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function projectSeatViewFromState(stateJson: string) {
+  const state = JSON.parse(stateJson) as {
+    seats: Array<{ type: string }>;
+    format: FormatConfig;
+    gameStarted: boolean;
+  };
+  return {
+    seats: state.seats,
+    format: state.format,
+    teamInfo: state.format.team_based
+      ? state.seats.map((_seat, seatIndex) => ({
+        teamIndex: Math.floor(seatIndex / 2),
+        positionInTeam: seatIndex % 2,
+      }))
+      : undefined,
+    isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+    gameStarted: state.gameStarted,
+  };
+}
+
+async function flushPromises(iterations = 5): Promise<void> {
+  for (let i = 0; i < iterations; i++) {
+    await Promise.resolve();
+  }
+}
+
 vi.mock("../wasm-adapter", () => ({
   WasmAdapter: vi.fn().mockImplementation(function () {
     return {
-      initialize: vi.fn(async () => undefined),
+      initialize: mocks.initialize,
       initializeGame: mocks.initializeGame,
       submitAction: mocks.submitAction,
       getState: mocks.getState,
@@ -119,6 +175,7 @@ vi.mock("../wasm-adapter", () => ({
       getViewerSnapshot: mocks.getViewerSnapshot,
       getAiAction: mocks.getAiAction,
       applySeatMutation: mocks.applySeatMutation,
+      projectSeatView: mocks.projectSeatView,
       setMultiplayerMode: mocks.setMultiplayerMode,
       dispose: vi.fn(),
     };
@@ -126,16 +183,19 @@ vi.mock("../wasm-adapter", () => ({
 }));
 
 // Stub crypto.randomUUID for deterministic token assertions
+const mockInitialize = mocks.initialize;
 let uuidCounter = 0;
 beforeEach(() => {
   uuidCounter = 0;
   vi.spyOn(crypto, "randomUUID").mockImplementation(
     () => `token-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`,
   );
+  mockInitialize.mockClear();
   mockSubmitAction.mockClear();
   mockGetViewerSnapshot.mockClear();
   mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
+  mockProjectSeatView.mockClear();
   mockGetState.mockClear();
   mockGetAiAction.mockClear();
 });
@@ -194,7 +254,24 @@ class FakeOpenableConnection extends FakeDataConnection {
   }
 }
 
-function makeHost(playerCount: number, gracePeriodMs = 5_000) {
+function twoHeadedGiantConfig(): FormatConfig {
+  return {
+    format: "TwoHeadedGiant",
+    starting_life: 30,
+    min_players: 4,
+    max_players: 4,
+    deck_size: 60,
+    singleton: false,
+    command_zone: false,
+    commander_damage_threshold: null,
+    range_of_influence: null,
+    team_based: true,
+    uses_commander: false,
+    allow_debug_actions: false,
+  };
+}
+
+function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: FormatConfig) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
     player: { main_deck: ["Mountain"], sideboard: [] },
@@ -206,7 +283,7 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000) {
     peer as unknown as Peer,
     onGuestConnected,
     playerCount,
-    undefined,
+    formatConfig,
     undefined,
     gracePeriodMs,
   );
@@ -262,6 +339,149 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+  });
+
+  it("projects team metadata from wire SeatView into player slots", () => {
+    const slots = playerSlotsFromSeatView({
+      seats: [
+        { type: "HostHuman" },
+        { type: "JoinedHuman" },
+        { type: "WaitingHuman" },
+        { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+      ],
+      format: twoHeadedGiantConfig(),
+      teamInfo: [
+        { teamIndex: 0, positionInTeam: 0 },
+        { teamIndex: 0, positionInTeam: 1 },
+        { teamIndex: 1, positionInTeam: 0 },
+        { teamIndex: 1, positionInTeam: 1 },
+      ],
+      isFull: false,
+      gameStarted: false,
+    });
+
+    expect(slots.map((slot) => slot.teamInfo?.teamIndex)).toEqual([0, 0, 1, 1]);
+    expect(slots.map((slot) => slot.teamInfo?.positionInTeam)).toEqual([0, 1, 0, 1]);
+  });
+
+  it("uses the Rust-projected host-local SeatView for team metadata", async () => {
+    const { adapter } = makeHost(4, 5_000, twoHeadedGiantConfig());
+    await adapter.initialize();
+
+    const slots = adapter.getPlayerSlots();
+
+    expect(mockProjectSeatView).toHaveBeenCalled();
+    expect(slots.map((slot) => slot.teamInfo?.teamIndex)).toEqual([0, 0, 1, 1]);
+    expect(slots.map((slot) => slot.teamInfo?.positionInTeam)).toEqual([0, 1, 0, 1]);
+  });
+
+  it("serializes host-local SeatView projections for overlapping guest joins", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+    const baselineCalls = mockProjectSeatView.mock.calls.length;
+    const firstProjection = deferred<ReturnType<typeof projectSeatViewFromState>>();
+    const secondProjection = deferred<ReturnType<typeof projectSeatViewFromState>>();
+    let firstStateJson = "";
+    let secondStateJson = "";
+    mockProjectSeatView
+      .mockImplementationOnce(async (stateJson: string) => {
+        firstStateJson = stateJson;
+        return firstProjection.promise;
+      })
+      .mockImplementationOnce(async (stateJson: string) => {
+        secondStateJson = stateJson;
+        return secondProjection.promise;
+      });
+
+    const firstJoin = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    const secondJoin = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Swamp"], sideboard: [] } },
+    });
+    await Promise.all([firstJoin, secondJoin]);
+    await flushPromises();
+
+    expect(mockProjectSeatView).toHaveBeenCalledTimes(baselineCalls + 1);
+
+    firstProjection.resolve(projectSeatViewFromState(firstStateJson));
+    await flushPromises(20);
+
+    expect(mockProjectSeatView).toHaveBeenCalledTimes(baselineCalls + 2);
+
+    secondProjection.resolve(projectSeatViewFromState(secondStateJson));
+    await flushPromises();
+
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+      "JoinedHuman",
+    ]);
+  });
+
+  it("ignores a queued guest join if that session disconnected before registration", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+    const baselineCalls = mockProjectSeatView.mock.calls.length;
+    const firstProjection = deferred<ReturnType<typeof projectSeatViewFromState>>();
+    let firstStateJson = "";
+    mockProjectSeatView.mockImplementationOnce(async (stateJson: string) => {
+      firstStateJson = stateJson;
+      return firstProjection.promise;
+    });
+
+    const firstJoin = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    const secondConn = new FakeOpenableConnection();
+    emitConnection(secondConn as unknown as DataConnection);
+    secondConn.fireOpen();
+    const secondJoin = secondConn.simulateData({
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Swamp"], sideboard: [] } },
+    });
+    await flushPromises();
+
+    secondConn.simulateClose();
+    firstProjection.resolve(projectSeatViewFromState(firstStateJson));
+    await firstJoin;
+    await secondJoin;
+    await flushPromises();
+
+    expect(mockProjectSeatView).toHaveBeenCalledTimes(baselineCalls + 1);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+      "WaitingHuman",
+    ]);
+  });
+
+  it("queues buffered guest joins until WASM initialization can project SeatView", async () => {
+    const initialize = deferred<undefined>();
+    mockInitialize.mockImplementationOnce(() => initialize.promise);
+    const { adapter, emitConnection } = makeHost(2);
+    const initializeHost = adapter.initialize();
+    const guestJoin = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises();
+
+    expect(mockProjectSeatView).not.toHaveBeenCalled();
+
+    initialize.resolve(undefined);
+    await initializeHost;
+    await guestJoin;
+    await flushPromises();
+
+    expect(mockProjectSeatView).toHaveBeenCalled();
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+    ]);
   });
 
   it("drives AI seats through simultaneous mulligan prompts", async () => {

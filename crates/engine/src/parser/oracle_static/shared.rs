@@ -1016,6 +1016,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         && (nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))
     {
+        let tp = TextPair::new(&stripped, &lower);
+        // Faith's Fetters / Arrest-class Aura lines lead with "enchanted
+        // permanent/creature …"; the combat lock and activation prohibition apply
+        // to the host, not the Aura source.
+        let affected = attached_subject_filter(&tp)
+            .map(|(filter, _)| filter)
+            .unwrap_or(TargetFilter::SelfRef);
+        let source_filter = affected.clone();
         let mut defs = Vec::new();
         let combat_mode = if nom_primitives::scan_contains(&lower, "can't attack or block") {
             StaticMode::CantAttackOrBlock
@@ -1026,18 +1034,16 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         };
         defs.push(
             StaticDefinition::new(combat_mode)
-                .affected(TargetFilter::SelfRef)
+                .affected(affected.clone())
                 .description(stripped.to_string()),
         );
         defs.push(
-            // CR 602.5 + CR 603.2a: Self-reference case — the affected permanent's
-            // own activated abilities can't be activated by anyone.
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
-                source_filter: TargetFilter::SelfRef,
+                source_filter,
                 exemption: parse_cant_be_activated_exemption_in_text(&lower),
             })
-            .affected(TargetFilter::SelfRef)
+            .affected(affected)
             .description(stripped.to_string()),
         );
         return defs;

@@ -44,7 +44,7 @@ function helloFrame(
     data: {
       server_version: "0.0.0-test",
       build_commit: "testhash",
-      protocol_version: 8,
+      protocol_version: 11,
       mode: "Full",
       ...overrides,
     },
@@ -64,7 +64,7 @@ describe("openPhaseSocket", () => {
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("Full");
-    expect(socket.serverInfo.protocolVersion).toBe(8);
+    expect(socket.serverInfo.protocolVersion).toBe(11);
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
@@ -77,6 +77,32 @@ describe("openPhaseSocket", () => {
 
     await expect(promise).rejects.toBeInstanceOf(HandshakeError);
     expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects the previous protocol version for Full servers", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 10 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("accepts the previous protocol version for LobbyOnly brokers", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({ protocol_version: 10, mode: "LobbyOnly" }),
+    );
+
+    const socket = await promise;
+    expect(socket.serverInfo.mode).toBe("LobbyOnly");
+    expect(socket.serverInfo.protocolVersion).toBe(10);
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining('"protocol_version":10'),
+    );
   });
 
   it("times out and closes the socket when ServerHello never arrives", async () => {

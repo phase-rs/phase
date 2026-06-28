@@ -198,6 +198,7 @@ const FORMAT_SHAPES: Array<[format: string, shape: DeckShape]> = [
   ["Pauper", "constructed"],
   ["FreeForAll", "constructed"],
   ["TwoHeadedGiant", "constructed"],
+  ["Archenemy", "constructed"],
   ["Commander", "commander"],
   ["DuelCommander", "commander"],
   ["PauperCommander", "commander"],

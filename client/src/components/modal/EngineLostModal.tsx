@@ -78,6 +78,11 @@ export function EngineLostModal() {
   };
 
   const isPanic = panic !== null;
+  // A getLegalActions/submitAction/getState watchdog timeout (ENGINE_UNRESPONSIVE,
+  // no panic captured) surfaces here with a `*-timeout` reason. It is NOT a lost
+  // connection — the engine is alive but couldn't answer within the budget (e.g.
+  // a very wide board). Show timeout-specific copy instead of the connection text.
+  const isTimeout = !isPanic && reason.endsWith("-timeout");
   const diagnostic = buildDiagnostic(snapshot);
 
   const handleCopy = async () => {
@@ -132,6 +137,15 @@ export function EngineLostModal() {
             <pre className="mb-4 max-h-40 overflow-auto rounded-lg bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-rose-100 whitespace-pre-wrap">
               {panic}
             </pre>
+          </>
+        ) : isTimeout ? (
+          <>
+            <h2 className="mb-3 text-xl font-bold text-white">
+              {t("engineLost.timeoutTitle")}
+            </h2>
+            <p className="mb-4 text-sm text-gray-300">
+              {t("engineLost.timeoutBody")}
+            </p>
           </>
         ) : (
           <>

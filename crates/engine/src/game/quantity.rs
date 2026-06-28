@@ -407,6 +407,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::AdditionalCostPaymentCount
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
@@ -557,6 +558,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
     }
 }
@@ -654,6 +656,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::AdditionalCostPaymentCount
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
@@ -837,6 +840,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::AdditionalCostPaymentCount
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
@@ -2886,6 +2890,15 @@ fn resolve_ref(
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.convoked_creatures.len()))
             .unwrap_or(0),
+        // CR 603.12a: Number of times the controller paid the repeated optional
+        // cost during THIS resolution. Resolution-local transient on the
+        // GameState (cleared at the depth==0 prelude of resolve_ability_chain,
+        // incremented once per successful payment); never read from an object,
+        // never snapshotted. Sizes the reflexive "choose up to that many" modal
+        // cap (CR 700.2d clamps it to mode_count).
+        QuantityRef::TimesCostPaidThisResolution => {
+            u32_to_i32_saturating(state.optional_cost_payments_this_resolution)
+        }
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
         // the `ZoneChanged` event in `current_trigger_event`, filtered by kind
@@ -3667,10 +3680,15 @@ fn resolve_object_typeline_component_count(
         .unwrap_or(0)
 }
 
+// CR 107.4 + CR 202.1: Count colored mana symbols in an object's mana cost.
+// `Some(c)` counts symbols contributing to color `c`. `None` counts each colored
+// shard once regardless of color — CR 107.4a/107.4e/107.4f: a hybrid or Phyrexian
+// symbol is a single colored mana symbol even though it is all of its component
+// colors, so `{G/W}{G/W}` counts as 2 (not 4).
 fn resolve_mana_symbols_in_mana_cost(
     state: &GameState,
     scope: ObjectScope,
-    color: ManaColor,
+    color: Option<ManaColor>,
     ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
@@ -3679,7 +3697,10 @@ fn resolve_mana_symbols_in_mana_cost(
             ManaCost::Cost { shards, .. } => usize_to_i32_saturating(
                 shards
                     .iter()
-                    .filter(|shard| shard.contributes_to(color))
+                    .filter(|shard| match color {
+                        Some(c) => shard.contributes_to(c),
+                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
+                    })
                     .count(),
             ),
             ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
@@ -5167,6 +5188,74 @@ mod tests {
         // graveyard excluded); P1 sees only their own 2.
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bf), 3);
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), opp), 2);
+    }
+
+    /// CR 107.4a/107.4e/107.4f + CR 202.1: `ManaSymbolsInManaCost { color: None }`
+    /// counts each COLORED mana symbol once regardless of color. A hybrid symbol
+    /// is a single colored symbol even though it is all of its component colors,
+    /// so `{1}{G/W}{G/W}` (Kitchen Finks) counts as 2 — NOT 4 (which a sum-of-all-
+    /// five-colors would yield). Generic mana is uncolored and never counts.
+    /// `color: Some(c)` retains the per-color count.
+    #[test]
+    fn mana_symbols_in_mana_cost_none_counts_each_colored_symbol_once() {
+        use crate::types::ability::ObjectScope;
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, cid, shards: Vec<ManaCostShard>, generic| {
+            let id = create_object(state, cid, PlayerId(0), "C".to_string(), Zone::Battlefield);
+            state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost { shards, generic };
+            id
+        };
+        // {1}{G/W}{G/W} → 2 colored symbols (each hybrid is ONE symbol, CR 107.4e).
+        let gw = mk(
+            &mut state,
+            CardId(1),
+            vec![ManaCostShard::GreenWhite, ManaCostShard::GreenWhite],
+            1,
+        );
+        // {U}{R}{W} → 3 distinct colored symbols.
+        let urw = mk(
+            &mut state,
+            CardId(2),
+            vec![
+                ManaCostShard::Blue,
+                ManaCostShard::Red,
+                ManaCostShard::White,
+            ],
+            0,
+        );
+        // {B}{B}{B} → 3 (repeated color still counts each symbol).
+        let bbb = mk(
+            &mut state,
+            CardId(3),
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            0,
+        );
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSymbolsInManaCost {
+                scope: ObjectScope::Source,
+                color: None,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), gw), 2);
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), urw), 3);
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bbb), 3);
+
+        // CR 202.1: per-color count still works. Black counts only black symbols;
+        // a hybrid {G/W} contributes to neither.
+        let qty_black = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSymbolsInManaCost {
+                scope: ObjectScope::Source,
+                color: Some(ManaColor::Black),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty_black, PlayerId(0), bbb), 3);
+        assert_eq!(resolve_quantity(&state, &qty_black, PlayerId(0), urw), 0);
+        assert_eq!(resolve_quantity(&state, &qty_black, PlayerId(0), gw), 0);
     }
 
     /// CR 404.2 + CR 109.4: graveyard-scope chroma must scope its population by

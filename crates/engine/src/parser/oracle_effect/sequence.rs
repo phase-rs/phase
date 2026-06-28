@@ -4056,6 +4056,11 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             .parse(after_put)
             {
                 PutCount::AnyNumber
+            } else if all_consuming(alt((tag::<_, _, OracleError<'_>>("all"), tag("each"))))
+                .parse(after_put)
+                .is_ok()
+            {
+                PutCount::All
             } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
@@ -5304,6 +5309,10 @@ pub(super) fn parse_followup_continuation_ast(
                 | "exile that card face down"
                 | "exile the card"
                 | "exile the card face down"
+                | "exile them"
+                | "exile them face down"
+                | "exile those cards"
+                | "exile those cards face down"
         ) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
@@ -6032,6 +6041,82 @@ mod tests {
             "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
+        let previous = Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+        };
+        let result =
+            parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
+        assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
+    }
+
+    /// CR 701.23a + CR 701.18a (cluster 35 / Mana Severance): comma-split
+    /// "search …, exile them, then shuffle" must lower to one SearchLibrary
+    /// compound with a single library→exile destination and shuffle — not a
+    /// duplicate ChangeZone from the redundant "exile them" restatement.
+    #[test]
+    fn mana_severance_search_any_number_lands_exile_then_shuffle() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Search your library for any number of land cards, exile them, then shuffle.",
+            AbilityKind::Spell,
+        );
+
+        let mut searches = 0usize;
+        let mut library_exiles = 0usize;
+        let mut shuffles = 0usize;
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            match &*d.effect {
+                Effect::SearchLibrary { filter, count, .. } => {
+                    searches += 1;
+                    assert!(
+                        matches!(count, QuantityExpr::UpTo { .. }),
+                        "any-number search must be up-to bounded, got {count:?}"
+                    );
+                    assert!(
+                        matches!(
+                            filter,
+                            TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Land)
+                        ),
+                        "expected land filter, got {filter:?}"
+                    );
+                }
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Exile,
+                    ..
+                } => {
+                    library_exiles += 1;
+                }
+                Effect::Shuffle { .. } => {
+                    shuffles += 1;
+                }
+                _ => {}
+            }
+            node = d.sub_ability.as_deref();
+        }
+
+        assert_eq!(searches, 1, "expected exactly one SearchLibrary");
+        assert_eq!(
+            library_exiles, 1,
+            "expected exactly one library→exile destination"
+        );
+        assert_eq!(shuffles, 1, "expected exactly one Shuffle");
     }
 
     #[test]
@@ -7144,6 +7229,33 @@ mod tests {
                 reveal_verb: false,
             })
         );
+    }
+
+    #[test]
+    fn put_mass_of_them_into_hand_is_all() {
+        for text in [
+            "Put all of them into your hand.",
+            "Put each of them into your hand.",
+            "Put all of those cards into your hand.",
+            "Put each of those cards into your hand.",
+        ] {
+            let dig = make_dig_effect();
+            let result = parse_followup_continuation_ast(text, &dig, &mut ParseContext::default());
+            assert_eq!(
+                result,
+                Some(ContinuationAst::DigFromAmong {
+                    quantity: PutCount::All,
+                    filter: TargetFilter::Any,
+                    destination: Some(Zone::Hand),
+                    rest_destination: None,
+                    enters_under: None,
+                    face_down_profile: None,
+                    enter_tapped: false,
+                    reveal_verb: false,
+                }),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -39,6 +39,22 @@ describe("saved-deck bracket sidecar", () => {
     expect(loaded && expandParsedDeck(loaded).sticker_sheets).toEqual(["sheet-1", "sheet-2", "sheet-3"]);
   });
 
+  it("preserves planar decks when loading and expanding a saved deck", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Planar Deck",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        planar_deck: ["The Aether Flues", "Spatial Merging"],
+      }),
+    );
+
+    const loaded = loadSavedDeck("Planar Deck");
+
+    expect(loaded?.planar_deck).toEqual(["The Aether Flues", "Spatial Merging"]);
+    expect(loaded && expandParsedDeck(loaded).planar_deck).toEqual(["The Aether Flues", "Spatial Merging"]);
+  });
+
   it("returns null when the deck does not exist", () => {
     expect(loadSavedDeckBracket("Missing Deck")).toBeNull();
   });

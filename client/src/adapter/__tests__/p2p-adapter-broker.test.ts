@@ -55,6 +55,19 @@ const mocks = vi.hoisted(() => ({
     actions: [],
     autoPassRecommended: false,
   })),
+  projectSeatView: vi.fn(async (stateJson: string) => {
+    const state = JSON.parse(stateJson) as {
+      seats: Array<{ type: string }>;
+      format: unknown;
+      gameStarted: boolean;
+    };
+    return {
+      seats: state.seats,
+      format: state.format,
+      isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+      gameStarted: state.gameStarted,
+    };
+  }),
   setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
 }));
 
@@ -69,6 +82,7 @@ vi.mock("../wasm-adapter", () => ({
       getLegalActionsForViewer: mocks.getLegalActionsForViewer,
       getFilteredState: mocks.getFilteredState,
       getViewerSnapshot: mocks.getViewerSnapshot,
+      projectSeatView: mocks.projectSeatView,
       setMultiplayerMode: mocks.setMultiplayerMode,
       dispose: vi.fn(),
     };

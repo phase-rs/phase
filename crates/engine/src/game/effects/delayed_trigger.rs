@@ -370,6 +370,7 @@ fn snapshot_parent_dependent_quantities(
                 ManaProduction::Colorless { count }
                 | ManaProduction::AnyOneColor { count, .. }
                 | ManaProduction::AnyCombination { count, .. }
+                | ManaProduction::AnyCombinationOfObjectColors { count, .. }
                 | ManaProduction::ChosenColor { count, .. },
             ..
         } => {

@@ -1313,6 +1313,20 @@ pub enum ManaProduction {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 106.1 + CR 106.5 + CR 202.2c: Produce `count` mana, each freely chosen
+    /// among the colors of an object identified by `scope` (Omnath, Locus of All:
+    /// "add three mana in any combination of its colors"). Unlike the static
+    /// `AnyCombination` (whose `color_options` are fixed at parse time), the color
+    /// set here is computed dynamically at resolution time from the scoped object's
+    /// colors (CR 202.2c). Its analog is the dynamic-color family
+    /// (`AnyOneColorAmongPermanents` / `DistinctColorsAmongPermanents`), not the
+    /// static `AnyCombination`. If the object has no colors, CR 106.5 applies and
+    /// no mana is produced.
+    AnyCombinationOfObjectColors {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        scope: ObjectScope,
+    },
     /// CR 106.7 + CR 106.1b: Produce N mana of any **type** (W/U/B/R/G/C) that a
     /// land matching `land_filter` could produce. Differs from
     /// `OpponentLandColors` in that the choice axis is the full type set
@@ -1463,6 +1477,11 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
                     },
+                    AnyCombinationOfObjectColors {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        scope: ObjectScope,
+                    },
                     AnyTypeProduceableBy {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
@@ -1538,6 +1557,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     },
                     ManaProductionHelper::OpponentLandColors { count } => {
                         ManaProduction::OpponentLandColors { count }
+                    }
+                    ManaProductionHelper::AnyCombinationOfObjectColors { count, scope } => {
+                        ManaProduction::AnyCombinationOfObjectColors { count, scope }
                     }
                     ManaProductionHelper::AnyTypeProduceableBy { count, land_filter } => {
                         ManaProduction::AnyTypeProduceableBy { count, land_filter }
@@ -4125,9 +4147,16 @@ pub enum QuantityRef {
     /// `ManaCostShard::contributes_to`. `Recipient` preserves per-affected
     /// layer boosts such as "gets +1/+1 for each white mana symbol in its mana
     /// cost" by binding to the object currently receiving the effect.
+    ///
+    /// `color: Some(c)` counts symbols contributing to color `c`. `color: None`
+    /// counts each colored mana symbol once regardless of color — per
+    /// CR 107.4a/107.4e/107.4f a hybrid or Phyrexian symbol is a single colored
+    /// symbol even though it is all of its component colors, so e.g.
+    /// `{G/W}{G/W}` counts as 2. Used by "three or more colored mana symbols in
+    /// its mana cost" eligibility checks (Omnath, Locus of All).
     ManaSymbolsInManaCost {
         scope: ObjectScope,
-        color: ManaColor,
+        color: Option<ManaColor>,
     },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
@@ -4532,6 +4561,16 @@ pub enum QuantityRef {
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
     ConvokedCreatureCount,
+    /// CR 603.12a: Number of times the controller paid the repeated optional
+    /// cost during THIS ability's resolution ("you may pay {C} up to N times").
+    /// Resolution-local and transient: read from
+    /// `GameState::optional_cost_payments_this_resolution`, which is cleared at
+    /// the `depth == 0` prelude of `resolve_ability_chain` and incremented once
+    /// per successful payment. Distinct from the cast-time `CostXPaid` /
+    /// `KickerCount` / `AdditionalCostPaymentCount` tallies, which are read from
+    /// the source spell/object at announcement (CR 601.2 / 702.33 / 702.51).
+    /// Used to size a reflexive "choose up to that many" modal (CR 700.2d).
+    TimesCostPaidThisResolution,
     /// CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
     /// which cast object is being measured and which spent-mana metric is
     /// needed. Covers total amount, distinct colors, and source-qualified
@@ -5720,6 +5759,13 @@ pub enum StaticCondition {
     /// Hamlet Glutton's "This spell costs {2} less to cast if it's bargained." Evaluated
     /// against the in-flight cast's `additional_cost_paid` flag (`state.pending_cast`).
     AdditionalCostPaid,
+    /// CR 702.34a + CR 601.2f: True when the spell is being cast via the named
+    /// alternative-cast variant (e.g. flashback "cast this way" cost reduction on
+    /// Visions of Ruin). Evaluated only during self-spell `ModifyCost` collection,
+    /// not in the layer pipeline.
+    CastingAsVariant {
+        variant: crate::types::game_state::CastingVariant,
+    },
     None,
 }
 
@@ -6046,6 +6092,11 @@ pub enum CastVariantPaid {
     /// "if its prowl cost was paid" intervening-if (Latchkey Faerie, Oona's
     /// Blackguard-style prowl payoffs).
     Prowl,
+    /// CR 702.119a-c: Emerge alternative cast cost was paid (a creature was
+    /// sacrificed and the reduced emerge mana cost paid). Read by the "if its
+    /// emerge cost was paid, instead …" intervening-if / instead clauses
+    /// (Adipose Offspring).
+    Emerge,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -7576,6 +7627,31 @@ impl StepSkipTarget {
             ],
         }
     }
+}
+
+/// CR 614.10 + CR 614.10a: How long a skip effect persists.
+///
+/// CR 614.10: "Skip [something]" is a replacement effect equivalent to
+/// "instead of doing [something], do nothing." A skip can be scoped to either a
+/// single next occurrence of a step (`NextOccurrence`) or to *every* occurrence
+/// within the player's next non-skipped turn (`AllOfNextTurn`, e.g. False Peace
+/// / Empty City Ruse: "skips all combat phases of their next turn"). Per
+/// CR 614.10a, an "all of next turn" skip lands on the first turn that isn't
+/// itself skipped (it waits past skipped turns), and — unlike a finite-count
+/// skip — it suppresses *every* combat phase that turn, including extra combat
+/// phases created that turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipScope {
+    /// CR 614.10a: skip the single next occurrence of the named step; satisfied
+    /// once that occurrence is skipped. This is the only scope that interacts
+    /// with a finite `count`.
+    #[default]
+    NextOccurrence,
+    /// CR 614.10 + CR 614.10a: skip every occurrence of the named phase across
+    /// the player's entire next non-skipped turn. Turn-binding subsumes
+    /// counting, so this scope ignores any finite `count`.
+    AllOfNextTurn,
 }
 
 /// CR 115.1: Whether the `Bounce` effect selects its affected object at
@@ -10185,6 +10261,15 @@ pub enum Effect {
         step: StepSkipTarget,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 614.10 + CR 614.10a: scope of the skip. `NextOccurrence` (default)
+        /// uses the finite `count` and consumes the per-player step counter at the
+        /// relevant turn-flow boundary. `AllOfNextTurn` binds the skip to the
+        /// player's entire next non-skipped turn via the turn-scoped combat-skip
+        /// state machine and is **mutually exclusive** with a finite `count` —
+        /// turn-binding subsumes counting, so `count` is ignored when
+        /// `scope == AllOfNextTurn`.
+        #[serde(default)]
+        scope: SkipScope,
     },
     /// CR 500.8: Add an additional step or phase after the specified anchor phase.
     /// Uses a LIFO stack on GameState.extra_phases. `followed_by` entries are pushed
@@ -11023,6 +11108,27 @@ impl TargetFilter {
                 .iter()
                 .all(TargetFilter::references_exiled_by_source),
             TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_exiled_by_source(),
+            _ => false,
+        }
+    }
+
+    /// CR 400.7d + CR 608.2k: True when this filter tree references the
+    /// cost-paid object (`TargetFilter::CostPaidObject`) at any structural
+    /// position — directly, or nested inside `And`/`Or`/`Not`/
+    /// `TrackedSetFiltered` composition. Mirrors `references_exiled_by_source`,
+    /// but uses `any` for `Or` because the consumer (the emerge cost-paid-object
+    /// propagation gate in `game::triggers`) needs to detect *any* reference to
+    /// the cost-paid object so the `cast_cost_paid_object` snapshot is propagated
+    /// whenever it could be read at resolution — not whether the filter as a
+    /// whole is a context-ref for target-slot purposes.
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            TargetFilter::CostPaidObject => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+                .iter()
+                .any(TargetFilter::references_cost_paid_object),
+            TargetFilter::Not { filter } => filter.references_cost_paid_object(),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_cost_paid_object(),
             _ => false,
         }
     }
@@ -15482,6 +15588,18 @@ pub struct TriggerDefinition {
     pub secondary: bool,
     #[serde(default)]
     pub valid_target: Option<TargetFilter>,
+    /// CR 115.1: The player leaf of a becomes-target trigger's SUBJECT (e.g. the
+    /// "a player" / "you" half of Loki, God of Mischief's "a player or permanent").
+    /// Kept DISTINCT from `valid_target` because `valid_target` is overloaded as the
+    /// EFFECT-target slot: the effect-target parser sets `valid_target =
+    /// TargetFilter::Player` whenever the effect text says "target opponent/player"
+    /// (e.g. Venerated Rotpriest's "target opponent gets a poison counter"). The
+    /// `match_becomes_target` Player arm reads THIS field for the subject's player
+    /// match so a player-targeting EFFECT can never be mistaken for a player SUBJECT.
+    /// Set only by `set_trigger_subject`'s mixed-subject (`Or`) split; ignored by
+    /// every non-becomes-target trigger mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_subject_player: Option<TargetFilter>,
     #[serde(default)]
     pub valid_source: Option<TargetFilter>,
     /// CR 601.2a + CR 603.2: Cast-origin constraint for `TriggerMode::SpellCast`
@@ -15573,6 +15691,7 @@ impl TriggerDefinition {
             damage_kind: DamageKindFilter::Any,
             secondary: false,
             valid_target: None,
+            valid_subject_player: None,
             valid_source: None,
             spell_cast_origin: OriginConstraint::Any,
             description: None,
@@ -15845,8 +15964,12 @@ pub enum DamageModification {
     Double,
     /// amount * 3 (e.g. Fiery Emancipation)
     Triple,
-    /// amount + value (e.g. Torbran, +2)
-    Plus { value: u32 },
+    /// CR 614.1a + CR 120: amount + value, where the added magnitude is a
+    /// `QuantityExpr` resolved against the replacement source at application
+    /// time. `Fixed { value }` covers static offsets (Torbran +2, Artist's
+    /// Talent +2); a `Ref` carries a live game quantity ("...plus X, where X is
+    /// ~'s power" — Hawkeye, Young Avenger).
+    Plus { value: QuantityExpr },
     /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1).
     /// CR 615.1 + CR 614.1a: Continuous prevention statics ("prevent that damage")
     /// emit `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for any
@@ -18241,6 +18364,7 @@ mod tests {
             damage_kind: DamageKindFilter::Any,
             secondary: false,
             valid_target: None,
+            valid_subject_player: None,
             valid_source: None,
             spell_cast_origin: OriginConstraint::Any,
             description: Some("When ~ dies, draw a card.".to_string()),
@@ -18885,6 +19009,61 @@ mod tests {
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
+    }
+
+    /// CR 107.4 + CR 202.1: `ManaSymbolsInManaCost.color` is now
+    /// `Option<ManaColor>`. `None` (count each colored symbol once) and
+    /// `Some(color)` (per-color count) both round-trip. serde renders
+    /// `Some(White)` as the bare `"color":"White"`, identical to the pre-change
+    /// non-optional form, so legacy payloads deserialize to `Some(White)`.
+    #[test]
+    fn mana_symbols_in_mana_cost_optional_color_serde_roundtrip() {
+        let none_ref = QuantityRef::ManaSymbolsInManaCost {
+            scope: ObjectScope::Target,
+            color: None,
+        };
+        let json = serde_json::to_string(&none_ref).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).unwrap(),
+            none_ref
+        );
+
+        let some_ref = QuantityRef::ManaSymbolsInManaCost {
+            scope: ObjectScope::Recipient,
+            color: Some(ManaColor::White),
+        };
+        let json = serde_json::to_string(&some_ref).unwrap();
+        assert!(json.contains("\"color\":\"White\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).unwrap(),
+            some_ref
+        );
+    }
+
+    /// CR 106.1 + CR 202.2c: the dynamic-color `AnyCombinationOfObjectColors`
+    /// mana production round-trips through the custom `ManaProduction` (de)serializer.
+    #[test]
+    fn any_combination_of_object_colors_serde_roundtrip() {
+        let mp = ManaProduction::AnyCombinationOfObjectColors {
+            count: QuantityExpr::Fixed { value: 3 },
+            scope: ObjectScope::Target,
+        };
+        let json = serde_json::to_string(&mp).unwrap();
+        let back: ManaProduction = serde_json::from_str(&json).unwrap();
+        assert_eq!(mp, back);
+
+        // count defaults to one when omitted (default_quantity_one).
+        let defaulted: ManaProduction = serde_json::from_str(
+            r#"{"type":"AnyCombinationOfObjectColors","scope":{"type":"Target"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            defaulted,
+            ManaProduction::AnyCombinationOfObjectColors {
+                count: default_quantity_one(),
+                scope: ObjectScope::Target,
+            }
+        );
     }
 
     #[test]

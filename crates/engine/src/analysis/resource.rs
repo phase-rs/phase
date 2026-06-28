@@ -719,6 +719,38 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.combat_phases_started_this_turn = 0;
     s.end_steps_started_this_turn = 0;
 
+    // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. The strict `loop_states_equal` /
+    // `normalize_for_loop` are deliberately NOT changed; they never call this fn
+    // (`project_out_resources` is reached only via `loop_states_equal_modulo_resources`).
+    //
+    // A triggered/activated ability placed on the stack takes a FRESH
+    // `entry_id = ObjectId(next_object_id++)` every time it goes on the stack, and
+    // `StackEntry`/`GameState` `PartialEq` compare that id. A MANDATORY trigger
+    // cascade (e.g. Marauding Blight-Priest + Bloodthirsty Conqueror) holds one
+    // in-loop trigger on the stack at every priority window (the stack never empties
+    // between resolutions), so two same-phase cycle points differ ONLY in this
+    // volatile id and never compare modulo-equal — the loop is invisible to the
+    // modulo scan. Canonicalize the id to its stack POSITION (the modulo analogue of
+    // `normalize_for_loop` zeroing `next_object_id`) while PRESERVING
+    // source_id/controller/kind, so different triggers/spells from different sources
+    // at the same depth still compare UNEQUAL.
+    //
+    // What is STILL compared element-wise inside `kind` (and is therefore the real
+    // discriminator, left intentionally untouched): for a `TriggeredAbility` the
+    // `trigger_event` (`GameEvent::LifeChanged { player_id, amount }` for the drain
+    // class — no volatile id, constant amount per cycle), `subject_match_count`, and
+    // `die_result`, plus the boxed `ability` and `condition`. These are CONTENT, not
+    // bookkeeping: a residual difference in any of them only makes the two states
+    // compare UNEQUAL, which SUPPRESSES a match — fail-safe (never a false win). The
+    // same fail-safe direction holds for any state field that still references a raw
+    // stack id (`stack_paid_facts`, `pending_trigger_entry`, a `WaitingFor` carrying
+    // a stack-entry id): left AS-IS, a residual mismatch can only suppress a match.
+    // Canonicalizing the position id can therefore never MANUFACTURE a false positive
+    // (a wrongful win); it can only make a genuine repeat visible.
+    for (pos, entry) in s.stack.iter_mut().enumerate() {
+        entry.id = ObjectId(pos as u64);
+    }
+
     s
 }
 
@@ -1347,5 +1379,71 @@ mod tests {
             &state,
             &(ObjectId(9999), 0)
         ));
+    }
+
+    /// Build a `TriggeredAbility` stack entry from `source`/`controller` with the
+    /// given volatile `entry_id` (fresh each cycle in the live reducer).
+    fn trigger_entry(
+        entry_id: u64,
+        source: u64,
+        controller: u8,
+    ) -> crate::types::game_state::StackEntry {
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let src = ObjectId(source);
+        StackEntry {
+            id: ObjectId(entry_id),
+            source_id: src,
+            controller: PlayerId(controller),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: src,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    src,
+                    PlayerId(controller),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        }
+    }
+
+    /// U-stack ([BLOCKER 0]): the modulo comparator must treat two cascade cycle
+    /// points whose stacks hold the SAME triggered ability from the SAME source but
+    /// a DIFFERENT (fresh) entry id as equal — otherwise a mandatory trigger cascade
+    /// is invisible to the modulo scan and PR-3 is dead code. The control pair (a
+    /// DIFFERENT source) must still compare UNEQUAL (the canon zeroes only the
+    /// bookkeeping id, never the content).
+    ///
+    /// Revert proof: removing the `entry.id = ObjectId(pos)` loop in
+    /// `project_out_resources` flips the first assertion to `false`.
+    #[test]
+    fn modulo_equal_ignores_volatile_stack_entry_id() {
+        let mut a = GameState::new_two_player(7);
+        a.stack.push_back(trigger_entry(10, 500, 0));
+        let mut b = a.clone();
+        b.stack.clear();
+        b.stack.push_back(trigger_entry(11, 500, 0)); // same source, fresh id
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "same triggered ability from the same source must compare equal modulo its fresh id"
+        );
+
+        // CONTROL: a different source_id is a genuinely different stack point.
+        let mut c = a.clone();
+        c.stack.clear();
+        c.stack.push_back(trigger_entry(10, 501, 0));
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &c),
+            "a trigger from a DIFFERENT source must NOT be equated (content is preserved)"
+        );
     }
 }

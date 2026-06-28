@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 
-import { decodeWireMessage, encodeWireMessage, validateMessage } from "../protocol";
+import type { GameState } from "../../adapter/types";
+import {
+  WIRE_PROTOCOL_VERSION,
+  decodeWireMessage,
+  encodeWireMessage,
+  validateMessage,
+} from "../protocol";
 import type { P2PMessage } from "../protocol";
 
 describe("encodeWireMessage / decodeWireMessage", () => {
@@ -32,6 +38,22 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       type: "action",
       senderPlayerId: 0,
       action: { type: "TapForConvoke", data: { object_id: 42, mana_type: "Green" } },
+    },
+    {
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "token-123",
+      state: { derived: { planechase: { can_roll: true } } } as unknown as GameState,
+      events: [],
+      legalActions: [{ type: "RollPlanarDie" }],
+    },
+    {
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      state: { derived: { planechase: { active_plane: 7 } } } as unknown as GameState,
+      legalActions: [{ type: "RollPlanarDie" }],
     },
   ];
 
@@ -70,6 +92,18 @@ describe("encodeWireMessage / decodeWireMessage", () => {
 
   it("rejects empty payload", async () => {
     await expect(decodeWireMessage(new Uint8Array())).rejects.toThrow(/empty/);
+  });
+
+  it("rejects stale setup wire protocol versions", () => {
+    expect(() => validateMessage({
+      type: "game_setup",
+      wireProtocolVersion: 3,
+      assignedPlayerId: 1,
+      playerToken: "token-123",
+      state: {} as GameState,
+      events: [],
+      legalActions: [],
+    })).toThrow(/Wire protocol mismatch/);
   });
 
   // (e) Compressed payload still gates through validateMessage so unknown

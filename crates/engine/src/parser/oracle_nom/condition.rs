@@ -107,6 +107,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
+        // CR 508.1 + CR 118.9: "N or more creatures are attacking" — must precede
+        // `parse_control_conditions` so the bare count phrase is not mis-read as
+        // "you control N or more creatures".
+        parse_creatures_are_attacking_count_ge,
         parse_control_conditions,
         parse_remaining_state_presence_conditions,
     ))
@@ -2060,7 +2064,7 @@ fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCon
 }
 
 /// Parse a superlative adjective into its corresponding `AggregateFunction`.
-fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
     alt((
         value(AggregateFunction::Max, tag("greatest")),
         value(AggregateFunction::Max, tag("highest")),
@@ -2071,7 +2075,7 @@ fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunctio
 }
 
 /// Property keyword parser — used by both LHS and RHS of the comparison.
-fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
     alt((
         value(ObjectProperty::Power, tag("power")),
         value(ObjectProperty::Toughness, tag("toughness")),
@@ -2195,6 +2199,72 @@ fn build_superlative_comparison(
             },
         },
     }
+}
+
+/// CR 608.2c: Spell-target gate "[least|greatest] <property> among <filter>"
+/// (Wretched Banquet body). Uses `ObjectScope::Target` on the LHS and a
+/// population aggregate without `OtherThanTriggerObject` — distinct from the
+/// trigger-anchored `build_superlative_comparison` form.
+pub(crate) fn parse_spell_target_has_superlative(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, aggregate) = parse_superlative_adjective(input)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
+    let (rest, property) = parse_property_keyword(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(remainder));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    let lhs_qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(rest)),
+    };
+    // "Has the least/greatest" allows ties — use LE/GE, not strict LT/GT.
+    let comparator = match aggregate {
+        AggregateFunction::Min => Comparator::LE,
+        AggregateFunction::Max => Comparator::GE,
+        AggregateFunction::Sum => return Err(oracle_err(rest)),
+    };
+    Ok((
+        remainder,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref { qty: lhs_qty },
+            comparator,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: aggregate,
+                    property,
+                    filter,
+                },
+            },
+        },
+    ))
+}
+
+/// Suffix connector for spell-target superlative gates: "it has the …" /
+/// "they have the …" (CR 608.2c).
+pub(crate) fn parse_spell_target_superlative_suffix(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("it has the "),
+            tag("they have the "),
+        )),
+        parse_spell_target_has_superlative,
+    )
+    .parse(input)
 }
 
 /// Attach `FilterProp::OtherThanTriggerObject` to a `TargetFilter`'s property
@@ -2842,6 +2912,30 @@ fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition
         rest,
         StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
+/// CR 508.1 + CR 118.9: Parse "N or more creatures are attacking" →
+/// `QuantityComparison(ObjectCount(creature + Attacking) >= N)`.
+///
+/// Lethargy Trap: "If three or more creatures are attacking, you may pay {U}
+/// rather than pay this spell's mana cost." Reuses `parse_ge_threshold` so
+/// "at least three creatures are attacking" shares the same parse path.
+fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    let (rest, _) = tag("creatures are attacking").parse(rest.trim_start())?;
+    let filter = TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+    );
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
 }
@@ -6533,6 +6627,40 @@ pub fn parse_you_discard_this_way_clause(input: &str) -> OracleResult<'_, (Targe
     Ok((rest, (filter, false)))
 }
 
+/// CR 603.12 + CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" —
+/// the active-voice reflexive gate created by a preceding "sacrifice [quantifier]
+/// [type]" instruction in the same ability (Nyssa of Traken: "sacrifice any
+/// number of artifacts. When you sacrifice one or more artifacts this way, tap
+/// up to that many target creatures and draw that many cards").
+///
+/// CR 701.21a defines sacrifice as a battlefield → graveyard move, so the
+/// sacrificed permanent is published into `state.last_zone_changed_ids` by the
+/// parent `Sacrifice` effect. Semantically identical to the active
+/// `parse_you_discard_this_way_clause` existential check, differing only in the
+/// active verb ("sacrifice") and its fixed-graveyard destination. The optional
+/// trailing plural "s" lets "one or more artifacts" / "an artifact" / "a creature"
+/// all narrow through the shared `parse_type_phrase` helper, covering the class.
+pub fn parse_you_sacrifice_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you sacrifice ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        value((), tag("any number of ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
@@ -6612,6 +6740,37 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
+    /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
+    /// every quantifier form, mirroring the discard/put combinators.
+    #[test]
+    fn parse_you_sacrifice_this_way_clause_quantifier_variants() {
+        for input in [
+            "you sacrifice one or more artifacts this way",
+            "you sacrifice any number of artifacts this way",
+            "you sacrifice an artifact this way",
+            "you sacrifice at least one artifact this way",
+        ] {
+            let (rest, (filter, negated)) =
+                parse_you_sacrifice_this_way_clause(input).expect("must parse sacrifice gate");
+            assert_eq!(rest, "", "input {input:?} left remainder {rest:?}");
+            assert!(!negated);
+            match filter {
+                TargetFilter::Typed(TypedFilter {
+                    ref type_filters, ..
+                }) => assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Artifact)),
+                    "expected Artifact filter for {input:?}, got {type_filters:?}"
+                ),
+                other => panic!("expected Typed Artifact filter for {input:?}, got {other:?}"),
+            }
+        }
+        // A bare "this way" with no recognizable filter must fail closed.
+        assert!(parse_you_sacrifice_this_way_clause("you sacrifice this way").is_err());
+    }
 
     /// CR 506.2 + CR 508.6 + CR 603.4: Suppressor Skyguard's intervening-if
     /// "that player has another opponent who isn't being attacked" parses to a
@@ -7892,6 +8051,37 @@ mod tests {
                 ..
             } => assert_eq!(comparator, Comparator::GE),
             other => panic!("expected QuantityComparison GE 3, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// gates the alternative casting cost.
+    #[test]
+    fn test_creatures_are_attacking_count_ge() {
+        let (rest, c) = parse_inner_condition("three or more creatures are attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
         }
     }
 

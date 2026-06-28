@@ -68,7 +68,11 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
             ctx,
         ));
     }
@@ -80,7 +84,11 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
             ctx,
         ));
     }
@@ -144,11 +152,25 @@ pub(super) fn try_parse_subject_predicate_ast(
         ));
     }
 
+    // CR 509.1b + CR 611.2c: "<source> and up to N other target creature(s) can't
+    // be blocked this turn" (Martha Jones) — conjoined-subject evasion grant.
+    // Builds its own ClauseAst (with the source as the primary subject and the
+    // targeted creature as a sub_ability) so the secondary target/multi_target
+    // does not leak onto the source grant. Must run before the generic
+    // restriction split, which can't resolve the compound subject.
+    if let Some(ast) = try_parse_source_and_other_restriction_clause(text, ctx) {
+        return Some(ast);
+    }
+
     if let Some(clause) = try_parse_subject_restriction_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
             ctx,
         ));
     }
@@ -828,6 +850,90 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
     })
 }
 
+/// CR 509.1b + CR 611.2c: "<source> and up to N other target creature(s) can't
+/// be blocked [this turn]" — a conjoined-subject evasion grant (Martha Jones:
+/// "Martha Jones and up to one other target creature can't be blocked this
+/// turn."). The subject is a conjunction of the source (self-ref) and a
+/// separately-targeted creature; the single predicate applies to BOTH conjuncts.
+///
+/// Each conjunct is granted the SAME restriction through the ordinary
+/// single-subject builder ([`build_restriction_clause`]): the source grant is the
+/// primary effect, and the targeted grant rides as a `sub_ability` continuation
+/// carrying its own `multi_target` so the "up to one" optional creature is
+/// selected independently of the source. Scoped to the can't-be-blocked class —
+/// other "<X> and <Y> can't …" compounds fall through to the generic split. This
+/// builds the class of "<self> and up to N other target creature(s) can't be
+/// blocked" riders, not a single card.
+///
+/// Returns a fully-built [`ClauseAst`] (not routed through
+/// `subject_predicate_ast_from_clause`) because that helper re-derives the
+/// subject from the full text — it cannot split the compound back into a clean
+/// primary subject, and would leak the secondary's `multi_target` onto the
+/// primary grant. The primary `SubjectPhraseAst` is the source conjunct alone
+/// (no target/multi_target); the secondary rides in the predicate's `sub_ability`.
+fn try_parse_source_and_other_restriction_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    let lower = text.to_lowercase();
+
+    // Use nom `take_until + alt` to locate the " can't " / " cannot " predicate
+    // boundary. Per the nom-combinator mandate, parsing recognition is expressed
+    // with combinators on first write — `take_until` finds the predicate marker
+    // without string-method dispatch.
+    let ((), predicate_with_space) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value((), take_until::<_, _, OracleError<'_>>(" can't ")),
+            value((), take_until::<_, _, OracleError<'_>>(" cannot ")),
+        ))
+        .parse(input)
+    })?;
+    let subject = text[..text.len() - predicate_with_space.len()].trim();
+    let predicate = predicate_with_space.trim_start();
+
+    // Class gate: only the can't-be-blocked evasion grant participates.
+    if !is_cant_be_blocked_restriction_predicate(&predicate.to_lowercase()) {
+        return None;
+    }
+
+    // The subject must be a two-part conjunction "<primary> and <secondary>".
+    let subject_lower = subject.to_lowercase();
+    let subject_pair = TextPair::new(subject, &subject_lower);
+    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+    let primary_application = parse_subject_application(primary_tp.original.trim(), ctx)?;
+    let secondary_application = parse_subject_application(secondary_tp.original.trim(), ctx)?;
+    // The secondary conjunct must carry its own target slot ("up to one other
+    // target creature"); a bare conjunction with no second target is not this
+    // class and is left to the generic subject split. The primary conjunct, by
+    // contrast, must NOT introduce its own target slot — its grant rides as a
+    // direct (self-ref/anaphor) static, with the predicate's multi_target empty.
+    secondary_application.target.as_ref()?;
+    if primary_application.target.is_some() || primary_application.multi_target.is_some() {
+        return None;
+    }
+    let secondary_multi = secondary_application.multi_target.clone();
+
+    let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
+    let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
+    secondary_clause.multi_target = secondary_multi;
+    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: primary_application.affected,
+            target: primary_application.target,
+            multi_target: None,
+            inherits_parent: primary_application.inherits_parent,
+            is_optional: primary_application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Restriction {
+            effect: primary_clause.effect,
+            duration: primary_clause.duration,
+            sub_ability: Some(Box::new(secondary_def)),
+        }),
+    })
+}
+
 fn try_parse_subject_restriction_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1458,11 +1564,19 @@ pub(super) fn parse_subject_application(
     if let Ok((after_prefix, _)) =
         tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str())
     {
+        // CR 115.1d: Accept "any number of target X" and "any number of other
+        // target X". consumed is kept at the end of "any number of " so that
+        // target_text starts with "other target..." or "target..." and
+        // parse_target_with_ctx can add FilterProp::Another for the "other" form
+        // (Guardian of Faith: "any number of other target creatures you control").
         let consumed = lower.len() - after_prefix.len();
         let target_text = &subject[consumed..];
-        if tag::<_, _, OracleError<'_>>("target ")
-            .parse(after_prefix)
-            .is_ok()
+        if alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+        ))
+        .parse(after_prefix)
+        .is_ok()
         {
             let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
@@ -4871,6 +4985,32 @@ mod tests {
         assert_eq!(strip_trailing_additive_adverb("also"), "also");
     }
 
+    /// CR 509.1c (issue #4233): "Each creature your opponents control blocks this
+    /// turn if able" (Predatory Rampage) is a non-targeted mass requirement — it
+    /// must lower to a `ForceBlock` whose `target` filter selects every opponent
+    /// creature, with NO target prompt (so it does not ask the caster to pick one
+    /// creature). The resolver then expands the filter at resolution.
+    #[test]
+    fn each_opponent_creature_blocks_if_able_is_non_targeted_mass_force_block() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Each creature your opponents control blocks this turn if able.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.target_prompt.is_none(),
+            "mass force-block must not request a target, got {:?}",
+            def.target_prompt
+        );
+        let Effect::ForceBlock { target } = &*def.effect else {
+            panic!("expected ForceBlock, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected a typed mass filter, got {target:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    }
+
     /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
     /// shape the sequence splitter can leave behind ("this turn" optional, both
     /// "it"/"they" pronoun forms, optional trailing period) and rejects unrelated
@@ -6014,6 +6154,35 @@ mod tests {
         assert!(starts_with_subject_prefix(
             "any number of target creatures each get +1/+1"
         ));
+    }
+
+    #[test]
+    fn any_number_of_other_target_produces_multi_target() {
+        // CR 115.1d: Guardian of Faith — "any number of other target creatures"
+        // must produce multi_target and a filter with FilterProp::Another.
+        let mut ctx = ParseContext::default();
+        let app =
+            parse_subject_application("any number of other target creatures you control", &mut ctx)
+                .expect("should parse");
+        assert!(app.multi_target.is_some(), "multi_target must be set");
+        assert!(app.target.is_some(), "must be a targeted form");
+        if let Some(TargetFilter::Typed(ref tf)) = app.target {
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Another)),
+                "filter must have FilterProp::Another for 'other'"
+            );
+        }
+    }
+
+    #[test]
+    fn any_number_of_target_without_other_still_works() {
+        // Regression: "any number of target creatures" (no "other") still parses.
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("any number of target creatures", &mut ctx)
+            .expect("should parse");
+        assert!(app.multi_target.is_some(), "multi_target must be set");
     }
 
     // CR 115.1 + CR 115.1d: "one or more target X" variable-count subject tests.

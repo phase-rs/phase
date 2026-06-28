@@ -511,7 +511,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             (1, stripped.to_string())
         };
         let (filter, _) = parse_target(&format!("target {}", filter_text));
-        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
+        return AbilityCost::Sacrifice(SacrificeCost::count(
+            ensure_another_sacrifice_filter(filter, &filter_text),
+            use_count,
+        ));
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
@@ -1256,6 +1259,37 @@ fn strip_article<'a>(text: &'a str, lower: &str) -> &'a str {
         .unwrap_or(text)
 }
 
+/// CR 109.4 + CR 701.21: Sacrifice costs phrased "another [type]" / "other [type]"
+/// must carry `FilterProp::Another` so the ability source is excluded (Bound by
+/// Moonsilver, Mazirek class). `parse_target("target another …")` usually adds
+/// the property, but belt-and-suspenders here in case the type phrase is
+/// recovered without the prefix (article stripping, numeric count paths, etc.).
+fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> TargetFilter {
+    let lower = phrase.trim().to_lowercase();
+    let has_another_prefix = nom_on_lower(&lower, &lower, |i| {
+        value((), alt((tag("another "), tag("other ")))).parse(i)
+    })
+    .is_some();
+    if !has_another_prefix {
+        return filter;
+    }
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed.properties.contains(&FilterProp::Another) {
+                typed.properties.push(FilterProp::Another);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|f| ensure_another_sacrifice_filter(f, phrase))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 /// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",
 /// "this artifact", "this creature from your hand". Returns the zone (if specified).
 /// Also handles `~` (normalized card name) variants.
@@ -1825,6 +1859,30 @@ mod tests {
                     target,
                     TargetFilter::Typed(ref tf) if matches!(tf.get_primary_type(), Some(TypeFilter::Creature))
                 ));
+            }
+            other => panic!("Expected Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_another_permanent() {
+        match parse_oracle_cost("Sacrifice another permanent") {
+            AbilityCost::Sacrifice(cost) => {
+                let TargetFilter::Typed(tf) = &cost.target else {
+                    panic!("expected typed sacrifice target, got {:?}", cost.target);
+                };
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Permanent)),
+                    "expected permanent filter, got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "another permanent must carry FilterProp::Another, got {:?}",
+                    tf.properties
+                );
             }
             other => panic!("Expected Sacrifice, got {:?}", other),
         }

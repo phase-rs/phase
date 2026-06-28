@@ -2543,7 +2543,7 @@ pub(crate) fn parse_static_line_inner(
         && (nom_primitives::scan_contains(tp.lower, "less")
             || nom_primitives::scan_contains(tp.lower, "more"))
     {
-        if let Some(def) = try_parse_cost_modification(&text, &lower) {
+        if let Some(def) = try_parse_cost_modification(&text, &lower, None) {
             return Some(def);
         }
     }

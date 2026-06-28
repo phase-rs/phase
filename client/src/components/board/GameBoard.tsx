@@ -17,9 +17,11 @@ import {
   resolveFocusedOpponent,
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
+import { ArchenemyPanel } from "./ArchenemyPanel.tsx";
 import { CombatLine } from "./CombatLine.tsx";
 import { ManualManaToggle } from "./ManualManaToggle.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
+import { PlanechasePanel } from "./PlanechasePanel.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 interface GameBoardProps {
@@ -260,6 +262,8 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
   return (
     <BoardInteractionContext.Provider value={boardInteractionState}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <PlanechasePanel />
+        <ArchenemyPanel />
         {/* Opponent area */}
         {is1v1 ? (
           opponents[0] != null ? (

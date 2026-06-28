@@ -29,6 +29,7 @@ use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources::{self, ManaSourceOption};
+use super::priority;
 use super::restrictions;
 use super::stack;
 
@@ -1338,13 +1339,32 @@ pub(crate) fn handle_sacrifice_for_cost(
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(obj) = state.objects.get(&first) {
+        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
+            object_id: first,
+            lki: obj.snapshot_for_mana_spent(),
+        }) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(snapshot.clone());
+            // CR 400.7d: also stamp the spell object on the stack directly. A
+            // permanent spell whose only cost-paid-object reference lives in an
+            // ETB *trigger* (Adipose Offspring's "where X is the sacrificed
+            // creature's toughness") has no on-resolve Spell ability, so the
+            // ability-gated normalization in `stack::resolve` is skipped and the
+            // pipeline's `CastLinkSnapshot` would otherwise capture `None`.
+            // Stamping the stack object here fulfills the "already-stamped"
+            // contract that the resolution epilogue relies on for ability-less
+            // permanent spells, so the snapshot survives `reset_for_battlefield_entry`.
+            //
+            // Gated to spell casts only: activated-ability sacrifice costs share
+            // this resolver (`activation_ability_index` is set), but their
+            // `object_id` is the source permanent, whose own cast provenance must
+            // not be overwritten. A spell cast leaves this field `None`.
+            if pending.activation_ability_index.is_none() {
+                if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
+                    spell_obj.cast_cost_paid_object = Some(snapshot);
+                }
+            }
         }
     }
 
@@ -2591,8 +2611,7 @@ fn push_ability_entry(
         player,
         events,
     );
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
 }
@@ -5828,8 +5847,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         super::commander::record_commander_cast(state, object_id);
     }
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     events.push(GameEvent::SpellCast {
         card_id,
@@ -6277,8 +6295,7 @@ fn handle_resolution_cast_rejection(
     }
 
     // CR 601.2a: Priority returns to the would-be caster.
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::Priority { player })
 }
 
@@ -6520,6 +6537,11 @@ fn auto_tap_mana_sources_inner(
         ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
     };
 
+    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
+    // every land in this board-global sweep, so compute it once instead of
+    // re-scanning the whole battlefield per land inside `land_mana_options`.
+    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
+
     // Build list of activatable mana options for ALL permanents this player controls.
     // CR 605.1b: Non-land permanents can have mana abilities.
     let mut available: Vec<ManaSourceOption> = state
@@ -6538,7 +6560,12 @@ fn auto_tap_mana_sources_inner(
             // payable from the current pool; Phase 3 pays those sub-costs from
             // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::auto_tap_land_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_land_mana_options_indexed(
+                    state,
+                    oid,
+                    player,
+                    &aura_sources,
+                ))
             } else {
                 Some(mana_sources::auto_tap_mana_options(state, oid, player))
             }
@@ -6964,6 +6991,12 @@ fn production_override_for_option(
         | crate::types::ability::ManaProduction::ChoiceAmongExiledColors { .. }
         | crate::types::ability::ManaProduction::OpponentLandColors { .. }
         | crate::types::ability::ManaProduction::AnyTypeProduceableBy { .. }
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All is a one-shot triggered mana
+        // effect, not an activatable mana source the cost payer taps, so this is
+        // unreachable for the only current printing. Grouped with the dynamic
+        // any-color producers: each produced unit picks a single color, so the
+        // chosen option maps to a SingleColor override.
+        | crate::types::ability::ManaProduction::AnyCombinationOfObjectColors { .. }
         | crate::types::ability::ManaProduction::AnyInCommandersColorIdentity { .. } => Some(
             crate::types::game_state::ProductionOverride::SingleColor(option.mana_type),
         ),
@@ -7660,6 +7693,7 @@ pub fn finalize_mana_payment(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+    let pending_for_restore = pending.clone();
 
     // CR 118.3a: `pending_cast` is now gone, but the caster's pin hints must
     // still reach the spend. Carry them on the transient `active_payment_pins`
@@ -7809,7 +7843,16 @@ pub fn finalize_mana_payment(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
-    finalize_result
+    match finalize_result {
+        Ok(waiting_for) => Ok(waiting_for),
+        Err(err) => {
+            // CR 601.2h: A failed Pay attempt must not consume the pending cast —
+            // the caster remains in the mana-payment window and may tap more
+            // convoke sources or CancelCast (issue #4379).
+            state.pending_cast = Some(pending_for_restore);
+            Err(err)
+        }
+    }
 }
 
 fn stamp_convoked_creatures(
@@ -7842,6 +7885,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+    let pending_for_restore = pending.clone();
 
     // CR 118.3a: `pending_cast` is now gone, but the caster's pin hints must
     // still reach the spend. Carry them on the transient `active_payment_pins`
@@ -7992,7 +8036,16 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
-    finalize_result
+    match finalize_result {
+        Ok(waiting_for) => Ok(waiting_for),
+        Err(err) => {
+            // CR 601.2h: A failed Pay attempt must not consume the pending cast —
+            // the caster remains in the mana-payment window and may tap more
+            // convoke sources or CancelCast (issue #4379).
+            state.pending_cast = Some(pending_for_restore);
+            Err(err)
+        }
+    }
 }
 
 /// CR 107.4f + CR 601.2f: Determine whether this cast needs to pause for per-shard
@@ -8080,7 +8133,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let any_color = super::casting::player_can_spend_as_any_color_for_payment(
         state,
         player,
-        source_id,
+        Some(source_id),
         effective_payment_context,
     );
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes

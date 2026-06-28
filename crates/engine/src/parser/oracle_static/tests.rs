@@ -2447,6 +2447,50 @@ fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents()
     );
 }
 
+#[test]
+fn visions_of_ruin_cast_this_way_cost_reduction_binds_commander_mv() {
+    let def = parse_flashback_trailing_self_spell_cost_reduction(
+        "This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        dynamic_count:
+            Some(QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+                ..
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!(
+            "expected commander-MV dynamic ReduceCost, got {:?}",
+            def.mode
+        );
+    };
+    assert!(matches!(
+        def.condition,
+        Some(StaticCondition::CastingAsVariant {
+            variant: crate::types::game_state::CastingVariant::Flashback
+        })
+    ));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+}
+
+#[test]
+fn cast_this_way_cost_reduction_without_flashback_context_has_no_variant_gate() {
+    let def = parse_static_line(
+        "This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.",
+    )
+    .unwrap();
+    assert!(!matches!(
+        def.condition,
+        Some(StaticCondition::CastingAsVariant { .. })
+    ));
+}
+
 /// CR 601.2f + CR 102.2/102.3: Heliod, the Warped Eclipse. "Spells you cast cost
 /// {1} less to cast for each card your opponents have drawn this turn." must lower
 /// to a `ModifyCost { mode: Reduce, dynamic_count: CardsDrawnThisTurn{Opponent{Sum}} }`.
@@ -2485,6 +2529,46 @@ fn heliod_warped_eclipse_cost_reduction_counts_opponents_draws() {
     assert!(
         !matches!(dynamic_count, Some(QuantityRef::ObjectCount { .. })),
         "dynamic_count must NOT be the generic ObjectCount{{Card}} misparse"
+    );
+}
+
+#[test]
+fn drag_to_the_underworld_self_cost_reduction_binds_devotion_to_black() {
+    use crate::types::ability::DevotionColors;
+    use crate::types::mana::ManaColor;
+
+    let def =
+        parse_static_line("This spell costs {X} less to cast, where X is your devotion to black.")
+            .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count:
+            Some(QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(colors),
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!(
+            "expected devotion-bound self-spell ReduceCost, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(colors, vec![ManaColor::Black]);
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+#[test]
+fn variable_x_self_cost_reduction_without_where_x_binding_is_rejected() {
+    assert!(
+        parse_static_line("This spell costs {X} less to cast.").is_none(),
+        "unbound {{X}} self-spell reduction must not lower to a silent {{1}} reducer"
     );
 }
 
@@ -5356,6 +5440,19 @@ fn static_enchanted_creature_doesnt_untap() {
         Some(TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
         ))
+    );
+}
+
+#[test]
+fn static_enchanted_creature_doesnt_untap_if_sleep_counter() {
+    let def = parse_static_line(
+        "Enchanted creature doesn't untap during its controller's untap step if it has a sleep counter on it.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::CantUntap);
+    assert!(
+        def.condition.is_some(),
+        "if-clause must become a static condition"
     );
 }
 
@@ -9772,6 +9869,104 @@ fn static_parse_for_each_attached_to_self_kellan() {
     }
 }
 
+/// Helper: the dynamic-power `QuantityExpr` from a static line's first
+/// `AddDynamicPower` modification, plus whether `keyword` was granted.
+fn dyn_power_and_keyword(
+    line: &str,
+    keyword: &Keyword,
+) -> (crate::types::ability::QuantityExpr, bool) {
+    let def = parse_static_line(line).unwrap_or_else(|| panic!("static must parse: {line}"));
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let power = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected AddDynamicPower in: {line}"));
+    let has_kw = def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddKeyword { keyword: k } if k == keyword));
+    (power, has_kw)
+}
+
+#[test]
+fn static_gets_for_each_survives_leading_keyword_clause() {
+    // Issue #4364 (Glamdring): "Equipped creature has first strike and gets
+    // +1/+0 for each instant and sorcery card in your graveyard." The leading
+    // "has first strike and" used to strand the "gets +N/+M" verb (the P/T
+    // extractor only stripped "gets " at the head of the clause), collapsing the
+    // dynamic boost to a flat +1/+0. The verb is now located at any word
+    // boundary, so BOTH the dynamic P/T and the leading keyword survive.
+    let assert_graveyard_is = |power: &crate::types::ability::QuantityExpr| match power {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types,
+                    scope,
+                    ..
+                },
+        } => {
+            assert_eq!(*zone, ZoneRef::Graveyard);
+            assert_eq!(*scope, CountScope::Controller);
+            assert!(
+                card_types.contains(&TypeFilter::Instant)
+                    && card_types.contains(&TypeFilter::Sorcery),
+                "expected instant+sorcery card types, got {card_types:?}"
+            );
+        }
+        other => panic!("expected ZoneCardCount Ref, got {other:?}"),
+    };
+
+    // Keyword-first (the bug witness) and the reordered control must agree.
+    let (kw_first, has_fs1) = dyn_power_and_keyword(
+        "Equipped creature has first strike and gets +1/+0 for each instant and sorcery card in your graveyard.",
+        &Keyword::FirstStrike,
+    );
+    let (gets_first, has_fs2) = dyn_power_and_keyword(
+        "Equipped creature gets +1/+0 for each instant and sorcery card in your graveyard and has first strike.",
+        &Keyword::FirstStrike,
+    );
+    assert_graveyard_is(&kw_first);
+    assert_graveyard_is(&gets_first);
+    assert!(
+        has_fs1,
+        "leading-keyword form must still grant first strike"
+    );
+    assert!(
+        has_fs2,
+        "trailing-keyword form must still grant first strike"
+    );
+    assert_eq!(
+        kw_first, gets_first,
+        "clause order must not change the boost"
+    );
+}
+
+#[test]
+fn static_gets_for_each_leading_keyword_class_generic() {
+    // Build-the-class check: "has <keyword> and gets +N/+M for each <filter>"
+    // must work for any keyword/filter, not just Glamdring.
+    let (power, has_trample) = dyn_power_and_keyword(
+        "Equipped creature has trample and gets +2/+2 for each Mountain you control.",
+        &Keyword::Trample,
+    );
+    assert!(has_trample, "leading keyword (trample) must survive");
+    assert!(
+        matches!(
+            power,
+            QuantityExpr::Multiply { factor: 2, .. }
+                | QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+        ),
+        "expected a per-Mountain dynamic boost, got {power:?}"
+    );
+}
+
 #[test]
 fn static_parse_for_each_clause_other_creature() {
     // Verify parse_for_each_clause handles "other creature you control"
@@ -10924,7 +11119,7 @@ fn static_for_each_mana_symbol_in_its_mana_cost_emits_recipient_symbol_count() {
         &QuantityExpr::Ref {
             qty: QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
-                color: ManaColor::White,
+                color: Some(ManaColor::White),
             },
         }
     );
@@ -10934,7 +11129,7 @@ fn static_for_each_mana_symbol_in_its_mana_cost_emits_recipient_symbol_count() {
             value: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSymbolsInManaCost {
                     scope: ObjectScope::Recipient,
-                    color: ManaColor::White,
+                    color: Some(ManaColor::White),
                 }
             }
         }
@@ -16391,21 +16586,54 @@ fn static_enchanted_creature_loses_abilities_and_cant_attack_or_block() {
         assert_eq!(
             def.affected,
             Some(TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
             ))
         );
     }
 }
 
 #[test]
-fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
-    let def = parse_static_line("Enchanted creature can't attack or block.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+fn static_enchanted_creature_cant_attack_block_or_transform() {
+    let defs = parse_static_line_multi("Enchanted creature can't attack, block, or transform.");
     assert_eq!(
-        def.affected,
-        Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
-        ))
+        defs.len(),
+        3,
+        "expected three restriction statics, got {defs:?}"
+    );
+    for mode in [
+        StaticMode::CantAttack,
+        StaticMode::CantBlock,
+        StaticMode::Other("CantTransform".to_string()),
+    ] {
+        assert!(
+            defs.iter().any(|def| def.mode == mode),
+            "expected {mode:?}, got {:?}",
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+    }
+    assert!(defs.iter().all(|def| {
+        def.affected
+            == Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+    }));
+}
+
+#[test]
+fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
+    let defs = parse_static_line_multi("Enchanted creature can't attack or block.");
+    let expected_affected = Some(TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+    ));
+    assert!(
+        defs.iter()
+            .any(|def| def.mode == StaticMode::CantAttack && def.affected == expected_affected),
+        "expected CantAttack on enchanted host, got {defs:?}"
+    );
+    assert!(
+        defs.iter()
+            .any(|def| def.mode == StaticMode::CantBlock && def.affected == expected_affected),
+        "expected CantBlock on enchanted host, got {defs:?}"
     );
 }
 
@@ -16509,8 +16737,18 @@ fn cant_be_activated_self_ref_mana_exemption_suffix() {
 #[test]
 fn cant_be_activated_compound_aura_mana_exemption_suffix() {
     let defs = parse_static_line_multi(
-            "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",
-        );
+        "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",
+    );
+    let expected_affected =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
+    let cant_attack_or_block = defs
+        .iter()
+        .find(|def| def.mode == StaticMode::CantAttackOrBlock)
+        .expect("compound Aura text should emit CantAttackOrBlock");
+    assert_eq!(
+        cant_attack_or_block.affected,
+        Some(expected_affected.clone())
+    );
     let cant_be_activated = defs
         .iter()
         .find(|def| matches!(def.mode, StaticMode::CantBeActivated { .. }))
@@ -16522,7 +16760,8 @@ fn cant_be_activated_compound_aura_mana_exemption_suffix() {
             exemption,
         } => {
             assert_eq!(*who, ProhibitionScope::AllPlayers);
-            assert_eq!(source_filter, &TargetFilter::SelfRef);
+            assert_eq!(source_filter, &expected_affected);
+            assert_eq!(cant_be_activated.affected, Some(expected_affected));
             assert_eq!(*exemption, ActivationExemption::ManaAbilities);
         }
         other => panic!("expected CantBeActivated, got {other:?}"),

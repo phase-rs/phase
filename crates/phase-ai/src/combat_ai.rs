@@ -28,6 +28,9 @@ pub(crate) struct BlockLegalitySlices {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
     block_restriction: Vec<(ObjectId, StaticDefinition)>,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
+    // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
+    can_block_shadow_exists: bool,
 }
 
 impl BlockLegalitySlices {
@@ -36,6 +39,10 @@ impl BlockLegalitySlices {
             blocker_restriction: collect_blocker_restriction_statics(state),
             block_restriction: collect_block_restriction_statics(state),
             blocker_allowed: collect_blocker_allowed_statics(state),
+            can_block_shadow_exists:
+                engine::game::functioning_abilities::any_functioning_static_mode(state, |m| {
+                    matches!(m, StaticMode::CanBlockShadow)
+                }),
         }
     }
 
@@ -53,6 +60,7 @@ impl BlockLegalitySlices {
             &self.blocker_restriction,
             &self.block_restriction,
             &self.blocker_allowed,
+            self.can_block_shadow_exists,
         )
     }
 }
@@ -173,10 +181,20 @@ pub fn choose_attackers_with_targets_with_profile(
     // attackers or the engine rejects the whole declaration. Partition them out
     // and union them back unconditionally — value heuristics only apply to the
     // free choices. `creature_must_attack` is the engine's single authority.
+    // Loop-invariant hoist: `attackable_player_targets` depends only on `state`
+    // (immutable during this filter), so compute it once instead of per creature
+    // inside `creature_must_attack`.
+    let attackable = engine::game::combat::attackable_player_targets(state);
     let mandatory: Vec<ObjectId> = candidates
         .iter()
         .copied()
-        .filter(|&id| engine::game::combat::creature_must_attack(state, id))
+        .filter(|&id| {
+            engine::game::combat::creature_must_attack_with_attackable_players(
+                state,
+                id,
+                &attackable,
+            )
+        })
         .collect();
 
     let preferred_opponent = preferred_attack_opponent(state, player, &opponents, &candidates);
@@ -1838,6 +1856,43 @@ mod tests {
         obj.keywords = keywords;
         obj.entered_battlefield_turn = Some(1);
         id
+    }
+
+    /// Item E (revert-failing perf): the must-attack partition computes the
+    /// attackable-player set ONCE, so the number of `attackable_player_targets`
+    /// sweeps does NOT scale with the goaded-creature count. Pre-fix each
+    /// goaded creature's `creature_must_attack` recomputed it, so the sweep count
+    /// grew with K.
+    fn goaded_attacker_sweep_count(num_goaded: usize) -> u64 {
+        let mut state = setup();
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        for _ in 0..num_goaded {
+            let id = add_creature(&mut state, PlayerId(0), "Goaded", 2, 2, vec![]);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .goaded_by
+                .insert(PlayerId(1));
+        }
+        engine::game::perf_counters::reset();
+        let _ = choose_attackers(&state, PlayerId(0));
+        engine::game::perf_counters::snapshot().attackable_player_sweeps
+    }
+
+    #[test]
+    fn attacker_choice_sweeps_attackable_players_independent_of_goaded_count() {
+        let one = goaded_attacker_sweep_count(1);
+        let many = goaded_attacker_sweep_count(4);
+        assert!(
+            one >= 1,
+            "the must-attack partition must actually sweep (non-degenerate fixture)"
+        );
+        assert_eq!(
+            one, many,
+            "attackable-player sweeps must not scale with goaded count \
+             (revert-failing: pre-fix grows as K)"
+        );
     }
 
     // --- Issue #2514: crackback_damage blocker reuse (CR 509.1) ---
