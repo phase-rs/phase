@@ -2086,6 +2086,54 @@ mod tests {
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
     }
 
+    #[test]
+    fn test_additional_land_drops_saturates_any_number() {
+        let mut state = setup();
+
+        let fastbond = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fastbond".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fastbond)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::AdditionalLandDrop { count: u8::MAX })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play any number of lands on each of your turns.".into()),
+            );
+
+        let exploration = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exploration".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exploration)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::MayPlayAdditionalLand)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play an additional land on each of your turns.".into()),
+            );
+
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), u8::MAX);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
+    }
+
     /// Issue #2879 + CR 305.2 + CR 611.2c: a turn-scoped transient grant (Escape
     /// to the Wilds: "you may play an additional land this turn") must be summed
     /// into `additional_land_drops` for the affected player only.

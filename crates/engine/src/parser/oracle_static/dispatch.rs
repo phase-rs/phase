@@ -90,6 +90,36 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 305.2: static land-play permissions with an explicit additional-drop
+/// count. `u8::MAX` represents "any number"; runtime summing saturates so it
+/// stays effectively unbounded when combined with ordinary extra drops.
+fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> {
+    all_consuming(terminated(
+        preceded(
+            (opt(tag("you may ")), tag("play ")),
+            alt((
+                value(u8::MAX, tag("any number of lands")),
+                value(2, tag("two additional lands")),
+                value(1, tag("an additional land")),
+            )),
+        ),
+        (
+            opt((
+                space1,
+                alt((
+                    tag("on each of your turns"),
+                    tag("on each of their turns"),
+                    tag("during each of your turns"),
+                    tag("during each of their turns"),
+                )),
+            )),
+            opt(tag(".")),
+            space0,
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 502.3: Trailing "during their untap step(s)" clause of the
 /// max-untap restriction (Smoke / Damping Field / Winter Orb class). The
 /// canonical printing uses the plural possessive "their untap steps", but the
@@ -2735,22 +2765,9 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "play any number of lands" / additional land-drop grants ---
-    // CR 305.2: Determine the count at parse time and carry it as typed data.
-    if nom_primitives::scan_contains(tp.lower, "play any number of lands") {
+    if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: u8::MAX })
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
-        return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "play an additional land") {
-        return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count })
                 .description(text.to_string()),
         );
     }

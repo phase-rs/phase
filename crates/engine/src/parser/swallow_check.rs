@@ -303,12 +303,13 @@ fn detect_optional_you_may(
         // allow-noncombinator: swallow detector marker scan on classified text
         return;
     }
-    // CR 305.2: "you may play additional lands" is encoded as
-    // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
-    // static, not a def-level optional effect.
+    // CR 305.2: "you may play additional lands" / "any number of lands" is
+    // encoded as a land-drop static, which is an optional permission static,
+    // not a def-level optional effect.
     // allow-noncombinator: swallow detector marker scan on classified text
     if cleaned.contains("you may play") // allow-noncombinator: swallow detector marker scan on classified text
-        && cleaned.contains("additional land")
+        && (cleaned.contains("additional land") // allow-noncombinator: swallow detector marker scan on classified text
+            || cleaned.contains("any number of lands"))
     // allow-noncombinator: swallow detector marker scan on classified text
     {
         return;
@@ -598,6 +599,7 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             | StaticMode::MayLookAtFaceDown
             | StaticMode::MayChooseNotToUntap
             | StaticMode::MayPlayAdditionalLand
+            | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             // CR 702.8: "You may cast this spell as though it had flash" —
             // opt-in cast-timing permission.
@@ -3215,6 +3217,27 @@ mod tests {
             &["Instant"],
         );
 
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_any_number_land_drop_static() {
+        let parsed = parse_named(
+            "You may play any number of lands on each of your turns.\n\
+             Whenever you play a land, if it wasn't the first land you played this turn, \
+             this enchantment deals 1 damage to you.",
+            "Fastbond",
+            &["Enchantment"],
+        );
+
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| s.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })),
+            "expected Fastbond land-drop permission to parse as a static, got: {:#?}",
+            parsed.statics
+        );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
