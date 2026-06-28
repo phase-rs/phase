@@ -1937,14 +1937,14 @@ fn parse_self_event_verb(input: &str) -> OracleResult<'_, crate::types::triggers
                 tag("untaps"),
             )),
         ),
-        // CR 603.6c: "~ leaves the battlefield".
+        // CR 603.6c: "~ leaves the battlefield". Only the full-phrase variants
+        // are accepted — bare `tag("leaves")` would match "leaves your
+        // graveyard" at a word boundary and silently classify a non-battlefield
+        // trigger as LeavesBattlefield. Every leaves-the-battlefield Oracle
+        // phrasing uses the complete phrase.
         value(
             TriggerMode::LeavesBattlefield,
-            alt((
-                tag("leaves the battlefield"),
-                tag("leave the battlefield"),
-                tag("leaves"),
-            )),
+            alt((tag("leaves the battlefield"), tag("leave the battlefield"))),
         ),
     ))
     .parse(input)
@@ -38407,6 +38407,24 @@ mod tests {
             ),
             "inner phase-in must bind ParentTarget, got {:?}",
             effect.effect
+        );
+    }
+
+    /// Regression guard: "when ~ leaves your graveyard or …" must NOT be
+    /// accepted as a LeavesBattlefield delayed trigger. The bare `tag("leaves")`
+    /// arm was removed from `parse_self_event_verb` because `scan_at_word_boundaries`
+    /// discards the remainder after a match — so "leaves your graveyard" would
+    /// have matched "leaves" and produced a false LeavesBattlefield trigger
+    /// (PR #4475 review comment by @matthewevans). The disjunctive parser must
+    /// fall through to `Effect::Unimplemented` for unsupported zone qualifiers.
+    #[test]
+    fn self_disjunctive_trigger_with_non_battlefield_leaves_is_unimplemented() {
+        let e = parse_effect(
+            "When ~ leaves your graveyard or becomes untapped, that permanent phases in",
+        );
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "graveyard-leaves disjunct must remain Unimplemented, got {e:?}"
         );
     }
 
