@@ -1561,6 +1561,8 @@
     "crashBody": "phase.rs a rencontré une erreur interne et ne peut pas poursuivre cette action en toute sécurité. Votre dernier tour enregistré est préservé — rechargez pour restaurer la partie. <strong>Veuillez le signaler</strong> afin que nous puissions corriger le problème.",
     "connectionTitle": "Connexion au moteur perdue",
     "connectionBody": "phase.rs a perdu son lien avec le moteur de jeu — le plus souvent à cause d'une mise à jour en arrière-plan activée en cours de partie. Votre dernier tour enregistré est préservé ; rechargez pour restaurer la partie.",
+    "timeoutTitle": "Le moteur a mis trop de temps",
+    "timeoutBody": "phase.rs n'a pas pu terminer le calcul de cette action dans le temps imparti. Cela peut arriver sur des champs de bataille très complexes (par exemple, des centaines de jetons). Votre dernier tour enregistré est préservé — rechargez pour restaurer la partie, et pensez à exporter l'état pour le signaler.",
     "diagnostic": "diagnostic : {{reason}}",
     "showDetails": "Afficher les détails",
     "exportGameState": "Exporter l'état de la partie",

@@ -1561,6 +1561,8 @@
     "crashBody": "phase.rs napotkał wewnętrzny błąd i nie może bezpiecznie kontynuować tej akcji. Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę. <strong>Zgłoś to</strong>, abyśmy mogli to naprawić.",
     "connectionTitle": "Utracono połączenie z silnikiem",
     "connectionBody": "phase.rs utracił połączenie z silnikiem gry — najczęściej spowodowane aktualizacją w tle aktywowaną w trakcie gry. Twoja ostatnia zapisana tura jest zachowana; odśwież, aby przywrócić grę.",
+    "timeoutTitle": "Silnik potrzebował zbyt dużo czasu",
+    "timeoutBody": "phase.rs nie zdążył obliczyć tej akcji w wyznaczonym czasie. Może się to zdarzyć na bardzo złożonych stołach (na przykład setki żetonów). Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę, i rozważ wyeksportowanie stanu, aby go zgłosić.",
     "diagnostic": "diagnostyka: {{reason}}",
     "showDetails": "Pokaż szczegóły",
     "exportGameState": "Eksportuj stan gry",

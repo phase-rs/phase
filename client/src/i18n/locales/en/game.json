@@ -1595,6 +1595,8 @@
     "crashBody": "phase.rs hit an internal error and can’t safely continue this action. Your last saved turn is preserved — reload to restore the game. <strong>Please report this</strong> so we can fix it.",
     "connectionTitle": "Engine connection lost",
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
+    "timeoutTitle": "Engine took too long",
+    "timeoutBody": "phase.rs couldn't finish computing this action within the time limit. This can happen on very complex boards (for example, hundreds of tokens). Your last saved turn is preserved — reload to restore the game, and consider exporting the state to report it.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
     "exportGameState": "Export Game State",

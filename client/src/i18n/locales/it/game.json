@@ -1561,6 +1561,8 @@
     "crashBody": "phase.rs ha riscontrato un errore interno e non può continuare in sicurezza questa azione. Il tuo ultimo turno salvato è preservato — ricarica per ripristinare la partita. <strong>Segnala questo problema</strong> così possiamo correggerlo.",
     "connectionTitle": "Connessione al motore persa",
     "connectionBody": "phase.rs ha perso il collegamento con il motore di gioco — più spesso causato da un aggiornamento in background attivatosi a metà partita. Il tuo ultimo turno salvato è preservato; ricarica per ripristinare la partita.",
+    "timeoutTitle": "Il motore ha impiegato troppo tempo",
+    "timeoutBody": "phase.rs non è riuscito a completare il calcolo di questa azione entro il limite di tempo. Può accadere su campi di gioco molto complessi (ad esempio, centinaia di pedine). Il tuo ultimo turno salvato è preservato: ricarica per ripristinare la partita e valuta di esportare lo stato per segnalarlo.",
     "diagnostic": "diagnostica: {{reason}}",
     "showDetails": "Mostra dettagli",
     "exportGameState": "Esporta stato partita",

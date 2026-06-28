@@ -1561,6 +1561,8 @@
     "crashBody": "phase.rs encontró un error interno y no puede continuar esta acción de forma segura. Tu último turno guardado se conserva — recarga para restaurar la partida. <strong>Por favor, informa de esto</strong> para que podamos corregirlo.",
     "connectionTitle": "Se perdió la conexión con el motor",
     "connectionBody": "phase.rs perdió su enlace con el motor de la partida — lo más habitual es que lo cause una actualización en segundo plano activándose a mitad de partida. Tu último turno guardado se conserva; recarga para restaurar la partida.",
+    "timeoutTitle": "El motor tardó demasiado",
+    "timeoutBody": "phase.rs no pudo terminar de calcular esta acción dentro del límite de tiempo. Esto puede ocurrir en tableros muy complejos (por ejemplo, cientos de fichas). Tu último turno guardado se conserva: recarga para restaurar la partida y considera exportar el estado para reportarlo.",
     "diagnostic": "diagnóstico: {{reason}}",
     "showDetails": "Mostrar detalles",
     "exportGameState": "Exportar estado de la partida",
