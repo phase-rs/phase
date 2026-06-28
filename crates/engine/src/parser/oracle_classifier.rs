@@ -613,6 +613,21 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
         return true;
     }
+    // CR 121.1 / CR 613.11: "[subject] draw(s) cards from the bottom of [your|
+    // their] library rather than/instead of the top." — River Song's draw-source
+    // redirection static (Meet in Reverse). The body verb is "draw", so none of
+    // the generic static keywords (get/have/can't) anchor it; without this gate
+    // the (ability-word-prefixed) line never reaches Priority 7 and falls to the
+    // spell catch-all as Unimplemented. The "from the bottom of" + "library" +
+    // top-reference combination is the diagnostic; extraction is delegated to
+    // `parse_draw_from_bottom`, which lowers it to `StaticMode::DrawFromBottom`.
+    if scan_contains(lower, "from the bottom of")
+        && scan_contains(lower, "library")
+        && (scan_contains(lower, "rather than the top")
+            || scan_contains(lower, "instead of the top"))
+    {
+        return true;
+    }
     false
 }
 

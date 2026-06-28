@@ -971,6 +971,15 @@ pub enum StaticMode {
     CantDraw {
         who: ProhibitionScope,
     },
+    /// CR 121.1 + CR 613.11: Rule-modifying continuous effect — affected players
+    /// draw cards from the BOTTOM of their library rather than the top (River
+    /// Song, "Meet in Reverse"). Data-carrying / non-registry; the top-vs-bottom
+    /// decision is enforced by `game/effects/draw.rs::select_cards_to_draw`,
+    /// which EVERY draw-delivery path consults. `who` scopes the affected
+    /// players via `ProhibitionScope` (River Song = `Controller`).
+    DrawFromBottom {
+        who: ProhibitionScope,
+    },
     /// CR 603.2d: "If [cause], a triggered ability of a permanent you control
     /// triggers an additional time." Panharmonicon, Isshin Two Heavens as One,
     /// and the class of trigger-doublers. The `cause` predicate narrows which
@@ -1807,6 +1816,7 @@ impl Hash for StaticMode {
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
@@ -1872,6 +1882,7 @@ impl StaticMode {
             | StaticMode::MustBlock
             | StaticMode::MustBlockAttacker { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::DoubleTriggers { .. }
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
@@ -2040,6 +2051,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBlockAttacker({attacker:?})")
             }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
+            StaticMode::DrawFromBottom { who } => write!(f, "DrawFromBottom({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
             StaticMode::GraveyardCastPermission {
@@ -2689,6 +2701,14 @@ impl FromStr for StaticMode {
                 {
                     if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantDraw { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("DrawFromBottom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::DrawFromBottom { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other

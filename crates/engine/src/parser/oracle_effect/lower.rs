@@ -151,6 +151,283 @@ fn rewrite_else_parent_target_to_self_ref(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 608.2b: A chained tap/untap anaphor ("untap him"/"untap it")
+/// inherits its referent from the active antecedent. When the source itself
+/// (`SelfRef` — The Incredible Hulk: "put a +1/+1 counter on him ... untap him")
+/// is the active antecedent, a chained single-permanent `SetTapState` whose target
+/// lowered to the `ParentTarget` anaphor refers to the source, so rewrite it to
+/// `SelfRef` (the runtime then binds it to `source_id`).
+///
+/// The active antecedent is carried DOWN the sub-ability chain, so an intervening
+/// instruction that introduces NO new permanent referent ("... You gain 2 life.
+/// Untap him." / Hulk's extra-phase rider) does not break the rewrite — the
+/// immediate-child-only earlier version silently no-op'd those. It is reset only
+/// when an effect establishes a NEW OBJECT antecedent: a non-`SelfRef`,
+/// non-player-scoped target ("destroy target creature. Untap it." — "it" is the
+/// creature, not the source). Targetless and player-directed effects (life gain,
+/// extra phases, draws) leave the permanent antecedent intact.
+///
+/// A head with a real or *optional* target (Tyvar Kell: "...up to one target Elf.
+/// Untap it.") is NOT `SelfRef`, so its anaphor stays `ParentTarget`: it binds the
+/// chosen target, and a DECLINED optional target leaves the target list empty so
+/// the sub correctly does nothing (CR 608.2b — the anaphor has no referent).
+///
+/// Sibling of [`rewrite_else_parent_target_to_self_ref`] for the `sub_ability`
+/// chain. Must run at lowering time: by resolution the discriminator is erased
+/// (both Hulk and a declined-optional anaphor reach the resolver with the same
+/// empty target list), so the head's subject filter — visible only here — is the
+/// only thing that tells them apart. Scope is restricted to `Single` (the
+/// anaphoric singular) — `All` ("untap all ...") is a population filter.
+fn patch_self_ref_head_tap_anaphor(def: &mut AbilityDefinition) {
+    fn walk(def: &mut AbilityDefinition, carried_self_ref: bool) {
+        // Update the active permanent antecedent for THIS node, then apply it to
+        // the immediate chained sub before recursing further down the chain.
+        let active_self_ref = match def.effect.target_filter() {
+            Some(TargetFilter::SelfRef) => true,
+            // A new object antecedent (target creature/permanent/...) takes over.
+            Some(filter) if !target_filter_is_player_scoped(filter) => false,
+            // Player-directed (life/phase/draw) or targetless effects introduce no
+            // permanent referent — carry the antecedent through unchanged.
+            _ => carried_self_ref,
+        };
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if active_self_ref {
+                if let Effect::SetTapState {
+                    target: target @ TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    ..
+                } = sub.effect.as_mut()
+                {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
+            walk(sub, active_self_ref);
+        }
+    }
+    walk(def, false);
+}
+
+/// CR 608.2c: True for `TargetFilter`s that refer to a PLAYER (or set of players),
+/// which therefore do NOT establish a new permanent antecedent for a chained
+/// tap/untap "him"/"it" anaphor (see [`patch_self_ref_head_tap_anaphor`]).
+///
+/// Deliberately a NON-exhaustive allow-list: any unlisted filter is treated as a
+/// potential new object antecedent, which only ever STOPS a rewrite (leaving the
+/// anaphor as `ParentTarget` — the pre-fix behavior), never causes a wrong-object
+/// untap. So an omission is safe; a false inclusion would not be, which is why
+/// only unambiguously player-referencing variants are listed.
+fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::AllPlayers
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::SpecificPlayer { .. }
+    )
+}
+
+#[cfg(test)]
+mod self_ref_tap_anaphor_tests {
+    use super::*;
+    use crate::types::ability::TapStateChange;
+
+    /// Builds a `PutCounter{head_target}` head with a chained
+    /// `SetTapState{ParentTarget, scope}` untap sub — the shape every chained
+    /// tap/untap anaphor lowers to.
+    fn put_counter_then_untap_chain(
+        head_target: TargetFilter,
+        sub_scope: EffectScope,
+    ) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: head_target,
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: sub_scope,
+                state: TapStateChange::Untap,
+            },
+        )));
+        def
+    }
+
+    // CR 608.2c: a chained "untap him" anaphor after a `SelfRef`-subject head (The
+    // Incredible Hulk: "put a +1/+1 counter on him ... untap him") refers to the
+    // source, so the patch rewrites its `ParentTarget` to `SelfRef`.
+    #[test]
+    fn self_ref_head_tap_anaphor_rewrites_to_self_ref() {
+        let mut def = put_counter_then_untap_chain(TargetFilter::SelfRef, EffectScope::Single);
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "SelfRef-head anaphor must be rewritten to SelfRef, got {:?}",
+            sub.effect
+        );
+    }
+
+    // CR 608.2b: a head with a real/optional target (Tyvar Kell "...up to one
+    // target Elf. Untap it.") is NOT `SelfRef`, so the anaphor MUST stay
+    // `ParentTarget` — it binds the chosen target, and a declined optional target
+    // leaves the target list empty so the sub no-ops. This is exactly the
+    // discrimination the rejected bare-`is_empty()` resolver arm lacked (it would
+    // have wrongly untapped the source planeswalker on a declined target).
+    #[test]
+    fn typed_head_tap_anaphor_stays_parent_target() {
+        let mut def = put_counter_then_untap_chain(
+            TargetFilter::Typed(TypedFilter::default()),
+            EffectScope::Single,
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "Typed-head anaphor must stay ParentTarget (CR 608.2b), got {:?}",
+            sub.effect
+        );
+    }
+
+    // Scope guard: `All` ("untap all ...") is a population filter, never an
+    // anaphor — it must not be rewritten even under a `SelfRef` head.
+    #[test]
+    fn self_ref_head_tap_all_scope_not_rewritten() {
+        let mut def = put_counter_then_untap_chain(TargetFilter::SelfRef, EffectScope::All);
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "All-scope SetTapState must not be rewritten, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Builds `PutCounter{head_target}` -> `middle` -> `SetTapState{ParentTarget,
+    /// Single}` untap — a THREE-node chain to exercise antecedent propagation
+    /// across an intervening instruction.
+    fn head_middle_untap_chain(head_target: TargetFilter, middle: Effect) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: head_target,
+            },
+        );
+        let mut middle_def = AbilityDefinition::new(AbilityKind::Spell, middle);
+        middle_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        )));
+        def.sub_ability = Some(Box::new(middle_def));
+        def
+    }
+
+    fn untap_of(chain: AbilityDefinition) -> AbilityDefinition {
+        *chain
+            .sub_ability
+            .expect("middle")
+            .sub_ability
+            .expect("untap")
+    }
+
+    // CR 608.2c: an intervening PLAYER-directed instruction (here "you gain 2
+    // life") between a `SelfRef` head and the untap does NOT introduce a new
+    // permanent referent, so the source antecedent carries through and the untap
+    // is still rewritten to `SelfRef`. Discrimination: the immediate-child-only
+    // version (and gemini's `target_filter().is_some()` reset) left this as
+    // `ParentTarget` — a runtime no-op.
+    #[test]
+    fn self_ref_head_intermediate_player_effect_still_rewrites() {
+        let mut def = head_middle_untap_chain(
+            TargetFilter::SelfRef,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let untap = untap_of(def);
+        assert!(
+            matches!(
+                &*untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "anaphor after SelfRef head + intervening player effect must rewrite to SelfRef, got {:?}",
+            untap.effect
+        );
+    }
+
+    // CR 608.2b/608.2c: an intervening effect that establishes a NEW OBJECT
+    // antecedent (here pairing with a chosen creature) resets the antecedent, so a
+    // following "untap it" binds THAT object (`ParentTarget`), not the source.
+    // This is the target-head negative fixture the maintainer asked for.
+    #[test]
+    fn self_ref_head_intermediate_object_target_does_not_rewrite() {
+        let mut def = head_middle_untap_chain(
+            TargetFilter::SelfRef,
+            Effect::PairWith {
+                target: TargetFilter::Typed(TypedFilter::default()),
+            },
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let untap = untap_of(def);
+        assert!(
+            matches!(
+                &*untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "anaphor after an intervening object-target effect must stay ParentTarget, got {:?}",
+            untap.effect
+        );
+    }
+}
+
 /// CR 608.2c + CR 401.4: After an optional `CastFromZone` from a linked-exile
 /// pool (Sanwell, Chaos Wand class), a trailing "put the rest / put the exiled
 /// cards … on the bottom" clause must route uncards still linked to the source
@@ -1221,6 +1498,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // and coin flip conditional branches into their parent FlipCoin.
     consolidate_die_and_coin_defs(&mut defs, kind);
 
+    // CR 609.7a + CR 608.2c: Desperate Gambit — a preceding
+    // `ChooseDamageSource` makes bare "it" in the lose-branch one-shot prevention
+    // refer to the chosen source, not `SelfRef` (the instant on the stack).
+    thread_chosen_damage_source_into_oneshot_effects(&mut defs);
+
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
     // append to the deepest sub rather than overwriting.
@@ -1332,6 +1614,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
+    // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
+    // SelfRef-subject head (The Incredible Hulk's "untap him") — rewrite its
+    // ParentTarget to SelfRef so it binds the source, while a real/optional
+    // target head (Tyvar Kell) keeps ParentTarget and no-ops when declined.
+    patch_self_ref_head_tap_anaphor(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
@@ -2086,6 +2373,76 @@ fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
 /// `ChangeZone` is included because Inalla-style "Exile it at the beginning
 /// of the next end step" lowers to `ChangeZone { destination: Exile,
 /// target: ParentTarget }`.
+fn definition_contains_choose_damage_source(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::ChooseDamageSource { .. }) {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(definition_contains_choose_damage_source)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_contains_choose_damage_source)
+}
+
+/// CR 609.7a + CR 608.2c: When a resolution chain begins with
+/// `ChooseDamageSource`, bare "it" in a coin-flip one-shot prevention branch
+/// co-refers with the chosen source — rewrite `SelfRef` to `ChosenDamageSource`.
+fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
+    match effect {
+        Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } if matches!(damage_source_filter, Some(TargetFilter::SelfRef)) => {
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource);
+        }
+        Effect::CreateDamageReplacement { source_filter, .. }
+            if matches!(source_filter, Some(TargetFilter::SelfRef)) =>
+        {
+            *source_filter = Some(TargetFilter::ChosenDamageSource);
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win) = win_effect.as_deref_mut() {
+                rewrite_oneshot_selfref_to_chosen_in_def(win);
+            }
+            if let Some(lose) = lose_effect.as_deref_mut() {
+                rewrite_oneshot_selfref_to_chosen_in_def(lose);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_oneshot_selfref_to_chosen_in_def(def: &mut AbilityDefinition) {
+    rewrite_oneshot_selfref_to_chosen_in_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_def(sub);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_def(else_def);
+    }
+}
+
+fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinition]) {
+    if !defs.iter().any(definition_contains_choose_damage_source) {
+        return;
+    }
+    for def in defs.iter_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_effect(&mut def.effect);
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            rewrite_oneshot_selfref_to_chosen_in_def(sub);
+        }
+        if let Some(else_def) = def.else_ability.as_deref_mut() {
+            rewrite_oneshot_selfref_to_chosen_in_def(else_def);
+        }
+    }
+}
+
 pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
         Effect::Sacrifice { target, .. }

@@ -4667,16 +4667,8 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
     let (_, (subject, _)) = nom_primitives::split_once_on(body, "would deal").ok()?;
     let subject = subject.trim();
     // Bare-anaphor source references (handled by combinator dispatch, not the
-    // generic source-filter parser).
-    //
-    // TODO (known limitation, deferred): cross-sentence anaphora. In the
-    // Desperate Gambit lose-branch ("...the next time it would deal damage this
-    // turn, prevent that damage"), the bare "it" co-refers with the prior
-    // sentence's "that source" (the chosen source), so it should resolve to
-    // `ChosenDamageSource`, not `SelfRef`. Resolving that requires sentence-level
-    // anaphora tracking across the FlipCoin branches, which is a separate parser
-    // problem out of scope here. The win-branch (amount) and the activated-ability
-    // cards (Soltari/Beacon/Jade/Goblin Psychopath) are unaffected.
+    // generic source-filter parser). Cross-sentence "it" → chosen source after
+    // `ChooseDamageSource` is repaired in `lower.rs::thread_chosen_damage_source_into_oneshot_effects`.
     if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("it"),
         tag("~"),
@@ -4695,14 +4687,6 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
     .parse(subject)
     {
         if rest.trim().is_empty() {
-            // TODO (known limitation, deferred): the candidate constraint on the
-            // chosen source is dropped. Desperate Gambit's separate "Choose a
-            // source you control" sentence parses as TargetOnly{Any}, and the
-            // inline source prompt enumerates with TargetFilter::Any — so a
-            // "you control" restriction (and any similar qualifier) is not yet
-            // enforced when the player picks the source. Closing this needs the
-            // pre-choice candidate filter threaded into ChosenDamageSource;
-            // out of scope for this change.
             return Some(TargetFilter::ChosenDamageSource);
         }
     }
@@ -4740,6 +4724,51 @@ fn parse_redirect_recipient_phrase(
         ),
     ))
     .parse(input)
+}
+
+pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<TargetFilter> {
+    let input = input.trim();
+    // CR 609.7a: interactive "Choose a source …" — only the leading clause
+    // (Desperate Gambit: "Choose a source you control. Flip a coin. …").
+    // Must NOT reuse `parse_damage_source_subject_filter`'s typed-target fallback
+    // (`parse_type_phrase`), which would misroute "choose a creature …" /
+    // "choose a creature or land" to damage-source selection.
+    let first_clause = nom_primitives::split_once_on(input, ".")
+        .map(|(_, (before, _))| before.trim().trim_end_matches('.'))
+        .unwrap_or_else(|_| input.trim());
+    let subject = match alt((
+        preceded(tag::<_, _, OracleError<'_>>("choose "), rest),
+        preceded(tag::<_, _, OracleError<'_>>("Choose "), rest),
+    ))
+    .parse(first_clause)
+    {
+        Ok((_, rest)) => rest.trim(),
+        Err(_) => first_clause,
+    };
+    // Strip the article so "a source you control" does not treat "a" as subtype A.
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map(|(rest, _)| rest.trim())
+        .unwrap_or(subject);
+
+    if let Ok((rest, filter)) = parse_attached_host_subject(subject) {
+        if rest.trim().is_empty() {
+            return Some(filter);
+        }
+    }
+    if let Some(filter) = parse_damage_source_subject(subject) {
+        return Some(filter);
+    }
+
+    let stripped = nom_primitives::parse_article
+        .parse(subject)
+        .map(|(rest, _)| rest.trim())
+        .unwrap_or(subject);
+    if matches!(stripped, "source" | "sources") {
+        return Some(TargetFilter::Any);
+    }
+
+    None
 }
 
 /// Parse the damage source filter from the subject clause before "would deal".
@@ -14908,15 +14937,25 @@ mod snapshot_tests {
 
     #[test]
     fn oneshot_prevention_sibling() {
-        // Desperate Gambit lose-branch — routes to PreventDamage.
+        // Desperate Gambit lose-branch — routes to PreventDamage. Isolated parse
+        // keeps bare "it" as SelfRef; chains with ChooseDamageSource rewrite at lower time.
         let effect = parse_oneshot_damage_replacement(
             "the next time it would deal damage this turn, prevent that damage",
         )
         .expect("must parse prevention sibling");
-        assert!(
-            matches!(effect, Effect::PreventDamage { .. }),
-            "expected PreventDamage, got {effect:?}"
-        );
+        match effect {
+            Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } => {
+                assert_eq!(
+                    damage_source_filter,
+                    Some(TargetFilter::SelfRef),
+                    "isolated one-shot keeps SelfRef until chain threading"
+                );
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
     }
 
     #[test]

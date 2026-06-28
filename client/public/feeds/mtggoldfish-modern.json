@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-27T00:00:00Z",
+  "updated": "2026-06-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -860,150 +860,6 @@
       ]
     },
     {
-      "name": "Esper GenericBlink",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Boggart Trawler"
-        },
-        {
-          "count": 3,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 3,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Flickerwisp"
-        },
-        {
-          "count": 4,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 2,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 4,
-          "name": "Marsh Flats"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 2,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 3,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Witch Enchanter"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Surgical Extraction"
-        },
-        {
-          "count": 3,
-          "name": "Wrath of the Skies"
-        }
-      ]
-    },
-    {
       "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
@@ -1017,27 +873,15 @@
       "main": [
         {
           "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 4,
-          "name": "Ruby Medallion"
-        },
-        {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
+          "name": "Wrenn's Resolve"
         },
         {
           "count": 2,
-          "name": "Wish"
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
         },
         {
           "count": 4,
@@ -1045,35 +889,11 @@
         },
         {
           "count": 4,
-          "name": "Reckless Impulse"
-        },
-        {
-          "count": 4,
-          "name": "Wrenn's Resolve"
+          "name": "Ral, Monsoon Mage"
         },
         {
           "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 2,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 3,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 3,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 2,
-          "name": "Elegant Parlor"
+          "name": "Artist's Talent"
         },
         {
           "count": 2,
@@ -1085,45 +905,81 @@
         },
         {
           "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
           "name": "Gemstone Caverns"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 3,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 3,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 3,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
         },
         {
           "count": 2,
           "name": "Valakut Awakening"
         },
         {
+          "count": 2,
+          "name": "Wish"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
           "count": 1,
           "name": "March of Reckless Joy"
         },
         {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
+          "count": 4,
+          "name": "Ruby Medallion"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Galvanic Relay"
-        },
-        {
-          "count": 3,
-          "name": "Flusterstorm"
+          "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Out of Time"
+          "name": "Fire Magic"
         },
         {
           "count": 1,
           "name": "Blood Moon"
+        },
+        {
+          "count": 1,
+          "name": "Empty the Warrens"
         },
         {
           "count": 1,
@@ -1138,8 +994,8 @@
           "name": "Wear // Tear"
         },
         {
-          "count": 1,
-          "name": "Empty the Warrens"
+          "count": 3,
+          "name": "Flusterstorm"
         },
         {
           "count": 3,
@@ -1147,7 +1003,7 @@
         },
         {
           "count": 1,
-          "name": "Fire Magic"
+          "name": "Galvanic Relay"
         }
       ]
     },
@@ -1470,6 +1326,150 @@
         {
           "count": 1,
           "name": "Fire Magic"
+        }
+      ]
+    },
+    {
+      "name": "Esper GenericBlink",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "B",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Boggart Trawler"
+        },
+        {
+          "count": 3,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 3,
+          "name": "Ephemerate"
+        },
+        {
+          "count": 3,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Flickerwisp"
+        },
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 2,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 1,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Marsh Flats"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "Overlord of the Balemurk"
+        },
+        {
+          "count": 4,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 2,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 3,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 2,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 1,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 3,
+          "name": "Wrath of the Skies"
         }
       ]
     }

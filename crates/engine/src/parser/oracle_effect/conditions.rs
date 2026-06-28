@@ -3309,6 +3309,33 @@ pub(crate) fn static_condition_to_ability_condition(
             };
             Some(counter_threshold_to_condition(qty, *minimum, *maximum))
         }
+        // CR 508.1k + CR 608.2c: source-anaphoric mid-effect "if he's/she's/they're
+        // attacking" rider. `SourceIsAttacking` has no dedicated `AbilityCondition`
+        // variant, but "attacking" is a runtime `FilterProp` the resolver already
+        // evaluates against the ability source, so the gate composes as
+        // `SourceMatchesFilter` against the source — mirroring the `SourceIsSaddled`
+        // bridge above. Drives The Incredible Hulk's Enrage ("untap him and there is
+        // an additional combat phase") gate.
+        StaticCondition::SourceIsAttacking => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::Attacking { defender: None }],
+                ..Default::default()
+            }),
+        }),
+        // CR 509.1g + CR 608.2c: same bridge for "he's/she's/they're blocking".
+        StaticCondition::SourceIsBlocking => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::Blocking],
+                ..Default::default()
+            }),
+        }),
+        // CR 506.5 + CR 608.2c: same bridge for "it's attacking alone".
+        StaticCondition::SourceAttackingAlone => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::AttackingAlone],
+                ..Default::default()
+            }),
+        }),
         StaticCondition::DevotionGE { .. }
         // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
         // source-bound static predicates with no effect-resolution
@@ -3329,9 +3356,6 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
-        | StaticCondition::SourceAttackingAlone
-        | StaticCondition::SourceIsAttacking
-        | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -6874,6 +6898,55 @@ mod tests {
                     ..Default::default()
                 }),
             }
+        );
+    }
+
+    /// CR 508.1k + CR 509.1g + CR 506.5 + CR 608.2c: the source-anaphoric
+    /// combat-state static conditions bridge to `SourceMatchesFilter` against
+    /// the ability source with the matching runtime `FilterProp`. This is the
+    /// building-block-level guard for the whole class (not one card): if any
+    /// arm regresses to `None`, the in-effect `if he's attacking/blocking`
+    /// rider is silently dropped and the gated sub-effects fire
+    /// unconditionally (The Incredible Hulk's Enrage untap + extra combat).
+    #[test]
+    fn source_combat_state_conditions_bridge_to_source_matches_filter() {
+        let cases = [
+            (
+                StaticCondition::SourceIsAttacking,
+                vec![FilterProp::Attacking { defender: None }],
+            ),
+            (
+                StaticCondition::SourceIsBlocking,
+                vec![FilterProp::Blocking],
+            ),
+            (
+                StaticCondition::SourceAttackingAlone,
+                vec![FilterProp::AttackingAlone],
+            ),
+        ];
+        for (sc, props) in cases {
+            let mapped = static_condition_to_ability_condition(&sc, &mut ParseContext::default());
+            assert_eq!(
+                mapped,
+                Some(AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: props,
+                        ..Default::default()
+                    }),
+                }),
+                "{sc:?} must bridge to SourceMatchesFilter, not None"
+            );
+        }
+        // `SourceIsBlocked` has no clean 1:1 runtime FilterProp and must stay
+        // unmapped (left in the `=> None` bucket) — guards against accidentally
+        // moving it out alongside the bridged siblings.
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &StaticCondition::SourceIsBlocked,
+                &mut ParseContext::default()
+            ),
+            None,
+            "SourceIsBlocked must remain unmapped (no clean FilterProp::Blocked)"
         );
     }
 }

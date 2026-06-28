@@ -1077,6 +1077,11 @@ pub(crate) enum HandRevealImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ChooseImperativeAst {
+    /// CR 609.7a: "choose a source [you control|...]" — interactive damage-source
+    /// selection, distinct from permanent targeting (`TargetOnly`).
+    DamageSource {
+        source_filter: TargetFilter,
+    },
     TargetOnly {
         target: TargetFilter,
     },

@@ -1322,6 +1322,46 @@ pub(crate) fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefini
     Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
 }
 
+/// CR 121.1 + CR 613.11: Parse a draw-source redirection static from Oracle
+/// text: "[Subject] draw(s) cards from the bottom of [your|their] library
+/// rather than/instead of the top." → `DrawFromBottom { who }`.
+/// E.g., River Song ("Meet in Reverse"): "You draw cards from the bottom of
+/// your library rather than the top."
+pub(crate) fn parse_draw_from_bottom(tp: &str, text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    // Subject axis → `ProhibitionScope` via the shared building block.
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+    // Verb axis ("draw"/"draws") × quantity axis ("cards"/"a card") — composed, not permuted.
+    // Covers "draw a card", "draw cards", "draws a card", "draws cards".
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("draw "), tag("draws ")))
+        .parse(predicate)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("cards"), tag("a card")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" from the bottom of ")
+        .parse(rest)
+        .ok()?;
+    // Possessive axis composed (not permuted).
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("your "), tag("their ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>("library ").parse(rest).ok()?;
+    // Connector axis composed (not permuted).
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("rather than"), tag("instead of")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" the top").parse(rest).ok()?;
+    // STRICT: reject a silently-dropped trailing clause — the redirect must be
+    // the whole sentence, not a fragment with an unparsed remainder.
+    let tail = rest.trim();
+    if !matches!(tail, "" | ".") {
+        return None;
+    }
+    Some(StaticDefinition::new(StaticMode::DrawFromBottom { who }).description(text.to_string()))
+}
+
 /// Parse the subject of "[type] cards in [zones] can't enter the battlefield".
 /// CR 604.3: Extracts the card type filter and zone restrictions into a TypedFilter.
 pub(crate) fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
@@ -2587,6 +2627,74 @@ mod filtered_spend_any_type_tests {
         assert!(
             try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
             "an unrecognised spell class must stay an honest defer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod draw_from_bottom_tests {
+    use super::*;
+
+    /// CR 121.1 + CR 613.11: River Song's exact "Meet in Reverse" line (after
+    /// ability-word stripping) lowers to `DrawFromBottom { Controller }`.
+    #[test]
+    fn parses_controller_draw_from_bottom() {
+        let text = "You draw cards from the bottom of your library rather than the top.";
+        let lower = text.to_ascii_lowercase();
+        let def = parse_draw_from_bottom(&lower, text)
+            .expect("River Song's draw-redirect line must lower to a static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Controller
+            }
+        );
+    }
+
+    /// The subject axis composes with the shared `strip_casting_prohibition_subject`
+    /// building block — "each opponent" scopes to `Opponents`, and "instead of"
+    /// is an accepted connector variant. Covers the class, not just River Song.
+    #[test]
+    fn parses_opponents_scope_and_instead_of_connector() {
+        let text = "Each opponent draws cards from the bottom of their library instead of the top.";
+        let lower = text.to_ascii_lowercase();
+        let def = parse_draw_from_bottom(&lower, text)
+            .expect("opponent-scoped draw-redirect must lower to a static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Opponents
+            }
+        );
+    }
+
+    /// The static dispatch chain (`parse_static_line_multi`) must route the
+    /// stripped body to `parse_draw_from_bottom` — guards against a future
+    /// dispatch-registration regression.
+    #[test]
+    fn static_line_multi_routes_to_draw_from_bottom() {
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "You draw cards from the bottom of your library rather than the top.",
+        );
+        assert_eq!(
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>(),
+            vec![&StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Controller
+            }],
+            "static dispatch must lower to a single DrawFromBottom(controller)"
+        );
+    }
+
+    /// STRICT: a trailing clause must NOT be silently dropped — the redirect has
+    /// to be the whole sentence, else the line stays an honest defer.
+    #[test]
+    fn declines_trailing_clause() {
+        let text =
+            "You draw cards from the bottom of your library rather than the top and you lose 1 life.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            parse_draw_from_bottom(&lower, text).is_none(),
+            "a silently-dropped trailing clause must NOT parse"
         );
     }
 }

@@ -19946,6 +19946,77 @@ Artifacts you control have \"{T}: Add {U}. Spend this mana only to cast a spell 
         }
     }
 
+    /// CR 305.1 + CR 305.2a + CR 608.2c + CR 605.1a: River of Tears — a
+    /// conditional dual-color mana land whose `{T}` ability adds {U}, but adds
+    /// {B} *instead* if the controller has played a land this turn. The
+    /// simple-past "you played a land this turn" condition must lower to a
+    /// `ConditionInstead` mana swap with ZERO Unimplemented nodes.
+    #[test]
+    fn river_of_tears_conditional_mana_swap_fully_supported() {
+        use crate::types::ability::{AbilityCondition, AbilityCost, PlayerScope, QuantityRef};
+        use crate::types::mana::ManaColor;
+
+        let r = parse_oracle_text(
+            "{T}: Add {U}. If you played a land this turn, add {B} instead.",
+            "River of Tears",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "single {{T}} mana ability: {r:#?}");
+        let ability = &r.abilities[0];
+        assert!(
+            !has_unimplemented(ability),
+            "no Unimplemented nodes anywhere in the ability: {ability:#?}"
+        );
+        assert_eq!(ability.cost, Some(AbilityCost::Tap));
+
+        // Root produces {U}.
+        let Effect::Mana { produced, .. } = &*ability.effect else {
+            panic!("expected root Effect::Mana, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(produced, ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Blue]),
+            "root must add {{U}}, got {produced:?}"
+        );
+
+        // Sub-ability: ConditionInstead{ LandsPlayedThisTurn >= 1 } producing {B}.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("conditional-instead sub-ability must be attached");
+        let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+            panic!("expected ConditionInstead on sub, got {:?}", sub.condition);
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LandsPlayedThisTurn {
+                            player: PlayerScope::Controller,
+                            from_zones: None,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected LandsPlayedThisTurn{{Controller, None}} >= 1, got {inner:?}"
+        );
+        let Effect::Mana {
+            produced, target, ..
+        } = &*sub.effect
+        else {
+            panic!("expected sub Effect::Mana, got {:?}", sub.effect);
+        };
+        assert_eq!(target, &None, "mana swap sub-ability is untargeted");
+        assert!(
+            matches!(produced, ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Black]),
+            "instead branch must add {{B}}, got {produced:?}"
+        );
+    }
+
     #[test]
     fn leading_conditional_instead_composes_self_replacement() {
         use crate::types::ability::{AbilityCondition, QuantityRef};
