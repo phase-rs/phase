@@ -23491,6 +23491,7 @@ mod station_tests {
 
     #[test]
     fn stationed_perpetual_grant_keywords_applies_to_stationing_creature() {
+        use crate::game::trigger_index::reindex_object_triggers;
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, Effect, PerpetualModification, TriggerDefinition,
         };
@@ -23513,6 +23514,7 @@ mod station_tests {
                     ),
                 ));
         }
+        reindex_object_triggers(&mut state, spacecraft_id);
 
         apply_as_current(
             &mut state,
