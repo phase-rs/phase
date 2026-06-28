@@ -3030,8 +3030,6 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 }
 
 fn parse_each_player_who_last_chose_subject(input: &str) -> OracleResult<'_, ()> {
-    use nom::bytes::complete::take_while1;
-
     value(
         (),
         all_consuming(preceded(

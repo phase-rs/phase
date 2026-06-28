@@ -8,7 +8,7 @@ mod prelude {
 
     pub(super) use crate::parser::oracle_nom::error::OracleError;
     pub(super) use nom::branch::alt;
-    pub(super) use nom::bytes::complete::{tag, tag_no_case, take_until};
+    pub(super) use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
     pub(super) use nom::character::complete::{alpha1, space0, space1};
     pub(super) use nom::combinator::{all_consuming, eof, map, opt, recognize, rest, value};
     pub(super) use nom::multi::{many0, separated_list1};
