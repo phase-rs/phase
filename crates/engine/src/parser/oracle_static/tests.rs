@@ -20722,3 +20722,36 @@ fn river_song_full_card_parses_without_unimplemented() {
         );
     }
 }
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom`.
+/// "You draw a card from the bottom of your library rather than the top."
+/// must parse identically to the plural River Song wording.
+#[test]
+fn draw_from_bottom_singular_controller() {
+    let def =
+        parse_static_line("You draw a card from the bottom of your library rather than the top.")
+            .expect("singular controller form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Controller,
+        }
+    );
+}
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom` with
+/// opponent subject and "instead of" connector.
+/// "Each opponent draws a card from the bottom of their library instead of the top."
+#[test]
+fn draw_from_bottom_singular_opponents() {
+    let def = parse_static_line(
+        "Each opponent draws a card from the bottom of their library instead of the top.",
+    )
+    .expect("singular opponent form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+}

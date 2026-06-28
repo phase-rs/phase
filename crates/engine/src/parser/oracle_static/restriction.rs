@@ -1332,9 +1332,17 @@ pub(crate) fn parse_draw_from_bottom(tp: &str, text: &str) -> Option<StaticDefin
 
     // Subject axis → `ProhibitionScope` via the shared building block.
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
-    // Verb axis: "draw"/"draws" (predicate is already lowercase).
-    let rest = nom_tag_lower(predicate, predicate, "draw cards from the bottom of ")
-        .or_else(|| nom_tag_lower(predicate, predicate, "draws cards from the bottom of "))?;
+    // Verb axis ("draw"/"draws") × quantity axis ("cards"/"a card") — composed, not permuted.
+    // Covers "draw a card", "draw cards", "draws a card", "draws cards".
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("draw "), tag("draws ")))
+        .parse(predicate)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("cards"), tag("a card")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" from the bottom of ")
+        .parse(rest)
+        .ok()?;
     // Possessive axis composed (not permuted).
     let (rest, _) = alt((tag::<_, _, VE<'_>>("your "), tag("their ")))
         .parse(rest)
