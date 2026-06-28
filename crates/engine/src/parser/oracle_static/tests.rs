@@ -7461,12 +7461,20 @@ fn static_play_two_additional_lands() {
     let def =
         parse_static_line("You may play two additional lands on each of your turns.").unwrap();
     assert_eq!(def.mode, StaticMode::AdditionalLandDrop { count: 2 });
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(tf.controller, Some(ControllerRef::You)),
+        other => panic!("two-additional land static must affect controller only, got {other:?}"),
+    }
 }
 
 #[test]
 fn static_play_any_number_of_lands() {
     let def = parse_static_line("You may play any number of lands on each of your turns.").unwrap();
     assert_eq!(def.mode, StaticMode::AdditionalLandDrop { count: u8::MAX });
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(tf.controller, Some(ControllerRef::You)),
+        other => panic!("any-number land static must affect controller only, got {other:?}"),
+    }
 }
 
 #[test]
@@ -7480,10 +7488,14 @@ fn fastbond_first_line_is_static_not_targeted_play_effect() {
     );
 
     assert!(
-        parsed
-            .statics
-            .iter()
-            .any(|def| def.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })),
+        parsed.statics.iter().any(|def| {
+            def.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })
+                && matches!(
+                    &def.affected,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.controller == Some(ControllerRef::You)
+                )
+        }),
         "Fastbond must parse its land-play permission as a static ability, got {:?}",
         parsed.statics
     );

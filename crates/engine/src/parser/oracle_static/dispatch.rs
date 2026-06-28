@@ -2771,6 +2771,9 @@ pub(crate) fn parse_static_line_inner(
     if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }
