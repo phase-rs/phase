@@ -640,6 +640,18 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         map(tag("it's not your turn"), |_| StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         }),
+        // CR 102.1 + CR 102.2: there is always exactly one active player, so
+        // "it's an opponent's turn" is exactly "it's not your turn" — the active
+        // player is any non-controller. Maps to the same Not(DuringYourTurn).
+        map(
+            alt((
+                tag("it's an opponent's turn"),
+                tag("it is an opponent's turn"),
+            )),
+            |_| StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        ),
         parse_day_night_condition,
     ))
     .parse(input)
@@ -6991,6 +7003,25 @@ mod tests {
         let (rest, c) = parse_condition("if it's your turn, do").unwrap();
         assert_eq!(rest, ", do");
         assert_eq!(c, StaticCondition::DuringYourTurn);
+    }
+
+    #[test]
+    fn test_parse_condition_opponents_turn() {
+        // CR 102.1 + CR 102.2: there is always exactly one active player, so
+        // "it's an opponent's turn" is exactly "it's not your turn" — the active
+        // player is any non-controller. Represented as `Not(DuringYourTurn)`,
+        // mirroring the existing "it's not your turn" arm.
+        let expected = StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        };
+        for input in [
+            "if it's an opponent's turn, do",
+            "if it is an opponent's turn, do",
+        ] {
+            let (rest, c) = parse_condition(input).unwrap();
+            assert_eq!(rest, ", do", "remainder for {input:?}");
+            assert_eq!(c, expected, "condition for {input:?}");
+        }
     }
 
     #[test]
