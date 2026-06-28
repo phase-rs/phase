@@ -3993,13 +3993,21 @@ fn mana_payment_actions(
                 }
             }
         } else {
-            for (obj_id, obj) in &state.objects {
+            // Non-Delve convoke/improvise/waterbend taps come from the
+            // battlefield only; the eligibility helpers all require
+            // `zone == Battlefield`, so iterating `state.battlefield` (rather
+            // than every object in the game) is behavior-preserving and avoids
+            // scanning hand/library/graveyard objects on go-wide token boards.
+            for &obj_id in &state.battlefield {
+                let Some(obj) = state.objects.get(&obj_id) else {
+                    continue;
+                };
                 match mode {
                     ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
                         // Waterbend: always colorless
                         actions.push(candidate(
                             GameAction::TapForConvoke {
-                                object_id: *obj_id,
+                                object_id: obj_id,
                                 mana_type: crate::types::mana::ManaType::Colorless,
                             },
                             TacticalClass::Mana,
@@ -4010,7 +4018,7 @@ fn mana_payment_actions(
                         // CR 702.126a: Improvise pays generic mana — always colorless.
                         actions.push(candidate(
                             GameAction::TapForConvoke {
-                                object_id: *obj_id,
+                                object_id: obj_id,
                                 mana_type: crate::types::mana::ManaType::Colorless,
                             },
                             TacticalClass::Mana,
@@ -4021,7 +4029,7 @@ fn mana_payment_actions(
                         // CR 702.51a: Colorless (for generic) always available
                         actions.push(candidate(
                             GameAction::TapForConvoke {
-                                object_id: *obj_id,
+                                object_id: obj_id,
                                 mana_type: crate::types::mana::ManaType::Colorless,
                             },
                             TacticalClass::Mana,
@@ -4040,7 +4048,7 @@ fn mana_payment_actions(
                             }
                             actions.push(candidate(
                                 GameAction::TapForConvoke {
-                                    object_id: *obj_id,
+                                    object_id: obj_id,
                                     mana_type: mana_sources::mana_color_to_type(color),
                                 },
                                 TacticalClass::Mana,
