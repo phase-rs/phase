@@ -224,8 +224,8 @@ mod tests {
         super::resolve(&mut state, &ability, &mut events).unwrap();
 
         let obj = state.objects.get(&id).unwrap();
-        assert!(obj.keywords.contains(&Keyword::Deathtouch));
-        assert!(obj.keywords.contains(&Keyword::Lifelink));
+        assert!(obj.has_keyword(&Keyword::Deathtouch));
+        assert!(obj.has_keyword(&Keyword::Lifelink));
         assert!(obj.perpetual_mods.contains(&modification));
     }
 }
