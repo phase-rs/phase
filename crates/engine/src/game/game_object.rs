@@ -1064,6 +1064,13 @@ impl GameObject {
                 self.base_power = Some(base_power);
                 self.base_toughness = Some(base_toughness);
             }
+            PerpetualModification::GrantKeywords { keywords } => {
+                for keyword in keywords {
+                    if !self.keywords.contains(keyword) {
+                        self.keywords.push(keyword.clone());
+                    }
+                }
+            }
         }
         self.perpetual_mods.push(modification.clone());
     }

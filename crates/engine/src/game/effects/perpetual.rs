@@ -194,4 +194,38 @@ mod tests {
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(4));
     }
+
+    #[test]
+    fn perpetual_grant_keywords_adds_to_object() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monoist Gravliner".to_string(),
+            Zone::Battlefield,
+        );
+
+        let modification = PerpetualModification::GrantKeywords {
+            keywords: vec![Keyword::Deathtouch, Keyword::Lifelink],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: crate::types::ability::TargetFilter::Any,
+                modification: modification.clone(),
+            },
+            vec![TargetRef::Object(id)],
+            id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&id).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Deathtouch));
+        assert!(obj.keywords.contains(&Keyword::Lifelink));
+        assert!(obj.perpetual_mods.contains(&modification));
+    }
 }

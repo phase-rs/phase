@@ -7785,6 +7785,11 @@ pub enum PerpetualModification {
         power_delta: i32,
         toughness_delta: i32,
     },
+    /// "[object] perpetually gains [keyword] [and [keyword]]" — permanently
+    /// grants evergreen keywords (Monoist Gravliner station trigger).
+    GrantKeywords {
+        keywords: Vec<crate::types::keywords::Keyword>,
+    },
 }
 
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its

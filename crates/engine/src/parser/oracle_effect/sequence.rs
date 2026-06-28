@@ -5803,6 +5803,16 @@ fn parse_keyword_list(input: &str) -> nom::IResult<&str, Vec<Keyword>, OracleErr
     Ok((rest, keywords))
 }
 
+/// Parse a trailing evergreen keyword grant list (e.g. "deathtouch and lifelink").
+/// The input must start at the first keyword; returns unconsumed tail.
+pub(super) fn parse_keyword_grant_list(input: &str) -> Option<(Vec<Keyword>, &str)> {
+    let (rest, keywords) = parse_keyword_list(input).ok()?;
+    if keywords.is_empty() {
+        return None;
+    }
+    Some((keywords, rest))
+}
+
 /// CR 702: Parse "The same is true for <keyword list>." — Odric, Lunarch
 /// Marshal's follow-up sentence that extends the antecedent keyword grant to
 /// each additional listed keyword.
