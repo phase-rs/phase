@@ -621,6 +621,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Another
         | FilterProp::OtherThanTriggerObject
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy

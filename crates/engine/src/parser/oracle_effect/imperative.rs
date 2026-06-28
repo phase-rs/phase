@@ -44,8 +44,8 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    resolve_pronoun_target, TargetSyntax,
+    parse_mass_type_union, parse_target, parse_target_with_ctx, parse_target_with_syntax,
+    parse_type_phrase, resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -6291,6 +6291,29 @@ pub(super) fn parse_library_player_suffix<'a>(
     None
 }
 
+/// CR 112.1: A spell is a card on the stack. `scope_target_spell_phrase` lowers
+/// a "spell"/"spells" head noun to a `StackSpell` leg, so detecting a `StackSpell`
+/// (or an explicit `InZone(Stack)`) in the PARSED filter is how the "exile all
+/// spells" wipe knows to constrain its population to the stack. Recurses through
+/// `Or`/`And`/`Not`. Checks the parsed structure, never the raw text — a "spell"
+/// buried in a relative clause ("a creature that convoked this spell") must not
+/// trigger the constraint, and "cards" (also `TypeFilter::Card`, e.g. "exile all
+/// cards from target player's library", Jace) must NOT be treated as a spell.
+fn filter_targets_stack(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_targets_stack)
+        }
+        TargetFilter::Not { filter } => filter_targets_stack(filter),
+        _ => false,
+    }
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
@@ -6394,11 +6417,21 @@ pub(super) fn parse_exile_ast(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, _rem) = parse_target(rest);
+        // CR 205.2a + CR 205.3a + CR 608.2c: parse the full target as a
+        // multi-type union so "exile all A except <X>, all B, and all C" lowers to
+        // one `ChangeZoneAll { Or[…] }` instead of fragmenting the trailing
+        // "all B"/"all C" legs into verb-less sub-abilities (Everything Comes to
+        // Dust). Union legs span card types (205.2a) and subtypes (205.3a).
+        let (parsed_target, _rem) = parse_mass_type_union(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        // CR 701.5a: "exile all spells" must constrain to the stack.
-        let target = if nom_primitives::scan_contains(rest_lower, "spell") {
+        // CR 109.2b + CR 701.13a: "exile all spells" must scope to the stack, but
+        // the bare word "spell" can appear deep inside a relative clause ("a
+        // creature that convoked this spell", Everything Comes to Dust) where it
+        // must NOT force a stack constraint. The parser is the detector: only
+        // constrain when the PARSED filter actually references a stack object,
+        // never a substring scan over the raw text.
+        let target = if filter_targets_stack(&parsed_target) {
             super::constrain_filter_to_stack(parsed_target)
         } else {
             parsed_target

@@ -559,6 +559,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::SaddledSource => parts.push("saddled the source".into()),
+            FilterProp::ConvokedSource => parts.push("convoked the source".into()),
             FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {

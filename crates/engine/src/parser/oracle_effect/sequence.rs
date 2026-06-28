@@ -879,6 +879,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         .is_some();
                         let bare_becomes_continuation =
                             bare_becomes_remainder && !antecedent_is_become;
+                        // CR 205.2a + CR 205.3a + CR 608.2c: "exile all A, all B,
+                        // and all C" — a bare "and" before a "[all|each] <type>"
+                        // union leg is a union delimiter, not a clause boundary
+                        // (Everything Comes to Dust; covers the non-"except" union
+                        // form too). The legs span both card types (205.2a:
+                        // creature/artifact/enchantment) and subtypes (205.3a).
+                        let mass_exile_union_continuation = continues_mass_exile_union(
+                            &before_lower,
+                            &remainder_trimmed.to_ascii_lowercase(),
+                        );
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -895,6 +905,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || continuous_modifier_conjunct
                         || roll_die_modifier_continuation
                         || bare_becomes_continuation
+                        || mass_exile_union_continuation
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -1008,6 +1019,38 @@ fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<Or
     Ok((rest, ()))
 }
 
+/// CR 205.2a + CR 205.3a + CR 608.2c: true when the clause-so-far is an "exile
+/// all/each …" mass effect and `next_lower` (the text right after a comma or a
+/// bare "and") is another "[all|each] <type>" union leg — where `<type>` spans
+/// both card types (205.2a) and subtypes (205.3a). Such a separator is a within-effect
+/// union delimiter — not a clause boundary — so the whole multi-type union
+/// reaches `parse_exile_ast` (→ `parse_mass_type_union`) as one chunk rather than
+/// fragmenting "all artifacts" / "all enchantments" into verb-less sub_abilities
+/// (Everything Comes to Dust). Combinator-only; no string-method dispatch.
+fn continues_mass_exile_union(current_lower: &str, next_lower: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    if alt((tag::<_, _, E>("exile all "), tag("exile each ")))
+        .parse(current_lower.trim_start())
+        .is_err()
+    {
+        return false;
+    }
+    // The comma path leaves a leading conjunction ("and …" / "or …") on `next`.
+    let seg = alt((
+        tag::<_, _, E>("and/or "),
+        tag::<_, _, E>("and "),
+        tag::<_, _, E>("or "),
+    ))
+    .parse(next_lower.trim_start())
+    .map(|(rest, _)| rest)
+    .unwrap_or_else(|_| next_lower.trim_start())
+    .trim_start();
+    match alt((tag::<_, _, E>("all "), tag::<_, _, E>("each "))).parse(seg) {
+        Ok((rest, _)) => crate::parser::oracle_target::starts_with_type_word(rest.trim_start()),
+        Err(_) => false,
+    }
+}
+
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
     let current_lower = current.trim().to_ascii_lowercase();
     let trimmed = remainder.trim_start();
@@ -1015,6 +1058,14 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     let trimmed_lower = trimmed.to_ascii_lowercase();
 
     if starts_prefix_clause(&current_lower) {
+        return None;
+    }
+
+    // CR 205.2a + CR 205.3a + CR 608.2c: keep an "exile all/each A, all B, and
+    // all C" union intact — a comma before a "[all|each] <type>" continuation is
+    // a union delimiter, not a clause boundary (Everything Comes to Dust). Legs
+    // span card types (205.2a) and subtypes (205.3a).
+    if continues_mass_exile_union(&current_lower, &trimmed_lower) {
         return None;
     }
 

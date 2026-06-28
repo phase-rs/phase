@@ -2647,6 +2647,13 @@ pub enum FilterProp {
     /// of `BlockingSource`; used by "choose a creature that saddled it this turn"
     /// (Calamity, Galloping Inferno).
     SaddledSource,
+    /// CR 702.51c: Matches a creature that convoked the filter source — i.e. was
+    /// tapped to pay the source spell's convoke cost, recorded in the source
+    /// object's `convoked_creatures`. Source-relative, mirroring `SaddledSource`
+    /// / `BlockingSource`. Membership analogue of
+    /// `QuantityRef::ConvokedCreatureCount` (both read `convoked_creatures`).
+    /// Used by "a creature that convoked this spell" (Everything Comes to Dust).
+    ConvokedSource,
     /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
     /// `controller` relative to the ability source ("each battle they protect").
     ProtectorMatches {

@@ -161,6 +161,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -371,6 +372,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -2863,6 +2865,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -3250,6 +3253,13 @@ fn matches_filter_prop(
             .objects
             .get(&source.id)
             .is_some_and(|src| src.saddled_by.contains(&object_id)),
+        // CR 702.51c: a creature tapped to pay the source spell's convoke cost
+        // (recorded in the source's `convoked_creatures`). Source-relative,
+        // mirroring `SaddledSource`.
+        FilterProp::ConvokedSource => state
+            .objects
+            .get(&source.id)
+            .is_some_and(|src| src.convoked_creatures.contains(&object_id)),
         // CR 310.8a: "each battle they protect" — protector is an opponent of
         // the source controller (Joyful Stormsculptor class).
         FilterProp::ProtectorMatches { controller } => {
@@ -4203,6 +4213,7 @@ fn zone_change_record_matches_property(
         FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
