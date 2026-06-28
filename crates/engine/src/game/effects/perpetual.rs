@@ -12,9 +12,81 @@
 //! (Stationed/VehicleCrewed events, chain propagation) bind the correct object;
 //! `Any` falls back to the source when no referent is available.
 
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, StackEntryKind};
+
+/// CR 702.184a/702.122/702.171: object referent for Stationed/VehicleCrewed/Saddled
+/// trigger anaphora while a triggered ability is resolving.
+fn parent_object_from_trigger_event(
+    event: Option<&GameEvent>,
+) -> Option<crate::types::identifiers::ObjectId> {
+    match event? {
+        GameEvent::Stationed { creature_id, .. } => Some(*creature_id),
+        GameEvent::VehicleCrewed { vehicle_id, .. } => Some(*vehicle_id),
+        GameEvent::Saddled { mount_id, .. } => Some(*mount_id),
+        _ => None,
+    }
+}
+
+fn parent_object_from_resolution_trigger_context(
+    state: &GameState,
+) -> Option<crate::types::identifiers::ObjectId> {
+    parent_object_from_trigger_event(state.current_trigger_event.as_ref())
+        .or_else(|| {
+            state
+                .current_trigger_events
+                .iter()
+                .find_map(|event| parent_object_from_trigger_event(Some(event)))
+        })
+        .or_else(|| {
+            state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        trigger_event: Some(te),
+                        ..
+                    } => parent_object_from_trigger_event(Some(te)),
+                    _ => None,
+                })
+        })
+}
+
+fn perpetual_target_object_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<crate::types::identifiers::ObjectId> {
+    if !ability.targets.is_empty() {
+        let propagated = super::effect_object_targets(target, &ability.targets);
+        if !propagated.is_empty() {
+            return propagated;
+        }
+    }
+
+    if matches!(target, TargetFilter::ParentTarget) {
+        if let Some(id) = parent_object_from_resolution_trigger_context(state) {
+            return vec![id];
+        }
+    }
+
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
+    let mut ids = super::effect_object_targets(target, &effective_targets);
+
+    // Stationed/VehicleCrewed/Saddled ParentTarget must not bind the trigger
+    // source when the event referent is still available on the resolving entry.
+    if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
+        if let Some(id) = parent_object_from_resolution_trigger_context(state) {
+            return vec![id];
+        }
+    }
+
+    if ids.is_empty() {
+        ids.push(ability.source_id);
+    }
+    ids
+}
 
 /// Target resolution: uses the effect's `target` filter through the shared
 /// `resolved_targets` machinery (ParentTarget event anaphora, chain propagation,
@@ -34,11 +106,7 @@ pub fn resolve(
     let modification = modification.clone();
     let target = target.clone();
 
-    let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
-    let mut ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
-    if ids.is_empty() {
-        ids.push(ability.source_id);
-    }
+    let ids = perpetual_target_object_ids(state, ability, &target);
 
     let mut changed = false;
     for id in ids {

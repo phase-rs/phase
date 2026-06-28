@@ -23540,8 +23540,10 @@ mod station_tests {
             "Stationed trigger must push a stack entry"
         );
 
-        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
-        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        while !state.stack.is_empty() {
+            apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+            apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        }
 
         let creature = state.objects.get(&p5).unwrap();
         assert!(creature.has_keyword(&Keyword::Deathtouch));
