@@ -91,8 +91,9 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
 }
 
 /// CR 305.2: static land-play permissions with an explicit additional-drop
-/// count. `u8::MAX` represents "any number"; runtime summing saturates so it
-/// stays effectively unbounded when combined with ordinary extra drops.
+/// count greater than the ordinary +1 grant. `u8::MAX` represents "any
+/// number"; runtime summing saturates so it stays effectively unbounded when
+/// combined with ordinary extra drops.
 fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> {
     all_consuming(terminated(
         preceded(
@@ -100,7 +101,6 @@ fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> 
             alt((
                 value(u8::MAX, tag("any number of lands")),
                 value(2, tag("two additional lands")),
-                value(1, tag("an additional land")),
             )),
         ),
         (
@@ -2764,7 +2764,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "play any number of lands" / additional land-drop grants ---
+    // --- "play any number of lands" / counted additional land-drop grants ---
+    // The ordinary +1 phrase ("play an additional land") is handled by the
+    // rule-static subject/predicate shell so embedded subjects such as
+    // "Each player who last chose green anchor ..." keep their affected filter.
     if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count })

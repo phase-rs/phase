@@ -2976,6 +2976,16 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
         return Some(TargetFilter::Player);
     }
 
+    // Planechase planar die choice wording (Two Streams Facility): the current
+    // engine has no dedicated target filter for "players who last chose <word>",
+    // but this is still a player-scoped rule-static subject and must not cause
+    // the embedded predicate to fall through to `static_structure`.
+    if let Some(rest) = tp.lower.strip_prefix("each player who last chose ") {
+        if !rest.trim().is_empty() {
+            return Some(TargetFilter::Player);
+        }
+    }
+
     // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a
     // rule-static grant (e.g. "All Slivers have shroud"). Strip the quantifier and
     // delegate to parse_type_phrase (mirroring parse_target), so the subtype filter

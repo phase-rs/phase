@@ -6442,6 +6442,22 @@ fn static_each_player_may_play_an_additional_land() {
 }
 
 #[test]
+fn static_anchor_choice_player_may_play_an_additional_land() {
+    let def = parse_static_line(
+        "Each player who last chose green anchor may play an additional land during each of their turns.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MayPlayAdditionalLand);
+    assert_eq!(def.affected, Some(TargetFilter::Player));
+    assert_eq!(
+        def.description.as_deref(),
+        Some(
+            "Each player who last chose green anchor may play an additional land during each of their turns."
+        )
+    );
+}
+
+#[test]
 fn static_you_may_choose_not_to_untap_self() {
     let def =
         parse_static_line("You may choose not to untap this creature during your untap step.")
