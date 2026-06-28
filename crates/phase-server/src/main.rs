@@ -3747,6 +3747,7 @@ async fn handle_client_message(
                     );
                     info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
+                    let mut initial_player_count = 1;
                     if let Some(session) = mgr.sessions.get_mut(&game_code) {
                         session.start_when_full = start_when_full;
                         session.ranked = ranked;
@@ -3764,16 +3765,8 @@ async fn handle_client_message(
                             );
                             session.ai_configs.insert(pid, config);
                         }
-                    }
 
-                    let initial_player_count = mgr
-                        .sessions
-                        .get(&game_code)
-                        .map(|s| s.current_player_count())
-                        .unwrap_or(1);
-
-                    // Store lobby metadata on the session and persist to SQLite.
-                    if let Some(session) = mgr.sessions.get_mut(&game_code) {
+                        initial_player_count = session.current_player_count();
                         session.lobby_meta = Some(server_core::PersistedLobbyMeta {
                             host_name: display_name.clone(),
                             public,
@@ -3813,7 +3806,7 @@ async fn handle_client_message(
                     lob.register_game(
                         &game_code,
                         RegisterGameRequest {
-                            host_name: display_name.clone(),
+                            host_name: display_name,
                             public,
                             password,
                             timer_seconds,
