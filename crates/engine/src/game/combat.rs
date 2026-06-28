@@ -18,6 +18,58 @@ use crate::types::statics::{
 };
 use crate::types::zones::Zone;
 
+/// CR 604.1: loop-invariant presence facts for the combat-restriction statics.
+///
+/// Combat legality loops iterate N battlefield permanents and, per permanent,
+/// call `check_static_ability` — itself an O(N) `game_functioning_statics`
+/// sweep — making each loop O(N^2). `compute` does ONE sweep up front and
+/// records, for each restriction mode, whether any functioning static of that
+/// mode exists. The per-permanent `check_static_ability` call is then gated
+/// behind the matching flag: when the flag is false the call would `continue`
+/// past every definition and return false anyway (`check_static_ability`
+/// rejects on `def.mode != mode` first), so `flag && check_static_ability(..)`
+/// is byte-identical to the original call while skipping the redundant scan.
+///
+/// Representation: five named compile-time presence flags, NOT a no-bool-flags
+/// anti-pattern — these are five independent existence facts, not one
+/// choice-encoding bool. An `EnumSet` is rejected because `enumset` is not a
+/// workspace dependency and `StaticMode` is not fieldless (it carries data
+/// variants such as `MaxUntapPerType { filter, max }` and `Other(String)`).
+/// Five named flags read clearer than a runtime set lookup.
+struct CombatStaticGates {
+    has_cant_attack: bool,
+    has_cant_attack_or_block: bool,
+    has_must_attack: bool,
+    has_goad: bool,
+    has_can_attack_with_defender: bool,
+}
+
+impl CombatStaticGates {
+    /// One `game_functioning_statics` sweep computing all five presence flags.
+    /// Does NOT increment the static-full-scan perf counter: this is the single
+    /// intended hoisted sweep, not a per-element legality scan.
+    fn compute(state: &GameState) -> Self {
+        let mut gates = CombatStaticGates {
+            has_cant_attack: false,
+            has_cant_attack_or_block: false,
+            has_must_attack: false,
+            has_goad: false,
+            has_can_attack_with_defender: false,
+        };
+        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+            match def.mode {
+                StaticMode::CantAttack => gates.has_cant_attack = true,
+                StaticMode::CantAttackOrBlock => gates.has_cant_attack_or_block = true,
+                StaticMode::MustAttack => gates.has_must_attack = true,
+                StaticMode::Goaded => gates.has_goad = true,
+                StaticMode::CanAttackWithDefender => gates.has_can_attack_with_defender = true,
+                _ => {}
+            }
+        }
+        gates
+    }
+}
+
 /// CR 702.19: Which trample variant applies to combat damage assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrampleKind {
@@ -381,6 +433,10 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
+    // CR 604.1: hoist the combat-restriction existence gates once before the
+    // per-attacker scan (collapses O(N^2) to O(N)).
+    let gates = CombatStaticGates::compute(state);
+
     for &id in attacker_ids {
         let obj = state
             .objects
@@ -423,14 +479,15 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
             let can_attack_with_defender =
                 super::functioning_abilities::active_static_definitions(state, obj)
                     .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                    || crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CanAttackWithDefender,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(id),
-                            ..Default::default()
-                        },
-                    );
+                    || (gates.has_can_attack_with_defender
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::CanAttackWithDefender,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(id),
+                                ..Default::default()
+                            },
+                        ));
             if !can_attack_with_defender {
                 return Err(format!("{:?} has Defender", id));
             }
@@ -446,21 +503,25 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
                 sd.mode,
                 StaticMode::CantAttack | StaticMode::CantAttackOrBlock
             ) && sd.attack_defended.is_none()
-        }) || crate::game::static_abilities::check_static_ability(
-            state,
-            StaticMode::CantAttack,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(id),
-                ..Default::default()
-            },
-        ) || crate::game::static_abilities::check_static_ability(
-            state,
-            StaticMode::CantAttackOrBlock,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(id),
-                ..Default::default()
-            },
-        ) {
+        }) || (gates.has_cant_attack
+            && crate::game::static_abilities::check_static_ability(
+                state,
+                StaticMode::CantAttack,
+                &crate::game::static_abilities::StaticCheckContext {
+                    target_id: Some(id),
+                    ..Default::default()
+                },
+            ))
+            || (gates.has_cant_attack_or_block
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttackOrBlock,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(id),
+                        ..Default::default()
+                    },
+                ))
+        {
             return Err(format!("{:?} can't attack", id));
         }
 
@@ -846,6 +907,7 @@ fn attacker_has_must_be_blocked_by_all_from_precomputed(
 /// from the blocker, and remote affected filters are resolved through the shared
 /// static-ability checker.
 fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
+    crate::game::perf_counters::record_combat_shadow_block_scan();
     super::functioning_abilities::active_static_definitions(state, blocker)
         .any(|sd| sd.mode == StaticMode::CanBlockShadow)
         || crate::game::static_abilities::check_static_ability(
@@ -856,6 +918,20 @@ fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
                 ..Default::default()
             },
         )
+}
+
+// CR 604.1: static abilities are continuously "on"; if NO functioning
+// CanBlockShadow static exists anywhere (the loop-invariant existence gate),
+// both the blocker's intrinsic static scan and the remote check_static_ability
+// sweep return false, so this is byte-identical to the full predicate while
+// skipping the O(N) per-blocker sweep. CR 509.1b/609.4/702.28b: a CanBlockShadow
+// static lifts the shadow block restriction for the affected blocker.
+fn blocker_can_block_shadow_gated(
+    state: &GameState,
+    blocker: &GameObject,
+    can_block_shadow_exists: bool,
+) -> bool {
+    can_block_shadow_exists && blocker_can_block_shadow(state, blocker)
 }
 
 /// Validate blocker declarations per CR 509.1.
@@ -917,6 +993,14 @@ pub fn validate_blockers_for_player(
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
     let must_be_blocked = collect_must_be_blocked_statics(state);
+    // CR 604.1: loop-invariant existence gate for the shadow block-lift (CR
+    // 509.1b/609.4/702.28b). Hoisted once so the per-blocker shadow scan below
+    // and every `can_block_pair_with_precomputed` call skip the O(N)
+    // `check_static_ability` sweep when no `CanBlockShadow` static exists.
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
 
     // Group assignments by attacker for menace validation and by blocker for
     // per-creature block-capacity checks.
@@ -1091,7 +1175,10 @@ pub fn validate_blockers_for_player(
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
         // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
         // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
-        if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
+        if attacker_has_shadow
+            && !blocker_has_shadow
+            && !blocker_can_block_shadow_gated(state, blocker, can_block_shadow_exists)
+        {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow can only be blocked by shadow)",
                 blocker_id, attacker_id
@@ -1301,6 +1388,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
             });
 
@@ -1355,6 +1443,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
                 {
                     return false;
@@ -1374,6 +1463,13 @@ pub fn validate_blockers_for_player(
         // player's declaration.
         // If a defending creature has MustBlock and isn't assigned as a blocker,
         // verify it couldn't legally block any attacker.
+        // CR 604.1: hoist the MustBlock existence gate once before iterating N
+        // permanents so the per-permanent `check_static_ability` re-scan is
+        // skipped when no functioning MustBlock static exists (O(N^2) -> O(N)).
+        let has_must_block_static =
+            super::functioning_abilities::any_functioning_static_mode(state, |m| {
+                matches!(m, StaticMode::MustBlock)
+            });
         for &obj_id in &state.battlefield {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -1390,14 +1486,15 @@ pub fn validate_blockers_for_player(
             let has_must_block =
                 super::functioning_abilities::active_static_definitions(state, obj)
                     .any(|sd| sd.mode == StaticMode::MustBlock)
-                    || crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::MustBlock,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(obj_id),
-                            ..Default::default()
-                        },
-                    );
+                    || (has_must_block_static
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::MustBlock,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(obj_id),
+                                ..Default::default()
+                            },
+                        ));
             if !has_must_block {
                 continue;
             }
@@ -1431,6 +1528,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
             });
             if can_block_any {
@@ -1501,6 +1599,7 @@ pub fn validate_blockers_for_player(
                         &blocker_restriction,
                         &block_restriction,
                         &blocker_allowed,
+                        can_block_shadow_exists,
                     )
                 {
                     return Err(format!(
@@ -1870,7 +1969,8 @@ pub fn creature_must_attack(state: &GameState, obj_id: ObjectId) -> bool {
     creature_must_attack_with_attackable_players(state, obj_id, &attackable_players)
 }
 
-fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
+pub fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
+    crate::game::perf_counters::record_attackable_player_sweep();
     get_valid_attack_targets(state)
         .into_iter()
         .filter_map(|target| match target {
@@ -1897,10 +1997,23 @@ pub(crate) fn must_attack_players_for_creature(
         .collect()
 }
 
-fn creature_must_attack_with_attackable_players(
+pub fn creature_must_attack_with_attackable_players(
     state: &GameState,
     obj_id: ObjectId,
     attackable_players: &[PlayerId],
+) -> bool {
+    // Single-permanent entry: compute the loop-invariant gates once, then
+    // delegate. The single batch caller (`declare_attackers_with_bands`) reuses
+    // its already-hoisted gates via the `_gated` form below.
+    let gates = CombatStaticGates::compute(state);
+    creature_must_attack_with_attackable_players_gated(state, obj_id, attackable_players, &gates)
+}
+
+fn creature_must_attack_with_attackable_players_gated(
+    state: &GameState,
+    obj_id: ObjectId,
+    attackable_players: &[PlayerId],
+    gates: &CombatStaticGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&obj_id) else {
         return false;
@@ -1916,16 +2029,17 @@ fn creature_must_attack_with_attackable_players(
     // cross-permanent static (e.g., "All creatures attack each combat if able").
     let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
         .any(|sd| sd.mode == StaticMode::MustAttack)
-        || crate::game::static_abilities::check_static_ability(
-            state,
-            StaticMode::MustAttack,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(obj_id),
-                ..Default::default()
-            },
-        );
+        || (gates.has_must_attack
+            && crate::game::static_abilities::check_static_ability(
+                state,
+                StaticMode::MustAttack,
+                &crate::game::static_abilities::StaticCheckContext {
+                    target_id: Some(obj_id),
+                    ..Default::default()
+                },
+            ));
     // CR 701.15b: Goaded creatures must attack each combat if able.
-    let is_goaded = !goading_players_for_creature(state, obj_id).is_empty();
+    let is_goaded = !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty();
     let has_attackable_must_attack_player = must_attack_players_for_creature(state, obj)
         .iter()
         .any(|player| attackable_players.contains(player));
@@ -1942,14 +2056,15 @@ fn creature_must_attack_with_attackable_players(
         let can_attack_with_defender =
             super::functioning_abilities::active_static_definitions(state, obj)
                 .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                || crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CanAttackWithDefender,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(obj_id),
-                        ..Default::default()
-                    },
-                );
+                || (gates.has_can_attack_with_defender
+                    && crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CanAttackWithDefender,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(obj_id),
+                            ..Default::default()
+                        },
+                    ));
         if !can_attack_with_defender {
             return false;
         }
@@ -2215,13 +2330,22 @@ pub fn declare_attackers_with_bands(
         validate_attack_band_declarations(state, attacks, bands)?;
     }
     let attackable_players = attackable_player_targets(state);
+    // CR 604.1: hoist the combat-restriction existence gates once; every
+    // per-permanent / per-attacker static check below reuses them so each loop
+    // stays O(N) instead of O(N^2).
+    let gates = CombatStaticGates::compute(state);
 
     // CR 508.1d / CR 701.15b: Creatures that must attack each combat if able.
     // `creature_must_attack` is the single authority for the requirement +
     // exemption logic; this loop only adds the "already declared?" check and
     // the rejection error text.
     for &obj_id in &state.battlefield {
-        if !creature_must_attack_with_attackable_players(state, obj_id, &attackable_players) {
+        if !creature_must_attack_with_attackable_players_gated(
+            state,
+            obj_id,
+            &attackable_players,
+            &gates,
+        ) {
             continue;
         }
         // Already declared as attacker — constraint satisfied
@@ -2230,7 +2354,7 @@ pub fn declare_attackers_with_bands(
         }
         // Creature could legally attack but wasn't declared.
         // CR 701.15b: goad-specific error text; CR 508.1d otherwise.
-        if !goading_players_for_creature(state, obj_id).is_empty() {
+        if !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty() {
             return Err(format!(
                 "{:?} is goaded and must attack this combat if able (CR 701.15b)",
                 obj_id
@@ -2314,23 +2438,27 @@ pub fn declare_attackers_with_bands(
     // CR 508.1d: Scoped remote CantAttack (Eriette — enchanted creatures can't
     // attack you or planeswalkers you control).
     for (attacker_id, target) in attacks {
-        if crate::game::static_abilities::check_static_ability(
-            state,
-            StaticMode::CantAttack,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(*attacker_id),
-                attack_target: Some(*target),
-                ..Default::default()
-            },
-        ) || crate::game::static_abilities::check_static_ability(
-            state,
-            StaticMode::CantAttackOrBlock,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(*attacker_id),
-                attack_target: Some(*target),
-                ..Default::default()
-            },
-        ) {
+        if (gates.has_cant_attack
+            && crate::game::static_abilities::check_static_ability(
+                state,
+                StaticMode::CantAttack,
+                &crate::game::static_abilities::StaticCheckContext {
+                    target_id: Some(*attacker_id),
+                    attack_target: Some(*target),
+                    ..Default::default()
+                },
+            ))
+            || (gates.has_cant_attack_or_block
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttackOrBlock,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(*attacker_id),
+                        attack_target: Some(*target),
+                        ..Default::default()
+                    },
+                ))
+        {
             return Err(format!(
                 "{attacker_id:?} can't attack {target:?} (CR 508.1d attack restriction)"
             ));
@@ -2412,7 +2540,8 @@ pub fn declare_attackers_with_bands(
     // actually attack.
     for (attacker_id, target) in attacks {
         if let AttackTarget::Player(defending_pid) = target {
-            let goading_players = goading_players_for_creature(state, *attacker_id);
+            let goading_players =
+                goading_players_for_creature_gated(state, *attacker_id, gates.has_goad);
             if goading_players.is_empty() {
                 continue;
             }
@@ -2581,22 +2710,47 @@ pub(crate) fn goading_players_for_creature(
     state: &GameState,
     creature_id: ObjectId,
 ) -> HashSet<PlayerId> {
+    goading_players_for_creature_gated(
+        state,
+        creature_id,
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::Goaded)
+        }),
+    )
+}
+
+/// Loop-invariant-gated form of [`goading_players_for_creature`].
+///
+/// CR 701.15b: with no functioning `Goaded` static, only the directly-goaded
+/// `goaded_by` set applies, so combat loops that have already hoisted the
+/// existence gate pass `has_goad_static = false` to skip the O(N) sweep. When
+/// `true`, the exact existing sweep runs unchanged. The gate is computed over
+/// `game_functioning_statics` (a superset of `battlefield_active_statics` for
+/// `Goaded`), so it never produces a false negative.
+pub(crate) fn goading_players_for_creature_gated(
+    state: &GameState,
+    creature_id: ObjectId,
+    has_goad_static: bool,
+) -> HashSet<PlayerId> {
     let mut players = state
         .objects
         .get(&creature_id)
         .map(|obj| obj.goaded_by.clone())
         .unwrap_or_default();
 
-    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        if def.mode != StaticMode::Goaded {
-            continue;
-        }
-        let Some(affected) = &def.affected else {
-            continue;
-        };
-        let ctx = FilterContext::from_source(state, source.id);
-        if matches_target_filter(state, creature_id, affected, &ctx) {
-            players.insert(source.controller);
+    if has_goad_static {
+        crate::game::perf_counters::record_static_full_scan();
+        for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+            if def.mode != StaticMode::Goaded {
+                continue;
+            }
+            let Some(affected) = &def.affected else {
+                continue;
+            };
+            let ctx = FilterContext::from_source(state, source.id);
+            if matches_target_filter(state, creature_id, affected, &ctx) {
+                players.insert(source.controller);
+            }
         }
     }
 
@@ -2749,6 +2903,9 @@ pub fn has_summoning_sickness(obj: &GameObject) -> bool {
 /// CR 702.26b: Phased-out creatures can't attack.
 pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
     let active = state.active_player;
+    // CR 604.1: hoist the combat-restriction existence gates once before the
+    // per-permanent scan (collapses O(N^2) to O(N)).
+    let gates = CombatStaticGates::compute(state);
 
     state
         .battlefield_phased_in_ids()
@@ -2761,14 +2918,15 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 && (!obj.has_keyword(&Keyword::Defender)
                     || super::functioning_abilities::active_static_definitions(state, obj)
                         .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                    || crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CanAttackWithDefender,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    ))
+                    || (gates.has_can_attack_with_defender
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::CanAttackWithDefender,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(*id),
+                                ..Default::default()
+                            },
+                        )))
                 && !super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
                     matches!(
                         sd.mode,
@@ -2778,22 +2936,24 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
                 // (Angelic Arbiter restricting opponents' creatures) resolved via
                 // the shared `check_static_ability` building block.
-                && !crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantAttack,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(*id),
-                        ..Default::default()
-                    },
-                )
-                && !crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantAttackOrBlock,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(*id),
-                        ..Default::default()
-                    },
-                )
+                && !(gates.has_cant_attack
+                    && crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttack,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    ))
+                && !(gates.has_cant_attack_or_block
+                    && crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttackOrBlock,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    ))
                 // CR 302.6: delegate to the single authority for summoning
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
@@ -2959,6 +3119,11 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     let blocker_restriction = collect_blocker_restriction_statics(state);
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b).
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
     can_block_pair_with_precomputed(
         state,
         blocker_id,
@@ -2966,6 +3131,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         &blocker_restriction,
         &block_restriction,
         &blocker_allowed,
+        can_block_shadow_exists,
     )
 }
 
@@ -2983,6 +3149,7 @@ pub fn can_block_pair_with_precomputed(
     blocker_restriction: &[(ObjectId, StaticDefinition)],
     block_restriction: &[(ObjectId, StaticDefinition)],
     blocker_allowed: &[(ObjectId, StaticDefinition)],
+    can_block_shadow_exists: bool,
 ) -> bool {
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
@@ -3054,7 +3221,10 @@ pub fn can_block_pair_with_precomputed(
     let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
     // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
     // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
-    if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
+    if attacker_has_shadow
+        && !blocker_has_shadow
+        && !blocker_can_block_shadow_gated(state, blocker, can_block_shadow_exists)
+    {
         return false;
     }
     if !attacker_has_shadow && blocker_has_shadow {
@@ -3147,6 +3317,12 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
     let blocker_restriction = collect_blocker_restriction_statics(state);
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
+    // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
+    // hoisted once for the whole O(blockers × attackers) sweep.
+    let can_block_shadow_exists =
+        super::functioning_abilities::any_functioning_static_mode(state, |m| {
+            matches!(m, StaticMode::CanBlockShadow)
+        });
 
     let mut result = HashMap::new();
     for &blocker_id in &valid_blockers {
@@ -3169,6 +3345,7 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
                     &blocker_restriction,
                     &block_restriction,
                     &blocker_allowed,
+                    can_block_shadow_exists,
                 )
             })
             .map(|a| a.object_id)
@@ -3328,6 +3505,27 @@ pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> O
         } else {
             None
         }
+    })
+}
+
+/// CR 508.5 + CR 508.5a: Single authority for resolving the defending player a
+/// `ControllerRef::DefendingPlayer` reference points at, given the ability's source
+/// object. Per CR 508.5, when an ability refers to both an attacking creature and a
+/// defending player, the defending player is the one *that attacking creature* is
+/// attacking.
+///
+/// For a creature whose own attack trigger refers to "defending player", the ability
+/// source IS the attacker, so [`defending_player_for_attacker`] resolves it directly.
+/// For an Equipment, Aura, or any other permanent whose attack trigger references the
+/// defending player of a *different* creature (Greatsword of Tyr — "Whenever equipped
+/// creature attacks, ... tap up to one target creature defending player controls"), the
+/// source is not the attacker; fall back to the attacker carried by the current
+/// triggering event and resolve *its* defending player individually (CR 508.5a — the
+/// defending player is determined per attacking creature, not as a single batch value).
+pub fn resolve_defending_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    defending_player_for_attacker(state, source_id).or_else(|| {
+        crate::game::quantity::triggering_event_source_object(state)
+            .and_then(|attacker| defending_player_for_attacker(state, attacker))
     })
 }
 
@@ -3521,6 +3719,9 @@ pub fn prune_attackers_not_in_play(state: &mut GameState) {
 pub fn has_potential_attackers(state: &GameState) -> bool {
     let active = state.active_player;
     let turn = state.turn_number;
+    // CR 604.1: hoist the combat-restriction existence gates once before the
+    // per-permanent scan (collapses O(N^2) to O(N)).
+    let gates = CombatStaticGates::compute(state);
 
     state.battlefield.iter().any(|id| {
         state
@@ -3533,14 +3734,15 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                     && (!obj.has_keyword(&Keyword::Defender)
                         || super::functioning_abilities::active_static_definitions(state, obj)
                             .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                        || crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CanAttackWithDefender,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        ))
+                        || (gates.has_can_attack_with_defender
+                            && crate::game::static_abilities::check_static_ability(
+                                state,
+                                StaticMode::CanAttackWithDefender,
+                                &crate::game::static_abilities::StaticCheckContext {
+                                    target_id: Some(*id),
+                                    ..Default::default()
+                                },
+                            )))
                     && !super::functioning_abilities::active_static_definitions(state, obj).any(
                         |sd| {
                             matches!(
@@ -3551,22 +3753,24 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                     )
                     // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
                     // (Angelic Arbiter) resolved via `check_static_ability`.
-                    && !crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CantAttack,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    )
-                    && !crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CantAttackOrBlock,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    )
+                    && !(gates.has_cant_attack
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::CantAttack,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(*id),
+                                ..Default::default()
+                            },
+                        ))
+                    && !(gates.has_cant_attack_or_block
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::CantAttackOrBlock,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(*id),
+                                ..Default::default()
+                            },
+                        ))
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
@@ -3653,6 +3857,108 @@ mod tests {
         obj.chosen_attributes
             .push(crate::types::ability::ChosenAttribute::Player(protector));
         id
+    }
+
+    /// CR 604.1: a restriction-free board of K active-player attackers must NOT
+    /// trigger any whole-battlefield `check_static_ability` scan in
+    /// `get_valid_attacker_ids` — the `CombatStaticGates` hoist gates every
+    /// per-permanent scan off. Reverting the gate makes `static_full_scans`
+    /// jump to O(K) (2 scans per vanilla creature here — CantAttack and
+    /// CantAttackOrBlock; CanAttackWithDefender is short-circuited by
+    /// `!Defender`), failing the `== 0` assertion.
+    #[test]
+    fn get_valid_attacker_ids_no_static_scan_on_vanilla_board() {
+        let mut state = setup();
+        let ids: Vec<ObjectId> = (0..8)
+            .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
+            .collect();
+
+        crate::game::perf_counters::reset();
+        let valid = get_valid_attacker_ids(&state);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert_eq!(valid.len(), ids.len(), "all vanilla creatures can attack");
+        assert_eq!(
+            scans, 0,
+            "no static-ability whole-board scan on a vanilla board"
+        );
+    }
+
+    /// CR 604.1: `has_potential_attackers` gates the same three per-permanent
+    /// scans behind the hoisted existence flags.
+    #[test]
+    fn has_potential_attackers_no_static_scan_on_vanilla_board() {
+        let mut state = setup();
+        for i in 0..8 {
+            create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2);
+        }
+
+        crate::game::perf_counters::reset();
+        let any = has_potential_attackers(&state);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(any, "vanilla untapped creatures are potential attackers");
+        assert_eq!(
+            scans, 0,
+            "no static-ability whole-board scan on a vanilla board"
+        );
+    }
+
+    /// CR 604.1: declaring K vanilla attackers exercises Sites 2A/2B/2C/2D
+    /// (validate_attackers, the must-attack loop, the scoped CantAttack loop and
+    /// the goad-redirect loop). With no functioning combat-restriction static,
+    /// the single hoisted `CombatStaticGates` sweep gates every per-permanent /
+    /// per-attacker `check_static_ability` off, so the declaration costs zero
+    /// whole-board scans. Reverting any gate restores O(K) scans.
+    #[test]
+    fn declare_attackers_no_static_scan_on_vanilla_board() {
+        let mut state = setup();
+        let ids: Vec<ObjectId> = (0..8)
+            .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
+            .collect();
+        let attacks: Vec<(ObjectId, AttackTarget)> = ids
+            .iter()
+            .map(|id| (*id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+
+        crate::game::perf_counters::reset();
+        let mut events = Vec::new();
+        let result = declare_attackers_with_bands(&mut state, &attacks, &[], &mut events);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            result.is_ok(),
+            "declaring vanilla attackers is legal: {result:?}"
+        );
+        assert_eq!(
+            scans, 0,
+            "no static-ability whole-board scan on a vanilla declaration"
+        );
+    }
+
+    /// CR 604.1: the `validate_blockers_for_player` MustBlock loop gates its
+    /// per-permanent scan behind a hoisted `any_functioning_static_mode`
+    /// existence check, so validating an empty block on a vanilla board costs
+    /// zero whole-board scans.
+    #[test]
+    fn validate_blockers_no_static_scan_on_vanilla_board() {
+        let mut state = setup();
+        for i in 0..8 {
+            create_creature(&mut state, PlayerId(1), &format!("Wall {i}"), 0, 4);
+        }
+
+        crate::game::perf_counters::reset();
+        let result = validate_blockers_for_player(&state, PlayerId(1), &[]);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            result.is_ok(),
+            "an empty block is legal with no must-block: {result:?}"
+        );
+        assert_eq!(
+            scans, 0,
+            "no static-ability whole-board scan with no MustBlock static"
+        );
     }
 
     #[test]
@@ -5166,6 +5472,93 @@ mod tests {
             .keywords
             .push(Keyword::Shadow);
         assert!(validate_blockers(&state, &[(shadow_blocker, normal_attacker)]).is_err());
+    }
+
+    /// CR 604.1 + CR 509.1b/609.4/702.28b: with NO functioning `CanBlockShadow`
+    /// static anywhere, the hoisted existence gate short-circuits every
+    /// per-blocker shadow scan, so a shadow attacker facing K non-shadow blockers
+    /// costs ZERO `blocker_can_block_shadow` full-body executions while remaining
+    /// byte-identical (no non-shadow creature can block the shadow attacker).
+    /// Reverting the gate restores the O(K) per-blocker `check_static_ability`
+    /// sweep, flipping the `combat_shadow_block_scans == 0` assertion to K.
+    #[test]
+    fn get_valid_block_targets_no_shadow_scan_when_no_can_block_shadow_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow Strider", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        // K=8 non-shadow defending creatures (PlayerId(1)).
+        for i in 0..8 {
+            create_creature(&mut state, PlayerId(1), &format!("Bear {i}"), 2, 2);
+        }
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        crate::game::perf_counters::reset();
+        let targets = get_valid_block_targets(&state);
+        let scans = crate::game::perf_counters::snapshot().combat_shadow_block_scans;
+
+        assert_eq!(
+            scans, 0,
+            "no CanBlockShadow static exists, so the gate must skip every per-blocker shadow scan"
+        );
+        assert!(
+            targets.is_empty(),
+            "no non-shadow creature can legally block the shadow attacker; got {targets:?}"
+        );
+    }
+
+    /// CR 604.1 + CR 509.1b/609.4/702.28b equivalence: when a functioning
+    /// `CanBlockShadow` static DOES exist, the gate is true and the full
+    /// predicate runs, so the affected non-shadow creature is a legal blocker for
+    /// the shadow attacker while plain non-shadow creatures are not. This proves
+    /// the gate-true path preserves the shadow-lift (the gate is a pure
+    /// existence short-circuit, not a behavior change).
+    #[test]
+    fn get_valid_block_targets_honors_can_block_shadow_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow Strider", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        let plain = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let dryad = create_creature(&mut state, PlayerId(1), "Heartwood Dryad", 2, 2);
+        state
+            .objects
+            .get_mut(&dryad)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::SelfRef),
+            );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let targets = get_valid_block_targets(&state);
+        assert_eq!(
+            targets.get(&dryad).map(Vec::as_slice),
+            Some([attacker].as_slice()),
+            "the CanBlockShadow creature must be able to block the shadow attacker"
+        );
+        assert!(
+            !targets.contains_key(&plain),
+            "a plain non-shadow creature still cannot block the shadow attacker; got {targets:?}"
+        );
     }
 
     #[test]
@@ -7753,6 +8146,8 @@ mod tests {
             "collect_blocker_allowed_statics must capture the flying-only BlockRestriction"
         );
 
+        // No CanBlockShadow static on this board, so the shadow-lift gate is false.
+        let can_block_shadow_exists = false;
         let precomputed_ground = can_block_pair_with_precomputed(
             &state,
             drone,
@@ -7760,6 +8155,7 @@ mod tests {
             &blocker_restriction,
             &block_restriction,
             &blocker_allowed,
+            can_block_shadow_exists,
         );
         let precomputed_flyer = can_block_pair_with_precomputed(
             &state,
@@ -7768,6 +8164,7 @@ mod tests {
             &blocker_restriction,
             &block_restriction,
             &blocker_allowed,
+            can_block_shadow_exists,
         );
 
         assert!(
@@ -7841,6 +8238,8 @@ mod tests {
                 &blocker_restriction,
                 &block_restriction,
                 &blocker_allowed,
+                // No CanBlockShadow static on this board.
+                false,
             ),
             "precomputed pair check must reject a blocker under CantBlock"
         );

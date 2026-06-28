@@ -1,7 +1,7 @@
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 
-const DECK_BUILDER_FORMATS = FORMAT_REGISTRY.map(({ format, label }) => ({
+const DECK_BUILDER_FORMATS = DECK_CONSTRUCTION_FORMATS.map(({ format, label }) => ({
   value: format,
   label,
 }));

@@ -534,6 +534,10 @@ pub enum TriggerMode {
     EntersOrAttacks,
     /// "Whenever ~ attacks or blocks" — fires on both attack (CR 508.3a) and block (CR 509.1h) events.
     AttacksOrBlocks,
+    /// CR 702.55c: "~ enters or the creature it haunts dies" — parsed as one compound
+    /// trigger; the ETB half fires on the battlefield and synthesis clones the effect into
+    /// a `HauntedCreatureDies` trigger in exile for the haunted-dies half.
+    EntersOrHauntedCreatureDies,
 
     /// CR 603.8: State trigger — fires when a game-state condition becomes true, rather than
     /// in response to an event. Checked whenever a player would receive priority.
@@ -640,6 +644,7 @@ impl FromStr for TriggerMode {
             "Enlisted" => TriggerMode::Enlisted,
             "AttacksOrBlocks" => TriggerMode::AttacksOrBlocks,
             "EntersOrAttacks" => TriggerMode::EntersOrAttacks,
+            "EntersOrHauntedCreatureDies" => TriggerMode::EntersOrHauntedCreatureDies,
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "ExcessDamage" => TriggerMode::ExcessDamage,
@@ -908,6 +913,7 @@ mod tests {
             "ElementalBend",
             "Enlisted",
             "EntersOrAttacks",
+            "EntersOrHauntedCreatureDies",
             "Evolve",
             "Evolved",
             "ExcessDamage",

@@ -56,6 +56,7 @@
     "seatPlayer": "Player",
     "seatOpen": "Open",
     "seatAi": "AI ({{difficulty}})",
+    "teamLabel": "Team {{number}}",
     "waiting": "Waiting…",
     "seatLabel": "Seat {{id}}",
     "addAi": "Add AI",

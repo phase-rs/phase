@@ -49,9 +49,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *   1 — pre-compression JSON-serialization era (no longer in production)
- *   2 — gzip + version-prefixed binary wire format (current)
+ *   2 — gzip + version-prefixed binary wire format
+ *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
+ *   4 — Archenemy derived view and scheme deck payloads
  */
-export const WIRE_PROTOCOL_VERSION = 2 as const;
+export const WIRE_PROTOCOL_VERSION = 4 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -149,6 +151,14 @@ export function validateMessage(raw: unknown): P2PMessage {
   const msg = raw as { type: string };
   if (!VALID_TYPES.has(msg.type)) {
     throw new Error(`Invalid message type: ${msg.type}`);
+  }
+  if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
+    const versioned = raw as { wireProtocolVersion?: unknown };
+    if (versioned.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
+      throw new Error(
+        `Wire protocol mismatch: host sent v${String(versioned.wireProtocolVersion)}, this client speaks v${WIRE_PROTOCOL_VERSION}`,
+      );
+    }
   }
   return raw as P2PMessage;
 }

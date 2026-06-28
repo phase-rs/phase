@@ -18,6 +18,27 @@ import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 import type { AiCardDataMode } from "./card-db-subset";
 import { DEFAULT_AI_CARD_DATA_MODE, loadAiPoolCardDb } from "./card-db-subset";
+
+/**
+ * True on handheld browsers whose per-tab memory ceiling cannot hold the main
+ * WASM engine instance plus the 2–4 pooled AI instances. Every iOS browser is
+ * WebKit and shares one per-tab budget, so N copies of the full ~48MB engine
+ * module silently OOM-reload the tab. Desktop browsers have GB-scale ceilings
+ * and return false. Used by `ensureAiPool` to skip the pool on these devices.
+ *
+ * iPadOS 13+ reports the desktop `MacIntel` platform, so it is distinguished by
+ * its touch support rather than the user-agent string.
+ */
+function isMemoryConstrainedDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  const isIOS =
+    /iP(hone|od|ad)/.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isAndroidPhone = /Android/.test(ua) && /Mobile/.test(ua);
+  return isIOS || isAndroidPhone;
+}
+
 /**
  * Flatten the `ClientGameState { state, derived }` wire envelope produced
  * by the engine's WASM getters into the store-side `GameState` shape with
@@ -356,6 +377,13 @@ export class WasmAdapter implements EngineAdapter {
       return this.aiPool;
     }
     if (this.aiPoolFailed) return null;
+    // Skip the AI worker pool on memory-constrained handhelds (iOS WebKit in
+    // particular): the main engine instance plus 2–4 pooled instances each hold
+    // a full ~48MB WASM module and exceed the per-tab memory ceiling, silently
+    // OOM-reloading the tab. VeryHard then falls through to the single-worker
+    // path below (getAiAction), which runs the same fixed-budget beam search;
+    // the pool only adds cross-seed rollout-variance averaging, not search depth.
+    if (isMemoryConstrainedDevice()) return null;
     try {
       const cores = navigator.hardwareConcurrency ?? 0;
       const count = Math.max(2, Math.min(cores - 1, 4));
@@ -426,6 +454,14 @@ export class WasmAdapter implements EngineAdapter {
       return this.engine.applySeatMutation(stateJson, mutationJson);
     }
     return this.fallback!.applySeatMutation(stateJson, mutationJson);
+  }
+
+  async projectSeatView(stateJson: string): Promise<unknown> {
+    this.assertInitialized();
+    if (this.engine) {
+      return this.engine.projectSeatView(stateJson);
+    }
+    return this.fallback!.projectSeatView(stateJson);
   }
 
   /**
@@ -603,6 +639,7 @@ interface MainThreadFallback {
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
+  projectSeatView(stateJson: string): Promise<unknown>;
   ping(): string;
   initializeGame(
     deckData: unknown | null,
@@ -701,6 +738,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     applySeatMutation: (stateJson: string, mutationJson: string) =>
       enqueue(() => wasm.apply_seat_mutation(stateJson, mutationJson)),
+
+    projectSeatView: (stateJson: string) =>
+      enqueue(() => wasm.project_seat_view(stateJson)),
 
     ping: () => wasm.ping(),
 

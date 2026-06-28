@@ -208,8 +208,10 @@ export function createAIController(config: AIControllerConfig): AIController {
       // Resolve a guaranteed-legal escape action. A hardcoded empty combat
       // declaration is NOT always legal — CR 508.1d / CR 701.15b require
       // goaded / "attacks if able" creatures to be declared. Instead, ask the
-      // engine for its legal-action list (the single authority for legality)
-      // and pick the first entry matching the current WaitingFor.
+      // engine for its legal-action list (the single authority for legality).
+      // Non-priority legal actions are already scoped to the current
+      // WaitingFor; Priority fallback keeps preferring PassPriority as the
+      // least invasive escape.
       // CancelCast escapes a stuck casting flow; PassPriority is the final
       // fallthrough — never dispatch `undefined`.
       const fallbackPromise: Promise<GameAction> = state.has_pending_cast
@@ -218,8 +220,13 @@ export function createAIController(config: AIControllerConfig): AIController {
             const { adapter } = useGameStore.getState();
             if (!adapter) return Promise.resolve<GameAction>({ type: "PassPriority" });
             return adapter.getLegalActions().then((result) => {
-              const match = result.actions.find((a) => a.type === waitingFor.type);
-              return match ?? { type: "PassPriority" };
+              if (waitingFor.type === "Priority") {
+                return (
+                  result.actions.find((a) => a.type === "PassPriority") ??
+                  { type: "PassPriority" }
+                );
+              }
+              return result.actions[0] ?? { type: "PassPriority" };
             });
           })();
       // Dispatch the fallback as the authorized submitter being unstuck —

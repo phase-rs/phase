@@ -148,7 +148,7 @@ export function getWaitingForObjectChoiceIds(
   switch (waitingFor?.type) {
     case "TargetSelection":
     case "TriggerTargetSelection":
-      return waitingFor.data.selection.current_legal_targets.flatMap((target) =>
+      return (waitingFor.data.selection?.current_legal_targets ?? []).flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
     case "CopyTargetChoice":

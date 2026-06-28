@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
 import { searchCards } from "../../services/engineRuntime";
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import { useSetList } from "../../hooks/useSetList";
 import { hasSearchCriteria } from "./searchFilters";
 import { MenuSelect } from "../ui/MenuSelect";
@@ -66,7 +66,7 @@ export function CardSearch({
   const browserFormats = useMemo<{ value: BrowserLegalityFilter; label: string }[]>(
     () => [
       { value: "all", label: t("search.browseFormat.all") },
-      ...FORMAT_REGISTRY.map(({ format, label }) => ({
+      ...DECK_CONSTRUCTION_FORMATS.map(({ format, label }) => ({
         value: format as BrowserLegalityFilter,
         label,
       })),

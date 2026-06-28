@@ -16,11 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import { GamePage } from "../GamePage";
+import type { FormatConfig } from "../../adapter/types";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
 // Capture `onNoDeck` from GameProvider so tests can fire it.
 let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | undefined;
+let capturedFormatConfig: FormatConfig | undefined;
 
 const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
@@ -59,11 +61,14 @@ vi.mock("../../providers/GameProvider", () => ({
   GameProvider: ({
     children,
     onNoDeck,
+    formatConfig,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
+    formatConfig?: FormatConfig;
   }) => {
     capturedOnNoDeck = onNoDeck;
+    capturedFormatConfig = formatConfig;
     return <>{children}</>;
   },
 }));
@@ -122,7 +127,7 @@ vi.mock("../../stores/gameStore", () => ({
 // importing the real module.
 vi.mock("../../stores/multiplayerStore", () => ({
   useMultiplayerStore: mockUseMultiplayerStore,
-  FORMAT_DEFAULTS: new Proxy({}, { get: () => ({}) }),
+  FORMAT_DEFAULTS: new Proxy({}, { get: (_target, key) => ({ format: String(key) }) }),
 }));
 
 vi.mock("../../hooks/usePlayerId", () => ({
@@ -205,9 +210,9 @@ vi.mock("../../hooks/useCardDataMeta", () => ({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function renderGamePage() {
+function renderGamePage(initialEntry = "/game/test-game-123?mode=ai") {
   return render(
-    <MemoryRouter initialEntries={["/game/test-game-123?mode=ai"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game/:id" element={<GamePage />} />
         <Route path="/setup" element={<div data-testid="setup-page">Setup</div>} />
@@ -221,6 +226,7 @@ function renderGamePage() {
 
 beforeEach(() => {
   capturedOnNoDeck = undefined;
+  capturedFormatConfig = undefined;
   vi.clearAllMocks();
 });
 
@@ -229,6 +235,24 @@ afterEach(() => {
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {
+  it("passes Two-Headed Giant to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=TwoHeadedGiant&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
+  });
+
+  it("passes Two-Headed Giant to GameProvider for a direct AI URL", () => {
+    renderGamePage("/game/test-game-123?mode=ai&format=TwoHeadedGiant&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
+  });
+
+  it("passes Planechase to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=Planechase&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("Planechase");
+  });
+
   it("renders the blocking modal when bracketViolation flag is true", async () => {
     renderGamePage();
 

@@ -51,10 +51,13 @@ interface DeckCompatibilityRequest {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  planar_deck: string[];
+  scheme_deck: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
+  player_count?: number;
   summary_only?: boolean;
 }
 
@@ -64,6 +67,7 @@ interface EvaluateOptions {
   summaryOnly?: boolean;
   onResult?: (name: string, result: DeckCompatibilityResult) => void;
   onStatus?: (status: "starting-worker" | "loading-card-database" | "checking-deck", name?: string) => void;
+  playerCount?: number;
 }
 
 const fullCompatibilityCache = new Map<string, DeckCompatibilityResult>();
@@ -76,6 +80,7 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     ...expandParsedDeck(deck),
     selected_format: options.selectedFormat ?? null,
     selected_match_type: options.selectedMatchType ?? null,
+    player_count: options.playerCount ?? 2,
     summary_only: options.summaryOnly ?? false,
   };
 }
@@ -85,9 +90,12 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     main_deck: request.main_deck,
     sideboard: request.sideboard,
     commander: request.commander,
+    planar_deck: request.planar_deck,
+    scheme_deck: request.scheme_deck,
     signature_spell: request.signature_spell,
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
+    player_count: request.player_count ?? 2,
   });
 }
 

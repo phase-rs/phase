@@ -614,6 +614,46 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         }
     }
 
+    // CR 502.3: enchanted/equipped host untap restriction with optional trailing
+    // "if …" / "as long as …" (Venarian Gold, Winter's Rest canonical rewrite).
+    if nom_primitives::scan_contains(&pred_lower, "doesn't untap during")
+        || nom_primitives::scan_contains(&pred_lower, "don\u{2019}t untap during")
+    {
+        if let Some(predicate) = parse_rule_static_predicate(predicate) {
+            let mut def = lower_rule_static(predicate, affected.clone(), description);
+            if matches!(predicate, RuleStaticPredicate::CantUntap) {
+                if let Some((_, after_cond)) = pred_tp.split_around(" as long as ") {
+                    let condition_text = after_cond.original.trim().trim_end_matches('.');
+                    def.condition = Some(
+                        parse_static_condition(condition_text)
+                            .or_else(|| parse_attached_static_condition(condition_text))
+                            .unwrap_or(StaticCondition::Unrecognized {
+                                text: condition_text.to_string(),
+                            }),
+                    );
+                } else if let Some(condition) = extract_cant_untap_condition(&pred_lower) {
+                    def.condition = Some(condition);
+                }
+            }
+            return vec![def];
+        }
+    }
+
+    // CR 611.2 + CR 701.27: restriction-only enchanted/equipped predicates
+    // ("can't attack, block, or transform" — Bound by Moonsilver class). Must
+    // precede continuous-grant parsing, which would otherwise return an empty vec
+    // and let the line fall through to a SelfRef combat lock on the Aura source.
+    if let Some(modes) = parse_restriction_modes(pred_lower.trim().trim_end_matches('.')) {
+        return modes
+            .into_iter()
+            .map(|mode| {
+                StaticDefinition::new(mode)
+                    .affected(affected.clone())
+                    .description(description.to_string())
+            })
+            .collect();
+    }
+
     // --- Non-standard keyword phrasings (check before continuous grants) ---
 
     // CR 702.10: "can attack as though it had haste" → AddKeyword(Haste)

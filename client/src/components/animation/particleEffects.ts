@@ -4,6 +4,11 @@
 // Ported from Alchemy's particle engine, adapted for MTG context.
 
 import type { ParticleSystem, RGB, Particle } from "./particleSystem";
+import {
+  DAMAGE_FLURRY_PROJECTILE_MAX,
+  DAMAGE_FLURRY_PROJECTILE_MIN,
+  DAMAGE_FLURRY_TRAIL_PARTICLE_MAX,
+} from "../../animation/types";
 
 // ─── MTG Colors ───
 
@@ -365,6 +370,95 @@ export function emitPlayerDamage(system: ParticleSystem, x: number, y: number, a
       const ringAlpha = (1 - t) * 0.7;
       const ringSize = 12 + easeOutQuart(t) * 65;
       system.drawGlowRing(ctx, x, y, ringSize, DAMAGE_COLOR, ringAlpha, 2.5, 12);
+    },
+  });
+}
+
+export function damageFlurryProjectileCount(hitCount: number): number {
+  return Math.min(
+    DAMAGE_FLURRY_PROJECTILE_MAX,
+    Math.max(DAMAGE_FLURRY_PROJECTILE_MIN, Math.ceil(Math.sqrt(hitCount) * 2)),
+  );
+}
+
+export function emitDamageFlurry(
+  system: ParticleSystem,
+  fromPoints: { x: number; y: number }[],
+  to: { x: number; y: number },
+  hitCount: number,
+  totalDamage: number,
+  durationMs: number,
+) {
+  const now = performance.now();
+  const projectileCount = damageFlurryProjectileCount(hitCount);
+  const sources = fromPoints.length > 0 ? fromPoints : [to];
+  const staggerSpan = Math.min(90, durationMs);
+  let remainingTrailParticles = DAMAGE_FLURRY_TRAIL_PARTICLE_MAX;
+
+  for (let i = 0; i < projectileCount; i++) {
+    const source = sources[i % sources.length];
+    const stagger = (i / projectileCount) * staggerSpan;
+    const projectileDuration = Math.max(0, durationMs - stagger);
+    const dx = to.x - source.x;
+    const dy = to.y - source.y;
+    let lastTrailEmitT = -1;
+
+    system.addEffect({
+      startTime: now + stagger,
+      duration: projectileDuration,
+      update(t) {
+        if (remainingTrailParticles <= 0 || t - lastTrailEmitT <= 0.08) return;
+        lastTrailEmitT = t;
+        const progress = easeOutCubic(t);
+        const px = source.x + dx * progress + randRange(-8, 8);
+        const py = source.y + dy * progress + randRange(-8, 8);
+        const count = Math.min(
+          remainingTrailParticles,
+          Math.max(1, Math.floor(DAMAGE_FLURRY_TRAIL_PARTICLE_MAX / projectileCount)),
+        );
+        remainingTrailParticles -= count;
+        const trail: Partial<Particle>[] = [];
+        for (let j = 0; j < count; j++) {
+          trail.push({
+            x: px,
+            y: py,
+            vx: randRange(-45, 45),
+            vy: randRange(-45, 45),
+            life: randRange(0.12, 0.28),
+            size: randRange(2, 5),
+            endSize: 0,
+            r: COMBAT_COLOR.r,
+            g: COMBAT_COLOR.g,
+            b: COMBAT_COLOR.b,
+            alpha: 0.75,
+            drag: 3,
+            glow: 10,
+          });
+        }
+        system.emit(trail);
+      },
+      draw(t, ctx) {
+        const progress = easeOutCubic(t);
+        const px = source.x + dx * progress;
+        const py = source.y + dy * progress;
+        const fadeOut = t > 0.85 ? 1 - (t - 0.85) / 0.15 : 1;
+        system.drawGlowCircle(ctx, px, py, 10 * fadeOut, COMBAT_COLOR, 0.75 * fadeOut, 14);
+        system.drawGlowCircle(ctx, px, py, 4 * fadeOut, WHITE, 0.8 * fadeOut, 8);
+      },
+    });
+  }
+
+  system.addEffect({
+    startTime: now + durationMs,
+    duration: 520,
+    update() {},
+    draw(t, ctx) {
+      const intensity = Math.min(totalDamage / 20, 1);
+      const alpha = (1 - easeOutCubic(t)) * (0.55 + intensity * 0.35);
+      const size = 24 + easeOutCubic(t) * (55 + intensity * 40);
+      system.drawGlowCircle(ctx, to.x, to.y, size, DAMAGE_COLOR, alpha, 28);
+      system.drawGlowCircle(ctx, to.x, to.y, size * 0.35, WHITE, alpha * 0.65, 14);
+      system.drawGlowRing(ctx, to.x, to.y, 14 + easeOutQuart(t) * 95, DAMAGE_COLOR, (1 - t) * 0.75, 3, 14);
     },
   });
 }

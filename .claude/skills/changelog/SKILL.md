@@ -109,8 +109,41 @@ This rewrites `client/public/changelog-meta.json` (`{ latestId }`) and asserts
 the changelog invariants (newest-first, unique ids). CI fails if the committed
 meta drifts from `changelog.json`, so always run it before committing.
 
-Commit both `changelog.json` and `changelog-meta.json`. The preview snapshot
-updates on the next push to main; production picks it up at the nightly release.
+## Publish to Discord (`#announcements`)
+
+After the entry and meta are written, mirror the SAME entry out to Discord so
+the announcement and the in-app modal stay one source of truth — the post is
+reconstructed from `changelog.json` (`🎴 What's New in phase.rs` + the entry
+body), never re-authored, so the two can't drift:
+
+```bash
+bun scripts/post-changelog.ts --dry-run   # preview the exact message(s)
+bun scripts/post-changelog.ts             # post for real
+```
+
+Always run `--dry-run` first and show the output before posting — a real post to
+`#announcements` is outward-facing and pings members. This step is **safe to run
+unconditionally**: it no-ops (exit 0) when `DISCORD_BOT_TOKEN` or
+`ANNOUNCEMENTS_CHANNEL_ID` is absent, so a token-less environment simply skips
+it. It is **idempotent** — it records `lastPostedId` in
+`scripts/changelog/state.json` and skips an already-posted entry, so re-running
+the skill never double-posts. Long entries are split across multiple messages
+automatically (Discord's 2000-char limit). When `DISCORD_GUILD_ID` is set it
+writes the post's `discordUrl` back into the entry so the modal links to it.
+
+Config (same contract as `fetch-changelog.ts`, no hardcoded secrets/ids):
+`DISCORD_BOT_TOKEN` (gate), `ANNOUNCEMENTS_CHANNEL_ID` (target channel — NOT
+`DISCORD_CHANNEL_ID`, which is the bug-reports channel), optional
+`DISCORD_GUILD_ID` (for the `discordUrl` write-back), optional
+`CHANGELOG_HEADER_EMOJI` (the post's leading emoji; defaults to `🎴`). A custom
+guild emoji is stored **bracket-free** as `name:id` (e.g. `phase:1500234…`) —
+the script wraps it as `<:name:id>` for the API, since a bare `:name:` only
+resolves in the Discord client (not over REST) and the `<`/`>` brackets would
+break `source .env`. A literal Unicode emoji (no colon) is used verbatim.
+
+Commit `changelog.json`, `changelog-meta.json`, and (when the post ran)
+`scripts/changelog/state.json`. The preview snapshot updates on the next push to
+main; production picks it up at the nightly release.
 
 ## Footer
 

@@ -11,7 +11,7 @@ use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
-    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
+    ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -140,6 +140,24 @@ fn strip_mana_subject_prefix(text: &str) -> Option<(TargetFilter, &str)> {
         )
         .parse(i)
     })
+}
+
+/// CR 202.2c: Recognize the dynamic-color tail of an "any combination of …"
+/// mana clause that refers to a scoped object's colors ("its colors" / "that
+/// card's colors" — Omnath, Locus of All). Maps to `ObjectScope::Target` so the
+/// runtime resolver surveys the bound object's colors at resolution time. Unlike
+/// the static `parse_mana_color_set` path, the color set here is computed
+/// dynamically (CR 106.1 + CR 106.5).
+fn parse_object_colors_scope(text: &str) -> Option<ObjectScope> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let mut parser = all_consuming(value(
+        ObjectScope::Target,
+        alt((
+            tag::<_, _, OracleError<'_>>("its colors"),
+            tag("that card's colors"),
+        )),
+    ));
+    parser.parse(lower.as_str()).ok().map(|(_, scope)| scope)
 }
 
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
@@ -574,6 +592,19 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             value((), tag("mana in any combination of ")).parse(i)
         }) {
             let color_set_text = after_combo.trim();
+            // CR 106.1 + CR 202.2c: "...of its colors" / "...of that card's colors"
+            // produces mana freely chosen among a scoped object's colors, resolved
+            // dynamically at resolution time (Omnath, Locus of All). Dispatch this
+            // dynamic-color branch BEFORE the static brace-only color-set path.
+            if let Some(scope) = parse_object_colors_scope(color_set_text) {
+                return Some(Effect::Mana {
+                    produced: ManaProduction::AnyCombinationOfObjectColors { count, scope },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: where_x_target,
+                });
+            }
             if let Some(color_options) = parse_mana_color_set(color_set_text) {
                 return Some(Effect::Mana {
                     produced: ManaProduction::AnyCombination {
@@ -2565,6 +2596,42 @@ mod tests {
             }) => Some(options),
             _ => None,
         }
+    }
+
+    /// CR 106.1 + CR 202.2c: Omnath, Locus of All — "add three mana in any
+    /// combination of its colors" lowers to the dynamic-color
+    /// `AnyCombinationOfObjectColors { scope: Target }`, NOT the static
+    /// `AnyCombination`. The "its colors" dispatch must beat the brace-only
+    /// `parse_mana_color_set` path. "that card's colors" is the sibling phrasing.
+    #[test]
+    fn add_mana_in_any_combination_of_its_colors_is_dynamic() {
+        for oracle in [
+            "Add three mana in any combination of its colors",
+            "Add three mana in any combination of that card's colors",
+        ] {
+            let effect = try_parse_add_mana_effect(oracle)
+                .unwrap_or_else(|| panic!("{oracle:?} must parse as a mana effect"));
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("expected Effect::Mana for {oracle:?}");
+            };
+            let ManaProduction::AnyCombinationOfObjectColors { count, scope } = produced else {
+                panic!("expected AnyCombinationOfObjectColors for {oracle:?}, got {produced:?}");
+            };
+            assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(scope, ObjectScope::Target);
+        }
+
+        // The static brace form is unchanged (not captured by the dynamic branch).
+        let effect =
+            try_parse_add_mana_effect("Add three mana in any combination of {W}, {U}, or {B}")
+                .expect("static color-set form must still parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        assert!(
+            matches!(produced, ManaProduction::AnyCombination { .. }),
+            "brace color-set must stay static AnyCombination, got {produced:?}"
+        );
     }
 
     /// CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the mana-echo anaphor

@@ -214,6 +214,7 @@ export interface ScryfallCard {
 }
 
 const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
+  Archenemy: null,
   Brawl: "standardbrawl",
   DuelCommander: "duel",
   FreeForAll: null,

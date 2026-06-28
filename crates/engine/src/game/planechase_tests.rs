@@ -20,8 +20,10 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::format::FormatConfig;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -149,6 +151,40 @@ fn coretype_plane_phenomenon_roundtrip() {
     }
     assert_eq!(CoreType::Plane.to_string(), "Plane");
     assert_eq!(CoreType::Phenomenon.to_string(), "Phenomenon");
+}
+
+#[test]
+fn planar_die_legality_uses_semantic_priority_seat_under_turn_control() {
+    // CR 901.9 / CR 116.2i: the active player may roll the planar die as a
+    // special action while they have priority. CR 723 turn-control effects can
+    // route the authorized submitter through another player, but the rules
+    // legality remains attached to the controlled active seat.
+    let mut state = GameState::new_two_player(7);
+    let controller = PlayerId(0);
+    let controlled = PlayerId(1);
+    state.format_config = FormatConfig::planechase();
+    state.active_player = controlled;
+    state.priority_player = controller;
+    state.turn_decision_controller = Some(controller);
+    state.waiting_for = crate::types::game_state::WaitingFor::Priority { player: controlled };
+    state.phase = Phase::PreCombatMain;
+
+    let plane = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    setup_planechase(
+        &mut state,
+        controlled,
+        ("Controlled Turn Plane", &plane),
+        &[],
+    );
+
+    assert!(
+        super::planechase::can_roll_planar_die(&state, controlled),
+        "controlled active seat should satisfy planar-die rules legality"
+    );
+    assert!(
+        !super::planechase::can_roll_planar_die(&state, controller),
+        "authorized submitter is transport authority, not the planar-die rules seat"
+    );
 }
 
 // ---------------------------------------------------------------------------

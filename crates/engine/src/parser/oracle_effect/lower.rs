@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::character::complete::{multispace0, multispace1};
+use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -11,8 +11,9 @@ use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
-    parse_cda_quantity, parse_cda_quantity_with_context, parse_for_each_clause,
-    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context, parse_quantity_ref,
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -978,7 +979,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             {
                 ability_condition_to_static_condition(cond).map(|static_cond| {
                     for static_def in static_abilities.iter_mut() {
-                        static_def.condition = Some(static_cond.clone());
+                        // CR 611.3a + CR 118.12a: compose the outer/effective
+                        // clause condition with any per-static condition the
+                        // static parser already established, rather than dropping
+                        // one. Both gates must survive to runtime (mirrors the
+                        // `StaticCondition::And` composition in
+                        // `oracle_static/anthem.rs`).
+                        static_def.condition = Some(match static_def.condition.take() {
+                            Some(existing) => StaticCondition::And {
+                                conditions: vec![static_cond.clone(), existing],
+                            },
+                            None => static_cond.clone(),
+                        });
                     }
                 })
             } else {
@@ -1642,12 +1654,52 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     let (_, tail) = nom_on_lower(after, &after_lower, |i| {
         value((), tag("of those tokens")).parse(i)
     })?;
+    // CR 107.3 / CR 107.3c: when the count is the placeholder X and a trailing
+    // ", where X is <expr>" clause defines it, the value of X is defined by the
+    // card's own text — bind the count to that clause (e.g. Adipose Offspring's
+    // "the sacrificed creature's toughness" → Toughness { CostPaidObject }, The
+    // Final Days' "the number of creature cards in your graveyard") rather than
+    // to any {X} in the spell's mana cost. Absent the clause, X falls back to
+    // the spell's announced {X} (Starnheim Unleashed, Conqueror's Pledge).
+    if matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { .. }
+        }
+    ) {
+        if let Some(bound) = parse_trailing_where_x_quantity(tail) {
+            return Some(bound);
+        }
+    }
     // Accept end, or a comma/whitespace-prefixed modifier.
     if tail.is_empty() || matches!(tail.chars().next(), Some(' ' | ',' | '.')) {
         Some(count)
     } else {
         None
     }
+}
+
+/// CR 107.3c: parse a trailing ", where X is <quantity>" clause into the bound
+/// `QuantityExpr` it defines, reusing the shared quantity combinators. Returns
+/// `None` when the tail carries no such clause (the count then keeps its prior
+/// reading). Event-context quantities ("the sacrificed creature's toughness")
+/// are tried before the general CDA quantities so cost-paid-object possessives
+/// bind to `ObjectScope::CostPaidObject`.
+fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
+    let lower = tail.to_lowercase();
+    // Optional leading separator (", " / " ") then the defining clause keyword,
+    // all dispatched via nom combinators.
+    let (_, rest) = nom_on_lower(tail, &lower, |i| {
+        value((), (opt(tag(",")), multispace0, tag("where x is "))).parse(i)
+    })?;
+    // Structural trailing-period cleanup on the already clause-delimited
+    // quantity text before delegating to the quantity combinators (mirrors
+    // `parse_where_x_quantity_expression`).
+    let expr = rest.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup, not dispatch
+    if expr.is_empty() {
+        return None;
+    }
+    parse_event_context_quantity(expr).or_else(|| parse_cda_quantity(expr))
 }
 
 /// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
@@ -3518,6 +3570,14 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 player: crate::types::player::PlayerId(0),
             },
         ),
+        // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step"
+        // (Bounty of the Hunt and the class of temporary-counter effects).
+        (
+            " at the beginning of the next cleanup step",
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Cleanup,
+            },
+        ),
     ] {
         if lower.ends_with(suffix) {
             let end = text.len() - suffix.len();
@@ -3619,6 +3679,13 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     phase: Phase::EndCombat,
                 },
                 tag("at end of combat, "),
+            ),
+            // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step, "
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Cleanup,
+                },
+                tag("at the beginning of the next cleanup step, "),
             ),
         ))
         .parse(i)
@@ -4101,6 +4168,83 @@ pub(super) struct ReturnDestination {
     pub(super) face_down: bool,
 }
 
+/// A single battlefield-entry rider parsed from the tail after the destination
+/// phrase. Each variant is one independent flag; the scanner OR-accumulates a
+/// sequence of them into [`BattlefieldRiders`].
+#[derive(Clone, Copy)]
+enum BattlefieldRider {
+    // CR 614.1: enters the battlefield tapped.
+    Tapped,
+    // CR 708.2a + CR 708.3: turned face down before it enters.
+    FaceDown,
+    // CR 712.14a: put onto the battlefield "transformed" — enters with its
+    // back face up.
+    Transformed,
+    // CR 508.4: enters tapped and attacking (attacking flag; the accompanying
+    // "tapped" word, when present, is a separate `Tapped` rider).
+    Attacking,
+}
+
+/// OR-accumulated battlefield-entry riders.
+#[derive(Default, Clone, Copy)]
+struct BattlefieldRiders {
+    enter_tapped: bool,
+    face_down: bool,
+    transformed: bool,
+    enters_attacking: bool,
+}
+
+/// Match a single battlefield-entry rider, preceded by an optional connector
+/// (" and" / ","). The connector + rider are matched atomically: if no rider
+/// follows the connector the `preceded` fails and consumes nothing (including
+/// the connector), so a non-rider tail (", then exile it") stops the scan
+/// cleanly. " tapped" carries a word-boundary guard so it does not match a
+/// longer word with the same prefix.
+fn parse_one_battlefield_rider(input: &str) -> OracleResult<'_, BattlefieldRider> {
+    preceded(
+        opt(alt((tag(" and"), tag(",")))),
+        alt((
+            // CR 508.4: "tapped and attacking" is the connector ("tapped" +
+            // "and") feeding the `Attacking` rider on the next iteration; the
+            // standalone words are matched here. " face down" before " tapped"
+            // so the longer phrase wins when both could start a match.
+            value(BattlefieldRider::FaceDown, tag(" face down")),
+            value(
+                BattlefieldRider::Tapped,
+                terminated(tag(" tapped"), not(satisfy(|c: char| c.is_alphanumeric()))),
+            ),
+            value(BattlefieldRider::Transformed, tag(" transformed")),
+            value(BattlefieldRider::Attacking, tag(" attacking")),
+        )),
+    )
+    .parse(input)
+}
+
+/// Scan trailing battlefield-entry riders that may appear in any order after the
+/// destination phrase ("to the battlefield under your control face down and
+/// tapped"). The legacy destination table only encodes a fixed set of
+/// contiguous rider permutations; this scanner picks up whatever riders the
+/// table left on `after_destination`, OR-ing each into the flag accumulator.
+/// Returns the unconsumed remainder and the accumulated riders.
+///
+/// CR 614.1 (tapped) + CR 708.3 (face down) + CR 712.14a (transformed) + CR
+/// 508.4 (attacking) are all independent entry conditions, so order doesn't
+/// matter.
+fn strip_trailing_battlefield_riders(after_destination: &str) -> (&str, BattlefieldRiders) {
+    let mut remaining = after_destination;
+    let mut riders = BattlefieldRiders::default();
+    while let Ok((rest, rider)) = parse_one_battlefield_rider(remaining) {
+        match rider {
+            BattlefieldRider::Tapped => riders.enter_tapped = true,
+            BattlefieldRider::FaceDown => riders.face_down = true,
+            BattlefieldRider::Transformed => riders.transformed = true,
+            BattlefieldRider::Attacking => riders.enters_attacking = true,
+        }
+        remaining = rest;
+    }
+    (remaining, riders)
+}
+
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
 pub(super) fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>) {
     let (target, dest, _) = strip_return_destination_ext_with_remainder(text);
@@ -4385,7 +4529,31 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             None => (phrase.len(), false, lower.rfind(phrase)),
         };
         if let Some(pos) = pos {
-            let after_destination = &lower[pos + phrase_len..];
+            // Local, OR-able copies of this row's battlefield-entry flags. The
+            // legacy table only encodes a fixed set of contiguous rider
+            // permutations; `strip_trailing_battlefield_riders` picks up any
+            // order-independent riders the table left behind (Missy's "... under
+            // your control face down and tapped").
+            let mut face_down = face_down;
+            let mut transformed = *transformed;
+            let mut enter_tapped = *enter_tapped;
+            let mut enters_attacking = *enters_attacking;
+            // Byte offset (into both `lower` and `text`) just past the consumed
+            // destination phrase and any trailing riders. Riders are pure-ASCII
+            // and case-invariant, so the lowercase advance is valid into `text`
+            // exactly as the pre-existing `pos + phrase_len` indexing already
+            // assumes.
+            let mut entry_offset = pos + phrase_len;
+            if *zone == Zone::Battlefield {
+                let (rider_rest, riders) =
+                    strip_trailing_battlefield_riders(&lower[entry_offset..]);
+                face_down |= riders.face_down;
+                transformed |= riders.transformed;
+                enter_tapped |= riders.enter_tapped;
+                enters_attacking |= riders.enters_attacking;
+                entry_offset = lower.len() - rider_rest.len();
+            }
+            let after_destination = &lower[entry_offset..];
             let (enter_with_counters, counters_offset) =
                 parse_with_counters_suffix_spanned(after_destination);
             // CR 614.1c: when the "with N <type> counter(s)" clause is lifted
@@ -4401,23 +4569,23 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                     // which is not word-anchored and would corrupt a remainder
                     // ending in "brand"/"island"); mirrors the leading
                     // `strip_leading_sequence_connector` analogue.
-                    let trimmed = text[pos + phrase_len..pos + phrase_len + off].trim_end();
+                    let trimmed = text[entry_offset..entry_offset + off].trim_end();
                     trimmed
                         // allow-noncombinator: structural cleanup of a trailing " and" connector on an already-sliced remainder, not parsing dispatch
                         .strip_suffix(" and")
                         .map(|s| s.trim_end())
                         .unwrap_or(trimmed)
                 }
-                None => &text[pos + phrase_len..],
+                None => &text[entry_offset..],
             };
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
                     zone: *zone,
-                    transformed: *transformed,
+                    transformed,
                     enters_under: enters_under_you.then_some(ControllerRef::You),
-                    enter_tapped: *enter_tapped,
-                    enters_attacking: *enters_attacking,
+                    enter_tapped,
+                    enters_attacking,
                     enter_with_counters,
                     face_down,
                 }),
@@ -6976,10 +7144,10 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
-        value_quantity_clause_owns_this_turn_suffix,
+        match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+        parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
+        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
@@ -6991,6 +7159,55 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 107.3c: the "create N of those tokens" anaphor binds its count to a
+    /// trailing ", where X is <expr>" clause when present (Adipose Offspring and
+    /// The Final Days), and otherwise keeps the spell's announced {X}
+    /// (Starnheim Unleashed / Conqueror's Pledge).
+    #[test]
+    fn match_create_of_those_tokens_binds_trailing_where_x_clause() {
+        // CR 107.3c: cost-paid-object possessive → Toughness { CostPaidObject }.
+        let adipose = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the sacrificed creature's toughness",
+        );
+        assert_eq!(
+            match_create_of_those_tokens(&adipose),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+
+        // Boy-scout: The Final Days' graveyard-creature-count where-clause.
+        let final_days = Effect::unimplemented(
+            "create",
+            "create x of those tokens, where x is the number of creature cards in your \
+             graveyard",
+        );
+        assert!(
+            matches!(
+                match_create_of_those_tokens(&final_days),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount { .. }
+                })
+            ),
+            "graveyard creature-count where-clause must bind, got {:?}",
+            match_create_of_those_tokens(&final_days)
+        );
+
+        // No where-clause → the count stays the spell's announced {X}.
+        let bare = Effect::unimplemented("create", "create x of those tokens");
+        assert_eq!(
+            match_create_of_those_tokens(&bare),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        );
+    }
 
     // CR 101.4 + CR 608.2c: the comma-prefixed per-player imperative scope ("for
     // each player, <imperative> ... that player controls") strips to PlayerFilter::All

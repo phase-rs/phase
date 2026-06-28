@@ -2879,51 +2879,61 @@ pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     parse_for_each_clause_ref_with_they_controller(input, they_controller)
 }
 
+/// CR 608.2c + CR 609.3: Read the Runes — "for each card[s] drawn this way".
+fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("card drawn this way"), tag("cards drawn this way"))).parse(input)?;
+    Ok((rest, QuantityRef::EventContextAmount))
+}
+
 fn parse_for_each_clause_ref_with_they_controller(
     input: &str,
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
-        parse_for_each_one_life_changed,
-        parse_for_each_opponents_life_change,
-        parse_counter_added_this_turn_for_each,
-        parse_object_colors_for_each,
-        parse_object_name_word_count_for_each,
-        parse_object_typeline_component_count_for_each,
-        parse_mana_symbols_in_object_mana_cost_for_each,
-        parse_distinct_card_types_in_zone,
-        parse_foretold_cards_owned_in_exile,
-        parse_zone_card_count,
-        parse_for_each_attached_to_source,
-        // CR 201.2: "for each differently named <type>" — distinct-by-name
-        // iteration. Must precede generic type-filter arm.
-        parse_for_each_differently_named,
-        // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
-        // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
-        // Insight). Must precede the generic type-filter arm so the "different
-        // <quality>" adjective prefix is consumed before the bare type word.
-        parse_distinct_quality_among_objects,
-        // CR 700.8: "creature in your party" must precede the generic
-        // "<type> you control" arm — same reason as in
-        // `parse_number_of_inner`.
-        parse_creature_in_party_for_each,
-        parse_player_counter_ref_tail,
-        // CR 700.4: "creature that died this turn" / "creature that
-        // died under your control this turn" — event-based count of dies-events
-        // tracked in `state.zone_changes_this_turn`. Must precede
-        // `parse_for_each_controlled_type` since the leading "creature" token
-        // would otherwise commit the simple `<type> you control` arm.
-        parse_for_each_subtype_died_this_turn,
-        parse_for_each_creature_died_this_turn,
-        // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
-        // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
-        // leading type token does not commit to the generic `<type> you control` arm.
-        parse_for_each_sacrificed_this_turn,
-        // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
-        // control this turn" — destination-agnostic zone-change count, distinct
-        // from the graveyard-only "died" arm above.
-        parse_for_each_creature_left_battlefield_this_turn,
-        parse_entered_this_turn_ref,
+        parse_for_each_card_drawn_this_way,
+        alt((
+            parse_for_each_one_life_changed,
+            parse_for_each_opponents_life_change,
+            parse_counter_added_this_turn_for_each,
+            parse_color_of_object_for_each,
+            parse_object_colors_for_each,
+            parse_object_name_word_count_for_each,
+            parse_object_typeline_component_count_for_each,
+            parse_mana_symbols_in_object_mana_cost_for_each,
+            parse_distinct_card_types_in_zone,
+            parse_foretold_cards_owned_in_exile,
+            parse_zone_card_count,
+            parse_for_each_attached_to_source,
+            // CR 201.2: "for each differently named <type>" — distinct-by-name
+            // iteration. Must precede generic type-filter arm.
+            parse_for_each_differently_named,
+            // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
+            // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
+            // Insight). Must precede the generic type-filter arm so the "different
+            // <quality>" adjective prefix is consumed before the bare type word.
+            parse_distinct_quality_among_objects,
+            // CR 700.8: "creature in your party" must precede the generic
+            // "<type> you control" arm — same reason as in
+            // `parse_number_of_inner`.
+            parse_creature_in_party_for_each,
+            parse_player_counter_ref_tail,
+            // CR 700.4: "creature that died this turn" / "creature that
+            // died under your control this turn" — event-based count of dies-events
+            // tracked in `state.zone_changes_this_turn`. Must precede
+            // `parse_for_each_controlled_type` since the leading "creature" token
+            // would otherwise commit the simple `<type> you control` arm.
+            parse_for_each_subtype_died_this_turn,
+            parse_for_each_creature_died_this_turn,
+            // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
+            // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
+            // leading type token does not commit to the generic `<type> you control` arm.
+            parse_for_each_sacrificed_this_turn,
+            // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+            // control this turn" — destination-agnostic zone-change count, distinct
+            // from the graveyard-only "died" arm above.
+            parse_for_each_creature_left_battlefield_this_turn,
+            parse_entered_this_turn_ref,
+        )),
     ))
     .or(alt((
         |input| parse_for_each_combat_creature_controlled(input, they_controller.clone()),
@@ -3349,7 +3359,23 @@ fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<
     let (rest, _) = tag(" in ").parse(rest)?;
     let (rest, scope) = parse_object_possessive_scope(rest)?;
     let (rest, _) = tag(" mana cost").parse(rest)?;
-    Ok((rest, QuantityRef::ManaSymbolsInManaCost { scope, color }))
+    Ok((
+        rest,
+        QuantityRef::ManaSymbolsInManaCost {
+            scope,
+            color: Some(color),
+        },
+    ))
+}
+
+/// CR 105.1 + CR 601.2f: "for each color[s] of <object>" — scoped object-color
+/// count for cost reductions and similar per-color riders. Delegates object
+/// binding to `parse_object_color_of_scope` (target/enchanted/equipped/it-
+/// targets anaphors).
+fn parse_color_of_object_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("color of "), tag("colors of "))).parse(input)?;
+    let (rest, scope) = parse_object_color_of_scope(rest)?;
+    Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
 /// CR 105.1 + CR 105.2: Parse "for each [of] <object>'s colors" into a
@@ -3476,6 +3502,14 @@ fn parse_object_color_of_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that planeswalker")),
+        value(
+            ObjectScope::Target,
+            (
+                alt((tag("the "), tag("a "))),
+                alt((tag("creature"), tag("permanent"))),
+                tag(" it targets"),
+            ),
+        ),
         value(ObjectScope::Source, tag("~")),
         value(ObjectScope::Source, tag("this creature")),
         value(ObjectScope::Source, tag("this permanent")),
@@ -5278,6 +5312,37 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 105.1 + CR 601.2f + CR 115.1: generalized "color of <object>" for-each.
+    #[test]
+    fn test_parse_for_each_color_of_object() {
+        let (rest, q) = parse_for_each_clause_ref("color of the creature it targets").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref("color of target creature").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref("colors of the enchanted creature").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Recipient
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
     #[test]
     fn test_parse_for_each_object_name_word_count_recipient_and_target() {
         let (rest, q) = parse_for_each("for each word in its name").unwrap();
@@ -5306,7 +5371,7 @@ mod tests {
             q,
             QuantityRef::ManaSymbolsInManaCost {
                 scope: crate::types::ability::ObjectScope::Recipient,
-                color: ManaColor::White,
+                color: Some(ManaColor::White),
             }
         );
         assert_eq!(rest, "");
@@ -6339,6 +6404,13 @@ mod tests {
             },
             _ => panic!("expected ObjectCount"),
         }
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_card_drawn_this_way() {
+        let (rest, q) = parse_for_each_clause_ref("card drawn this way").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
     }
 

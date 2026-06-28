@@ -1576,6 +1576,8 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// - "that player each" — the player-axis form (Council's-dilemma "for each
 ///   player who chose <choice>" body).
 /// - "target opponent each" / "target player each" — targeted player-axis forms.
+///   The parser binds their exact player scope after the splitter preserves the
+///   full clause.
 /// - "that creature each" — the object-axis form (CR 115.1 parent-target
 ///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
 ///   +2/+0 and gain haste ... and attack this turn if able").
@@ -4062,6 +4064,11 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             .parse(after_put)
             {
                 PutCount::AnyNumber
+            } else if all_consuming(alt((tag::<_, _, OracleError<'_>>("all"), tag("each"))))
+                .parse(after_put)
+                .is_ok()
+            {
+                PutCount::All
             } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
@@ -4352,15 +4359,45 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
     let mut subtypes: Vec<String> = Vec::new();
     loop {
         rest = rest.trim_start();
-        // CR 708.2a sentence 1: "... creature(s)." terminator → creature body,
-        // P/T defaulting to 2/2. Checked FIRST (before the non-creature
-        // core-type words) so that a non-creature word acting as an adjective
-        // ("artifact creature") is treated as an extra core type rather than a
-        // terminal — mirroring `parse_theyre_face_down_profile`. This lets the
-        // singular Cyberman body ("It's a 2/2 Cyberman artifact creature.")
-        // parse, not just the plural form.
-        if let Ok((after, _)) =
-            alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))).parse(rest)
+        // Non-terminal extra core type word (e.g. "artifact creature"). A
+        // core-type word followed by a space is a *modifier*, not the clause's
+        // terminating noun, so it must be tried BEFORE the bare-noun terminator
+        // below. Otherwise "artifact creature" matches the terminal
+        // `tag("artifact")`, leaves a non-empty " creature" tail, and rejects
+        // the whole clause (the latent bug behind Missy / Cyber Conversion's
+        // "It's a 2/2 Cyberman artifact creature.").
+        if let Ok((after, ct)) = alt((
+            value(
+                CoreType::Artifact,
+                tag::<_, _, OracleError<'_>>("artifact "),
+            ),
+            value(CoreType::Enchantment, tag("enchantment ")),
+            value(CoreType::Land, tag("land ")),
+            value(CoreType::Planeswalker, tag("planeswalker ")),
+        ))
+        .parse(rest)
+        {
+            if !extra_core_types.contains(&ct) {
+                extra_core_types.push(ct);
+            }
+            rest = after;
+            continue;
+        }
+        // Terminator: a core-type noun then optional ".". The terminal noun maps
+        // directly to its `CoreType` — Creature is the only one that yields a
+        // creature body; every other core type ("land", "artifact", ...)
+        // terminates a non-creature body whose core types come from the effect.
+        if let Ok((after, terminal)) = alt((
+            value(
+                CoreType::Creature,
+                alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
+            ),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(rest)
         {
             let after = after.trim_start();
             let after = opt(tag::<_, _, OracleError<'_>>("."))
@@ -4369,67 +4406,36 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
             if !after.trim().is_empty() {
                 return None;
             }
-            return Some(FaceDownProfile {
-                power,
-                toughness,
-                body: FaceDownBody::Creature,
-                extra_core_types,
-                subtypes,
-                ward: None,
-            });
-        }
-        // CR 708.2a sentence 2 / CR 205.1a: a non-creature core-type word. It is
-        // the TERMINAL noun (a non-creature body — Yedora's "It's a Forest
-        // land.") only when it ENDS the clause; when followed by more text it is
-        // an adjective extra core type ("artifact creature") and the loop
-        // continues to the "creature" terminator above.
-        if let Ok((after, ct)) = alt((
-            value(CoreType::Land, tag::<_, _, OracleError<'_>>("land")),
-            value(CoreType::Artifact, tag("artifact")),
-            value(CoreType::Enchantment, tag("enchantment")),
-            value(CoreType::Planeswalker, tag("planeswalker")),
-        ))
-        .parse(rest)
-        {
-            // Word-boundary guard: don't match a prefix of a longer word; allow a
-            // following space, period, or end-of-input as the boundary.
-            let boundary_ok =
-                after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '.');
-            if boundary_ok {
-                let ends = {
-                    let t = after.trim_start();
-                    opt(tag::<_, _, OracleError<'_>>("."))
-                        .parse(t)
-                        .map_or(t, |(r, _)| r)
-                        .trim()
-                        .is_empty()
-                };
-                if ends {
-                    // CR 208.1: a non-creature body has no power/toughness, so a
-                    // stray P/T ("It's a 2/2 land.") is not a valid clause.
+            return match terminal {
+                // "... creature(s)." — creature body, P/T defaults to 2/2.
+                CoreType::Creature => Some(FaceDownProfile {
+                    power,
+                    toughness,
+                    body: FaceDownBody::Creature,
+                    extra_core_types,
+                    subtypes,
+                    ward: None,
+                }),
+                // "... land/artifact/enchantment/planeswalker." — non-creature
+                // body whose core type is the terminal noun; no implicit
+                // Creature, no power/toughness.
+                ct => {
                     if power.is_some() || toughness.is_some() {
                         return None;
                     }
                     if !extra_core_types.contains(&ct) {
                         extra_core_types.push(ct);
                     }
-                    return Some(FaceDownProfile {
+                    Some(FaceDownProfile {
                         power: None,
                         toughness: None,
                         body: FaceDownBody::Noncreature,
                         extra_core_types,
                         subtypes,
                         ward: None,
-                    });
+                    })
                 }
-                // Adjective use — an extra core type before the creature
-                // terminator (e.g. the "artifact" in "artifact creature").
-                if !extra_core_types.contains(&ct) {
-                    extra_core_types.push(ct);
-                }
-                rest = after;
-                continue;
-            }
+            };
         }
         // Subtype (land type "Forest", creature type "Spirit", ...).
         if let Some((canonical, consumed)) = crate::parser::oracle_util::parse_subtype(rest) {
@@ -5324,6 +5330,10 @@ pub(super) fn parse_followup_continuation_ast(
                 | "exile that card face down"
                 | "exile the card"
                 | "exile the card face down"
+                | "exile them"
+                | "exile them face down"
+                | "exile those cards"
+                | "exile those cards face down"
         ) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
@@ -6057,6 +6067,82 @@ mod tests {
             "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
+        let previous = Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+        };
+        let result =
+            parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
+        assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
+    }
+
+    /// CR 701.23a + CR 701.18a (cluster 35 / Mana Severance): comma-split
+    /// "search …, exile them, then shuffle" must lower to one SearchLibrary
+    /// compound with a single library→exile destination and shuffle — not a
+    /// duplicate ChangeZone from the redundant "exile them" restatement.
+    #[test]
+    fn mana_severance_search_any_number_lands_exile_then_shuffle() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Search your library for any number of land cards, exile them, then shuffle.",
+            AbilityKind::Spell,
+        );
+
+        let mut searches = 0usize;
+        let mut library_exiles = 0usize;
+        let mut shuffles = 0usize;
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            match &*d.effect {
+                Effect::SearchLibrary { filter, count, .. } => {
+                    searches += 1;
+                    assert!(
+                        matches!(count, QuantityExpr::UpTo { .. }),
+                        "any-number search must be up-to bounded, got {count:?}"
+                    );
+                    assert!(
+                        matches!(
+                            filter,
+                            TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Land)
+                        ),
+                        "expected land filter, got {filter:?}"
+                    );
+                }
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Exile,
+                    ..
+                } => {
+                    library_exiles += 1;
+                }
+                Effect::Shuffle { .. } => {
+                    shuffles += 1;
+                }
+                _ => {}
+            }
+            node = d.sub_ability.as_deref();
+        }
+
+        assert_eq!(searches, 1, "expected exactly one SearchLibrary");
+        assert_eq!(
+            library_exiles, 1,
+            "expected exactly one library→exile destination"
+        );
+        assert_eq!(shuffles, 1, "expected exactly one Shuffle");
     }
 
     #[test]
@@ -7172,6 +7258,33 @@ mod tests {
     }
 
     #[test]
+    fn put_mass_of_them_into_hand_is_all() {
+        for text in [
+            "Put all of them into your hand.",
+            "Put each of them into your hand.",
+            "Put all of those cards into your hand.",
+            "Put each of those cards into your hand.",
+        ] {
+            let dig = make_dig_effect();
+            let result = parse_followup_continuation_ast(text, &dig, &mut ParseContext::default());
+            assert_eq!(
+                result,
+                Some(ContinuationAst::DigFromAmong {
+                    quantity: PutCount::All,
+                    filter: TargetFilter::Any,
+                    destination: Some(Zone::Hand),
+                    rest_destination: None,
+                    enters_under: None,
+                    face_down_profile: None,
+                    enter_tapped: false,
+                    reveal_verb: false,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn put_all_milled_cards_onto_battlefield_tapped_patches_enter_tapped() {
         let mill = Effect::Mill {
             count: QuantityExpr::Fixed { value: 3 },
@@ -7773,8 +7886,8 @@ mod tests {
 
         // CR 708.2a + CR 205.1a: Cyber Conversion's singular creature body with an
         // extra core type AND a subtype — "It's a 2/2 Cyberman artifact creature."
-        // The non-creature word "artifact" is an adjective here (extra core type),
-        // not the terminal noun; "creature" terminates the creature body.
+        // The non-terminal "artifact " modifier must be consumed before the
+        // terminal "creature" noun; the subtype "Cyberman" is retained.
         let cyberman =
             parse_its_face_down_profile("it's a 2/2 cyberman artifact creature.").unwrap();
         assert_eq!(cyberman.body, FaceDownBody::Creature);
@@ -7782,6 +7895,16 @@ mod tests {
         assert_eq!(cyberman.toughness, Some(2));
         assert_eq!(cyberman.extra_core_types, vec![CoreType::Artifact]);
         assert_eq!(cyberman.subtypes, vec!["Cyberman".to_string()]);
+
+        // Sibling without an extra core type proves the reorder did not regress
+        // the plain "<subtype> creature" form.
+        let zombie = parse_its_face_down_profile("it's a 1/1 zombie creature").unwrap();
+        assert_eq!(zombie.body, FaceDownBody::Creature);
+        assert_eq!(zombie.power, Some(1));
+        assert_eq!(zombie.toughness, Some(1));
+        assert!(zombie.extra_core_types.is_empty());
+        assert_eq!(zombie.subtypes, vec!["Zombie".to_string()]);
+
 
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).

@@ -94,14 +94,7 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
 pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
-    if player == other {
-        return false;
-    }
-    if state.format_config.team_based {
-        team_index(player) != team_index(other)
-    } else {
-        true
-    }
+    super::topology::is_opponent(state, player, other)
 }
 
 /// CR 102.1 / CR 102.2 / CR 102.3 / CR 109.5: Match a player against a
@@ -189,6 +182,10 @@ pub fn apnap_order_from(
             | ControllerRef::EnchantedPlayer,
         ) => state.active_player,
     };
+
+    if state.format_config.topology().has_shared_team_turns() {
+        return super::topology::apnap_order_from(state, start_player);
+    }
 
     let start_idx = seat_order
         .iter()
@@ -284,29 +281,7 @@ pub fn owns_card_exiled_by_source(
 /// For Two-Headed Giant: players 0+1 are team A, players 2+3 are team B.
 /// For non-team formats, returns an empty vec.
 pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    if !state.format_config.team_based {
-        return Vec::new();
-    }
-
-    // 2HG team pairing: even-indexed players are paired with the next odd-indexed player
-    let player_idx = player.0;
-    let team_base = team_index(player) * 2;
-    let partner_idx = if player_idx == team_base {
-        team_base + 1
-    } else {
-        team_base
-    };
-    let partner = PlayerId(partner_idx);
-
-    if is_alive(state, partner) {
-        vec![partner]
-    } else {
-        Vec::new()
-    }
-}
-
-pub(crate) fn team_index(player: PlayerId) -> u8 {
-    player.0 / 2
+    super::topology::teammates(state, player)
 }
 
 /// CR 810.9a + CR 810.9d: Fold a player population into one i32 by aggregating
@@ -326,13 +301,9 @@ pub(crate) fn aggregate_over_teams<I>(
 where
     I: IntoIterator<Item = PlayerId>,
 {
-    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = if state.format_config.team_based {
-            team_index(pid) as u32
-        } else {
-            pid.0 as u32
-        };
+        let key = super::topology::shared_resource_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -353,21 +324,11 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    let mut total = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
+    super::topology::shared_resource_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
-        .unwrap_or(0);
-    for teammate in teammates(state, player) {
-        total += state
-            .players
-            .iter()
-            .find(|p| p.id == teammate)
-            .map(|p| p.life)
-            .unwrap_or(0);
-    }
-    total
+        .sum()
 }
 
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
@@ -375,21 +336,11 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// for the player and their (living) teammates. Non-team formats degenerate
 /// to the player's own count.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    let mut total = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
+    super::topology::shared_resource_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
-        .unwrap_or(0);
-    for teammate in teammates(state, player) {
-        total += state
-            .players
-            .iter()
-            .find(|p| p.id == teammate)
-            .map(|p| p.poison_counters)
-            .unwrap_or(0);
-    }
-    total
+        .sum()
 }
 
 #[cfg(test)]
@@ -547,6 +498,7 @@ mod tests {
         let state = make_state(2, FormatConfig::standard());
         assert_eq!(opponents(&state, PlayerId(0)), vec![PlayerId(1)]);
         assert_eq!(opponents(&state, PlayerId(1)), vec![PlayerId(0)]);
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(1)));
     }
 
     #[test]
@@ -690,6 +642,9 @@ mod tests {
     fn teammates_2hg_player_0_has_teammate_1() {
         let state = make_state(4, FormatConfig::two_headed_giant());
         assert_eq!(teammates(&state, PlayerId(0)), vec![PlayerId(1)]);
+        assert!(!is_opponent(&state, PlayerId(0), PlayerId(1)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(2)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(3)));
     }
 
     #[test]
@@ -732,6 +687,21 @@ mod tests {
         assert_eq!(team_life_total(&state, PlayerId(3)), 30);
     }
 
+    #[test]
+    fn new_two_hg_initializes_15_per_seat_30_team_total() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        assert!(state.players.iter().all(|player| player.life == 15));
+        assert_eq!(team_life_total(&state, PlayerId(0)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 30);
+
+        let standard = GameState::new(FormatConfig::standard(), 2, 0);
+        assert_eq!(standard.players[0].life, 20);
+        assert_eq!(standard.players[1].life, 20);
+
+        let commander = GameState::new(FormatConfig::commander(), 4, 0);
+        assert!(commander.players.iter().all(|player| player.life == 40));
+    }
+
     /// Outside team-based formats, `team_life_total` degenerates to the
     /// player's own (full, unsplit) starting life — no regression from the
     /// 2HG even-split fix.
@@ -750,6 +720,19 @@ mod tests {
         assert_eq!(team_poison_total(&state, PlayerId(1)), 15);
         // Opposing team is unaffected.
         assert_eq!(team_poison_total(&state, PlayerId(2)), 0);
+    }
+
+    #[test]
+    fn archenemy_life_and_poison_are_individual_not_shared_by_side() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 0);
+        state.players[1].poison_counters = 6;
+        state.players[2].poison_counters = 9;
+
+        assert_eq!(team_life_total(&state, PlayerId(0)), 40);
+        assert_eq!(team_life_total(&state, PlayerId(1)), 20);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 20);
+        assert_eq!(team_poison_total(&state, PlayerId(1)), 6);
+        assert_eq!(team_poison_total(&state, PlayerId(2)), 9);
     }
 
     // --- aggregate_over_teams ---

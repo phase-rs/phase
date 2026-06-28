@@ -899,6 +899,7 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "aiUnsupportedFormat": "{{format}} ist für das Hosten von Mehrspielerpartien verfügbar, aber KI-Partien werden dafür noch nicht unterstützt.",
     "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
     "cedhWarningUntagged": "ohne Bracket",
     "bracketViolation": {
@@ -1560,6 +1561,8 @@
     "crashBody": "phase.rs ist auf einen internen Fehler gestoßen und kann diese Aktion nicht sicher fortsetzen. Dein zuletzt gespeicherter Zug bleibt erhalten — lade neu, um das Spiel wiederherzustellen. <strong>Bitte melde dies</strong>, damit wir es beheben können.",
     "connectionTitle": "Engine-Verbindung verloren",
     "connectionBody": "phase.rs hat die Verbindung zur Spiel-Engine verloren — meist durch ein Hintergrund-Update verursacht, das mitten im Spiel aktiviert wurde. Dein zuletzt gespeicherter Zug bleibt erhalten; lade neu, um das Spiel wiederherzustellen.",
+    "timeoutTitle": "Engine hat zu lange gebraucht",
+    "timeoutBody": "phase.rs konnte diese Aktion nicht innerhalb des Zeitlimits berechnen. Das kann bei sehr komplexen Spielfeldern passieren (zum Beispiel Hunderte von Spielsteinen). Dein zuletzt gespeicherter Zug bleibt erhalten — lade neu, um das Spiel wiederherzustellen, und exportiere ggf. den Spielstand, um ihn zu melden.",
     "diagnostic": "Diagnose: {{reason}}",
     "showDetails": "Details anzeigen",
     "exportGameState": "Spielzustand exportieren",
@@ -1842,5 +1845,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

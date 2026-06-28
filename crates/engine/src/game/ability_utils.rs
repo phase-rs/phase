@@ -873,9 +873,15 @@ pub fn choose_target(
         return Ok(TargetSelectionAdvance::Complete(selected_slots));
     }
 
-    Ok(TargetSelectionAdvance::InProgress(
-        build_target_selection_progress(target_slots, constraints, next_slot, selected_slots)?,
-    ))
+    let next_progress =
+        build_target_selection_progress(target_slots, constraints, next_slot, selected_slots)?;
+    if next_progress.current_slot >= target_slots.len() {
+        validate_selected_slot_prefix(target_slots, &next_progress.selected_slots, constraints)?;
+        return Ok(TargetSelectionAdvance::Complete(
+            next_progress.selected_slots,
+        ));
+    }
+    Ok(TargetSelectionAdvance::InProgress(next_progress))
 }
 
 pub fn choose_target_for_ability(
@@ -951,16 +957,28 @@ pub fn choose_target_for_ability(
         return Ok(TargetSelectionAdvance::Complete(selected_slots));
     }
 
-    Ok(TargetSelectionAdvance::InProgress(
-        build_target_selection_progress_for_ability(
+    let next_progress = build_target_selection_progress_for_ability(
+        state,
+        ability,
+        target_slots,
+        constraints,
+        next_slot,
+        selected_slots,
+    )?;
+    if next_progress.current_slot >= target_slots.len() {
+        validate_selected_slots_with_specs(
             state,
             ability,
+            &specs,
             target_slots,
+            &next_progress.selected_slots,
             constraints,
-            next_slot,
-            selected_slots,
-        )?,
-    ))
+        )?;
+        return Ok(TargetSelectionAdvance::Complete(
+            next_progress.selected_slots,
+        ));
+    }
+    Ok(TargetSelectionAdvance::InProgress(next_progress))
 }
 
 pub fn auto_select_targets(
@@ -4159,6 +4177,16 @@ fn build_target_selection_progress(
                 "No legal target combinations available".to_string(),
             ));
         }
+        // CR 115.6: Optional slots with no remaining legal targets are
+        // auto-skipped — do not surface an interactive step with an empty
+        // `current_legal_targets` (the field is omitted on the wire when empty,
+        // which crashes clients that read it unconditionally).
+        return build_target_selection_progress(
+            target_slots,
+            constraints,
+            current_slot + 1,
+            skipped_slots,
+        );
     }
 
     Ok(TargetSelectionProgress {
@@ -4227,6 +4255,18 @@ fn build_target_selection_progress_for_ability(
                 "No legal target combinations available".to_string(),
             ));
         }
+        // CR 115.6: Optional slots with no remaining legal targets are
+        // auto-skipped — do not surface an interactive step with an empty
+        // `current_legal_targets` (the field is omitted on the wire when empty,
+        // which crashes clients that read it unconditionally).
+        return build_target_selection_progress_for_ability(
+            state,
+            ability,
+            target_slots,
+            constraints,
+            current_slot + 1,
+            skipped_slots,
+        );
     }
 
     Ok(TargetSelectionProgress {
@@ -7474,6 +7514,60 @@ mod tests {
         assert!(
             !selected_slots.contains(&Some(TargetRef::Object(second))),
             "skip must not auto-pick later legal targets"
+        );
+    }
+
+    /// CR 115.1 + CR 115.6: After the "controlled by different players"
+    /// constraint exhausts every controller, remaining optional multi-target
+    /// slots must auto-skip instead of pausing with an empty
+    /// `current_legal_targets` (issue #4242 / Lagrella).
+    #[test]
+    fn choose_target_auto_skips_optional_tail_when_constraint_exhausted() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_creature(&mut state, PlayerId(0), CardId(1), "Lagrella");
+        let p0_creature = create_creature(&mut state, PlayerId(0), CardId(2), "Ally");
+        let p1_creature = create_creature(&mut state, PlayerId(1), CardId(3), "Opp");
+
+        let mut ability = up_to_n_target_creatures(source, PlayerId(0), 3);
+        ability.target_constraints = vec![TargetSelectionConstraint::DifferentObjectControllers];
+        let target_slots = build_target_slots(&state, &ability).expect("target slots");
+        let constraints = ability.target_constraints.clone();
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &target_slots, &constraints)
+                .expect("selection should start");
+
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &target_slots,
+            &constraints,
+            &progress,
+            Some(TargetRef::Object(p1_creature)),
+        )
+        .expect("first target should be accepted") else {
+            panic!("expected target selection to continue after first pick");
+        };
+
+        let TargetSelectionAdvance::Complete(selected_slots) = choose_target_for_ability(
+            &state,
+            &ability,
+            &target_slots,
+            &constraints,
+            &progress,
+            Some(TargetRef::Object(p0_creature)),
+        )
+        .expect("second target should auto-complete the optional tail") else {
+            panic!("expected auto-skip to complete after the last controller is used");
+        };
+
+        assert_eq!(
+            selected_slots,
+            vec![
+                Some(TargetRef::Object(p1_creature)),
+                Some(TargetRef::Object(p0_creature)),
+                None,
+            ]
         );
     }
 

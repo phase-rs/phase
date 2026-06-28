@@ -1,6 +1,47 @@
 {
   "entries": [
     {
+      "id": 153,
+      "date": "2026-06-27",
+      "title": "Suspend arrives, plus Two-Headed Giant & Planechase",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "multiplayer",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Suspend is playable — cast spells with time counters that tick down each turn, plus Time Travel time-counter manipulation\n• Repeated cost payment arrives on Marvel's Spider-Man cards: Hawkeye, Master Marksman and Hawkeye, Young Avenger (pay a cost several times to scale the effect)\n• New cards: Cosmic Cube, The Ruinous Wrecking Crew, False Peace, Empty City Ruse, Lightning Dart, Inquisitor's Snare, Adipose Offspring, and Confession Dial\n• False Peace & Empty City Ruse can make a player skip all combat phases of their next turn\n• Doctor's companion legendary creatures are now supported\n\n🛠️ Cards That Now Work Right\n• Drag to the Underworld — devotion cost reduction now applies at cast time\n• Predatory Rampage — now forces every creature your opponents control to block\n• Wretched Banquet — correctly gates on the creature with the least power\n• Visions of Ruin — flashback casts now get the commander cost reduction\n• Progenitor's Icon — chosen-type next-spell flash now works\n• Fixes for Blademane Baku, Decoy Gambit, and Lethargy Trap\n\n⚔️ Combat & Gameplay\n• Game-winning loops now resolve instantly — infinite combos like Sanguine Bond + Exquisite Blood and Marauding Blight-Priest + Bloodthirsty Conqueror end the game immediately instead of grinding through hundreds of triggers\n• Much smoother play on huge token boards — declaring attackers and other decisions no longer slow down with hundreds of mana-producing tokens\n\n🌐 Multiplayer\n• New format foundations: Two-Headed Giant, Planechase, and Archenemy are now selectable in multiplayer setup\n\n🖥️ Interface\n• Sacrificing identical tokens now uses a single \"how many?\" prompt instead of clicking each one\n• Large combat damage is grouped into cleaner, faster animations",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520516929708626092"
+    },
+    {
+      "id": 152,
+      "date": "2026-06-26",
+      "title": "Cast from graveyard & exile, right in your hand",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Equipment that enters the battlefield already attached to a creature now attaches correctly instead of falling off\n• Mishra, Eminent One — the token copy it makes becomes a 4/4 named Mishra's Warform with its own name, so it no longer dies to the legend rule alongside the original\n• Nested Shambler now makes a number of tokens equal to its power including buffs — a pumped Shambler finally makes the full count\n• Riptide Shapeshifter and Heirloom Blade now dig to the correct creature type\n• Dominaria's Judgment grants each color of protection only when you control the matching basic land (white with a Plains, blue with an Island, and so on)\n• Limited Resources only stops players from playing lands once ten or more lands are on the battlefield, not before\n• Claws of Gix, Curie, and Master Transmuter can now be activated even when the permanent you sacrifice, exile, or return was paying for the ability's mana — mana is tapped first\n• Lava Blister, Blazing Salvo, and Molten Influence now offer their \"unless you deal damage to yourself\" alternative and resolve it correctly\n• Lim-Dul's Hex now offers its \"unless a player pays\" choice\n• Dragonfire Blade's equip-cost color discount now applies\n• Auras that read \"Enchant creature without flying\" can now legally target a creature\n• Accumulate Wisdom's alternate dig mode now works\n• Lagrella, the Magpie's enter-the-battlefield exile no longer stalls the game when exiling creatures controlled by different players\n• Creatures that enter with a dynamic number of extra +1/+1 counters — such as a count equal to another creature's toughness — now get them\n• \"Each opponent draws\" effects now correctly draw cards for your opponents\n• You can now tap your lands for mana during an opponent's turn to pay for instants and abilities\n\n⚔️ Combat & Gameplay\n• Big token boards no longer crawl — passing priority, declaring attackers, untapping, and combat legality checks are dramatically faster on boards with hundreds of creatures (for example Squirrel decks powered by Cryptolith Rite)\n\n🖥️ Interface\n• Cards you can cast from your graveyard and exile — flashback, escape, foretell, adventure, and more — now fan out as colored wings on either side of your hand: exile on the left, graveyard on the right, all on one continuous arc. Flick them up to cast\n• Slime Against Humanity and other \"any number of copies\" cards can now be added without limit to Commander decks instead of being capped\n\n🤖 AI\n• The AI no longer gets stuck when a spell it lined up turns out to be uncastable — it recovers and keeps playing",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520294592186945656"
+    },
+    {
+      "id": 151,
+      "date": "2026-06-26",
+      "title": "iOS crash fixes, deck folders & Rooms",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Rooms now play both halves — the second door of a Room split card is finally castable (Spiked Corridor // Torture Pit and other Rooms)\n• Curse of Conformity works — it sets the enchanted player's creatures to base 3/3 and strips their other creature types\n• Mad Wizard's Lair (Dungeon of the Mad Mage, room 8) now resolves instead of doing nothing\n\n🛠️ Cards That Now Work Right\n• Octavia, Living Thesis only gets her cost reduction with eight or more instants/sorceries in your graveyard — no more turn-two Octavia from an empty graveyard\n• Court of Cunning now mills every targeted player, not just the first\n• From the Rubble correctly reanimates creatures from your graveyard\n• Well Rested's untap trigger now gives the life gain and card draw to the Aura's controller\n• Braids, Arisen Nightmare no longer runs its life-loss and draw tail when you decline your own sacrifice\n• Sanar Vivid keeps revealed cards in your library for its per-color exile\n• Committing a crime now triggers on damage that doesn't target, such as a Desert ping to an opponent\n• Token copies made \"except it's legendary\" now actually become legendary (Adagia, Windswept Bastion)\n• The Commander 2017 curse cycle now fires its \"whenever the enchanted player is attacked\" abilities (Curse of Bounty, Curse of Disturbance, Curse of Opulence, Curse of Verbosity, Curse of Vitality, Imprison This Insolent Wretch)\n• Equipment and Aura \"whenever equipped creature attacks\" triggers can now target the defending player (Greatsword of Tyr)\n\n⚔️ Combat & Gameplay\n• Lifelink now gains life once when a single source hits multiple targets at once (several blockers, or trample to a blocker plus the player), so \"whenever you gain life\" abilities trigger once instead of several times (Blech, Loafing Pest)\n• Wide boards no longer stall during combat — removed a slowdown that grew sharply with the number of creatures in play\n\n🖥️ Interface\n• New \"What's New\" panel — release notes now live in the app behind the sparkle icon, with search, pagination, and an unread badge\n• Organize your decks into folders in My Decks — create, rename, and assign decks to folders\n• Fixed out-of-memory crashes on iOS — Very Hard AI and large card pools no longer reload the tab on iPhone and iPad\n• Moxfield maybeboard cards are no longer pulled in when importing a deck by URL\n• Board hover tooltips now stay on screen near the edges of the window\n• Fixed a card-art regression where some cached images showed text instead of the picture\n\n🌐 Multiplayer\n• Fixed an out-of-memory crash for the multiplayer host when validating a guest's deck on iOS",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1520112115816599743"
+    },
+    {
       "id": 150,
       "date": "2026-06-25",
       "title": "Stability fixes: graveyard-choice softlock & engine panics",

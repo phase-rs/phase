@@ -1697,6 +1697,44 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — leading "If three or more creatures
+    /// are attacking, " gates the {U} alternative casting cost.
+    #[test]
+    fn alt_cost_leading_if_attacking_creatures_count_ge_binds() {
+        let option = parse_spell_casting_option_line(
+            "If three or more creatures are attacking, you may pay {U} rather than pay this spell's mana cost.",
+            "Lethargy Trap",
+        )
+        .expect("alt-cost should parse with leading-if attacking-creatures gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
     #[test]
     fn alt_cost_leading_if_unrecognized_predicate_drops_option() {
         // CR 118.9 + CR 601.3d: when the leading-if predicate cannot decompose

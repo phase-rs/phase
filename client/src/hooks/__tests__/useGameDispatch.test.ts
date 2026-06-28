@@ -2,10 +2,21 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameEvent, GameState } from "../../adapter/types";
+import { normalizeEvents } from "../../animation/eventNormalizer";
 import { useAnimationStore } from "../../stores/animationStore";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useGameDispatch } from "../useGameDispatch";
+
+const mockPlaySfxForStep = vi.hoisted(() => vi.fn());
+
+vi.mock("../../audio/AudioManager", () => ({
+  audioManager: {
+    playSfxForStep: mockPlaySfxForStep,
+    playStinger: vi.fn(),
+    stopMusic: vi.fn(),
+  },
+}));
 
 // Mock the normalizer
 vi.mock("../../animation/eventNormalizer", () => ({
@@ -167,5 +178,38 @@ describe("useGameDispatch", () => {
 
     expect(useGameStore.getState().eventHistory).toEqual(mockEvents);
     expect(useGameStore.getState().events).toEqual(mockEvents);
+  });
+
+  it("does not play immediate scheduled SFX for grouped flurry or displayOnly life effects", async () => {
+    vi.mocked(normalizeEvents).mockReturnValueOnce([
+      {
+        duration: 100,
+        effects: [
+          {
+            event: {
+              type: "GroupedDamageFlurry",
+              data: { player_id: 0, source_ids: [1, 2], total_damage: 2, hit_count: 2 },
+            },
+            duration: 100,
+          },
+          {
+            event: { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
+            duration: 100,
+            displayOnly: true,
+          },
+        ],
+      },
+    ]);
+
+    const { result } = renderHook(() => useGameDispatch());
+
+    await act(async () => {
+      const promise = result.current({ type: "PassPriority" });
+      expect(mockPlaySfxForStep).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(110);
+      await promise;
+    });
+
+    expect(mockPlaySfxForStep).not.toHaveBeenCalled();
   });
 });
