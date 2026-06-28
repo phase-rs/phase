@@ -249,6 +249,7 @@ fn recast_trigger(
         Effect::CastCopyOfCard {
             target: TargetFilter::None,
             cost: ManaCost::zero(),
+            count: None,
         },
         vec![TargetRef::Object(card_id)],
         creature_id,

@@ -847,6 +847,12 @@ pub fn parse_target_with_syntax<'a>(
         "those tokens",
         "those auras",
         "the revealed cards",
+        // CR 603.7 + CR 707.12: "those exiled cards" / "the copies" — the cards a
+        // prior clause (or, for Baron Helmut Zemo's Boast, the activation COST)
+        // exiled and published into the tracked set. Ordered before "those cards"
+        // so the longer "those exiled cards" anaphor is not shadowed.
+        "those exiled cards",
+        "the copies",
         "those cards",
         "those permanents",
         "those creatures",

@@ -1,5 +1,5 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, value, verify};
@@ -722,6 +722,15 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
+    // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
+    // creature in addition to its other types" — a replacement from another
+    // source affecting a subset of entrants (Displaced Dinosaurs). Routes to
+    // `parse_replacement_line`. The line does not match `is_static_pattern`
+    // (no "becomes"/"in addition" static-contains entry; the "as " prefix is
+    // not a static-prefix entry), so no Priority-7 reroute is required.
+    if is_as_enters_becomes_in_addition_pattern(lower) {
+        return true;
+    }
     // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
     // forms ("Other creatures you control enter with …", "… creatures escape
     // with …") use the bare-verb "enter"/"escape" rather than "enters"/"escapes",
@@ -778,6 +787,39 @@ pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
         || scan_contains(lower, "escape with"))
         && scan_contains(lower, "counter")
         && scan_contains(lower, "for each")
+}
+
+/// CR 614.1c + CR 614.12: nom recognizer for the non-self "As a [filter] enters,
+/// it becomes a [P/T] [type] creature in addition to its other types" replacement
+/// template (Displaced Dinosaurs). The subject is a non-empty external permanent
+/// filter (never the bare self anaphor), and the additive "in addition to its
+/// other types" tail (CR 205.1b) is required so this never claims a set-replacing
+/// "becomes" line. Self / copy "enter as a copy" lines are claimed by earlier
+/// handlers and additionally fail the handler's `Typed`-subject guard.
+fn parse_as_enters_becomes_in_addition(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim().is_empty() || subject.trim() == "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes a "),
+        tag(" enters, it becomes an "),
+        tag(" enters the battlefield, it becomes a "),
+        tag(" enters the battlefield, it becomes an "),
+    ))
+    .parse(input)?;
+    // CR 205.1b + CR 105.3: require the full additive marker via the shared
+    // animation combinator so this recognizer covers the entire marker class
+    // (possessive variants, "creature types", "colors and types") rather than
+    // the single hardcoded Displaced Dinosaurs literal.
+    let (input, _) =
+        crate::parser::oracle_effect::animation::locate_in_addition_other_types_marker(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_in_addition_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_in_addition(lower).is_ok()
 }
 
 fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {

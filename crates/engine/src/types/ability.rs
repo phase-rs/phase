@@ -6529,6 +6529,29 @@ pub enum AbilityCost {
     CollectEvidence {
         amount: u32,
     },
+    /// CR 117.1 + CR 118.3 + CR 601.2b: Exile *any number* of cards matching
+    /// `filter` from `zone` as a cost, where the aggregate `function` of
+    /// `property` over the chosen cards must satisfy `comparator` against
+    /// `value`. Baron Helmut Zemo's Boast — "Exile any number of black cards
+    /// from your graveyard with fifteen or more black mana symbols among their
+    /// mana costs" — is `{ Sum, ManaSymbolCount(Black), GE, 15 }` over
+    /// `Typed(Card, You, [HasColor:Black, InZone:Graveyard])` from `Graveyard`.
+    ///
+    /// CR 601.2b/602.2b: "any number" is a count choice made as the ability is
+    /// activated; the chosen set is constrained only by the aggregate threshold,
+    /// not by a fixed cardinality. A standalone sibling of `CollectEvidence`
+    /// (CR 701.59a, the `Sum`/`ManaValue`/`GE` special case), NOT a
+    /// parameterization of `Exile` (which is a fixed-count exile with no
+    /// aggregate axis and ~132 call sites). CR 107.4a/107.4e/202.1: hybrid mana
+    /// symbols count for each of their colors via `ObjectProperty::ManaSymbolCount`.
+    ExileWithAggregate {
+        filter: TargetFilter,
+        function: AggregateFunction,
+        property: ObjectProperty,
+        comparator: Comparator,
+        value: i32,
+        zone: Zone,
+    },
     /// CR 601.2b: Tap creatures as an additional/activation cost. The
     /// `requirement` axis selects between a fixed count (Conspire's "tap two
     /// creatures") and an aggregate "any number with total power N or greater"
@@ -6724,6 +6747,10 @@ impl AbilityCost {
             | AbilityCost::Exile { .. }
             | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
+            // CR 117.1: `ExileWithAggregate` requires interactive object
+            // selection (the CR 601.2h cost-payment window), so the cheap gate
+            // cannot settle it — it must still simulate.
+            | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::PayEnergy { .. }
@@ -6805,6 +6832,8 @@ impl AbilityCost {
             // CR 702.167a: Craft's materials component exiles other objects.
             AbilityCost::ExileMaterials { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::CollectEvidence { .. } => vec![CostCategory::ExilesCards],
+            // CR 117.1: `ExileWithAggregate` exiles other cards from a zone.
+            AbilityCost::ExileWithAggregate { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::TapCreatures { .. } => vec![CostCategory::TapsOtherCreatures],
             AbilityCost::RemoveCounter { .. } => vec![CostCategory::RemovesCounters],
             AbilityCost::PayEnergy { .. } => vec![CostCategory::PaysEnergy],
@@ -6903,6 +6932,9 @@ impl AbilityCost {
             // own exile is the separate `Exile { filter: SelfRef }` sub-cost.
             | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
+            // CR 117.1: `ExileWithAggregate` exiles OTHER cards (from the
+            // graveyard), never the source.
+            | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::PayEnergy { .. }
@@ -8565,6 +8597,15 @@ pub enum Effect {
         /// Mizzix's Mastery and Cipher use `ManaCost::zero()`.
         #[serde(default)]
         cost: ManaCost,
+        /// CR 707.12a: Optional cap on how many of the copies the controller may
+        /// cast ("you may cast UP TO THREE of the copies"). `None` (the default,
+        /// preserving the 13 existing cards and their on-disk JSON) means every
+        /// copy may be cast; `Some(n)` caps the `WaitingFor::ChooseFromZoneChoice`
+        /// at `min(n, available)`. The choice is always `up_to` (CR 707.12a: the
+        /// player chooses individually whether to cast each copy), so this is an
+        /// upper bound, never a forced count.
+        #[serde(default)]
+        count: Option<QuantityExpr>,
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
@@ -11205,6 +11246,36 @@ impl TargetFilter {
         }
     }
 
+    /// CR 608.2c: Rewrite the tracked-set sentinel (`TrackedSetId(0)`) inside
+    /// this filter to a CONCRETE tracked-set id. Recurses through `Or`/`And`/`Not`
+    /// composites. A non-sentinel `TrackedSet`/`TrackedSetFiltered` (already
+    /// bound to a real id) and every non-tracked-set filter are left untouched.
+    ///
+    /// Used when a *cost* publishes the "those exiled cards" set (Baron Helmut
+    /// Zemo's Boast): binding the sentinel to the concrete id at cost-payment
+    /// time makes the effect immune to the activation→resolution gap, during
+    /// which intervening instant-speed effects would otherwise clobber
+    /// `chain_tracked_set_id` and the latest-id heuristic.
+    pub fn rebind_tracked_set_sentinel(
+        &mut self,
+        concrete: crate::types::identifiers::TrackedSetId,
+    ) {
+        match self {
+            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }
+                if *id == crate::types::identifiers::TrackedSetId(0) =>
+            {
+                *id = concrete;
+            }
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                for f in filters {
+                    f.rebind_tracked_set_sentinel(concrete);
+                }
+            }
+            TargetFilter::Not { filter } => filter.rebind_tracked_set_sentinel(concrete),
+            _ => {}
+        }
+    }
+
     /// Extract the `InZone` zone from this filter's properties, if any.
     ///
     /// Recursively checks `Typed`, `Or`, `And`, and `Not` variants.
@@ -11327,6 +11398,25 @@ impl Effect {
     ///
     /// Exhaustive match — no wildcards — so the compiler forces an update when new
     /// Effect variants are added.
+    /// CR 608.2c: Bind a tracked-set sentinel (`TrackedSetId(0)`) inside this
+    /// effect's tracked-set target slot to a CONCRETE id. Scoped to the effects
+    /// that consume a *cost-published* tracked set (the copy/cast/move family —
+    /// Baron Helmut Zemo's "Copy those exiled cards. You may cast … the copies").
+    /// Other effects carry no cost-published tracked-set target, so they are
+    /// intentionally left untouched (documented no-op arm).
+    pub fn bind_tracked_set_sentinel(&mut self, concrete: crate::types::identifiers::TrackedSetId) {
+        match self {
+            Effect::CastCopyOfCard { target, .. }
+            | Effect::CastFromZone { target, .. }
+            | Effect::CopySpell { target, .. }
+            | Effect::ChangeZone { target, .. }
+            | Effect::GrantCastingPermission { target, .. } => {
+                target.rebind_tracked_set_sentinel(concrete);
+            }
+            _ => {}
+        }
+    }
+
     pub fn target_filter(&self) -> Option<&TargetFilter> {
         match self {
             // --- Effects with a `target: TargetFilter` field ---
@@ -17228,6 +17318,30 @@ impl ResolvedAbility {
                 .objects
                 .get(&self.source_id)
                 .is_some_and(|obj| obj.incarnation == captured),
+        }
+    }
+
+    /// CR 608.2c: Bind a tracked-set sentinel (`TrackedSetId(0)`) to a CONCRETE
+    /// tracked-set id across this ability's effect and every sub/else branch.
+    ///
+    /// Used when a *cost* (not an effect) publishes the "those exiled cards" set:
+    /// the set must survive the activation→resolution gap, during which
+    /// intervening instant-speed effects can publish their own tracked sets and
+    /// clobber `chain_tracked_set_id` / the latest-id heuristic (and `state.
+    /// chain_tracked_set_id` is reset to `None` at depth-0 resolution anyway).
+    /// Rewriting the sentinel to the concrete id in the resolving ability at
+    /// cost-payment time — before the ability is pushed onto the stack — makes
+    /// the binding immune to that gap (Baron Helmut Zemo's Boast).
+    pub fn bind_tracked_set_sentinel_recursive(
+        &mut self,
+        concrete: crate::types::identifiers::TrackedSetId,
+    ) {
+        self.effect.bind_tracked_set_sentinel(concrete);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_tracked_set_sentinel_recursive(concrete);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_tracked_set_sentinel_recursive(concrete);
         }
     }
 

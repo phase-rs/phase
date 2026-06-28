@@ -1114,6 +1114,10 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 118.3: an aggregate graveyard-exile cost (Baron Helmut Zemo's Boast)
+        // is a structural exile cost like CollectEvidence — it consumes/produces no
+        // resource axis the loop detector models.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
