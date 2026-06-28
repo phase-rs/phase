@@ -334,7 +334,7 @@ def pr_files_from_view(pr: dict[str, Any]) -> list[str]:
 def latest_review_commit(pr: dict[str, Any], acting_login: str) -> str | None:
     reviews = [
         review
-        for review in pr.get("reviews", pr.get("latestReviews", []))
+        for review in (pr.get("reviews") or pr.get("latestReviews") or [])
         if review.get("author", {}).get("login") == acting_login
     ]
     if not reviews:
@@ -575,9 +575,10 @@ def command_scan(args: argparse.Namespace) -> int:
         packet = make_packet(pr, policy, acting_login, "light")
         packet["local_current_event"] = local_events.get((pr_number, pr.get("headRefOid") or ""))
         packet["recommendation"] = recommend_from_packet(packet)
-        if packet["recommendation"]["reason"] == "stale_changes_requested" or packet[
-            "recommendation"
-        ]["advisory_action"] in {
+        if packet["recommendation"]["reason"] in {
+            "stale_changes_requested",
+            "stale_approval",
+        } or packet["recommendation"]["advisory_action"] in {
             "approve_ready_for_handler",
             "update_branch_for_handler",
             "dequeue_stale_for_handler",
