@@ -11482,6 +11482,18 @@ impl Effect {
             | Effect::Discover { player, .. }
             | Effect::BlightEffect { player, .. } => Some(player),
 
+            // Digital-only Alchemy: `ApplyPerpetual.target` selects the modified
+            // object (`~` → Any/source fallback; "that creature"/"the duplicate"
+            // → ParentTarget event/chain anaphor). Context refs surface no
+            // target slot; Any likewise resolves to the source without one.
+            Effect::ApplyPerpetual { target, .. } => {
+                if matches!(target, TargetFilter::Any) {
+                    None
+                } else {
+                    Some(target)
+                }
+            }
+
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
             // target creature" targets its host — surface `attach_to` as the
             // target slot when it is a real targetable filter. CR 303.4 + the
@@ -11693,7 +11705,6 @@ impl Effect {
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
             | Effect::Intensify { .. }
-            | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }

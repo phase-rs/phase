@@ -8,35 +8,35 @@
 //! power/toughness ("perpetually become(s)/has base power and toughness P/T",
 //! e.g. High Fae Prankster, Three Tree Battalion, Blood Age Muster).
 //!
-//! Target resolution (Increment 1): the resolved object targets, or — when the
-//! effect carries none — the source itself ("~ perpetually has ..."). Broader
-//! filter-based forms ("creatures you control perpetually gain ...") are a
-//! follow-up.
+//! Target resolution routes through `resolved_targets` so ParentTarget anaphora
+//! (Stationed/VehicleCrewed events, chain propagation) bind the correct object;
+//! `Any` falls back to the source when no referent is available.
 
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 
-/// Resolve `Effect::ApplyPerpetual`: apply `modification` to each affected card.
+/// Target resolution: uses the effect's `target` filter through the shared
+/// `resolved_targets` machinery (ParentTarget event anaphora, chain propagation,
+/// or source fallback for `Any`).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let modification = match &ability.effect {
-        Effect::ApplyPerpetual { modification, .. } => modification.clone(),
-        _ => return Err(EffectError::MissingParam("ApplyPerpetual".to_string())),
+    let Effect::ApplyPerpetual {
+        target,
+        modification,
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("ApplyPerpetual".to_string()));
     };
+    let modification = modification.clone();
+    let target = target.clone();
 
-    let mut ids: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
+    let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
+    let mut ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
     if ids.is_empty() {
         ids.push(ability.source_id);
     }
@@ -227,5 +227,56 @@ mod tests {
         assert!(obj.has_keyword(&Keyword::Deathtouch));
         assert!(obj.has_keyword(&Keyword::Lifelink));
         assert!(obj.perpetual_mods.contains(&modification));
+    }
+
+    #[test]
+    fn perpetual_grant_keywords_parent_target_uses_stationed_event() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let spacecraft = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monoist Gravliner".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Stationing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        });
+
+        let modification = PerpetualModification::GrantKeywords {
+            keywords: vec![Keyword::Deathtouch, Keyword::Lifelink],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: modification.clone(),
+            },
+            vec![],
+            spacecraft,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        let stationer = state.objects.get(&creature).unwrap();
+        assert!(stationer.has_keyword(&Keyword::Deathtouch));
+        assert!(stationer.has_keyword(&Keyword::Lifelink));
+        assert!(!state
+            .objects
+            .get(&spacecraft)
+            .unwrap()
+            .has_keyword(&Keyword::Deathtouch));
     }
 }
