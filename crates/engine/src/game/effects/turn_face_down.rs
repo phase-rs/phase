@@ -31,7 +31,7 @@ pub fn resolve(
 
     let mut changed = false;
     for id in crate::game::effects::resolved_battlefield_object_ids(state, ability, &target) {
-        let Some(obj) = state.objects.get(&id) else {
+        let Some(obj) = state.objects.get_mut(&id) else {
             continue;
         };
         // CR 708.2b: A face-down permanent can't be turned face down — nothing
@@ -44,11 +44,15 @@ pub fn resolve(
         if crate::game::transform::is_double_faced_permanent(obj) {
             continue;
         }
-        // CR 708.2a: Preserve the real face so the permanent's printed
-        // characteristics can be restored when it is later turned face up
-        // (CR 708.8). Snapshot before overwriting.
-        let snapshot = crate::game::printed_cards::snapshot_object_face(obj);
-        let obj = state.objects.get_mut(&id).unwrap();
+        // CR 708.2a + CR 708.8 + CR 613: Preserve the real face from the
+        // object's printed/base characteristics. Snapshotting from base fields
+        // (not the live fields) avoids baking in any continuous-effect
+        // modifications (e.g. a +1/+1 anthem that has inflated power/toughness)
+        // that are currently active. `apply_back_face_to_object` on turn-up
+        // writes these values into both live and base fields, so the layer
+        // system then reapplies all continuous effects from the correct printed
+        // baseline — not from an already-inflated one.
+        let snapshot = crate::game::printed_cards::snapshot_object_base_face(obj);
         // CR 708.2a + CR 205.1a: Apply the effect-specified (or default vanilla
         // 2/2) face-down body.
         crate::game::morph::apply_face_down_creature_characteristics(obj, &profile);
@@ -249,6 +253,93 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::TurnedFaceDown { .. })));
+    }
+
+    #[test]
+    fn snapshot_uses_base_not_live_under_continuous_modifier() {
+        // CR 613.1 + CR 708.8: When a permanent is turned face down by a spell or
+        // ability, the stored back_face must capture the object's printed/base
+        // characteristics — not the live values that may be inflated by an active
+        // continuous effect (such as a +1/+1 anthem).
+        //
+        // Failure shape if live fields were snapshotted: a 2/2 creature pumped to
+        // 3/3 by an anthem gets turned face down and stores 3/3 in back_face. On a
+        // later turn-up, `apply_back_face_to_object` writes 3/3 into both live and
+        // base fields. The layer system then reapplies the anthem from base 3/3,
+        // producing 4/4 — a rules violation. With base fields snapshotted, the
+        // restored base is 2/2, the anthem reapplies to give 3/3, which is correct.
+        //
+        // Discriminating: reverting `snapshot_object_base_face` back to
+        // `snapshot_object_face` (live fields) makes `snapshot.power` equal to 3
+        // and `restored_base_power` equal to 3, flipping the assertions below.
+        let mut state = GameState::new_two_player(42);
+        let id = setup_face_up_creature(&mut state); // base_power=2, base_toughness=2
+
+        // Simulate a continuous +1/+1 effect: live fields inflated but base unchanged.
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            // base_power / base_toughness remain Some(2) as set by setup_face_up_creature.
+        }
+
+        let ability = turn_face_down_ability(id, Some(cyberman_profile()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The stored back_face must reflect the printed 2/2, not the live 3/3.
+        let snapshot = state.objects[&id]
+            .back_face
+            .as_ref()
+            .expect("back_face must be set after turning face down");
+        assert_eq!(
+            snapshot.power,
+            Some(2),
+            "back_face must capture base power (2), not live power inflated by continuous effect (3)"
+        );
+        assert_eq!(
+            snapshot.toughness,
+            Some(2),
+            "back_face must capture base toughness (2), not live toughness (3)"
+        );
+        assert_eq!(
+            snapshot.name, "Grizzly Bears",
+            "back_face must capture the base name"
+        );
+
+        // Simulate what turn_face_up::resolve does: restore from back_face.
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.face_down = false;
+            let back = obj.back_face.take().unwrap();
+            crate::game::printed_cards::apply_back_face_to_object(obj, back);
+        }
+
+        // After restoration, live and base fields must reflect the printed 2/2.
+        // The layer system (not run in this unit test) would then reapply the
+        // anthem to produce 3/3 — the correct CR 708.8 + CR 613 outcome.
+        let obj = &state.objects[&id];
+        assert!(!obj.face_down, "must be face up after restoration");
+        assert_eq!(
+            obj.base_power,
+            Some(2),
+            "restored base_power must be the printed 2/2, not 3/3"
+        );
+        assert_eq!(
+            obj.base_toughness,
+            Some(2),
+            "restored base_toughness must be the printed 2/2, not 3/3"
+        );
+        assert_eq!(
+            obj.name, "Grizzly Bears",
+            "real name must be restored on turn-up"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::TurnedFaceDown { object_id } if *object_id == id)),
+            "TurnedFaceDown event must be emitted"
+        );
     }
 
     #[test]
