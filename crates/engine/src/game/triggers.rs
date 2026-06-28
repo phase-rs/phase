@@ -3852,7 +3852,7 @@ pub(crate) fn take_pending_trigger_event_batch(
 /// targets at stack-push time. Only the root ability is seeded — downstream
 /// sub-abilities that produce a new parent referent during resolution (The
 /// Tenth Doctor's Allons-y! Suspend grant) keep the existing rebinding path.
-fn seed_batched_attack_parent_targets(
+pub(crate) fn seed_batched_attack_parent_targets(
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) {
@@ -3869,6 +3869,45 @@ fn seed_batched_attack_parent_targets(
         .iter()
         .map(|id| TargetRef::Object(*id))
         .collect();
+}
+
+/// CR 608.2c + CR 702.184a/702.122/702.171: Stationed/VehicleCrewed/Saddled
+/// triggers whose effect anaphorically binds `ParentTarget` ("that creature",
+/// "that Vehicle", "that Mount") inherit the event referent as propagated
+/// targets at stack-push time — mirroring `seed_batched_attack_parent_targets`
+/// for attack batches — so resolution does not depend on a live
+/// `current_trigger_event`.
+fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    if ability.targets.is_empty() {
+        return false;
+    }
+    // CR 608.2c: only skip when real propagated targets exist — a lone source
+    // fallback from `resolved_targets` use_self must be overwritable.
+    ability
+        .targets
+        .iter()
+        .any(|t| !matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+}
+
+pub(crate) fn seed_event_context_parent_targets(
+    ability: &mut ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) {
+    let Some(event) = trigger_event else {
+        return;
+    };
+    if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
+        return;
+    }
+    let parent_id = match event {
+        GameEvent::Stationed { creature_id, .. } => Some(*creature_id),
+        GameEvent::VehicleCrewed { vehicle_id, .. } => Some(*vehicle_id),
+        GameEvent::Saddled { mount_id, .. } => Some(*mount_id),
+        _ => None,
+    };
+    if let Some(id) = parent_id {
+        ability.targets = vec![TargetRef::Object(id)];
+    }
 }
 
 fn effect_uses_parent_target(effect: &Effect) -> bool {
@@ -3908,6 +3947,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
         ability.set_may_trigger_origin_recursive(origin);
     }
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
+    seed_event_context_parent_targets(&mut ability, trigger_event.as_ref());
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -6892,6 +6932,32 @@ pub mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn seed_event_context_parent_targets_overwrites_source_only_fallback() {
+        use crate::types::ability::PerpetualModification;
+
+        let spacecraft = ObjectId(1);
+        let creature = ObjectId(2);
+        let mut ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Deathtouch],
+                },
+            },
+            vec![TargetRef::Object(spacecraft)],
+            spacecraft,
+            PlayerId(0),
+        );
+        let event = GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        };
+        seed_event_context_parent_targets(&mut ability, Some(&event));
+        assert_eq!(ability.targets, vec![TargetRef::Object(creature)]);
     }
 
     fn zone_changed_event(

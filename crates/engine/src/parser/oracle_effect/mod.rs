@@ -6116,6 +6116,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/that X] perpetually gains [keyword(s)]" — persistent
+    // keyword grant (Monoist Gravliner station trigger).
+    if let Some(effect) = try_parse_perpetual_grant_keywords(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
     if let Some(effect) = try_parse_spellbook_draft(tp) {
         return parsed_clause(effect);
@@ -6385,6 +6391,67 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
             power_delta,
             toughness_delta,
         },
+    })
+}
+
+/// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
+/// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
+fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let lower = tp.lower;
+
+    if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
+        let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
+            .parse(after_that)
+            .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+            .parse(rest)
+            .ok()?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag::<_, _, OracleError<'_>>("gain "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
+        return tail_done(rest).then_some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
+        });
+    }
+
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("gains "),
+        tag::<_, _, OracleError<'_>>("gain "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
+    tail_done(rest).then_some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
     })
 }
 
@@ -51435,6 +51502,32 @@ mod tests {
                 },
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn perpetual_parser_maps_grant_keywords() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::keywords::Keyword;
+
+        let e = parse_effect("~ perpetually gains deathtouch and lifelink.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::GrantKeywords { keywords },
+                ..
+            } if keywords == vec![Keyword::Deathtouch, Keyword::Lifelink]
+        ));
+
+        let e = parse_effect("that creature perpetually gains flying.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::GrantKeywords { keywords },
+                ..
+            } if keywords == vec![Keyword::Flying]
         ));
     }
 

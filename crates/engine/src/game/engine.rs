@@ -23516,6 +23516,74 @@ mod station_tests {
     }
 
     #[test]
+    fn stationed_perpetual_grant_keywords_applies_to_stationing_creature() {
+        use crate::game::trigger_index::reindex_object_triggers;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, PerpetualModification, TriggerDefinition,
+        };
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        let (mut state, spacecraft_id, p5, _) = setup_station_scenario();
+        {
+            let trigger_def =
+                TriggerDefinition::new(TriggerMode::Stationed).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::ApplyPerpetual {
+                        target: TargetFilter::ParentTarget,
+                        modification: PerpetualModification::GrantKeywords {
+                            keywords: vec![Keyword::Deathtouch, Keyword::Lifelink],
+                        },
+                    },
+                ));
+            let obj = state.objects.get_mut(&spacecraft_id).unwrap();
+            obj.trigger_definitions.push(trigger_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger_def);
+        }
+        reindex_object_triggers(&mut state, spacecraft_id);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: None,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: Some(p5),
+            },
+        )
+        .unwrap();
+
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        assert!(
+            !state.stack.is_empty(),
+            "Stationed trigger must push a stack entry"
+        );
+
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "stack failed to drain");
+            apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+            apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        }
+
+        crate::game::layers::flush_layers(&mut state);
+        let creature = state.objects.get(&p5).unwrap();
+        assert!(creature.has_keyword(&Keyword::Deathtouch));
+        assert!(creature.has_keyword(&Keyword::Lifelink));
+        let spacecraft = state.objects.get(&spacecraft_id).unwrap();
+        assert!(!spacecraft.has_keyword(&Keyword::Deathtouch));
+        assert!(!spacecraft.has_keyword(&Keyword::Lifelink));
+    }
+
+    #[test]
     fn station_activation_rejects_outside_sorcery_window() {
         let (mut state, spacecraft_id, _, _) = setup_station_scenario();
         // Move to declare attackers — no longer sorcery speed.

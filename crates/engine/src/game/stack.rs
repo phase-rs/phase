@@ -315,6 +315,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
+    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
+    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
+    // be skipped on alternate dispatch paths; this guarantees the referent is
+    // bound before `execute_effect` when `trigger_event` is present on the entry.
+    if let (Some(ability), StackEntryKind::TriggeredAbility { trigger_event, .. }) =
+        (ability.as_mut(), &entry.kind)
+    {
+        let event_ref = trigger_event
+            .as_ref()
+            .or(state.current_trigger_event.as_ref());
+        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(ability, event_ref);
+    }
+
     if ability
         .as_ref()
         .is_some_and(|ability| has_missing_required_stack_targets(state, ability))

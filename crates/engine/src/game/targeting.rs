@@ -544,6 +544,8 @@ pub fn resolved_targets(
             return vec![target];
         }
     }
+    // CR 608.2c: `None` and unresolved `ParentTarget` (no event referent, no
+    // propagated targets) fall back to the source object.
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
@@ -806,7 +808,26 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         }
         TargetFilter::ParentTarget => {
             let event = event?;
-            blocked_attacker_from_event(event, source_id).map(TargetRef::Object)
+            if let Some(id) = blocked_attacker_from_event(event, source_id) {
+                return Some(TargetRef::Object(id));
+            }
+            match event {
+                // CR 702.184a: "that creature" on a Stationed trigger is the
+                // creature that stationed the Spacecraft (Monoist Gravliner).
+                crate::types::events::GameEvent::Stationed { creature_id, .. } => {
+                    Some(TargetRef::Object(*creature_id))
+                }
+                // CR 702.122: "that Vehicle" on a crews trigger is the crewed
+                // Vehicle (Tiana, Angelic Mechanic).
+                crate::types::events::GameEvent::VehicleCrewed { vehicle_id, .. } => {
+                    Some(TargetRef::Object(*vehicle_id))
+                }
+                // CR 702.171: "that Mount" on a saddles trigger is the saddled Mount.
+                crate::types::events::GameEvent::Saddled { mount_id, .. } => {
+                    Some(TargetRef::Object(*mount_id))
+                }
+                _ => None,
+            }
         }
         TargetFilter::StackSpell => {
             let event = event?;
@@ -3830,6 +3851,40 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 702.184a: "that creature" on a Stationed trigger is the creature that
+    /// stationed the Spacecraft, not the Spacecraft itself (Monoist Gravliner).
+    #[test]
+    fn resolved_targets_parent_target_for_stationed_event_returns_stationing_creature() {
+        let (mut state, spacecraft, creature) = {
+            let mut state = GameState::new_two_player(7);
+            let spacecraft = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Spacecraft".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Stationer".to_string(),
+                Zone::Battlefield,
+            );
+            (state, spacecraft, creature)
+        };
+        state.current_trigger_event = Some(crate::types::events::GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        });
+        let ability = make_resolved_with_targets(vec![], spacecraft);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(result, vec![TargetRef::Object(creature)]);
     }
 
     /// CR 603.2c + CR 608.2c: batched attack triggers pump every attacker that
