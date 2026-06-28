@@ -291,21 +291,23 @@ fn eligible_declined_reveal_produces_no_mana() {
         mana_prompt(runner.state()).is_none(),
         "no mana prompt on decline"
     );
+    // CR 608.2c: the decline branch must resolve to completion, not leave the
+    // chain parked at the optional reveal (the original stuck-state regression).
+    assert!(
+        !is_optional_reveal_pause(runner.state()),
+        "decline must not leave the chain parked at the optional reveal"
+    );
 }
 
-/// KNOWN GAP (stop-and-return): declining the optional reveal should still put
-/// the card into hand ("If you don't reveal it, put it into your hand"), but the
-/// decline branch is NOT reached today. The parser nests that Not(OptionalEffect-
-/// Performed) clause as a GRANDCHILD of the IfYouDo clause (the "If you do" body
-/// has two instructions — add mana AND put into hand — so the decline clause is
-/// appended after the in-hand move), and
-/// `should_resolve_subability_on_optional_decline` only inspects the IfYouDo
-/// sub's DIRECT child for a Not(IfYouDo) decline branch. Fixing this requires a
-/// decline-branch-selection change (or a parser sibling-linking change) in shared
-/// optional-effect infrastructure — out of scope for the GAP-1/GAP-2 plan, with
-/// broad blast radius. Tracked for a follow-up plan.
+/// CR 608.2c: declining the optional reveal still puts the card into hand ("If
+/// you don't reveal it, put it into your hand"). The `Not(OptionalEffectPerformed)`
+/// decline clause is nested as a GRANDCHILD of the IfYouDo head (the "If you do"
+/// body has two instructions — add mana AND put into hand — so the decline clause
+/// is chained after the in-hand move). `nested_optional_decline_clause` walks the
+/// head's sub-chain to find it, and the decline resolves ONLY that clause — not
+/// the accept-only add-mana instruction. DISCRIMINATING: reverting the resolver
+/// change leaves the card on top of the library (decline branch never reached).
 #[test]
-#[ignore = "decline-to-hand: nested Not(IfYouDo) decline branch not reached; shared decline-routing follow-up"]
 fn eligible_declined_reveal_puts_card_to_hand() {
     let (mut runner, top) = omnath_runtime(
         vec![
