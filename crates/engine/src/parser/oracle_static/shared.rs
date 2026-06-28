@@ -5,6 +5,83 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
+/// CR 702.11b + CR 702.21a: Parse the "[subject] can be the targets of spells
+/// and abilities as though they didn't have hexproof[. Ward abilities of those
+/// creatures don't trigger]" static pair (Nowhere to Run).
+///
+/// Sentence 1 → `StaticMode::IgnoreHexproof` scoped to `<subject>` via the
+/// definition's `affected` filter (CR 702.11b — the bypass lets the matched
+/// permanents be targeted as though they had no hexproof). Optional sentence 2
+/// → `StaticMode::SuppressTriggers { source_filter: <same subject>, events:
+/// [BecomesTargeted] }` (CR 702.21a — "those creatures" anaphors sentence 1's
+/// subject, so the parsed filter is reused rather than re-derived).
+///
+/// Parsed as one unit (before generic sentence splitting) so the anaphoric
+/// "those creatures" keeps its antecedent. When the ward sentence is present but
+/// unrecognized trailing prose follows, the whole line is deferred (`None`)
+/// rather than silently dropping a clause.
+pub(crate) fn parse_ignore_hexproof_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // Sentence 1: subject up to the hexproof-bypass clause.
+    let (after_subject, subject) = take_until::<_, _, OracleError<'_>>(" can be the target")
+        .parse(tp.lower)
+        .ok()?;
+    let bypass: OracleResult<'_, ()> = (|| {
+        let (i, _) = tag::<_, _, OracleError<'_>>(" can be the target").parse(after_subject)?;
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(i)?;
+        let (i, _) =
+            tag::<_, _, OracleError<'_>>(" of spells and abilities as though ").parse(i)?;
+        // CR 702.11b: plural ("they") or singular ("it") subject pronoun.
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("they didn't"),
+            tag::<_, _, OracleError<'_>>("it didn't"),
+        ))
+        .parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" have hexproof").parse(i)?;
+        Ok((i, ()))
+    })();
+    let (rest, ()) = bypass.ok()?;
+
+    // Map the subject phrase to a typed filter; require it to fully consume so a
+    // partial parse never silently scopes the bypass wider than written.
+    let (filter, filter_remainder) = parse_type_phrase(subject.trim());
+    if !filter_remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+
+    let mut defs = vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
+        .affected(filter.clone())
+        .description(text.to_string())];
+
+    // Optional sentence 2: ward suppression for the same subject.
+    let after_bypass = rest.trim_start_matches('.').trim_start();
+    if !after_bypass.is_empty() {
+        let ward: OracleResult<'_, ()> = (|| {
+            let (i, _) =
+                tag::<_, _, OracleError<'_>>("ward abilities of those creatures don't trigger")
+                    .parse(after_bypass)?;
+            let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i.trim())?;
+            Ok((i, ()))
+        })();
+        let (ward_rest, ()) = ward.ok()?;
+        // Any unconsumed prose means this isn't a clean hexproof+ward line.
+        if !ward_rest.trim().is_empty() {
+            return None;
+        }
+        defs.push(
+            StaticDefinition::new(StaticMode::SuppressTriggers {
+                source_filter: filter,
+                events: vec![SuppressedTriggerEvent::BecomesTargeted],
+            })
+            .description(text.to_string()),
+        );
+    }
+
+    Some(defs)
+}
+
 /// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
 /// of an "only during X turn(s)" prohibition.
 ///
@@ -887,6 +964,16 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // the first sentence, so it must bind before generic multi-sentence
     // splitting can treat "Otherwise" as independent prose.
     if let Some(defs) = parse_tiered_enters_with_additional_counters_static(&tp, &stripped) {
+        return defs;
+    }
+
+    // CR 702.11b + CR 702.21a: "Creatures your opponents control can be the
+    // targets of spells and abilities as though they didn't have hexproof. Ward
+    // abilities of those creatures don't trigger." (Nowhere to Run). The ward
+    // sentence's "those creatures" anaphors the first sentence's subject, so the
+    // pair is parsed as one unit before generic sentence splitting would treat
+    // them as independent statics (which would strand the anaphor).
+    if let Some(defs) = parse_ignore_hexproof_static(&tp, &stripped) {
         return defs;
     }
 

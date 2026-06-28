@@ -154,6 +154,16 @@ pub enum SuppressedTriggerEvent {
     /// CR 700.4: "Dies" means moving from the battlefield to the graveyard.
     /// Narrower than "leaves the battlefield" — does not catch exile or bounce.
     Dies,
+    /// CR 702.21a + CR 611.3 + CR 613.11: A permanent becoming the target of a
+    /// spell or ability — the ward trigger event (CR 702.21a). Used to suppress
+    /// the becomes-target *ward* triggered ability (Nowhere to Run: "Ward
+    /// abilities of those creatures don't trigger") via a continuous effect that
+    /// turns the ability off (CR 611.3 / 613.11), NOT a CR 603.2g event
+    /// prevention — the event still occurs. Consumed at the inline ward-trigger
+    /// creation gate in `triggers.rs`, not the ETB/Dies
+    /// `event_is_suppressed_by_static_triggers` path, so non-ward becomes-target
+    /// triggers on the same creature are unaffected.
+    BecomesTargeted,
 }
 
 impl fmt::Display for SuppressedTriggerEvent {
@@ -161,6 +171,7 @@ impl fmt::Display for SuppressedTriggerEvent {
         match self {
             SuppressedTriggerEvent::EntersBattlefield => write!(f, "EntersBattlefield"),
             SuppressedTriggerEvent::Dies => write!(f, "Dies"),
+            SuppressedTriggerEvent::BecomesTargeted => write!(f, "BecomesTargeted"),
         }
     }
 }

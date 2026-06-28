@@ -75,6 +75,63 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
+#[test]
+fn static_ignore_hexproof_and_ward_suppression_pair() {
+    // Nowhere to Run's static line: hexproof-bypass + ward-suppression. The
+    // "those creatures" anaphor in sentence 2 reuses sentence 1's parsed subject,
+    // so the pair is emitted from one line.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "must emit IgnoreHexproof + SuppressTriggers, got {defs:?}"
+    );
+
+    // Sentence 1: IgnoreHexproof scoped to opponents' creatures.
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    match &defs[0].affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "bypass must scope to creatures, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected opponents' creatures filter, got {other:?}"),
+    }
+
+    // Sentence 2: SuppressTriggers[BecomesTargeted] over the SAME filter
+    // ("those creatures" reuses sentence 1's subject).
+    match &defs[1].mode {
+        StaticMode::SuppressTriggers {
+            events,
+            source_filter,
+        } => {
+            assert_eq!(events, &vec![SuppressedTriggerEvent::BecomesTargeted]);
+            assert_eq!(
+                Some(source_filter),
+                defs[0].affected.as_ref(),
+                "ward suppression must reuse the hexproof-bypass subject filter"
+            );
+        }
+        other => panic!("expected SuppressTriggers, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_ignore_hexproof_without_ward_emits_single_static() {
+    // Control: the hexproof-bypass sentence alone (no ward clause) yields ONLY
+    // IgnoreHexproof — the ward static is never fabricated when unwritten.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof.",
+    );
+    assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+}
+
 /// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
 /// each of your opponents." (Absolute Virtue) must emit a SINGLE
 /// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a
