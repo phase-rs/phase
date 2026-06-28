@@ -27,15 +27,16 @@
 //!     `ExileWithAltCost { duration: Some(UntilEndOfTurn) }` is pruned at
 //!     cleanup if the controller declined or failed to cast.
 //!
-//! These tests do not depend on the production `card-data.json` export
-//! (which would also mask gates behind unrelated parser/loader work). Every
-//! test hand-builds the minimum state needed and exercises
+//! Most tests hand-build the minimum state needed and exercise
 //! `stack::resolve_top` plus the relevant prune helpers directly so each
 //! assertion discriminates the pre-fix bug from the post-fix correct
-//! behavior.
+//! behavior. The Terramorph regression uses the committed integration
+//! card-data fixture so it can drive the reported real-card cast/search path
+//! without reparsing the full production export.
 
 use std::sync::Arc;
 
+use crate::support::shared_card_db;
 use engine::game::stack;
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -142,6 +143,56 @@ fn consuming_vapors_resolves_to_exile_when_cast_from_hand() {
         Zone::Exile,
         "CR 702.88a: a Rebound spell cast from hand must exile on resolve, \
          not go to the graveyard (CR 608.2n displaced)",
+    );
+}
+
+/// Issue #1536 was reopened with Terramorph specifically. This drives the real
+/// fixture-backed Terramorph face through the production cast/search/resolve
+/// path so the stale-close decision is tied to the reported card, not only to the
+/// synthetic Rebound harness above.
+#[test]
+fn terramorph_real_card_rebounds_after_searching_basic_land() {
+    use engine::game::scenario::GameScenario;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let terramorph = scenario.add_real_card(P0, "Terramorph", Zone::Hand, db);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    runner.cast(terramorph).search_first_legal().resolve();
+
+    assert_eq!(
+        runner.state().objects[&terramorph].zone,
+        Zone::Exile,
+        "Terramorph has Rebound in card-data and must exile as it resolves from hand"
+    );
+    assert_eq!(
+        runner.state().objects[&forest].zone,
+        Zone::Battlefield,
+        "Terramorph's real SearchLibrary chain must put the selected basic land onto the battlefield"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "Terramorph must arm one next-upkeep Rebound delayed trigger"
     );
 }
 
