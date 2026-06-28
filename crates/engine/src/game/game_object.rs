@@ -1047,6 +1047,23 @@ impl GameObject {
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
             }
+            PerpetualModification::ModifyPowerToughness {
+                power_delta,
+                toughness_delta,
+            } => {
+                let base_power = self
+                    .base_power
+                    .or(self.power)
+                    .unwrap_or(0)
+                    .saturating_add(*power_delta);
+                let base_toughness = self
+                    .base_toughness
+                    .or(self.toughness)
+                    .unwrap_or(0)
+                    .saturating_add(*toughness_delta);
+                self.base_power = Some(base_power);
+                self.base_toughness = Some(base_toughness);
+            }
         }
         self.perpetual_mods.push(modification.clone());
     }

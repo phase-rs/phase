@@ -7779,6 +7779,12 @@ pub enum PerpetualModification {
     /// the card's persistent base power and toughness (High Fae Prankster,
     /// Three Tree Battalion, Blood Age Muster).
     SetBasePowerToughness { power: i32, toughness: i32 },
+    /// "[object] perpetually gets +N/+M" — permanently modifies base power and
+    /// toughness by the given deltas (Heir to Dragonfire, Tiana's Vehicle).
+    ModifyPowerToughness {
+        power_delta: i32,
+        toughness_delta: i32,
+    },
 }
 
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its

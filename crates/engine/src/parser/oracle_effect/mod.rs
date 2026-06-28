@@ -6110,6 +6110,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/that X] perpetually gets +N/+M" — persistent
+    // base P/T modifier (Heir to Dragonfire, Tiana's Vehicle).
+    if let Some(effect) = try_parse_perpetual_modify_pt(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
     if let Some(effect) = try_parse_spellbook_draft(tp) {
         return parsed_clause(effect);
@@ -6302,6 +6308,82 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
         modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
             power: power as i32,
             toughness: toughness as i32,
+        },
+    })
+}
+
+/// Digital-only Alchemy: parse the "perpetually gets +N/+M" modifier form —
+/// "[~ / this creature / …] perpetually gets +N/+M" or
+/// "that [type] perpetually gets +N/+M" → [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::ModifyPowerToughness`].
+///
+/// Self-subjects resolve to the source; the anaphoric "that …" form binds to
+/// [`TargetFilter::ParentTarget`] (the trigger/event object, e.g. Tiana's
+/// crewed Vehicle). The clause tail must be fully consumed so compound riders
+/// on other perpetual forms fall through to `Unimplemented`.
+fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let lower = tp.lower;
+
+    // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
+    if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
+        let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
+            .parse(after_that)
+            .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+            .parse(rest)
+            .ok()?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gets "),
+            tag::<_, _, OracleError<'_>>("get "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (rest, (power_delta, toughness_delta)) =
+            nom_primitives::parse_pt_modifier(rest).ok()?;
+        return tail_done(rest).then_some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                power_delta,
+                toughness_delta,
+            },
+        });
+    }
+
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("gets "),
+        tag::<_, _, OracleError<'_>>("get "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, (power_delta, toughness_delta)) = nom_primitives::parse_pt_modifier(rest).ok()?;
+    tail_done(rest).then_some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+            power_delta,
+            toughness_delta,
         },
     })
 }
@@ -51102,6 +51184,35 @@ mod tests {
                 modification: PerpetualModification::SetBasePowerToughness {
                     power: 2,
                     toughness: 2,
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn perpetual_parser_maps_modify_pt() {
+        use crate::types::ability::PerpetualModification;
+        let e = parse_effect("~ perpetually gets +3/+3.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 3,
+                    toughness_delta: 3,
+                },
+                ..
+            }
+        ));
+
+        let e = parse_effect("that vehicle perpetually gets +1/+0.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 1,
+                    toughness_delta: 0,
                 },
                 ..
             }

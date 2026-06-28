@@ -153,4 +153,45 @@ mod tests {
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(1));
     }
+
+    #[test]
+    fn perpetual_modify_pt_adds_to_base_and_updates_live_pt() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Heir to Dragonfire".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: crate::types::ability::TargetFilter::Any,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 3,
+                    toughness_delta: 3,
+                },
+            },
+            vec![TargetRef::Object(id)],
+            id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        crate::game::layers::flush_layers(&mut state);
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.base_power, Some(4));
+        assert_eq!(obj.base_toughness, Some(4));
+        assert_eq!(obj.power, Some(4));
+        assert_eq!(obj.toughness, Some(4));
+    }
 }
