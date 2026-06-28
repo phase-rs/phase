@@ -6972,10 +6972,13 @@ fn parse_damage_prevention_replacement(
             // prevents a follow-up rider's recipient-shaped phrase from being
             // misbound as the scope.
             match parse_damage_recipient_scope(working_lower) {
-                // Object recipient → a follow-up object anaphor binds to the
-                // event recipient (and its owner anaphor to that recipient's
-                // owner).
-                Some(tf @ DamageTargetFilter::CreatureOnly) => (Some(tf), true),
+                // Object recipient (any non-player filter: CreatureOnly,
+                // planeswalker, battle, etc.) → a follow-up object anaphor
+                // binds to the event recipient (and its owner anaphor to that
+                // recipient's owner). Guarding on `!Player` rather than
+                // hardcoding `CreatureOnly` keeps this composable as new
+                // non-player `DamageTargetFilter` variants are added.
+                Some(tf) if !matches!(tf, DamageTargetFilter::Player { .. }) => (Some(tf), true),
                 // Player recipient (or none) → scope the shield, but the
                 // object/owner-anaphor rewrite does not apply (player follow-ups
                 // are handled elsewhere).
