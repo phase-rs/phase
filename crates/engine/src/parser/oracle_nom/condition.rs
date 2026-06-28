@@ -643,11 +643,17 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         // CR 102.1 + CR 102.2: there is always exactly one active player, so
         // "it's an opponent's turn" is exactly "it's not your turn" — the active
         // player is any non-controller. Maps to the same Not(DuringYourTurn).
+        // Both apostrophe forms are accepted at each position (U+0027 straight
+        // and U+2019 curly — Scryfall English oracle text uses the curly form).
+        // The surface permutations are composed from two small `alt`s rather than
+        // enumerated as full strings (compose combinators, don't enumerate).
         map(
-            alt((
-                tag("it's an opponent's turn"),
-                tag("it is an opponent's turn"),
-            )),
+            (
+                alt((tag("it's"), tag("it\u{2019}s"), tag("it is"))),
+                tag(" an opponent"),
+                alt((tag("'s"), tag("\u{2019}s"))),
+                tag(" turn"),
+            ),
             |_| StaticCondition::Not {
                 condition: Box::new(StaticCondition::DuringYourTurn),
             },
@@ -7010,13 +7016,19 @@ mod tests {
         // CR 102.1 + CR 102.2: there is always exactly one active player, so
         // "it's an opponent's turn" is exactly "it's not your turn" — the active
         // player is any non-controller. Represented as `Not(DuringYourTurn)`,
-        // mirroring the existing "it's not your turn" arm.
+        // mirroring the existing "it's not your turn" arm. Both apostrophe forms
+        // (U+0027 straight, U+2019 curly — Scryfall uses the curly form) parse at
+        // each position, so the contraction/possessive permutations all hold.
         let expected = StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         };
         for input in [
             "if it's an opponent's turn, do",
             "if it is an opponent's turn, do",
+            "if it\u{2019}s an opponent\u{2019}s turn, do",
+            "if it's an opponent\u{2019}s turn, do",
+            "if it\u{2019}s an opponent's turn, do",
+            "if it is an opponent\u{2019}s turn, do",
         ] {
             let (rest, c) = parse_condition(input).unwrap();
             assert_eq!(rest, ", do", "remainder for {input:?}");
