@@ -6416,7 +6416,7 @@ fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
         ))
         .parse(rest)
         .ok()?;
-        let (rest, keywords) = sequence::parse_keyword_grant_list(rest)?;
+        let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
@@ -6448,7 +6448,7 @@ fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
     ))
     .parse(rest)
     .ok()?;
-    let (rest, keywords) = sequence::parse_keyword_grant_list(rest)?;
+    let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
     tail_done(rest).then_some(Effect::ApplyPerpetual {
         target: TargetFilter::Any,
         modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
