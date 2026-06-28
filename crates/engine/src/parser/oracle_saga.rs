@@ -121,7 +121,7 @@ fn is_chapter_body_continuation(line: &str) -> bool {
 /// Returns (chapter_triggers, etb_replacement, consumed_line_indices).
 pub(crate) fn parse_saga_chapters(
     lines: &[&str],
-    card_name: &str,
+    _card_name: &str,
 ) -> (
     Vec<TriggerDefinition>,
     ReplacementDefinition,
@@ -165,14 +165,12 @@ pub(crate) fn parse_saga_chapters(
             // parsing would mis-split the opener and leave the outcome clauses
             // Unimplemented. Try it first, mirroring the spell-line dispatch in
             // `oracle.rs`.
-            let mut execute = match crate::parser::oracle_vote::parse_vote_block(
-                effect_text,
-                AbilityKind::Spell,
-                card_name,
-            ) {
-                Some(vote_def) => vote_def,
-                None => parse_effect_chain(effect_text, AbilityKind::Spell),
-            };
+            let mut execute =
+                match crate::parser::oracle_vote::parse_vote_block(effect_text, AbilityKind::Spell)
+                {
+                    Some(vote_def) => vote_def,
+                    None => parse_effect_chain(effect_text, AbilityKind::Spell),
+                };
             // CR 611.2b + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that
             // persists indefinitely. The general-purpose `try_parse_gain_quoted_ability`

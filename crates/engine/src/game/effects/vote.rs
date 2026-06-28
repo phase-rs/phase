@@ -1071,7 +1071,7 @@ mod tests {
                     Each friend draws a card. \
                     Each foe draws a card.";
         let parsed_def =
-            parse_vote_block(text, AbilityKind::Spell, "").expect("Pir's Whim shape parses");
+            parse_vote_block(text, AbilityKind::Spell).expect("Pir's Whim shape parses");
         let mut state = GameState::new_two_player(42);
         let controller = state.players[0].id;
         let opp = state.players[1].id;
@@ -1408,8 +1408,8 @@ mod tests {
                     For each time vote, take an extra turn after this one. \
                     For each money vote, choose a permanent owned by the voter \
                     and gain control of it.";
-        let parsed_def = parse_vote_block(text, AbilityKind::Spell, "")
-            .expect("Expropriate vote block must parse");
+        let parsed_def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
 
         // Extract per_choice_effect from the parsed Vote definition.
         let (choices, per_choice_effect) = match *parsed_def.effect {
@@ -1661,25 +1661,31 @@ mod tests {
     }
 
     /// CR 701.38 + CR 608.2d + CR 120.1 + CR 608.2c: End-to-end resolution of the
-    /// hoisted-Choose / secret-vote / SourceChosenPlayer-damage composition
-    /// (Truth or Consequences). Drives the parsed `Choose{Random} → Vote →
-    /// [Draw, DealDamage{SourceChosenPlayer}]` chain in a 2-player game and
-    /// asserts: (a) the random Choose resolves WITHOUT parking on a NamedChoice
-    /// (Strax precedent — `resolve_random_in_chain`); (b) the truth tally drives
-    /// the controller's draw count; (c) `3 × consequences-tally` damage lands on
+    /// hoisted-Choose / suffix-aggregate-vote / SourceChosenPlayer-damage composition.
+    /// Uses a public-vote opener ("each player votes for truth or consequences") to
+    /// exercise the same `Choose{Random} → Vote → [Draw, DealDamage{SourceChosenPlayer}]`
+    /// chain as Truth or Consequences without requiring the unsupported secret-ballot
+    /// engine seam. Asserts: (a) the random Choose resolves WITHOUT parking on a
+    /// NamedChoice (Strax precedent — `resolve_random_in_chain`); (b) the truth tally
+    /// drives the controller's draw count; (c) `3 × consequences-tally` damage lands on
     /// the chosen opponent via the persisted `ChosenAttribute::Player`.
     #[test]
-    fn truth_or_consequences_resolves_choose_then_vote_then_chosen_player_damage() {
+    fn hoisted_choose_vote_suffix_aggregate_resolves_chosen_player_damage() {
         use crate::game::zones::create_object;
         use crate::parser::oracle_vote::parse_vote_block;
         use crate::types::identifiers::CardId;
 
-        let normalized = "Each player secretly votes for ~, then those votes are revealed. \
+        // Public-vote equivalent of Truth or Consequences. The secret-ballot
+        // opener "each player secretly votes for" is intentionally not used here
+        // because secret votes are unsupported until a proper hidden-ballot engine
+        // seam is added. This text exercises the identical Choose → Vote →
+        // SourceChosenPlayer runtime machinery via a public vote opener.
+        let normalized = "Each player votes for truth or consequences. \
                           You draw cards equal to the number of truth votes. \
                           Then choose an opponent at random. \
                           ~ deals 3 damage to that player for each consequences vote.";
-        let def = parse_vote_block(normalized, AbilityKind::Spell, "Truth or Consequences")
-            .expect("Truth or Consequences parses");
+        let def = parse_vote_block(normalized, AbilityKind::Spell)
+            .expect("hoisted-choose + suffix-aggregate vote parses");
         let choose_effect = (*def.effect).clone();
         let vote_effect = (*def.sub_ability.as_ref().expect("Choose wraps Vote").effect).clone();
 
@@ -1694,7 +1700,7 @@ mod tests {
             &mut state,
             CardId(1),
             controller,
-            "Truth or Consequences".to_string(),
+            "Test Vote Card".to_string(),
             Zone::Battlefield,
         );
         // Cards in the controller's library so the truth-tally draw succeeds.

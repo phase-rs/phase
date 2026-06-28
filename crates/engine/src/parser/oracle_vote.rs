@@ -22,7 +22,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use crate::parser::oracle_nom::primitives::{parse_number, scan_preceded, scan_split_at_phrase};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_while1};
 use nom::combinator::{map, opt, success, value};
 use nom::Parser;
 
@@ -42,11 +42,7 @@ use super::oracle_ir::context::ParseContext;
 /// "Whenever ~ enters or deals combat damage to a player, ". The "starting
 /// with you, " prefix is consumed here (kept inside this module so chain-level
 /// stripping in `parse_effect_chain_ir` doesn't interfere).
-pub(crate) fn parse_vote_block(
-    text: &str,
-    kind: AbilityKind,
-    card_name: &str,
-) -> Option<AbilityDefinition> {
+pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
     // Case-insensitive nom tags (`tag_no_case`) match directly against the
     // original-case input, so the entire vote-detection pipeline operates on
     // `text` without an upfront `to_lowercase()` allocation. On the failure
@@ -63,7 +59,7 @@ pub(crate) fn parse_vote_block(
     // CR 701.38c: "chooses" patterns aren't strict votes per the rules but
     // are mechanically identical for the engine's purposes — the resolver
     // tallies and fans out per-choice effects the same way.
-    let (i, choices, voter_scope) = parse_each_player_votes_clause(i, card_name)?;
+    let (i, choices, voter_scope) = parse_each_player_votes_clause(i)?;
     if choices.len() < 2 {
         return None;
     }
@@ -416,10 +412,7 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
 /// general spell resolution). The leading `"for each player, "` is
 /// consumed here (mirroring the `"starting with you, "` handling) so the
 /// chain splitter does not bisect the opener.
-fn parse_each_player_votes_clause<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, Vec<String>, VoterScope)> {
+fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>, VoterScope)> {
     let res: nom::IResult<&str, VoterScope, OracleError<'_>> = alt((
         value(
             VoterScope::AllPlayers,
@@ -429,14 +422,14 @@ fn parse_each_player_votes_clause<'a>(
             VoterScope::AllPlayers,
             tag_no_case("each player may vote for "),
         ),
-        // CR 701.38: secret-council / secret-ballot votes resolve identically to
-        // open votes (same tally, same per-choice effects). The CR defines no
-        // distinct "secret vote" resolution — secrecy is presentation only — so
-        // this opener maps onto the same standard vote tally.
-        value(
-            VoterScope::AllPlayers,
-            tag_no_case("each player secretly votes for "),
-        ),
+        // NOTE: "each player secretly votes for" is intentionally NOT handled here.
+        // Secret-ballot votes (Truth or Consequences, Elrond, Orchard Elemental)
+        // require a separate engine waiting-state so ballots are withheld until
+        // all players have voted. The existing WaitingFor::VoteChoice updates
+        // tallies and emits VoteCast immediately, which would expose each player's
+        // choice before the reveal step — violating the Oracle instruction. These
+        // cards fall through to Effect::Unimplemented until a proper secret-ballot
+        // engine seam is added.
         value(
             VoterScope::EachOpponent,
             tag_no_case("each opponent chooses "),
@@ -457,26 +450,7 @@ fn parse_each_player_votes_clause<'a>(
     // Read the choice list: "<a>[, <b>][, <c>] or <last>." — allow "or"
     // separator for the last item, comma between earlier items.
     let (after, choice_list_text) = read_until_period(rest)?;
-    // CR 701.38: the "then those votes are revealed" reveal step on a secret
-    // ballot has no resolution effect — consume it off the choice-list slice with
-    // `take_until` so only the options remain. Normal (non-secret) votes have no
-    // such tail, so the combinator fails and the slice falls through unchanged.
-    let seg = take_until::<_, _, OracleError<'_>>(", then those votes are revealed")
-        .parse(choice_list_text)
-        .map(|(_, options)| options)
-        .unwrap_or(choice_list_text);
-    // Card-name / choice-list pun (Truth or Consequences): self-reference
-    // normalization collapsed the option list to the bare "~" token because the
-    // options ("truth or consequences") ARE the card name. Expand the self-ref
-    // sentinel back to the lowercased card name — which IS the "<a> or <b>" option
-    // list — then read the choices. `str::replace` is idempotent when no "~" is
-    // present (normal votes pass through unchanged), so no presence guard is
-    // needed. The expansion is provably exact for the pun: "~" appears in the
-    // option slot only because the option list was the card name. If the result
-    // is not a >=2 list, `split_choices` returns None and the detector falls
-    // through harmlessly.
-    let expanded = seg.replace('~', &card_name.to_lowercase());
-    let choices = split_choices(&expanded)?;
+    let choices = split_choices(choice_list_text)?;
     Some((after, choices, voter_scope))
 }
 
@@ -824,6 +798,10 @@ fn parse_vote_for_each_suffix_clause<'a>(
 /// `deal_damage::player_context_target`. Only `Effect::DealDamage` carries this
 /// anaphor in the suffix-vote class today; extend with new arms as new shapes
 /// ship.
+///
+/// CR 608.2c: the controller follows instructions in order written; later text
+/// ("that player") modifies the meaning of earlier text by referring back to the
+/// player chosen in the preceding "choose an opponent at random" instruction.
 fn retarget_that_player_to_chosen(effect: &mut Effect) {
     if let Effect::DealDamage { target, .. } = effect {
         if matches!(target, TargetFilter::TriggeringPlayer) {
@@ -919,7 +897,7 @@ mod tests {
     #[test]
     fn parses_tivit_vote_block() {
         let text = "starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -955,7 +933,7 @@ mod tests {
     #[test]
     fn parses_master_of_ceremonies_vote_block() {
         let text = "each opponent chooses money, friends, or secrets. For each player who chose money, you and that player each create a Treasure token. For each player who chose friends, you and that player each create a 1/1 green and white Citizen creature token. For each player who chose secrets, you and that player each draw a card.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1033,7 +1011,7 @@ mod tests {
     #[test]
     fn parses_each_opponent_chooses_two_options() {
         let text = "each opponent chooses left or right. For each player who chose left, you and that player each draw a card. For each player who chose right, you and that player each draw a card.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1051,7 +1029,7 @@ mod tests {
     #[test]
     fn parses_each_opponent_chooses_three_options() {
         let text = "each opponent chooses one, two, or three. For each player who chose one, you and that player each draw a card. For each player who chose two, you and that player each draw a card. For each player who chose three, you and that player each draw a card.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1074,7 +1052,7 @@ mod tests {
         let text = "each opponent chooses money. For each player who chose money, you and that player each draw a card.";
         // `split_choices` requires N>=2 — single-choice input fails the
         // detector outright.
-        assert!(parse_vote_block(text, AbilityKind::Spell, "").is_none());
+        assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 
     /// Regression: serialized vote effects from the previous schema
@@ -1085,7 +1063,7 @@ mod tests {
     #[test]
     fn tivit_test_still_passes_with_default_voter_scope() {
         let text = "starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         if let Effect::Vote { voter_scope, .. } = *def.effect {
             assert_eq!(voter_scope, VoterScope::AllPlayers);
         } else {
@@ -1115,7 +1093,7 @@ mod tests {
     #[test]
     fn parses_capital_punishment_three_choice_vote() {
         let text = "starting with you, each player votes for first, second, or third. For each first vote, draw a card. For each second vote, investigate. For each third vote, create a Treasure token.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1133,7 +1111,7 @@ mod tests {
 
     #[test]
     fn rejects_non_vote_text() {
-        assert!(parse_vote_block("Draw a card.", AbilityKind::Spell, "").is_none());
+        assert!(parse_vote_block("Draw a card.", AbilityKind::Spell).is_none());
     }
 
     /// CR 701.38 + CR 122.1 + CR 608.2c: Emissary Green's aggregate-tally vote.
@@ -1150,7 +1128,7 @@ mod tests {
         let text = "starting with you, each player votes for profit or security. \
                     You create a number of Treasure tokens equal to twice the number of profit votes. \
                     Put a number of +1/+1 counters on each creature you control equal to the number of security votes.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1479,7 +1457,7 @@ mod tests {
                     Each friend searches their library for a land card, puts it onto \
                     the battlefield tapped, then shuffles. \
                     Each foe sacrifices an artifact or enchantment of their choice.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1523,7 +1501,7 @@ mod tests {
     fn pirs_whim_emits_friend_before_foe_in_choices() {
         let text = "For each player, choose friend or foe. \
                     Each friend draws a card. Each foe loses 1 life.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote { ref choices, .. } => {
                 assert_eq!(choices[0], "friend");
@@ -1542,7 +1520,7 @@ mod tests {
         let text = "For each player, choose friend or foe. \
                     Each friend puts a +1/+1 counter on each creature they control. \
                     Each foe taps a creature.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("vote block parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1570,7 +1548,7 @@ mod tests {
     #[test]
     fn rejects_single_class_friend_or_foe_opener() {
         let text = "For each player, choose friend. Each friend draws a card.";
-        assert!(parse_vote_block(text, AbilityKind::Spell, "").is_none());
+        assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 
     /// CR 701.38d + issue #821: Expropriate — the money clause's "choose a
@@ -1586,8 +1564,8 @@ mod tests {
                     For each time vote, take an extra turn after this one. \
                     For each money vote, choose a permanent owned by the voter \
                     and gain control of it.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "")
-            .expect("Expropriate vote block must parse");
+        let def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1669,7 +1647,7 @@ mod tests {
         let text = "Starting with you, each player votes for time or knowledge. \
                     If time gets more votes, take an extra turn after this one. \
                     If knowledge gets more votes or the vote is tied, draw three cards.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("threshold vote parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("threshold vote parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1704,7 +1682,7 @@ mod tests {
         let text = "Starting with you, each player votes for innocent or guilty. \
                     If guilty gets more votes, the owner of each card exiled with ~ \
                     puts that card on the bottom of their library.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "").expect("threshold vote parses");
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("threshold vote parses");
         match *def.effect {
             Effect::Vote {
                 ref choices,
@@ -1749,7 +1727,7 @@ mod tests {
         let text = "Starting with you, each player votes for innocent or guilty. \
                     If guilty gets more votes, the owner of each card exiled with ~ \
                     puts that card on the bottom of their library.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "")
+        let def = parse_vote_block(text, AbilityKind::Spell)
             .expect("Trial of a Time Lord IV must parse as a threshold vote");
         let Effect::Vote {
             ref per_choice_effect,
@@ -1803,110 +1781,41 @@ mod tests {
         // The full block falls through to the per-vote parser, which also
         // rejects (these are not "For each ... vote" clauses), so the whole
         // detector returns None.
-        assert!(parse_vote_block(text, AbilityKind::Spell, "").is_none());
+        assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 
-    /// CR 701.38 + CR 120.1 + CR 608.2c: Truth or Consequences — the secret-vote
-    /// class with a card-name/choice-list pun. Drives the full post-self-ref-
-    /// normalization body (the "Secret council —" ability word is stripped
-    /// upstream; the option list "truth or consequences" — which IS the card name
-    /// — collapses to "~") and asserts the hoisted random-opponent Choose wrapping
-    /// a two-choice Vote whose truth slot draws `VoteCount{0}` and consequences
-    /// slot deals `3 × VoteCount{1}` to the persisted chosen player.
+    /// Secret-ballot cards (Truth or Consequences, Elrond, Orchard Elemental) are
+    /// intentionally unsupported: the existing WaitingFor::VoteChoice state updates
+    /// public tallies and emits VoteCast immediately after each vote, which would
+    /// expose ballots before the reveal step mandated by the Oracle text. Until a
+    /// proper secret-ballot waiting state is added, these cards fall through to
+    /// Effect::Unimplemented. This test pins that behaviour so a future engine
+    /// change that accidentally regresses to the broken public-tally path is caught.
     #[test]
-    fn parses_truth_or_consequences_secret_vote_with_recovery() {
+    fn secret_vote_opener_is_unsupported() {
+        // Truth or Consequences shape — secret opener must not parse as a Vote.
         let text = "Each player secretly votes for ~, then those votes are revealed. \
                     You draw cards equal to the number of truth votes. \
                     Then choose an opponent at random. \
                     ~ deals 3 damage to that player for each consequences vote.";
-        let def = parse_vote_block(text, AbilityKind::Spell, "Truth or Consequences")
-            .expect("Truth or Consequences must parse as a secret vote");
-        // Outer: random opponent choice, persisted for the SourceChosenPlayer damage.
-        match &*def.effect {
-            Effect::Choose {
-                choice_type,
-                persist,
-                selection,
-            } => {
-                assert!(matches!(
-                    choice_type,
-                    ChoiceType::Opponent { restriction: None }
-                ));
-                assert!(*persist);
-                assert_eq!(*selection, TargetSelectionMode::Random);
-            }
-            other => panic!("expected hoisted Choose, got {:?}", other),
-        }
-        // Inner: the secret vote with truth/consequences tallies.
-        let vote = def.sub_ability.as_ref().expect("Choose wraps the Vote");
-        match &*vote.effect {
-            Effect::Vote {
-                choices,
-                per_choice_effect,
-                starting_with,
-                voter_scope,
-                tally_mode,
-            } => {
-                assert_eq!(
-                    choices,
-                    &vec!["truth".to_string(), "consequences".to_string()]
-                );
-                assert_eq!(*starting_with, ControllerRef::You);
-                assert_eq!(*voter_scope, VoterScope::AllPlayers);
-                assert_eq!(*tally_mode, VoteTally::PerVote);
-                // truth → controller draws VoteCount{0} cards.
-                match &*per_choice_effect[0].effect {
-                    Effect::Draw { count, target } => {
-                        assert_eq!(
-                            *count,
-                            QuantityExpr::Ref {
-                                qty: QuantityRef::VoteCount { choice_index: 0 },
-                            }
-                        );
-                        assert_eq!(*target, TargetFilter::Controller);
-                    }
-                    other => panic!("expected truth → Draw, got {:?}", other),
-                }
-                // consequences → 3 × VoteCount{1} damage to the chosen opponent.
-                match &*per_choice_effect[1].effect {
-                    Effect::DealDamage { amount, target, .. } => {
-                        assert_eq!(
-                            *amount,
-                            QuantityExpr::Multiply {
-                                factor: 3,
-                                inner: Box::new(QuantityExpr::Ref {
-                                    qty: QuantityRef::VoteCount { choice_index: 1 },
-                                }),
-                            }
-                        );
-                        assert_eq!(*target, TargetFilter::SourceChosenPlayer);
-                    }
-                    other => panic!("expected consequences → DealDamage, got {:?}", other),
-                }
-                // Aggregate bodies are controller-/source-performed, not per-voter.
-                assert!(per_choice_effect[0].player_scope.is_none());
-                assert!(per_choice_effect[1].player_scope.is_none());
-            }
-            other => panic!("expected Vote sub_ability, got {:?}", other),
-        }
+        assert!(
+            parse_vote_block(text, AbilityKind::Spell).is_none(),
+            "secret-vote cards must not silently parse as a public vote"
+        );
     }
 
-    /// Secret-opener unit: the "each player secretly votes for ~" opener strips
-    /// the reveal tail and recovers the collapsed "~" option list back to the
-    /// card name, yielding the two real choices.
+    /// Secret-opener unit: "each player secretly votes for" must be rejected by
+    /// `parse_each_player_votes_clause` because the engine does not yet implement
+    /// a secret-ballot waiting state.
     #[test]
-    fn secret_opener_recovers_card_name_choice_list() {
-        let (rest, choices, scope) = parse_each_player_votes_clause(
-            "each player secretly votes for ~, then those votes are revealed. rest goes here",
-            "Truth or Consequences",
-        )
-        .expect("secret opener parses");
-        assert_eq!(
-            choices,
-            vec!["truth".to_string(), "consequences".to_string()]
+    fn secret_opener_returns_none() {
+        assert!(
+            parse_each_player_votes_clause(
+                "each player secretly votes for ~, then those votes are revealed. rest goes here"
+            )
+            .is_none(),
+            "secret opener must fall through when secret ballot is unsupported"
         );
-        assert_eq!(scope, VoterScope::AllPlayers);
-        assert_eq!(rest.trim(), "rest goes here");
     }
 
     /// Suffix-aggregate building block (general, no setup): "<effect> for each
