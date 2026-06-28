@@ -23544,9 +23544,11 @@ mod station_tests {
         while !state.stack.is_empty() {
             guard += 1;
             assert!(guard < 20, "stack failed to drain");
-            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+            apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+            apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
         }
 
+        crate::game::layers::flush_layers(&mut state);
         let creature = state.objects.get(&p5).unwrap();
         assert!(creature.has_keyword(&Keyword::Deathtouch));
         assert!(creature.has_keyword(&Keyword::Lifelink));

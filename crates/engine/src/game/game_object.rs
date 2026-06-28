@@ -1069,6 +1069,12 @@ impl GameObject {
                     if !self.keywords.contains(keyword) {
                         self.keywords.push(keyword.clone());
                     }
+                    // CR 613.1: perpetual keyword grants must survive the layer
+                    // pass's `keywords = base_keywords.clone()` reset — mirror
+                    // base_* P/T edits and the crew-keyword test seeding pattern.
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
                 }
             }
         }
