@@ -2734,8 +2734,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "play an additional land" / "play two additional lands" ---
+    // --- "play any number of lands" / additional land-drop grants ---
     // CR 305.2: Determine the count at parse time and carry it as typed data.
+    if nom_primitives::scan_contains(tp.lower, "play any number of lands") {
+        return Some(
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: u8::MAX })
+                .description(text.to_string()),
+        );
+    }
     if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
         return Some(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })

@@ -7448,6 +7448,40 @@ fn static_play_two_additional_lands() {
 }
 
 #[test]
+fn static_play_any_number_of_lands() {
+    let def = parse_static_line("You may play any number of lands on each of your turns.").unwrap();
+    assert_eq!(def.mode, StaticMode::AdditionalLandDrop { count: u8::MAX });
+}
+
+#[test]
+fn fastbond_first_line_is_static_not_targeted_play_effect() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "You may play any number of lands on each of your turns.\nWhenever you play a land, if it wasn't the first land you played this turn, this enchantment deals 1 damage to you.",
+        "Fastbond",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|def| def.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })),
+        "Fastbond must parse its land-play permission as a static ability, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(*ability.effect, Effect::CastFromZone { .. })),
+        "Fastbond must not ask for a target by lowering the static land-play permission to CastFromZone, got {:?}",
+        parsed.abilities
+    );
+}
+
+#[test]
 fn parse_compound_static_counter_minimum_variants() {
     // "a" counter variant
     let text =
