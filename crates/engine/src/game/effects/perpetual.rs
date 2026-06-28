@@ -36,9 +36,7 @@ pub fn resolve(
 
     let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
     let mut ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
-    // CR 608.2c: only the `~` / Any form falls back to the source; ParentTarget
-    // and other anaphors resolve to nothing when their referent is unavailable.
-    if ids.is_empty() && matches!(target, crate::types::ability::TargetFilter::Any) {
+    if ids.is_empty() {
         ids.push(ability.source_id);
     }
 

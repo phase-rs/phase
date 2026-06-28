@@ -3852,7 +3852,7 @@ pub(crate) fn take_pending_trigger_event_batch(
 /// targets at stack-push time. Only the root ability is seeded — downstream
 /// sub-abilities that produce a new parent referent during resolution (The
 /// Tenth Doctor's Allons-y! Suspend grant) keep the existing rebinding path.
-fn seed_batched_attack_parent_targets(
+pub(crate) fn seed_batched_attack_parent_targets(
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) {
@@ -3877,7 +3877,7 @@ fn seed_batched_attack_parent_targets(
 /// targets at stack-push time — mirroring `seed_batched_attack_parent_targets`
 /// for attack batches — so resolution does not depend on a live
 /// `current_trigger_event`.
-fn seed_event_context_parent_targets(
+pub(crate) fn seed_event_context_parent_targets(
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) {

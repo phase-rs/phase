@@ -544,9 +544,12 @@ pub fn resolved_targets(
             return vec![target];
         }
     }
-    // CR 608.2c: `ParentTarget` must not fall back to the source — an unresolved
-    // anaphor yields no target (CR 608.2b), not the triggering permanent.
-    let use_self = matches!(target_filter, TargetFilter::None) && ability.targets.is_empty();
+    // CR 608.2c: `None` and unresolved `ParentTarget` (no event referent, no
+    // propagated targets) fall back to the source object.
+    let use_self = matches!(
+        target_filter,
+        TargetFilter::None | TargetFilter::ParentTarget
+    ) && ability.targets.is_empty();
     if use_self {
         return vec![TargetRef::Object(ability.source_id)];
     }
