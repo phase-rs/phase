@@ -10,7 +10,7 @@ use super::ability::{
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, StepEndManaAction};
+use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -634,6 +634,28 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
 }
 
+/// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
+/// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
+fn special_action_registry_str(action: SpecialAction) -> &'static str {
+    match action {
+        SpecialAction::Plot => "Plot",
+        SpecialAction::UnlockDoor => "UnlockDoor",
+        SpecialAction::TurnFaceUp => "TurnFaceUp",
+        SpecialAction::RollPlanarDie => "RollPlanarDie",
+    }
+}
+
+/// Inverse of [`special_action_registry_str`].
+fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
+    match s {
+        "Plot" => Some(SpecialAction::Plot),
+        "UnlockDoor" => Some(SpecialAction::UnlockDoor),
+        "TurnFaceUp" => Some(SpecialAction::TurnFaceUp),
+        "RollPlanarDie" => Some(SpecialAction::RollPlanarDie),
+        _ => None,
+    }
+}
+
 /// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
 /// Distinct from [`CostModifyMode`], which only adjusts the mana component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -906,6 +928,28 @@ pub enum StaticMode {
         /// When present, the total adjustment is `amount * resolve_quantity(dynamic_count)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
+    },
+    /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
+    /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
+    /// direction given by `mode`. Doc Aurlock ("Plotting cards from your hand
+    /// costs {2} less") and Inquisitive Glimmer ("Unlock costs you pay cost {1}
+    /// less").
+    ///
+    /// Parameterized over [`SpecialAction`] rather than proliferating one variant
+    /// per action — any future "[special action] costs you pay cost {N} less"
+    /// lands without a new variant. Distinct from [`StaticMode::ReduceAbilityCost`]
+    /// (which keys on an `AbilityTag` and never matches a special action, since
+    /// plot/unlock payments carry no tag) and from [`StaticMode::ModifyCost`]
+    /// (spell costs, CR 601.2f). `amount` is generic mana only (CR 118.7a — a
+    /// generic cost reduction can't touch colored/colorless components).
+    /// `Minimum` is not meaningful here — only `Reduce` and `Raise` are
+    /// emitted/applied.
+    ReduceActionCost {
+        action: SpecialAction,
+        /// CR 118.7: Direction of the adjustment.
+        mode: CostModifyMode,
+        /// Generic mana adjustment per the special action (CR 118.7a).
+        amount: u32,
     },
     /// CR 702.142b: Modifies the per-turn activation limit for abilities matching
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
@@ -1829,6 +1873,10 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 116.2 + CR 118.7a: data-carrying (SpecialAction is not Hash);
+            // consumed by direct match in the special-action cost-reduction
+            // resolver, never used as a HashMap key.
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1871,6 +1919,7 @@ impl StaticMode {
             | StaticMode::ModifyCost { .. }
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::CantPayCost { .. }
@@ -2029,6 +2078,23 @@ impl fmt::Display for StaticMode {
                 } else {
                     write!(f, "ReduceAbilityCost({sign}{keyword},{amount})")
                 }
+            }
+            StaticMode::ReduceActionCost {
+                action,
+                mode,
+                amount,
+            } => {
+                // CR 118.7: Encode direction lossless ("+"/"-"); legacy default
+                // is Reduce in `from_str`.
+                let sign = match mode {
+                    CostModifyMode::Raise => "+",
+                    _ => "-",
+                };
+                write!(
+                    f,
+                    "ReduceActionCost({},{sign}{amount})",
+                    special_action_registry_str(*action)
+                )
             }
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
@@ -2397,6 +2463,31 @@ impl FromStr for StaticMode {
                 } else {
                     StaticMode::Other(s.to_string())
                 }
+            }
+            s if s.starts_with("ReduceActionCost(") => {
+                // CR 116.2 + CR 118.7: Parse "ReduceActionCost(Action,[+|-]amount)".
+                // A leading "+"/"-" on the amount marks Raise/Reduce; legacy
+                // strings without a marker default to Reduce.
+                let parsed = s
+                    .strip_prefix("ReduceActionCost(")
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .and_then(|inner| inner.split_once(','))
+                    .and_then(|(action_str, amt_str)| {
+                        let action = special_action_from_registry_str(action_str)?;
+                        let (mode, amount_str) = if let Some(rest) = amt_str.strip_prefix('+') {
+                            (CostModifyMode::Raise, rest)
+                        } else if let Some(rest) = amt_str.strip_prefix('-') {
+                            (CostModifyMode::Reduce, rest)
+                        } else {
+                            (CostModifyMode::Reduce, amt_str)
+                        };
+                        Some(StaticMode::ReduceActionCost {
+                            action,
+                            mode,
+                            amount: amount_str.parse().ok()?,
+                        })
+                    });
+                parsed.unwrap_or_else(|| StaticMode::Other(s.to_string()))
             }
             s if s.starts_with("ModifyActivationLimit(") => {
                 let inner = s

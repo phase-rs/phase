@@ -3690,18 +3690,7 @@ fn resolve_mana_symbols_in_mana_cost(
     targets: &[TargetRef],
 ) -> i32 {
     object_for_scope(state, scope, ctx, targets)
-        .map(|obj| match &obj.mana_cost {
-            ManaCost::Cost { shards, .. } => usize_to_i32_saturating(
-                shards
-                    .iter()
-                    .filter(|shard| match color {
-                        Some(c) => shard.contributes_to(c),
-                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
-                    })
-                    .count(),
-            ),
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
-        })
+        .map(|obj| obj.mana_cost.count_colored_pips(color))
         .unwrap_or(0)
 }
 

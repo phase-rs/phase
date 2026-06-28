@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, opt, peek, value};
+use nom::combinator::{all_consuming, map, opt, peek, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -25,8 +25,8 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DigSource,
-    Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1333,6 +1333,11 @@ fn parse_target_anaphoric_tense_polarity(
         value((true, true), alt((tag(" wasn't "), tag(" was not ")))),
         // Positive past
         value((false, true), tag(" was ")),
+        // CR 400.7: past-tense possession ("it had mana value 3 or less", "that
+        // creature had power 2 or less") → LKI snapshot. None of the recognized
+        // reflexive predicates use a negated " hadn't "/" didn't have " form, so
+        // only the positive arm is supplied.
+        value((false, true), tag(" had ")),
         // Negated present — must precede positive present
         value(
             (true, false),
@@ -1397,6 +1402,122 @@ fn parse_anaphoric_attacked_tense_polarity(input: &str) -> OracleResult<'_, bool
 fn parse_target_attacked_this_turn_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
     let parsed = all_consuming(parse_target_attacked_this_turn_condition)
+        .parse(lower.as_str())
+        .ok()
+        .map(|(_, c)| c);
+    parsed
+}
+
+/// CR 202.3 + CR 208.1: Parse a trailing "N or less" / "N or greater"
+/// comparison threshold shared by the mana-value and power/toughness reflexive
+/// predicates. Returns the typed `Comparator` and the fixed threshold. Composed
+/// from `nom_primitives::parse_number` and a comparator `alt` — one combinator,
+/// not a flat product of full-string tags.
+fn parse_or_threshold(input: &str) -> OracleResult<'_, (Comparator, i32)> {
+    let (rest, n) = nom_primitives::parse_number(input)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, comparator) = alt((
+        value(Comparator::LE, alt((tag("less"), tag("fewer")))),
+        value(Comparator::GE, alt((tag("greater"), tag("more")))),
+    ))
+    .parse(rest)?;
+    Ok((rest, (comparator, n as i32)))
+}
+
+/// CR 208.1: consume a P/T-stat keyword (with its trailing space) for the
+/// reflexive power/toughness predicate. Power and toughness are a leaf-level
+/// parameterization of the same CR 208 characteristic pair (`PtStat`).
+fn parse_reflexive_pt_stat(input: &str) -> OracleResult<'_, PtStat> {
+    alt((
+        value(PtStat::Power, tag("power ")),
+        value(PtStat::Toughness, tag("toughness ")),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c: the reflexive predicate following a target-anaphoric subject +
+/// tense — one branch per object characteristic. This `alt` IS the parameterized
+/// predicate axis: a single combinator per characteristic, composed, not a flat
+/// product of full-sentence tags. Each branch yields the `FilterProp` the
+/// condition tests against the prior clause's first object target.
+fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        // CR 120.6 + CR 120.9: historical "was dealt damage this turn" (Sold Out).
+        // NOTE: `FilterProp::Tapped` ("it was tapped", Brackish Blunder) is
+        // deliberately NOT recognized here. Tap status is not captured in the
+        // `LKISnapshot` / `ZoneChangeRecord` look-back snapshot, so a past-tense
+        // "was tapped" rider (use_lki) would evaluate fail-closed (always false)
+        // after the antecedent leaves the battlefield — silently under-firing.
+        // Recognizing it would turn the honest red swallow into a green parse with
+        // broken runtime semantics; left swallowed until the snapshot carries tap
+        // state (see implementation report).
+        value(
+            FilterProp::WasDealtDamageThisTurn,
+            tag("dealt damage this turn"),
+        ),
+        // CR 508.1b: combat status (Wisecrack "is attacking").
+        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        // CR 509.1a: combat status (blocking sibling).
+        value(FilterProp::Blocking, tag("blocking")),
+        // CR 202.3: "mana value N or less/greater" (Consuming Ashes).
+        map(
+            preceded(tag("mana value "), parse_or_threshold),
+            |(comparator, value)| FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ),
+        // CR 208.1: "power/toughness N or less/greater" (Driftgloom Coyote).
+        map(
+            (parse_reflexive_pt_stat, parse_or_threshold),
+            |(stat, (comparator, value))| FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 400.7: target-anaphoric reflexive object-property gate — the
+/// rider condition for the "removal/bounce/damage, then conditional bonus"
+/// class ("it was dealt damage this turn", "it had mana value 3 or less", "that
+/// creature had power 2 or less", "that creature is attacking"). Composes three
+/// orthogonal axes:
+///
+///   - subject: `it` / `that creature` / `that permanent` / `that card`
+///     (`parse_target_anaphoric_subject`)
+///   - tense + polarity: `parse_target_anaphoric_tense_polarity` →
+///     `(negated, use_lki)` — past tense (`was`/`had`) reads LKI per CR 400.7 /
+///     CR 608.2h; present tense (`is`) reads live state.
+///   - predicate: a parameterized `FilterProp` axis
+///     (`parse_reflexive_object_property`).
+///
+/// Emits `TargetMatchesFilter` (wrapped in `Not` when negated) resolving against
+/// the resolving ability's first object target.
+fn parse_target_reflexive_property_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, _) = parse_target_anaphoric_subject(input)?;
+    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, prop) = parse_reflexive_object_property(rest)?;
+    Ok((
+        rest,
+        maybe_negate(
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                use_lki,
+            },
+            negated,
+        ),
+    ))
+}
+
+fn parse_target_reflexive_property_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let parsed = all_consuming(parse_target_reflexive_property_condition)
         .parse(lower.as_str())
         .ok()
         .map(|(_, c)| c);
@@ -3770,6 +3891,19 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // a type/subtype phrase, so it does not collide with the bare-color form
     // (which `parse_condition_text` handles separately).
     if let Some(condition) = parse_target_type_membership_condition_text(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 608.2c + CR 400.7: target-anaphoric reflexive object-property gate —
+    // "it was dealt damage this turn" / "it had mana value 3 or less" / "that
+    // creature had power 2 or less" / "that creature is attacking". The rider
+    // condition for the "<removal/bounce/damage>, then conditional bonus" class
+    // (Consuming Ashes, Sold Out, Driftgloom Coyote, Wisecrack). Placed after the
+    // more specific combat-history and type-membership forms above and before the
+    // bare-color / parse_inner_condition fallbacks: the predicate is a
+    // parameterized object characteristic (dealt-damage, combat status, mana
+    // value, P/T), so it must not preempt the type/color recognizers.
+    if let Some(condition) = parse_target_reflexive_property_condition_text(lower.as_str()) {
         return Some(condition);
     }
 
@@ -6334,6 +6468,195 @@ mod tests {
             *condition,
             AbilityCondition::TargetMatchesFilter { .. }
         ));
+    }
+
+    // ---- reflexive-if-rider recognizer (S01) ----
+    //
+    // Discrimination / revert-probe: reverting the `parse_reflexive_object_property`
+    // arm (or the `try_nom_condition_as_ability_condition` registration) makes
+    // `parse_target_reflexive_property_condition_text` return `None`, reproducing
+    // the pre-fix swallow (`condition: null` on the rider sub-ability, measured in
+    // card-data.json for Sold Out / Consuming Ashes / Brackish Blunder). Each
+    // sibling negative proves a distinct axis (predicate / comparator / tense /
+    // polarity) is load-bearing.
+
+    fn single_prop(cond: &AbilityCondition) -> (&FilterProp, bool) {
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = cond else {
+            panic!("expected TargetMatchesFilter, got {cond:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters.len(), 0, "reflexive filter carries no type");
+        assert_eq!(tf.properties.len(), 1, "exactly one predicate prop");
+        (&tf.properties[0], *use_lki)
+    }
+
+    /// Honesty guard: "it was tapped" (Brackish Blunder) is deliberately NOT
+    /// recognized — tap status is absent from the LKI snapshot, so a use_lki
+    /// "was tapped" rider would under-fire. Leaving it unrecognized keeps the
+    /// coverage swallow honest (red) until the snapshot carries tap state.
+    #[test]
+    fn reflexive_was_tapped_is_deliberately_unrecognized() {
+        assert!(
+            parse_target_reflexive_property_condition_text("it was tapped").is_none(),
+            "'was tapped' must stay unrecognized (LKI tap state unsupported)"
+        );
+    }
+
+    /// Sibling: negated present "that creature isn't attacking" → Not +
+    /// use_lki:false. Proves the polarity AND tense axes are load-bearing on a
+    /// runtime-supported predicate.
+    #[test]
+    fn reflexive_isnt_attacking_emits_negated_present() {
+        let cond = parse_target_reflexive_property_condition_text("that creature isn't attacking")
+            .unwrap();
+        let AbilityCondition::Not { condition } = &cond else {
+            panic!("expected Not, got {cond:?}");
+        };
+        let (prop, use_lki) = single_prop(condition);
+        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert!(!use_lki, "present-tense 'isn't' must read live state");
+    }
+
+    /// CR 202.3: Consuming Ashes "it had mana value 3 or less" → Cmc LE 3, LKI.
+    #[test]
+    fn reflexive_had_mana_value_le3() {
+        let cond =
+            parse_target_reflexive_property_condition_text("it had mana value 3 or less").unwrap();
+        let (prop, use_lki) = single_prop(&cond);
+        assert_eq!(
+            *prop,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+        assert!(use_lki, "past-tense 'had' must use LKI per CR 400.7");
+    }
+
+    /// Sibling: comparator axis — "4 or greater" → GE 4.
+    #[test]
+    fn reflexive_had_mana_value_ge4() {
+        let cond = parse_target_reflexive_property_condition_text("it had mana value 4 or greater")
+            .unwrap();
+        let (prop, _) = single_prop(&cond);
+        assert_eq!(
+            *prop,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+
+    /// CR 208.1: Driftgloom Coyote "that creature had power 2 or less" →
+    /// PtComparison{Power, LE, 2}, LKI.
+    #[test]
+    fn reflexive_had_power_le2() {
+        let cond =
+            parse_target_reflexive_property_condition_text("that creature had power 2 or less")
+                .unwrap();
+        let (prop, use_lki) = single_prop(&cond);
+        assert_eq!(
+            *prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+        assert!(use_lki, "past-tense 'had' must use LKI per CR 400.7");
+    }
+
+    /// Sibling: stat axis — toughness, GE.
+    #[test]
+    fn reflexive_had_toughness_ge3() {
+        let cond = parse_target_reflexive_property_condition_text(
+            "that creature had toughness 3 or greater",
+        )
+        .unwrap();
+        let (prop, _) = single_prop(&cond);
+        assert_eq!(
+            *prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+    }
+
+    /// CR 508.1b: Wisecrack "that creature is attacking" → Attacking, present
+    /// tense reads live state (use_lki:false).
+    #[test]
+    fn reflexive_is_attacking_live() {
+        let cond =
+            parse_target_reflexive_property_condition_text("that creature is attacking").unwrap();
+        let (prop, use_lki) = single_prop(&cond);
+        assert_eq!(*prop, FilterProp::Attacking { defender: None });
+        assert!(!use_lki, "present-tense 'is attacking' reads live combat");
+    }
+
+    /// Sibling: combat-status predicate axis — blocking.
+    #[test]
+    fn reflexive_is_blocking_live() {
+        let cond =
+            parse_target_reflexive_property_condition_text("that creature is blocking").unwrap();
+        let (prop, _) = single_prop(&cond);
+        assert_eq!(*prop, FilterProp::Blocking);
+    }
+
+    /// CR 120.6 + CR 120.9: Sold Out "it was dealt damage this turn" →
+    /// WasDealtDamageThisTurn, LKI.
+    #[test]
+    fn reflexive_was_dealt_damage_this_turn() {
+        let cond = parse_target_reflexive_property_condition_text("it was dealt damage this turn")
+            .unwrap();
+        let (prop, use_lki) = single_prop(&cond);
+        assert_eq!(*prop, FilterProp::WasDealtDamageThisTurn);
+        assert!(use_lki, "past-tense look-back must use LKI per CR 400.7");
+    }
+
+    /// CR 608.2c: Faller's Faithful "that creature wasn't dealt damage this turn"
+    /// → Not{WasDealtDamageThisTurn, LKI}. (Part B card; recognizer-side proof.)
+    #[test]
+    fn reflexive_wasnt_dealt_damage_negated() {
+        let cond = parse_target_reflexive_property_condition_text(
+            "that creature wasn't dealt damage this turn",
+        )
+        .unwrap();
+        let AbilityCondition::Not { condition } = &cond else {
+            panic!("expected Not, got {cond:?}");
+        };
+        let (prop, use_lki) = single_prop(condition);
+        assert_eq!(*prop, FilterProp::WasDealtDamageThisTurn);
+        assert!(use_lki, "negated past-tense look-back uses LKI");
+    }
+
+    /// Coverage-regression guard (Zemo / Isochron class): a board-state leading
+    /// conditional whose subject is NOT a target anaphor ("you control a
+    /// creature") must NOT be folded into a `TargetMatchesFilter`. The reflexive
+    /// recognizer returns `None`, and the full dispatch routes it to its existing
+    /// control-presence condition.
+    #[test]
+    fn reflexive_recognizer_ignores_board_state_conditional() {
+        assert!(
+            parse_target_reflexive_property_condition_text("you control a creature").is_none(),
+            "board-state 'you control a creature' must not match the reflexive recognizer"
+        );
+        let mut ctx = ParseContext::default();
+        let routed = try_nom_condition_as_ability_condition("you control a creature", &mut ctx);
+        assert!(
+            !matches!(
+                routed,
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+                    | Some(AbilityCondition::Not { .. })
+            ),
+            "control-presence gate must not be mis-folded into TargetMatchesFilter, got {routed:?}"
+        );
     }
 
     /// CR 608.2c: "permanent" is not a CoreType — strip_card_type_conditional must
