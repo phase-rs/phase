@@ -23500,19 +23500,19 @@ mod station_tests {
 
         let (mut state, spacecraft_id, p5, _) = setup_station_scenario();
         {
-            let obj = state.objects.get_mut(&spacecraft_id).unwrap();
-            obj.trigger_definitions
-                .push(TriggerDefinition::new(TriggerMode::Stationed).execute(
-                    AbilityDefinition::new(
-                        AbilityKind::Database,
-                        Effect::ApplyPerpetual {
-                            target: TargetFilter::ParentTarget,
-                            modification: PerpetualModification::GrantKeywords {
-                                keywords: vec![Keyword::Deathtouch, Keyword::Lifelink],
-                            },
+            let trigger_def =
+                TriggerDefinition::new(TriggerMode::Stationed).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::ApplyPerpetual {
+                        target: TargetFilter::ParentTarget,
+                        modification: PerpetualModification::GrantKeywords {
+                            keywords: vec![Keyword::Deathtouch, Keyword::Lifelink],
                         },
-                    ),
+                    },
                 ));
+            let obj = state.objects.get_mut(&spacecraft_id).unwrap();
+            obj.trigger_definitions.push(trigger_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger_def);
         }
         reindex_object_triggers(&mut state, spacecraft_id);
 
@@ -23540,9 +23540,11 @@ mod station_tests {
             "Stationed trigger must push a stack entry"
         );
 
+        let mut guard = 0;
         while !state.stack.is_empty() {
-            apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
-            apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+            guard += 1;
+            assert!(guard < 20, "stack failed to drain");
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         }
 
         let creature = state.objects.get(&p5).unwrap();

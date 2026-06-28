@@ -323,8 +323,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let (Some(ability), StackEntryKind::TriggeredAbility { trigger_event, .. }) =
         (ability.as_mut(), &entry.kind)
     {
-        super::triggers::seed_batched_attack_parent_targets(ability, trigger_event.as_ref());
-        super::triggers::seed_event_context_parent_targets(ability, trigger_event.as_ref());
+        let event_ref = trigger_event
+            .as_ref()
+            .or(state.current_trigger_event.as_ref());
+        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(ability, event_ref);
     }
 
     if ability

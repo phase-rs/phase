@@ -58,24 +58,27 @@ fn perpetual_target_object_ids(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    if !ability.targets.is_empty() {
-        let propagated = super::effect_object_targets(target, &ability.targets);
-        if !propagated.is_empty() {
-            return propagated;
-        }
-    }
-
+    // CR 702.184a/702.122/702.171: Stationed/VehicleCrewed/Saddled anaphora
+    // binds before propagated chain targets — a stale source-only fallback in
+    // `ability.targets` must not beat the live trigger event.
     if matches!(target, TargetFilter::ParentTarget) {
         if let Some(id) = parent_object_from_resolution_trigger_context(state) {
             return vec![id];
         }
     }
 
+    if !ability.targets.is_empty() {
+        let propagated = super::effect_object_targets(target, &ability.targets);
+        if !propagated.is_empty()
+            && !(matches!(target, TargetFilter::ParentTarget) && propagated == [ability.source_id])
+        {
+            return propagated;
+        }
+    }
+
     let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
     let mut ids = super::effect_object_targets(target, &effective_targets);
 
-    // Stationed/VehicleCrewed/Saddled ParentTarget must not bind the trigger
-    // source when the event referent is still available on the resolving entry.
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
         if let Some(id) = parent_object_from_resolution_trigger_context(state) {
             return vec![id];
@@ -346,5 +349,104 @@ mod tests {
             .get(&spacecraft)
             .unwrap()
             .has_keyword(&Keyword::Deathtouch));
+    }
+
+    #[test]
+    fn perpetual_grant_keywords_parent_target_overrides_source_only_propagation() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let spacecraft = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monoist Gravliner".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Stationing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        });
+
+        let modification = PerpetualModification::GrantKeywords {
+            keywords: vec![Keyword::Deathtouch],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: modification.clone(),
+            },
+            vec![TargetRef::Object(spacecraft)],
+            spacecraft,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state
+            .objects
+            .get(&creature)
+            .unwrap()
+            .has_keyword(&Keyword::Deathtouch));
+        assert!(!state
+            .objects
+            .get(&spacecraft)
+            .unwrap()
+            .has_keyword(&Keyword::Deathtouch));
+    }
+
+    #[test]
+    fn perpetual_parent_target_base_pt_uses_propagated_chain_target() {
+        use crate::types::ability::TargetFilter;
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Blood Age Muster".to_string(),
+            Zone::Stack,
+        );
+        let duplicate = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Conjured Duplicate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&duplicate).unwrap();
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 2,
+                    toughness: 2,
+                },
+            },
+            vec![TargetRef::Object(duplicate)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&duplicate).unwrap();
+        assert_eq!(obj.base_power, Some(2));
+        assert_eq!(obj.base_toughness, Some(2));
+        assert_eq!(state.objects.get(&source).unwrap().base_power, None);
     }
 }
