@@ -12,10 +12,9 @@
 //! (Stationed/VehicleCrewed events, chain propagation) bind the correct object;
 //! `Any` falls back to the source when no referent is available.
 
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
 
 /// Target resolution: uses the effect's `target` filter through the shared
 /// `resolved_targets` machinery (ParentTarget event anaphora, chain propagation,
@@ -68,6 +67,7 @@ pub fn resolve(
 mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, PerpetualModification, ResolvedAbility, TargetRef};
+    use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
