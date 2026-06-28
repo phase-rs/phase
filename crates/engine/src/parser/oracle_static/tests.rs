@@ -20847,3 +20847,106 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
         def.modifications
     );
 }
+
+/// CR 121.1 + CR 613.11: River Song regression. The "Meet in Reverse" line must
+/// lower to exactly one `DrawFromBottom { Controller }` static (NOT a spell
+/// catch-all `Effect::Unimplemented`), and the "Spoilers" trigger must remain a
+/// `PlayerPerformedAction` over [Scry, Surveil, SearchedLibrary].
+#[test]
+fn river_song_full_card_parses_without_unimplemented() {
+    use crate::types::events::PlayerActionKind;
+    use crate::types::triggers::TriggerMode;
+
+    let oracle = "Meet in Reverse \u{2014} You draw cards from the bottom of your library rather than the top.\n\
+        Spoilers \u{2014} Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on River Song. Then River Song deals damage to that player equal to its power.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "River Song",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Time".to_string(), "Lord".to_string()],
+    );
+
+    // (i) No spell catch-all Unimplemented leaked into the abilities.
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+        "River Song must parse with 0 Unimplemented abilities, got {:?}",
+        parsed.abilities
+    );
+
+    // (ii) Exactly one DrawFromBottom { Controller } static.
+    let bottom: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|d| {
+            d.mode
+                == StaticMode::DrawFromBottom {
+                    who: ProhibitionScope::Controller,
+                }
+        })
+        .collect();
+    assert_eq!(
+        bottom.len(),
+        1,
+        "expected exactly one DrawFromBottom(controller) static, got statics {:?}",
+        parsed.statics
+    );
+
+    // (iii) The Spoilers trigger shape is intact.
+    let spoilers = parsed
+        .triggers
+        .iter()
+        .find(|t| t.player_actions.is_some())
+        .expect("Spoilers must remain a player-action trigger");
+    assert_eq!(spoilers.mode, TriggerMode::PlayerPerformedAction);
+    let actions = spoilers
+        .player_actions
+        .as_ref()
+        .expect("player_actions present");
+    for expected in [
+        PlayerActionKind::Scry,
+        PlayerActionKind::Surveil,
+        PlayerActionKind::SearchedLibrary,
+    ] {
+        assert!(
+            actions.contains(&expected),
+            "Spoilers must fire on {expected:?}; got {actions:?}"
+        );
+    }
+}
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom`.
+/// "You draw a card from the bottom of your library rather than the top."
+/// must parse identically to the plural River Song wording.
+#[test]
+fn draw_from_bottom_singular_controller() {
+    let def =
+        parse_static_line("You draw a card from the bottom of your library rather than the top.")
+            .expect("singular controller form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Controller,
+        }
+    );
+}
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom` with
+/// opponent subject and "instead of" connector.
+/// "Each opponent draws a card from the bottom of their library instead of the top."
+#[test]
+fn draw_from_bottom_singular_opponents() {
+    let def = parse_static_line(
+        "Each opponent draws a card from the bottom of their library instead of the top.",
+    )
+    .expect("singular opponent form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+}

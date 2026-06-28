@@ -1384,12 +1384,14 @@ fn execute_draw_for(
             };
             let allowed = crate::game::effects::draw::allowed_draw_count(state, player_id, count);
 
-            let cards_to_draw: Vec<_> = state
-                .players
-                .iter()
-                .find(|p| p.id == player_id)
-                .map(|p| p.library.iter().take(allowed as usize).copied().collect())
-                .unwrap_or_default();
+            // CR 121.1 + CR 613.11: route card selection through the single
+            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
+            // honored on the turn-based draw step too.
+            let cards_to_draw = crate::game::effects::draw::select_cards_to_draw(
+                state,
+                player_id,
+                allowed as usize,
+            );
 
             // CR 704.5b: Attempting to draw from an empty library causes a game loss.
             if allowed > 0 && cards_to_draw.len() < allowed as usize {

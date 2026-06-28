@@ -1622,6 +1622,43 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             crate::game::casting_costs::tap_creature_power_contribution,
             |cards| GameAction::SelectCards { cards },
         ),
+        // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
+        // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
+        // subset whose summed `property` meets the comparator, so enumerate
+        // minimal-cover subsets (mirroring the Crew/Saddle aggregate-tap path)
+        // rather than a fixed-cardinality selection. `minimal_power_subset_candidates`
+        // is sum-based, so this arm handles the `Sum` aggregate (the only shape in
+        // the corpus); other aggregate functions fall through to the generic arm.
+        WaitingFor::PayCost {
+            player,
+            kind:
+                PayCostKind::ExileAggregate {
+                    function: crate::types::ability::AggregateFunction::Sum,
+                    property,
+                    comparator,
+                    value,
+                    ..
+                },
+            choices,
+            ..
+        } => {
+            let property = *property;
+            minimal_power_subset_candidates(
+                state,
+                *player,
+                choices,
+                |total| comparator.evaluate(total, *value),
+                move |state, id| {
+                    crate::game::quantity::aggregate_property_over(
+                        state,
+                        &[id],
+                        crate::types::ability::AggregateFunction::Sum,
+                        property,
+                    )
+                },
+                |cards| GameAction::SelectCards { cards },
+            )
+        }
         WaitingFor::PayCost {
             player,
             choices,

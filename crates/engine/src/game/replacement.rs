@@ -502,6 +502,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Loyalty { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::PayEnergy { .. }

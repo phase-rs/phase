@@ -2647,6 +2647,31 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                // CR 117.1 + CR 601.2b + CR 608.2c: Aggregate-threshold "exile
+                // any number" cost (Baron Helmut Zemo's Boast); the handler
+                // validates the threshold, exiles, publishes the tracked set, and
+                // binds the resolving ability's tracked-set sentinel to it.
+                PayCostKind::ExileAggregate {
+                    zone,
+                    function,
+                    property,
+                    comparator,
+                    value,
+                    filter,
+                } => engine_casting::handle_exile_aggregate_for_cost(
+                    state,
+                    *player,
+                    *zone,
+                    *function,
+                    *property,
+                    *comparator,
+                    *value,
+                    filter,
+                    *pending_cast.clone(),
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
                 PayCostKind::RemoveCounter {
                     counter_type,
                     count: counter_count,
@@ -2745,6 +2770,7 @@ fn apply_action(
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
+                | PayCostKind::ExileAggregate { .. }
                 | PayCostKind::RemoveCounter { .. }
                 | PayCostKind::Behold { .. } => {
                     return Err(EngineError::InvalidAction(

@@ -3016,6 +3016,13 @@ pub(super) fn parse_choose_ast(
     {
         let rest_lower = &lower[lower.len() - rest.len()..];
 
+        // CR 609.7a: "choose a source you control" — damage-source selection,
+        // not permanent targeting. Must precede `is_choose_as_targeting`, which
+        // would misroute this shape to `TargetOnly { Any }`.
+        if let Some(ast) = try_parse_choose_damage_source(rest) {
+            return Some(ast);
+        }
+
         // CR 101.4 + CR 701.21a: "choose from among ... an artifact, a creature, ..."
         // or "choose an artifact, a creature, ... from among ..."
         // Must be checked before is_choose_as_targeting since these are NOT targeting.
@@ -3094,6 +3101,13 @@ pub(super) fn parse_choose_ast(
     }
 
     None
+}
+
+/// CR 609.7a: "choose a source [you control|...]" lowers to `ChooseDamageSource`.
+fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
+    let source_filter =
+        crate::parser::oracle_replacement::parse_choose_damage_source_candidate(rest)?;
+    Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -3917,6 +3931,9 @@ fn parse_core_type_name(input: &str) -> Option<(&str, CoreType)> {
 
 pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     match ast {
+        ChooseImperativeAst::DamageSource { source_filter } => {
+            Effect::ChooseDamageSource { source_filter }
+        }
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
         ChooseImperativeAst::NamedChoice {
@@ -14205,6 +14222,90 @@ mod tests {
                 panic!("Expected TargetOnly or Reparse for single-target wording, got {other:?}")
             }
         }
+    }
+
+    /// CR 609.7a: Desperate Gambit's "Choose a source you control" must lower to
+    /// `ChooseDamageSource` with a controller-scoped candidate filter, not
+    /// `TargetOnly { Any }`.
+    #[test]
+    fn desperate_gambit_choose_source_you_control_lowers_to_choose_damage_source() {
+        use crate::types::ability::ControllerRef;
+
+        let text = "choose a source you control";
+        let lower = text.to_lowercase();
+        let ast = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("must parse choose-a-source-you-control");
+        match ast {
+            ChooseImperativeAst::DamageSource { ref source_filter } => {
+                let tf = typed_leg(source_filter).expect("expected typed source filter");
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters.is_empty(),
+                    "article 'a' must not parse as subtype A: {tf:?}"
+                );
+            }
+            other => panic!("expected DamageSource AST, got {other:?}"),
+        }
+
+        let effect = lower_choose_ast(ast);
+        match effect {
+            Effect::ChooseDamageSource { source_filter } => {
+                let tf = typed_leg(&source_filter).expect("expected typed source filter");
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters.is_empty(),
+                    "article 'a' must not parse as subtype A: {tf:?}"
+                );
+            }
+            other => panic!("expected ChooseDamageSource effect, got {other:?}"),
+        }
+    }
+
+    /// CR 609.7a + CR 705: Desperate Gambit's lose branch bare "it" must thread
+    /// `ChosenDamageSource` when the chain opens with `ChooseDamageSource`.
+    #[test]
+    fn desperate_gambit_lose_branch_threads_chosen_damage_source() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+
+        fn find_flip_coin(def: &AbilityDefinition) -> Option<&Effect> {
+            if matches!(&*def.effect, Effect::FlipCoin { .. }) {
+                return Some(&def.effect);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_flip_coin)
+                .or_else(|| def.else_ability.as_deref().and_then(find_flip_coin))
+        }
+
+        let text = "Choose a source you control. Flip a coin. If you win the flip, \
+            the next time that source would deal damage this turn, it deals double that damage instead. \
+            If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let flip = find_flip_coin(&def).expect("expected FlipCoin in chain");
+        let Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } = flip
+        else {
+            unreachable!();
+        };
+        let win = win_effect.as_ref().expect("win branch");
+        let lose = lose_effect.as_ref().expect("lose branch");
+        assert!(matches!(
+            &*win.effect,
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &*lose.effect,
+            Effect::PreventDamage {
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource),
+                ..
+            }
+        ));
     }
 
     /// CR 115.1c + CR 608.2c regression: "target X and put a counter on it"

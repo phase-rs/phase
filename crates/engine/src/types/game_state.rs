@@ -2685,6 +2685,25 @@ pub enum PayCostKind {
     Behold {
         action: BeholdCostAction,
     },
+    /// CR 117.1 + CR 601.2b + CR 602.2b: Interactive payment of an
+    /// `AbilityCost::ExileWithAggregate` — the player exiles *any number* of the
+    /// pre-filtered `WaitingFor::PayCost.choices` from `zone` such that the
+    /// aggregate `function` of `property` over the chosen set satisfies
+    /// `comparator` against `value`. Modeled on `PayCostKind::TapCreatures`
+    /// (aggregate-threshold payment, validated by the handler rather than a fixed
+    /// cardinality) combined with `ExileFromZone` (graveyard exile). The handler
+    /// (`handle_exile_aggregate_for_cost`) re-validates uniqueness, still-in-zone
+    /// membership, and the threshold, then publishes the exiled cards as a fresh
+    /// tracked set and binds the resolving ability's tracked-set sentinel to it
+    /// before the ability is pushed to the stack (CR 608.2c, Baron Helmut Zemo).
+    ExileAggregate {
+        zone: Zone,
+        function: crate::types::ability::AggregateFunction,
+        property: crate::types::ability::ObjectProperty,
+        comparator: crate::types::ability::Comparator,
+        value: i32,
+        filter: crate::types::ability::TargetFilter,
+    },
 }
 
 /// CR 601.2b + CR 605.3b: Resumption context after a PayCost choice completes.

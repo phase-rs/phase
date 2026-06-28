@@ -14915,6 +14915,34 @@ mod tests {
         }
     }
 
+    /// Discordant Spirit: "if it's an opponent's turn" must hoist as the
+    /// intervening-if condition. CR 102.1 + CR 102.2: a turn is never vacant, so
+    /// "an opponent's turn" is "the active player is any non-controller" —
+    /// `Not(DuringPlayersTurn { Controller })`, equivalent to "it's not your
+    /// turn". Without this the condition was silently dropped and the counter
+    /// would be placed on the controller's own end step too.
+    #[test]
+    fn trigger_intervening_if_opponents_turn_discordant_spirit() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if it's an opponent's turn, put a +1/+1 counter on this creature for each 1 damage dealt to you this turn.",
+            "Discordant Spirit",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Not { condition }) => {
+                assert!(
+                    matches!(
+                        condition.as_ref(),
+                        TriggerCondition::DuringPlayersTurn {
+                            player: PlayerFilter::Controller,
+                        }
+                    ),
+                    "expected Not(DuringPlayersTurn {{ Controller }}), got {condition:?}"
+                );
+            }
+            other => panic!("expected Not(DuringPlayersTurn), got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
         let def = parse_trigger_line(

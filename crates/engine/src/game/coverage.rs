@@ -149,6 +149,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
             | StaticMode::CantDraw { .. }
+            // CR 121.1 / CR 613.11: DrawFromBottom carries `who` — top-vs-bottom
+            // selection is enforced in
+            // game/effects/draw.rs::select_cards_to_draw.
+            | StaticMode::DrawFromBottom { .. }
             // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
             // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
             // turns.rs::should_skip_step_static(). Coverage support is via
@@ -7831,6 +7835,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             }
             StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
             StaticMode::CantDraw { .. } => effective_lower.contains("can't draw"),
+            StaticMode::DrawFromBottom { .. } => effective_lower.contains("from the bottom of"),
             StaticMode::PerTurnDrawLimit { .. } => effective_lower.contains("can't draw more than"),
             StaticMode::DoubleTriggers { .. } => {
                 effective_lower.contains("triggers an additional time")

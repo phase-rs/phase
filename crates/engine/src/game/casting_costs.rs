@@ -2,11 +2,12 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, BeholdCostAction,
-    CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect, KickerVariant,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
+    AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
+    BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
+    CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
+    SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate, TargetFilter, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -2122,6 +2123,92 @@ fn finish_exile_selection_for_cost(
     for &id in chosen {
         super::zones::move_to_zone(state, id, Zone::Exile, events);
     }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 117.1 + CR 601.2b + CR 602.2b + CR 608.2c: Resolve an `ExileWithAggregate`
+/// activation cost (Baron Helmut Zemo's Boast). The player has chosen any number
+/// of eligible graveyard cards; validate uniqueness, legality, and still-in-zone
+/// membership, then enforce the aggregate threshold (CR 118.3 — a cost can't be
+/// paid without the necessary resources). Exile the chosen cards, publish them as
+/// a fresh tracked set, and bind the resolving ability's tracked-set sentinel to
+/// that CONCRETE id BEFORE the ability is pushed onto the stack.
+///
+/// CR 608.2c (robustness): the binding MUST be to the concrete id, not left as
+/// the `TrackedSetId(0)` sentinel. The cost is paid at ACTIVATION time, but the
+/// `CastCopyOfCard` effect resolves LATER, off the stack. Between the two,
+/// `state.chain_tracked_set_id` is reset to `None` at depth-0 resolution
+/// (`effects::resolve_ability_chain`) and intervening instant-speed effects may
+/// publish their own tracked sets, so the sentinel's "newest set" fallback
+/// (`resolve_tracked_set_sentinel` / `latest_tracked_set_id`) would resolve to
+/// the WRONG set. `state.tracked_object_sets` is append-only (never cleared or
+/// rekeyed), so the concrete id published here remains valid through resolution.
+/// The threshold guarantees the chosen set is non-empty (a ≥15 sum needs at
+/// least one card), so the published set is never empty.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_aggregate_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    zone: Zone,
+    function: AggregateFunction,
+    property: ObjectProperty,
+    comparator: Comparator,
+    value: i32,
+    filter: &TargetFilter,
+    pending: PendingCast,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2b: the chosen cards must be distinct.
+    if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
+        return Err(EngineError::InvalidAction(
+            "Selected cards must be unique".to_string(),
+        ));
+    }
+    for id in chosen {
+        if !legal_cards.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not eligible for the exile cost".to_string(),
+            ));
+        }
+    }
+    // CR 601.2b: re-validate each chosen card is still eligible (still in the
+    // source zone and still matches the filter) against the live state.
+    let still_eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
+        state,
+        player,
+        pending.object_id,
+        filter,
+        zone,
+    );
+    for id in chosen {
+        if !still_eligible.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card is no longer eligible to exile".to_string(),
+            ));
+        }
+    }
+    // CR 118.3: the chosen set must satisfy the advertised aggregate threshold.
+    let total = super::quantity::aggregate_property_over(state, chosen, function, property);
+    if !comparator.evaluate(total, value) {
+        return Err(EngineError::InvalidAction(format!(
+            "Chosen cards aggregate to {total}, which does not satisfy the exile cost threshold ({value})"
+        )));
+    }
+
+    for &id in chosen {
+        super::zones::move_to_zone(state, id, Zone::Exile, events);
+    }
+
+    // CR 608.2c: publish the exiled cards as a fresh tracked set and bind the
+    // resolving ability's `TrackedSetId(0)` sentinel to that concrete id before
+    // the ability reaches the stack (see the doc comment for the robustness
+    // rationale across the activation→resolution gap).
+    let set_id = super::effects::publish_fresh_tracked_set(state, chosen.to_vec());
+    let mut pending = pending;
+    pending.ability.bind_tracked_set_sentinel_recursive(set_id);
 
     finish_pending_cost_or_cast(state, player, pending, events)
 }

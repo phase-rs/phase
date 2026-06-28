@@ -1839,10 +1839,32 @@ fn filter_inner_for_object(
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
-        TargetFilter::ChosenDamageSource => state
-            .last_chosen_damage_source
-            .as_ref()
-            .is_some_and(|choice| choice.source_id == object_id),
+        TargetFilter::ChosenDamageSource => {
+            let recheck_ctx = FilterContext {
+                source_id,
+                source_controller,
+                ability,
+                recipient_id,
+                scoped_iteration_player,
+            };
+            state
+                .last_chosen_damage_source
+                .as_ref()
+                .is_some_and(|choice| {
+                    // CR 609.7b: An effect that would prevent or replace damage from a
+                    // chosen source applies only to damage from that source.
+                    choice.source_id == object_id
+                        && (matches!(
+                            &choice.source_filter,
+                            TargetFilter::Any | TargetFilter::ChosenDamageSource
+                        ) || matches_target_filter(
+                            state,
+                            object_id,
+                            &choice.source_filter,
+                            &recheck_ctx,
+                        ))
+                })
+        }
         // "card named [literal]" — static name match.
         TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of

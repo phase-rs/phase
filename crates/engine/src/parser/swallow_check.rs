@@ -5120,6 +5120,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 id: TrackedSetId(0),
             },
             cost: ManaCost::zero(),
+            count: None,
         };
         assert!(super::effect_has_internal_optionality(&effect));
     }

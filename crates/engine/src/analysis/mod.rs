@@ -25,7 +25,14 @@
 //!   measurement into a [`LoopCertificate`] (the unbounded axes + a [`WinKind`]),
 //!   the offline classification the corpus harness asserts against. Still
 //!   **zero gameplay change** — never called from the reducer.
+//! - [`ability_graph`] — Engine B: [`candidate_cycles`] is the static, offline
+//!   candidate generator. From a list of `CardFace` ASTs it builds an
+//!   ability/resource graph, finds SCCs, and emits over-approximate
+//!   [`CandidateCycle`]s for Engine A to confirm. Like the rest of this module it
+//!   is **purely additive** — it never drives the reducer and never touches a
+//!   `GameState`.
 
+pub mod ability_graph;
 pub mod loop_check;
 pub mod resource;
 pub mod sim;
@@ -33,6 +40,7 @@ pub mod sim;
 #[cfg(test)]
 mod corpus_tests;
 
+pub use ability_graph::{candidate_cycles, AbilityGraph, CandidateCycle};
 pub use loop_check::{detect_loop, LoopCertificate, WinKind};
 pub use resource::{
     loop_states_equal_modulo_resources, CounterClass, ObjectClass, ResourceAxis, ResourceVector,

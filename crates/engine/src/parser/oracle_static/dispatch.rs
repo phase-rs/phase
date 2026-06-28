@@ -2226,6 +2226,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- CR 121.1 / CR 613.11: Draw-source redirection ("draw cards from the
+    // bottom of your library rather than the top") — River Song, "Meet in
+    // Reverse". ---
+    if let Some(def) = parse_draw_from_bottom(tp.lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
     // CR 502.3: Effects can keep permanents from untapping during the untap step.
     if nom_primitives::scan_contains(tp.lower, "doesn't untap during")

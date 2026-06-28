@@ -111,16 +111,10 @@ fn deliver_card_draw(
             else {
                 return;
             };
-            let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-                return;
-            };
-
-            let cards_to_draw: Vec<_> = player
-                .library
-                .iter()
-                .take(count as usize)
-                .copied()
-                .collect();
+            // CR 121.1 + CR 613.11: route card selection through the single
+            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
+            // honored on the gift draw too.
+            let cards_to_draw = super::draw::select_cards_to_draw(state, player_id, count as usize);
 
             for obj_id in cards_to_draw {
                 zones::move_to_zone(state, obj_id, Zone::Hand, events);

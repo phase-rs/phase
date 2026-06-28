@@ -103,6 +103,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
     // game/effects/draw.rs. Coverage support is via is_data_carrying_static().
+    // Note: DrawFromBottom (CR 121.1/613.11) is a data-carrying variant — its
+    // top-vs-bottom selection is enforced in
+    // game/effects/draw.rs::select_cards_to_draw, which all four draw-delivery
+    // paths consult. Coverage support is via is_data_carrying_static().
     // Note: DoubleTriggers (CR 603.2d) is a data-carrying variant — runtime
     // enforcement is in triggers.rs::apply_trigger_doubling. Coverage support
     // is via is_data_carrying_static().

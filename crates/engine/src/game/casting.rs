@@ -11937,6 +11937,35 @@ pub(super) fn find_non_self_exile(
     }
 }
 
+/// CR 117.1 + CR 601.2b: Detect an `ExileWithAggregate` activation cost (Baron
+/// Helmut Zemo's Boast) requiring an interactive "exile any number reaching the
+/// aggregate threshold" selection. Returns a borrowed view of its parameters.
+/// Recurses into `Composite`.
+#[allow(clippy::type_complexity)]
+pub(super) fn find_exile_with_aggregate_cost(
+    cost: &AbilityCost,
+) -> Option<(
+    &TargetFilter,
+    crate::types::ability::AggregateFunction,
+    crate::types::ability::ObjectProperty,
+    crate::types::ability::Comparator,
+    i32,
+    Zone,
+)> {
+    match cost {
+        AbilityCost::ExileWithAggregate {
+            filter,
+            function,
+            property,
+            comparator,
+            value,
+            zone,
+        } => Some((filter, *function, *property, *comparator, *value, *zone)),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_exile_with_aggregate_cost),
+        _ => None,
+    }
+}
+
 /// CR 702.167a/b: Detect a craft materials cost requiring interactive object
 /// selection across the battlefield/graveyard union. Returns `(count,
 /// materials)`. Recurses into `Composite` (the synthesized craft cost is a
@@ -12975,6 +13004,58 @@ pub fn handle_activate_ability(
                 min_count: 0,
                 resume: CostResume::Spell {
                     spell: Box::new(pending_discard),
+                },
+            });
+        }
+
+        // CR 117.1 + CR 601.2b + CR 602.2b: Pre-check for an `ExileWithAggregate`
+        // cost (Baron Helmut Zemo's Boast — "Exile any number of black cards from
+        // your graveyard with fifteen or more black mana symbols among their mana
+        // costs"). The player chooses any subset of the eligible cards whose
+        // aggregate satisfies the threshold; the handler validates the threshold
+        // and (CR 608.2c) publishes the exiled cards as the tracked set the
+        // `CastCopyOfCard` effect consumes. The effect target is `TrackedSet`
+        // (resolution-time), not a declared target, so no target-selection
+        // detour is needed.
+        if let Some((filter, function, property, comparator, value, zone)) =
+            find_exile_with_aggregate_cost(cost)
+        {
+            let eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
+                state, player, source_id, filter, zone,
+            );
+            // CR 118.3: payability was pre-checked above; re-derive the maximal
+            // aggregate (exile-all) here so an unsatisfiable threshold fails fast.
+            let total =
+                super::quantity::aggregate_property_over(state, &eligible, function, property);
+            if !comparator.evaluate(total, value) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards to reach the exile threshold".into(),
+                ));
+            }
+            let mut pending_agg =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_agg.activation_cost = Some(cost.clone());
+            pending_agg.activation_ability_index = Some(ability_index);
+            let max_count = eligible.len();
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExileAggregate {
+                    zone,
+                    function,
+                    property,
+                    comparator,
+                    value,
+                    filter: filter.clone(),
+                },
+                choices: eligible,
+                count: max_count,
+                // CR 601.2b: "any number" reaching the threshold — the threshold
+                // (not a fixed cardinality) is enforced by the handler. A nonzero
+                // GE/Sum threshold can never be met by the empty set, so at least
+                // one card is required; `min_count: 1` is the loose lower bound.
+                min_count: 1,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_agg),
                 },
             });
         }

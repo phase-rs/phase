@@ -12121,6 +12121,65 @@ fn try_parse_multi_target_counter_chain(
     })
 }
 
+/// True when a bare counter-chain segment qualifies its *target* as distinct
+/// (`another target`, `other target`, ordinal `third target`) — not when `another`
+/// modifies the counter quantity (`another +1/+1 counter on target creature`).
+fn segment_requires_distinct_target(segment: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(segment.trim(), |input| {
+        preceded(
+            opt(nom_primitives::parse_article),
+            alt((
+                tag::<_, _, OracleError<'_>>("another target"),
+                tag::<_, _, OracleError<'_>>("other target"),
+                tag::<_, _, OracleError<'_>>("third target"),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
+/// CR 115.4 + CR 601.2c: Bare counter-chain continuations re-invoke
+/// `try_parse_put_counter` on `put {segment}`; when the segment still says
+/// "another target" / "other target" / "third target", belt-and-suspenders
+/// re-inject `FilterProp::Another` in case the type-phrase recovery path
+/// dropped it (Incremental Growth / Incremental Blight class).
+fn ensure_another_on_counter_target(effect: Effect, segment: &str) -> Effect {
+    if !segment_requires_distinct_target(segment) {
+        return effect;
+    }
+    match effect {
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } => Effect::PutCounter {
+            counter_type,
+            count,
+            target: ensure_another_target_filter(target),
+        },
+        other => other,
+    }
+}
+
+fn ensure_another_target_filter(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            if !tf.properties.contains(&FilterProp::Another) {
+                tf.properties.push(FilterProp::Another);
+            }
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(ensure_another_target_filter)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 fn parse_bare_counter_continuation<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
@@ -12131,6 +12190,7 @@ fn parse_bare_counter_continuation<'a>(
         counter::try_parse_put_counter(&reparsed_lower, &reparsed_text, ctx)?;
     let consumed = reparsed_text.len().checked_sub(remainder.len())?;
     let text_consumed = consumed.checked_sub("put ".len())?;
+    let effect = ensure_another_on_counter_target(effect, text);
     Some((effect, &text[text_consumed..], multi_target))
 }
 
@@ -15729,6 +15789,56 @@ fn is_free_cast_exile_instead_rider(input: &str) -> bool {
     .is_ok()
 }
 
+/// CR 707.12 + CR 707.12a + CR 118.9: "Cast [up to N of] {the copies | those
+/// exiled cards} without paying their mana costs" — the cast half of the
+/// "Copy [those cards]. You may cast … the copies" idiom (Baron Helmut Zemo's
+/// Boast). Produces `Effect::CastCopyOfCard` directly, carrying the optional
+/// "up to N" cap as `count` (CR 707.12a: the controller may cast UP TO N of the
+/// copies). The redundant `CopySpell` from the preceding "Copy …" clause is
+/// dropped by `fold_cast_copy_of_card_defs`.
+///
+/// Scoped to the copies-specific anaphors ("the copies" / "those exiled cards")
+/// plus the free-cast rider, so the long-standing `CopySpell + CastFromZone`
+/// fold path (the 13 existing cast-a-copy cards) is left untouched.
+fn try_parse_cast_copies_with_count(lower: &str) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("cast ").parse(lower).ok()?;
+    // CR 707.12a: optional "up to N of " / "N of " cap on how many copies to cast.
+    let (rest, count) = parse_cast_copies_count_prefix(rest);
+    // CR 707.12: the copies created by the preceding "Copy …" clause.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the copies"),
+        tag("those exiled cards"),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 118.9: require the free-cast rider so this only matches the copy-cast
+    // idiom and never a paid cast.
+    if !scan_contains_phrase(rest, "without paying") {
+        return None;
+    }
+    Some(Effect::CastCopyOfCard {
+        target: tracked_set_filter(),
+        cost: ManaCost::zero(),
+        count,
+    })
+}
+
+/// Parse an optional "[up to ]N of " count prefix, returning the remainder and
+/// the captured `count` (`None` when no count prefix is present). Word and digit
+/// numbers are accepted (`nom_primitives::parse_number`: "three" → 3).
+fn parse_cast_copies_count_prefix(input: &str) -> (&str, Option<QuantityExpr>) {
+    let after_upto = opt(tag::<_, _, OracleError<'_>>("up to "))
+        .parse(input)
+        .map(|(r, _)| r)
+        .unwrap_or(input);
+    if let Ok((rest, n)) = nom_primitives::parse_number(after_upto) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" of ").parse(rest) {
+            return (rest, Some(QuantityExpr::Fixed { value: n as i32 }));
+        }
+    }
+    (input, None)
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -16498,6 +16608,14 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // opens an interactive free-cast window, not a standing CastFromZone permission.
     // Keep this at the normal per-clause cast seam, before the generic cast parser.
     if let Some(effect) = try_parse_free_cast_from_zones(tp.lower) {
+        return parsed_clause(effect);
+    }
+
+    // CR 707.12 + CR 707.12a: "cast [up to N of] the copies / those exiled cards
+    // without paying their mana costs" — the cast half of the copy-then-cast
+    // idiom. Must run before the generic cast parser (which would drop the
+    // "up to N" cap and the copies anaphor onto a `CastFromZone { Any }`).
+    if let Some(effect) = try_parse_cast_copies_with_count(tp.lower) {
         return parsed_clause(effect);
     }
 
@@ -17275,6 +17393,8 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
 /// `lower` must be the pre-lowered version of the text.
 fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
     scan_contains_phrase(lower, "those cards")
+        || scan_contains_phrase(lower, "those exiled cards")
+        || scan_contains_phrase(lower, "the copies")
         || scan_contains_phrase(lower, "those permanents")
         || scan_contains_phrase(lower, "those creatures")
         || scan_contains_phrase(lower, "those tokens")
@@ -17407,7 +17527,49 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
-        let copies_parent_card = matches!(
+        // "Copy [those exiled cards]" — the copy half. The anaphor binds either
+        // to `ParentTarget` (legacy "them"/"that card") or the tracked-set
+        // sentinel `TrackedSet(0)` ("those exiled cards"/"the copies", via
+        // `TRACKED_SET_PHRASES`).
+        let copies_card = matches!(
+            &*defs[index].effect,
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget
+                    | TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                ..
+            }
+        );
+        if !copies_card {
+            index += 1;
+            continue;
+        }
+
+        // Case 1: the cast half is already a `CastCopyOfCard` (produced by
+        // `try_parse_cast_copies_with_count`, carrying the "up to N" count from
+        // CR 707.12a). The leading `CopySpell` is redundant — the engine's
+        // `CastCopyOfCard` both creates and casts the copies — so drop it and
+        // keep the count-bearing `CastCopyOfCard`. The `up_to` choice in the
+        // resolver carries the "you may cast" optionality, so the def-level
+        // `optional`/`repeat_for` are cleared to mirror the legacy fold.
+        if matches!(&*defs[index + 1].effect, Effect::CastCopyOfCard { .. }) {
+            defs[index + 1].optional = false;
+            defs[index + 1].repeat_for = None;
+            defs.remove(index);
+            continue;
+        }
+
+        // Case 2 (legacy): the cast half is a `CastFromZone { without_paying,
+        // Cast }`. Restricted to the legacy `ParentTarget` idiom on BOTH halves.
+        // A `TrackedSet(0)` copy paired with a `CastFromZone` is the "copy the
+        // exiled card. If you do, cast the copy" parent-sub idiom (Isochron
+        // Scepter / Spellbinder / Spellweaver Helix); fusing it would drop the
+        // conditional cast sub-ability and orphan the "if you do" clause. The
+        // `TrackedSet(0)` "those exiled cards"/"the copies" path always casts via
+        // a count-bearing `CastCopyOfCard` (Case 1), so Case 2 stays narrow —
+        // matching the pre-PR-4b fold and leaving those three cards untouched.
+        let copies_parent_target = matches!(
             &*defs[index].effect,
             Effect::CopySpell {
                 target: TargetFilter::ParentTarget,
@@ -17423,11 +17585,11 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
                 ..
             }
         );
-
-        if copies_parent_card && casts_the_copy_without_paying {
+        if copies_parent_target && casts_the_copy_without_paying {
             *defs[index].effect = Effect::CastCopyOfCard {
                 target: tracked_set_filter(),
                 cost: ManaCost::zero(),
+                count: None,
             };
             defs[index].optional = false;
             defs[index].repeat_for = None;
@@ -24884,6 +25046,32 @@ mod tests {
         def.sub_ability.as_deref()
     }
 
+    fn assert_plus_counter_node(
+        def: &AbilityDefinition,
+        count: i32,
+        another: bool,
+    ) -> Option<&AbilityDefinition> {
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count: QuantityExpr::Fixed { value },
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*value, count);
+                let tf = typed_leg(target).expect("counter target should be typed");
+                assert!(has_type(tf, TypeFilter::Creature));
+                assert_eq!(
+                    tf.properties.contains(&FilterProp::Another),
+                    another,
+                    "unexpected Another property on {tf:?}",
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+        def.sub_ability.as_deref()
+    }
+
     /// Issue #943: comma-separated counter placements with bare count-led
     /// continuations inherit the `put` verb and stay as ordered sub-abilities.
     #[test]
@@ -24896,8 +25084,39 @@ mod tests {
         let second = assert_minus_counter_node(&def, 1, false).expect("second counter node");
         let third = assert_minus_counter_node(second, 2, true).expect("third counter node");
         assert!(
-            assert_minus_counter_node(third, 3, false).is_none(),
+            assert_minus_counter_node(third, 3, true).is_none(),
             "counter chain should contain exactly three nodes",
+        );
+    }
+
+    #[test]
+    fn incremental_growth_plus_counter_chain() {
+        let def = parse_effect_chain(
+            "Put a +1/+1 counter on target creature, two +1/+1 counters on another target creature, and three +1/+1 counters on a third target creature.",
+            AbilityKind::Spell,
+        );
+
+        let second = assert_plus_counter_node(&def, 1, false).expect("second counter node");
+        let third = assert_plus_counter_node(second, 2, true).expect("third counter node");
+        assert!(
+            assert_plus_counter_node(third, 3, true).is_none(),
+            "counter chain should contain exactly three nodes",
+        );
+    }
+
+    /// `another` modifying the counter quantity must not force `FilterProp::Another`
+    /// on the target — only target-qualified ordinals (`another target`, etc.) do.
+    #[test]
+    fn counter_chain_another_counter_quantity_does_not_require_distinct_target() {
+        let def = parse_effect_chain(
+            "Put a +1/+1 counter on target creature, another +1/+1 counter on target creature",
+            AbilityKind::Spell,
+        );
+
+        let second = assert_plus_counter_node(&def, 1, false).expect("second counter node");
+        assert!(
+            assert_plus_counter_node(second, 1, false).is_none(),
+            "counter chain should contain exactly two nodes",
         );
     }
 
@@ -40202,7 +40421,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("card-copy cast sub-ability");
-        let Effect::CastCopyOfCard { target, cost } = cast_copy.effect.as_ref() else {
+        let Effect::CastCopyOfCard { target, cost, .. } = cast_copy.effect.as_ref() else {
             panic!("expected CastCopyOfCard, got {:?}", cast_copy.effect);
         };
         assert_eq!(

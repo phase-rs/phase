@@ -266,7 +266,7 @@ fn combat_damage_collects_optional_recast_trigger_for_encoded_card() {
     // trigger is not dropped for the exile card being an illegal target).
     assert_eq!(trig.ability.targets, vec![TargetRef::Object(card)]);
     match &trig.ability.effect {
-        Effect::CastCopyOfCard { target, cost } => {
+        Effect::CastCopyOfCard { target, cost, .. } => {
             assert_eq!(target, &TargetFilter::None);
             assert!(
                 cost.is_without_paying_mana(),
