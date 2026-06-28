@@ -619,9 +619,14 @@ function buildIssueBody(item: TriageItem): string {
   // Keep the Discord source URL anchor in the body — it is the stable handle the
   // LLM operator greps for when checking whether a report was already filed.
   const lines = [
+    `<!-- phase-discord-thread-id: ${item.thread_id} -->`,
+    `<!-- phase-discord-message-id: ${item.message_id} -->`,
+    ``,
     `Reported in Discord: ${item.source_url}`,
     ``,
     `**Thread:** ${item.thread_name}`,
+    `**Discord thread id:** \`${item.thread_id}\``,
+    `**Discord message id:** \`${item.message_id}\``,
     `**Cards:** ${relevantCards.length > 0 ? relevantCards.join(", ") : "_none detected_"}`,
     `**Parser status:** ${item.parser_status}`,
     `**Extraction confidence:** ${item.extraction_confidence.toFixed(2)}`,
@@ -703,19 +708,28 @@ function resolveIssue(
 // judgment and the publish call — that's a strong "skip, leave it alone"
 // signal, and the caller logs it without touching the archive state.
 async function writeDiscordTracking(
-  item: TriageItem,
+  threadId: string,
   issueUrl: string,
   dryRun: boolean,
 ): Promise<string> {
   const replyContent = `${TRACKED_REPLY_PREFIX} ${issueUrl}`;
   if (dryRun) {
-    console.log(`    [dry-run] would: react ${REACTION_EMOJI} on ${item.thread_id}`);
-    console.log(`    [dry-run] would: post "${replyContent}" in ${item.thread_id}`);
+    console.log(`    [dry-run] would: react ${REACTION_EMOJI} on ${threadId}`);
+    console.log(`    [dry-run] would: post "${replyContent}" in ${threadId}`);
     return "DRY";
   }
-  await addReaction(item.thread_id, item.thread_id, REACTION_EMOJI);
-  const posted = await createMessage(item.thread_id, replyContent);
+  await addReaction(threadId, threadId, REACTION_EMOJI);
+  const posted = await createMessage(threadId, replyContent);
   return posted.id;
+}
+
+function hasDiscordWriteBack(record: PublishedThread): boolean {
+  return (
+    record.issue_number > 0 &&
+    record.issue_url !== "" &&
+    record.reacted_message_id !== "" &&
+    record.reply_message_id !== ""
+  );
 }
 
 async function cmdMarkHandled(): Promise<void> {
@@ -948,13 +962,36 @@ async function cmdPublish(): Promise<void> {
   }
 
   let created = 0;
+  let repairedDiscordWriteBacks = 0;
   let skippedAlreadyPublished = 0;
   let skippedNoItems = 0;
   let failed = 0;
 
   for (const threadId of targets) {
-    if (published[threadId] !== undefined) {
-      console.log(`  [skip] ${threadId} — already in published_threads (#${published[threadId].issue_number})`);
+    const existing = published[threadId];
+    if (existing !== undefined) {
+      if (existing.issue_number > 0 && existing.issue_url !== "" && !hasDiscordWriteBack(existing)) {
+        console.log(`  [repair] ${threadId} — issue #${existing.issue_number} exists, Discord write-back is incomplete`);
+        try {
+          const replyId = await writeDiscordTracking(threadId, existing.issue_url, dryRun);
+          if (!dryRun) {
+            published[threadId] = {
+              ...existing,
+              reacted_message_id: threadId,
+              reply_message_id: replyId,
+            };
+            state.published_threads = published;
+            await saveSyncState(state);
+          }
+          repairedDiscordWriteBacks++;
+        } catch (err) {
+          console.error(`    failed (discord repair): ${(err as Error).message}`);
+          failed++;
+        }
+        continue;
+      }
+
+      console.log(`  [skip] ${threadId} — already in published_threads (#${existing.issue_number})`);
       skippedAlreadyPublished++;
       continue;
     }
@@ -998,7 +1035,7 @@ async function cmdPublish(): Promise<void> {
     // Phase 2: Discord write-back. Failures (including 50083 archived-thread)
     // leave the GH record intact and surface the error to the operator.
     try {
-      const replyId = await writeDiscordTracking(item, issue.url, dryRun);
+      const replyId = await writeDiscordTracking(item.thread_id, issue.url, dryRun);
       if (!dryRun) {
         published[threadId] = {
           ...published[threadId],
@@ -1019,6 +1056,7 @@ async function cmdPublish(): Promise<void> {
   console.log(`Publish complete${dryRun ? " (dry-run)" : ""}.`);
   console.log(`  Targets:                    ${targets.size}`);
   console.log(`  Created:                    ${created}`);
+  console.log(`  Repaired Discord write-back: ${repairedDiscordWriteBacks}`);
   console.log(`  Skipped (already published): ${skippedAlreadyPublished}`);
   console.log(`  Skipped (no triage items):   ${skippedNoItems}`);
   console.log(`  Failed:                     ${failed}`);
@@ -1204,8 +1242,11 @@ Commands:
             because it once mass-suppressed unresolved bugs.
             Flags: --thread=<id>[,<id>], --notes='...', --dry-run
   publish   Create a GH issue for each --thread=<id> the operator listed, then
-            react 👀 + post tracking link in the Discord thread. Mechanics only
-            — the operator has already decided these threads are worth filing.
+            include Discord ids in the issue body, react 👀 + post tracking
+            link in the Discord thread. If a previous run created the issue but
+            missed Discord write-back, rerunning repairs the missing reply.
+            Mechanics only — the operator has already decided these threads are
+            worth filing.
             Flags:
               --dry-run                 preview without side effects
               --thread=<id>[,<id>...]   thread ids to publish (required)
