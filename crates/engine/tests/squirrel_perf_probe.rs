@@ -165,7 +165,7 @@ fn probe_declare_blockers() {
     for (_, def) in game_functioning_statics(&state) {
         let dbg = format!("{:?}", def.mode);
         let short = dbg
-            .split(|c| c == '(' || c == '{' || c == ' ')
+            .split(['(', '{', ' '])
             .next()
             .unwrap_or(&dbg)
             .to_string();
