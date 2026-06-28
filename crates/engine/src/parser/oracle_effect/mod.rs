@@ -19123,7 +19123,7 @@ fn parse_only_can_attack_restriction(text: &str) -> Option<TargetFilter> {
 /// phase" sub-ability sentence into the preceding `AdditionalPhase` effect's
 /// `attacker_restriction` field, then delete the now-redundant `Unimplemented`
 /// node. Mirrors [`fold_speed_floor_sentences`]: the restriction sentence parses
-/// as its own `Effect::Unimplemented { name: "only" }` sub-ability; leaving it
+/// as its own `Effect::unimplemented("only", …)` sub-ability; leaving it
 /// would surface a spurious unimplemented gap (Last Night Together).
 pub(crate) fn fold_additional_combat_attacker_restriction(def: &mut AbilityDefinition) {
     let mut cursor: &mut AbilityDefinition = def;
