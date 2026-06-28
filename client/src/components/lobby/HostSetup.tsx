@@ -28,8 +28,8 @@ interface HostSetupProps {
 
 // Format options derive from the engine-authored FORMAT_REGISTRY so new
 // formats added in `crates/engine/src/types/format.rs` flow through to this
-// picker automatically. Two-Headed Giant is intentionally absent from the
-// registry (team-based play unsupported), so it never appears here either.
+// picker automatically. Surface-specific guards live at submit/render
+// boundaries below.
 const FORMAT_OPTIONS: { format: GameFormat; label: string; description: string; group: FormatGroup }[] = FORMAT_REGISTRY.map((m) => ({
   format: m.format,
   label: m.label,
@@ -140,11 +140,18 @@ function OptionRow({
   );
 }
 
-/** Host (crown) and waiting/AI (bot) seat glyphs for the Player Seats panel. */
+/** Host, waiting-player, and AI seat glyphs for the Player Seats panel. */
 function CrownGlyph({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M3 7l4 4 5-6 5 6 4-4-1.5 11h-15L3 7Zm2.4 13h13.2v1.5H5.4V20Z" />
+    </svg>
+  );
+}
+function HumanGlyph({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 2c-4.2 0-7.5 2.2-7.5 5v1h15v-1c0-2.8-3.3-5-7.5-5Z" />
     </svg>
   );
 }
@@ -170,6 +177,9 @@ export function HostSetup({
   // player-name field to avoid the two-inputs-for-one-value confusion.
   const displayName = useMultiplayerStore((s) => s.displayName);
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
+  const setCompatibilityPlayerCount = useMultiplayerStore(
+    (s) => s.setCompatibilityPlayerCount,
+  );
   const hostingStatus = useMultiplayerStore((s) => s.hostingStatus);
 
   // Seed the format picker from whatever the user last selected (persisted
@@ -222,6 +232,8 @@ export function HostSetup({
   const defaultAiDeck = aiDeckCatalog.candidates[0]
     ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
     : null;
+  const aiSeatsSupported = !formatConfig.team_based && formatConfig.format !== "Planechase";
+  const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -233,7 +245,8 @@ export function HostSetup({
   // payload injects `playerCount` via `finalConfig` below.
   useEffect(() => {
     setFormatConfig(formatConfig);
-  }, [formatConfig, setFormatConfig]);
+    setCompatibilityPlayerCount(playerCount);
+  }, [formatConfig, playerCount, setCompatibilityPlayerCount, setFormatConfig]);
 
   const maxPlayers = isP2P
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
@@ -248,6 +261,7 @@ export function HostSetup({
     // min is 2, so it still defaults to a duel but users can bump up to 4).
     const newCount = defaults.min_players;
     setPlayerCount(newCount);
+    setCompatibilityPlayerCount(newCount);
     if (newCount !== 2) {
       setMatchType("Bo1");
     }
@@ -256,6 +270,7 @@ export function HostSetup({
 
   const handlePlayerCountChange = (count: number) => {
     setPlayerCount(count);
+    setCompatibilityPlayerCount(count);
     if (count !== 2) {
       setMatchType("Bo1");
     }
@@ -318,7 +333,7 @@ export function HostSetup({
       // Ranked rating updates aren't implemented in the engine — the room is
       // always casual. The transport field is retained for protocol parity.
       ranked: false,
-      aiSeats,
+      aiSeats: effectiveAiSeats,
     });
     try {
       const ok = await onHost({
@@ -328,7 +343,7 @@ export function HostSetup({
         timerSeconds: null,
         formatConfig: finalConfig,
         matchType: effectiveMatchType,
-        aiSeats: aiSeats.map((seat) => ({
+        aiSeats: effectiveAiSeats.map((seat) => ({
           ...seat,
           ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
         })),
@@ -394,7 +409,7 @@ export function HostSetup({
     [t],
   );
   const submitDisabled =
-    hostDisabled || isSubmitting || hostingStatus !== "idle" || (aiSeats.length > 0 && !defaultAiDeck);
+    hostDisabled || isSubmitting || hostingStatus !== "idle" || (effectiveAiSeats.length > 0 && !defaultAiDeck);
 
   return (
     <form
@@ -601,22 +616,24 @@ export function HostSetup({
                 </div>
                 {/* Seats 1..playerCount-1 */}
                 {Array.from({ length: playerCount - 1 }, (_, i) => i + 1).map((seatIndex) => {
-                  const aiSeat = aiSeats.find((s) => s.seatIndex === seatIndex);
+                  const aiSeat = effectiveAiSeats.find((s) => s.seatIndex === seatIndex);
                   return (
                     <div key={seatIndex} className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
                       <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
-                        <BotGlyph />
+                        {aiSeat ? <BotGlyph /> : <HumanGlyph />}
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => toggleAiSeat(seatIndex)}
-                        className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
-                          aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
-                        }`}
-                      >
-                        {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
-                      </button>
+                      {aiSeatsSupported && (
+                        <button
+                          type="button"
+                          onClick={() => toggleAiSeat(seatIndex)}
+                          className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                            aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
+                          }`}
+                        >
+                          {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
+                        </button>
+                      )}
                       {aiSeat ? (
                         <MenuSelect
                           ariaLabel={t("menu:aiDifficulty.label")}

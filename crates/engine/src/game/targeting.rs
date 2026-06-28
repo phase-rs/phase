@@ -3728,6 +3728,69 @@ mod tests {
         );
     }
 
+    /// Issue #4268 + CR 508.5: An Equipment/Aura attack trigger ("Whenever
+    /// equipped creature attacks, ... tap up to one target creature defending
+    /// player controls" — Greatsword of Tyr) has the EQUIPMENT as its ability
+    /// source. The equipped creature, not the Equipment, is the attacker in
+    /// `state.combat.attackers`, so keying `DefendingPlayer` resolution on the
+    /// source id alone finds no attacker and matches no object. Target-legality
+    /// (`matches_target_filter` → `filter_inner_for_object`) must fall back to
+    /// the attacker carried by `current_trigger_event` (CR 508.5a: the defending
+    /// player is determined for that attacking creature), so the defending
+    /// player's creature satisfies the `DefendingPlayer`-controlled filter while
+    /// the attacking player's own creature does not.
+    #[test]
+    fn defending_player_filter_resolves_from_attacker_when_source_is_equipment() {
+        use crate::game::combat::{AttackTarget, AttackerInfo};
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        // c0 = P0's creature (the defending player's creature); `attacker` = P1's
+        // equipped creature.
+        let (mut state, c0, attacker) = setup_with_creatures();
+
+        // P1 controls a separate Equipment object — the ability source. It is
+        // NOT an attacker and never appears in `combat.attackers`.
+        let equipment = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Greatsword of Tyr".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The equipped creature attacks P0.
+        let combat = state.combat.get_or_insert_with(Default::default);
+        combat.attackers.push(AttackerInfo::new(
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            PlayerId(0),
+        ));
+
+        // The attack trigger fired for the single equipped attacker.
+        state.current_trigger_event = Some(crate::types::events::GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(0)))],
+        });
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer));
+        // Filter is evaluated with the Equipment as source — NOT the attacker.
+        let ctx = FilterContext::from_source(&state, equipment);
+
+        assert!(
+            matches_target_filter(&state, c0, &filter, &ctx),
+            "the defending player's creature must be a legal target even though the \
+             ability source (the Equipment) is not itself the attacker"
+        );
+        assert!(
+            !matches_target_filter(&state, attacker, &filter, &ctx),
+            "the attacking player's own creature is not controlled by the defending \
+             player and must not match"
+        );
+    }
+
     /// CR 608.2c (issue #323): `SelfRef` always resolves to the source object,
     /// even when `ability.targets` is non-empty. The chained "Exile ~"
     /// sub-ability of cards like Treasured Find / Arc Blade gets its

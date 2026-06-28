@@ -291,7 +291,8 @@
     "decks": "Decks",
     "alpha": "Alpha",
     "profile": "Profil",
-    "settings": "Einstellungen"
+    "settings": "Einstellungen",
+    "whatsNew": "Neuigkeiten"
   },
   "folder": {
     "actionsMenu": "Ordneroptionen",
@@ -304,5 +305,30 @@
     "deleteConfirm": "Ordner „{{name}}“ löschen? Decks werden zu „Nicht zugeordnet“ verschoben.",
     "emptyHint": "Dieser Ordner ist leer.",
     "unfiledEmptyHint": "Keine nicht zugeordneten Decks."
+  },
+  "whatsNew": {
+    "title": "Neuigkeiten",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

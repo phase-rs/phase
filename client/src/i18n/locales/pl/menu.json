@@ -291,7 +291,8 @@
     "decks": "Talie",
     "alpha": "Alfa",
     "profile": "Profil",
-    "settings": "Ustawienia"
+    "settings": "Ustawienia",
+    "whatsNew": "Nowości"
   },
   "folder": {
     "actionsMenu": "Opcje folderu",
@@ -304,5 +305,30 @@
     "deleteConfirm": "Usunąć folder „{{name}}”? Talie zostaną przeniesione do „Bez folderu”.",
     "emptyHint": "Ten folder jest pusty.",
     "unfiledEmptyHint": "Brak talii bez folderu."
+  },
+  "whatsNew": {
+    "title": "Co nowego",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

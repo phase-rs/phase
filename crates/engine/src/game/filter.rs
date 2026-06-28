@@ -717,7 +717,7 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
         ControllerRef::DefendingPlayer => {
-            crate::game::combat::defending_player_for_attacker(state, source_id)
+            crate::game::combat::resolve_defending_player(state, source_id)
         }
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
@@ -931,7 +931,7 @@ fn stack_entry_controller_matches(
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, ctx.ability)
             .is_some_and(|pid| pid == entry_controller),
         Some(ControllerRef::DefendingPlayer) => {
-            crate::game::combat::defending_player_for_attacker(state, ctx.source_id)
+            crate::game::combat::resolve_defending_player(state, ctx.source_id)
                 .is_some_and(|pid| pid == entry_controller)
         }
         Some(ControllerRef::SourceChosenPlayer) => {
@@ -1566,7 +1566,7 @@ fn filter_inner_for_object(
                         }
                     }
                     ControllerRef::DefendingPlayer => {
-                        match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                        match crate::game::combat::resolve_defending_player(state, source_id) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -3425,7 +3425,7 @@ fn matches_filter_prop(
             ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
                 .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
-                crate::game::combat::defending_player_for_attacker(state, source.id)
+                crate::game::combat::resolve_defending_player(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 613.1: Ownership relative to the source's persisted chosen player.
@@ -4050,7 +4050,7 @@ fn zone_change_record_matches_property(
             ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
                 .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
-                crate::game::combat::defending_player_for_attacker(state, source.id)
+                crate::game::combat::resolve_defending_player(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
             // CR 613.1: Ownership relative to the source's persisted chosen player.
@@ -4281,10 +4281,8 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, source.ability)
             .is_some_and(|pid| pid == attachment_controller),
-        Some(ControllerRef::DefendingPlayer) => {
-            combat::defending_player_for_attacker(state, source.id)
-                .is_some_and(|pid| pid == attachment_controller)
-        }
+        Some(ControllerRef::DefendingPlayer) => combat::resolve_defending_player(state, source.id)
+            .is_some_and(|pid| pid == attachment_controller),
         // CR 613.1: Attachment controller relative to the source's chosen player.
         Some(ControllerRef::SourceChosenPlayer) => {
             crate::game::game_object::source_chosen_player(state, source.id)

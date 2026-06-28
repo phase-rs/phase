@@ -1890,7 +1890,10 @@ fn graveyard_has_subtype_card(
 }
 
 /// CR 508.1k: A chosen creature becomes an attacking creature until removed from combat.
-fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_attacking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state.combat.as_ref().is_some_and(|combat| {
         combat
             .attackers
@@ -1900,7 +1903,10 @@ fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: O
 }
 
 /// CR 509.1g: A chosen creature becomes a blocking creature until removed from combat.
-fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()
@@ -1908,7 +1914,10 @@ fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: Ob
 }
 
 /// CR 509.1h: An attacking creature with blockers declared for it becomes a blocked creature.
-fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocked(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()

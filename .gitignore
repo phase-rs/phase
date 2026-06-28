@@ -26,6 +26,7 @@ client/src/wasm/*.wasm.d.ts
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .claude/projects/
+.pr-review/
 
 # Build output
 client/dist/
@@ -123,3 +124,7 @@ triage/report-links.jsonl
 triage/triage-items.jsonl
 triage/sync-state.json
 triage/dashboard.md
+
+# Changelog backfill drafts — review staging only, never committed. The
+# canonical changelog lives at client/public/changelog.json.
+scripts/changelog/backfill-drafts.json

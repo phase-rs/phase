@@ -291,7 +291,8 @@
     "decks": "Decks",
     "alpha": "Alpha",
     "profile": "Perfil",
-    "settings": "Definições"
+    "settings": "Definições",
+    "whatsNew": "Novidades"
   },
   "folder": {
     "actionsMenu": "Opções da pasta",
@@ -304,5 +305,30 @@
     "deleteConfirm": "Excluir a pasta \"{{name}}\"? Os baralhos irão para Sem pasta.",
     "emptyHint": "Esta pasta está vazia.",
     "unfiledEmptyHint": "Nenhum baralho sem pasta."
+  },
+  "whatsNew": {
+    "title": "Novidades",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

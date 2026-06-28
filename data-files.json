@@ -6,6 +6,8 @@
   "card-data.it.json",
   "card-data.pt.json",
   "card-names.json",
+  "changelog.json",
+  "changelog-meta.json",
   "coverage-data.json",
   "coverage-summary.json",
   "decks.json",

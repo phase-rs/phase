@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{char, multispace1};
-use nom::combinator::{all_consuming, eof, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -2592,6 +2592,9 @@ fn parse_enters_with_counters(
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
         .parse(after_additional)
         .map_or(after_additional, |(rest, _)| rest);
+    let after_prefix = tag::<_, _, OracleError<'_>>("additional ")
+        .parse(after_prefix)
+        .map_or(after_prefix, |(rest, _)| rest);
     // CR 107.3 + CR 107.3m + CR 107.1a: Parse the counter count as a full
     // `QuantityExpr`, so "N", "X", "twice X", "three times X", and
     // "half X, rounded up/down" all compose through the same typed arithmetic
@@ -4921,27 +4924,52 @@ fn scan_damage_modification(text: &str) -> Option<DamageModification> {
     {
         return Some(modification);
     }
-    // Fallback: "that much damage plus/minus N" (fixed) or "that much damage
-    // plus X" (variable). The X case yields a `Plus { value: 0 }` placeholder —
-    // `DamageModification::Plus` carries a `u32`, so X is frozen at activation in
-    // `add_target_replacement::resolve` (CR 107.3a). Composed from nom
-    // combinators rather than `strip_after` so dispatch stays structural.
+    // Fallback: "that much damage plus/minus N" (fixed), "that much damage plus
+    // X, where X is <quantity>" (dynamic — carried as `Plus { Ref(..) }`), or a
+    // bare "that much damage plus X" with no binding (yields the
+    // `Plus { Fixed { 0 } }` placeholder frozen at activation in
+    // `add_target_replacement::freeze_damage_modification_x`, CR 107.3a).
+    // Composed from nom combinators rather than `strip_after` so dispatch stays
+    // structural.
     nom_primitives::scan_at_word_boundaries(text, parse_that_much_damage_offset)
 }
 
-/// CR 614.1a + CR 107.3a: "that much damage plus N" / "plus X" / "minus N".
-/// The "plus X" arm emits `Plus { value: 0 }` as a placeholder frozen at
-/// activation (X cannot live in the `u32`-typed `DamageModification`).
+/// CR 614.1a + CR 107.3a: "that much damage plus N" / "plus X, where X is
+/// <quantity>" / "plus X" / "minus N". A bound `where X is <quantity>` form
+/// carries the live game quantity as `Plus { Ref(..) }`; a bare "plus x" with
+/// no binding still emits the `Plus { Fixed { 0 } }` placeholder frozen at
+/// activation.
 fn parse_that_much_damage_offset(
     input: &str,
 ) -> nom::IResult<&str, DamageModification, OracleError<'_>> {
     let (rest, _) = tag("that much damage ").parse(input)?;
     alt((
-        // "plus X" — variable offset, frozen at install. Tried before the
-        // numeric arm so the literal "x" token is not consumed by parse_number.
-        value(DamageModification::Plus { value: 0 }, tag("plus x")),
+        // CR 614.1a + CR 107.3a: dynamic additive offset — "plus X, where X is
+        // <quantity>" (Hawkeye, Young Avenger: "...plus X, where X is ~'s
+        // power"). Placed BEFORE the bare-"plus x" freeze arm so the
+        // where-binding is not shadowed. `parse_cda_quantity` strips a trailing
+        // '.' internally, so "~'s power." parses; it returns
+        // `Option<QuantityExpr>`, composed via `map_opt`.
+        map_opt(
+            preceded(tag("plus x, where x is "), nom::combinator::rest),
+            |q: &str| {
+                crate::parser::oracle_quantity::parse_cda_quantity(q)
+                    .map(|value| DamageModification::Plus { value })
+            },
+        ),
+        // "plus X" with no binding — variable offset frozen at install. Tried
+        // before the numeric arm so the literal "x" token is not consumed by
+        // parse_number.
+        value(
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 },
+            },
+            tag("plus x"),
+        ),
         nom::combinator::map(preceded(tag("plus "), nom_primitives::parse_number), |n| {
-            DamageModification::Plus { value: n }
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: n as i32 },
+            }
         }),
         nom::combinator::map(preceded(tag("minus "), nom_primitives::parse_number), |n| {
             DamageModification::Minus { value: n }
@@ -10609,6 +10637,44 @@ mod tests {
     }
 
     #[test]
+    fn distributive_enters_with_dynamic_additional_counters_normalizes_counter_type() {
+        let def = parse_replacement_line(
+            "Each other creature you control enters with a number of additional +1/+1 counters on it equal to Arwen's toughness.",
+            "Arwen, Weaver of Hope",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            }))
+        );
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(target, &TargetFilter::SelfRef);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn other_creature_enters_with_counter_chosen_type() {
         let def = parse_replacement_line(
             "Each other creature you control of the chosen type enters with an additional +1/+1 counter on it.",
@@ -11780,7 +11846,9 @@ mod tests {
         ).unwrap();
         assert_eq!(
             def.damage_modification,
-            Some(DamageModification::Plus { value: 2 })
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            })
         );
         assert_eq!(
             def.damage_target_filter,
@@ -11807,7 +11875,9 @@ mod tests {
         ).unwrap();
         assert_eq!(
             def.damage_modification,
-            Some(DamageModification::Plus { value: 2 })
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            })
         );
         assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
         assert_eq!(
@@ -11822,6 +11892,106 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    /// MSH-F Sub-Plan B (B1): Hawkeye, Young Avenger — the dynamic additive
+    /// offset "plus X, where X is ~'s power" lowers to
+    /// `Plus { Ref(Power { Source }) }`, NOT the over-frozen `Plus { Fixed(0) }`
+    /// the bare-"plus x" arm produces (verified in card-data.json today).
+    /// Revert-fail: removing the new `map_opt(... parse_cda_quantity ...)` arm
+    /// makes the freeze arm win and the assertion flips to `Fixed { 0 }`. The
+    /// trailing '.' on "~'s power." is tolerated by `parse_cda_quantity`.
+    #[test]
+    fn damage_hawkeye_plus_dynamic_source_power() {
+        let def = parse_replacement_line(
+            "If a source you control would deal noncombat damage to an opponent or a permanent an opponent controls, instead it deals that much damage plus X, where X is Hawkeye's power.",
+            "Hawkeye, Young Avenger",
+        )
+        .unwrap();
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
+                }
+            }),
+            "Hawkeye's '+X where X is ~'s power' must carry a live source-power Ref, not Fixed(0)"
+        );
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(damage_target_opponent_or_permanents())
+        );
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.is_empty());
+            }
+            other => panic!("Expected Typed source filter, got {other:?}"),
+        }
+    }
+
+    /// B1 negative: a bare "plus x" with NO `where X is` binding still freezes
+    /// to the `Plus { Fixed(0) }` placeholder (Taii Wakeen class), and a literal
+    /// "plus 2" still carries `Fixed(2)` — the new dynamic arm does not shadow
+    /// either.
+    #[test]
+    fn damage_offset_bare_x_and_literal_unaffected_by_dynamic_arm() {
+        assert_eq!(
+            scan_damage_modification("it deals that much damage plus x instead"),
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 }
+            }),
+        );
+        assert_eq!(
+            scan_damage_modification("it deals that much damage plus 2 instead"),
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            }),
+        );
+        assert_eq!(
+            scan_damage_modification("it deals that much damage minus 1 instead"),
+            Some(DamageModification::Minus { value: 1 }),
+        );
+    }
+
+    /// B3: serde back-compat for the `Plus.value` field-type lift. Pre-lift
+    /// card-data.json / snapshots stored a bare integer (`"value": 2`); the
+    /// `QuantityExpr` custom Deserialize loads it as `Fixed`. Proves the lift
+    /// does not break existing serialized data (no wire bump).
+    #[test]
+    fn damage_modification_plus_legacy_int_deserializes_to_fixed() {
+        let two: DamageModification = serde_json::from_str(r#"{"type":"Plus","value":2}"#).unwrap();
+        assert_eq!(
+            two,
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            }
+        );
+        // Hawkeye's live record stores the frozen placeholder as a bare 0.
+        let zero: DamageModification =
+            serde_json::from_str(r#"{"type":"Plus","value":0}"#).unwrap();
+        assert_eq!(
+            zero,
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 }
+            }
+        );
+        // New canonical tagged form also loads.
+        let tagged: DamageModification =
+            serde_json::from_str(r#"{"type":"Plus","value":{"type":"Fixed","value":3}}"#).unwrap();
+        assert_eq!(
+            tagged,
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        );
+        // A non-integer scalar value is rejected (no silent coercion).
+        assert!(
+            serde_json::from_str::<DamageModification>(r#"{"type":"Plus","value":"x"}"#).is_err()
+        );
     }
 
     #[test]
@@ -14023,8 +14193,10 @@ mod tests {
     fn that_much_damage_plus_x_is_zero_placeholder() {
         assert_eq!(
             scan_damage_modification("it deals that much damage plus x instead"),
-            Some(DamageModification::Plus { value: 0 }),
-            "'plus X' must parse to the Plus(0) placeholder frozen at activation"
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 0 }
+            }),
+            "'plus X' must parse to the Plus(Fixed(0)) placeholder frozen at activation"
         );
     }
 
@@ -14033,7 +14205,9 @@ mod tests {
     fn that_much_damage_plus_literal_carries_value() {
         assert_eq!(
             scan_damage_modification("it deals that much damage plus 2 instead"),
-            Some(DamageModification::Plus { value: 2 })
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            })
         );
     }
 

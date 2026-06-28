@@ -23,12 +23,41 @@ type EngineResponse =
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
+/**
+ * Watchdog timeout for gameplay round-trip calls. Generous on purpose: a
+ * legitimately slow call (e.g. a turn-21 four-player board) can take many
+ * seconds, and a false-positive timeout on a valid-but-slow call is worse
+ * than a longer wait. This does NOT speed anything up — it converts an
+ * otherwise-infinite worker hang into a 60s-then-recoverable error so the
+ * dispatch mutex is released and the user sees the recovery prompt instead
+ * of a silently dead UI. Tunable; only applied to gameplay round-trips, never
+ * to bulk/long setup calls (card-DB load, game init, batch resolve, restore).
+ */
+const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Watchdog timeout for AI search round-trips (getAiAction /
+ * getAiScoredCandidates / selectActionFromScores). Deliberately much larger
+ * than ENGINE_REQUEST_TIMEOUT_MS: AI search legitimately exceeds 60s on
+ * pathological boards (turn-40 squirrel / mana-token storms take hundreds of
+ * seconds in debug; release is ~10-50x faster but can still cross a minute),
+ * so the 60s gameplay window would false-positive and surface the engine-lost
+ * recovery modal mid-AI-turn on a perfectly healthy worker. 5 minutes gives
+ * generous headroom over realistic release AI times while still converting a
+ * true infinite hang into a recoverable error.
+ */
+const ENGINE_AI_TIMEOUT_MS = 300_000;
+
 export class EngineWorkerClient {
   private worker: Worker;
   private nextId = 0;
   private pending = new Map<
     number,
-    { resolve: (value: unknown) => void; reject: (reason: Error) => void }
+    {
+      resolve: (value: unknown) => void;
+      reject: (reason: Error) => void;
+      timer?: ReturnType<typeof setTimeout>;
+    }
   >();
   private readyPromise: Promise<void>;
   private readyResolve!: () => void;
@@ -53,6 +82,7 @@ export class EngineWorkerClient {
           const entry = this.pending.get(msg.id);
           if (entry) {
             this.pending.delete(msg.id);
+            if (entry.timer) clearTimeout(entry.timer);
             entry.resolve(msg.data);
           }
           break;
@@ -61,6 +91,7 @@ export class EngineWorkerClient {
           const entry = this.pending.get(msg.id);
           if (entry) {
             this.pending.delete(msg.id);
+            if (entry.timer) clearTimeout(entry.timer);
             // Bracket violation is a typed rejection so the caller can match
             // by code rather than by string substring on the error message.
             const err = msg.bracketViolation
@@ -78,18 +109,46 @@ export class EngineWorkerClient {
       const msg = e.message ?? "Worker error";
       debugLog(`Engine worker error: ${msg} (${this.pending.size} pending requests rejected)`);
       for (const [, entry] of this.pending) {
+        if (entry.timer) clearTimeout(entry.timer);
         entry.reject(new Error(msg));
       }
       this.pending.clear();
     };
   }
 
-  private request<T>(message: Record<string, unknown>): Promise<T> {
+  /**
+   * Post a typed message to the worker and resolve when it replies.
+   *
+   * `timeoutMs` arms a watchdog: if the worker never replies within the
+   * window, the pending entry is deleted and the promise rejects with
+   * `ENGINE_UNRESPONSIVE`. This is applied ONLY to gameplay round-trips (see
+   * call sites below) — never to bulk/long setup calls (card-DB load, game
+   * init, batch resolve, restore), where a long but legitimate runtime is
+   * expected. A late worker reply after the timeout is a safe no-op: the
+   * pending entry is already gone, so the `if (entry)` guard in `onmessage`
+   * discards it.
+   */
+  private request<T>(message: Record<string, unknown>, timeoutMs?: number): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
+      const timer =
+        timeoutMs !== undefined
+          ? setTimeout(() => {
+              if (this.pending.delete(id)) {
+                reject(
+                  new AdapterError(
+                    AdapterErrorCode.ENGINE_UNRESPONSIVE,
+                    `Engine worker did not respond within ${timeoutMs}ms (${String(message.type)})`,
+                    true,
+                  ),
+                );
+              }
+            }, timeoutMs)
+          : undefined;
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
+        timer,
       });
       this.worker.postMessage({ ...message, id });
     });
@@ -112,6 +171,15 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  /**
+   * Build the game-scoped AI card-DB subset for THIS game. Returns the
+   * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
+   * Called ONLY on the MAIN engine client (full CARD_DB + live GAME_STATE).
+   */
+  async buildAiCardSubset(): Promise<string> {
+    return this.request<string>({ type: "buildAiCardSubset" });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,
@@ -131,39 +199,69 @@ export class EngineWorkerClient {
     });
   }
 
+  // ── Gameplay round-trips ──────────────────────────────────────────────
+  // Each of these is a per-action engine call that the UI awaits before it can
+  // continue (and that holds the dispatch mutex). They carry the watchdog
+  // timeout so a wedged worker rejects with ENGINE_UNRESPONSIVE instead of
+  // hanging forever. Human round-trips use ENGINE_REQUEST_TIMEOUT_MS (60s);
+  // the AI-search getters (getAiAction / getAiScoredCandidates /
+  // selectActionFromScores) use the far longer ENGINE_AI_TIMEOUT_MS because a
+  // healthy search can legitimately exceed a minute on pathological boards.
+  // Bulk/long setup calls (card-DB load, game init, deck compatibility, batch
+  // resolve, restore/resume, export, bracket estimate) deliberately omit the
+  // timeout — their runtime is legitimately long.
+
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
-    return this.request<SubmitResult>({ type: "submitAction", actor, action });
+    return this.request<SubmitResult>(
+      { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async getState(): Promise<GameState> {
-    return this.request<GameState>({ type: "getState" });
+    return this.request<GameState>({ type: "getState" }, ENGINE_REQUEST_TIMEOUT_MS);
   }
 
   async getFilteredState(viewerId: number): Promise<GameState> {
-    return this.request<GameState>({ type: "getFilteredState", viewerId });
+    return this.request<GameState>(
+      { type: "getFilteredState", viewerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this.request<LegalActionsResult>({ type: "getLegalActions" });
+    return this.request<LegalActionsResult>(
+      { type: "getLegalActions" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult> {
-    return this.request<LegalActionsResult>({ type: "getLegalActionsForViewer", viewerId });
+    return this.request<LegalActionsResult>(
+      { type: "getLegalActionsForViewer", viewerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot> {
-    return this.request<ViewerSnapshot>({ type: "getViewerSnapshot", viewerId });
+    return this.request<ViewerSnapshot>(
+      { type: "getViewerSnapshot", viewerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
   }
 
   async getAiAction(
     difficulty: string,
     playerId: number,
   ): Promise<GameAction | null> {
-    return this.request<GameAction | null>({
-      type: "getAiAction",
-      difficulty,
-      playerId,
-    });
+    return this.request<GameAction | null>(
+      {
+        type: "getAiAction",
+        difficulty,
+        playerId,
+      },
+      ENGINE_AI_TIMEOUT_MS,
+    );
   }
 
   async getAiScoredCandidates(
@@ -171,12 +269,15 @@ export class EngineWorkerClient {
     playerId: number,
     seed: number,
   ): Promise<[GameAction, number][]> {
-    return this.request<[GameAction, number][]>({
-      type: "getAiScoredCandidates",
-      difficulty,
-      playerId,
-      seed,
-    });
+    return this.request<[GameAction, number][]>(
+      {
+        type: "getAiScoredCandidates",
+        difficulty,
+        playerId,
+        seed,
+      },
+      ENGINE_AI_TIMEOUT_MS,
+    );
   }
 
   async selectActionFromScores(
@@ -184,12 +285,15 @@ export class EngineWorkerClient {
     difficulty: string,
     seed: number,
   ): Promise<GameAction | null> {
-    return this.request<GameAction | null>({
-      type: "selectActionFromScores",
-      scoresJson,
-      difficulty,
-      seed,
-    });
+    return this.request<GameAction | null>(
+      {
+        type: "selectActionFromScores",
+        scoresJson,
+        difficulty,
+        seed,
+      },
+      ENGINE_AI_TIMEOUT_MS,
+    );
   }
 
   async exportState(): Promise<string> {
@@ -219,6 +323,11 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "setMultiplayerMode", enabled });
   }
 
+  // Fast multiplayer-host seat-projection round-trips (pure state transforms,
+  // no AI search or animation). Intentionally left without the gameplay
+  // watchdog: they don't hold the dispatch mutex and a wedge here surfaces
+  // through the host's own connection/recovery path rather than the per-action
+  // recovery prompt.
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
     return this.request<unknown>({
       type: "applySeatMutation",
@@ -227,11 +336,25 @@ export class EngineWorkerClient {
     });
   }
 
+  async projectSeatView(stateJson: string): Promise<unknown> {
+    return this.request<unknown>({
+      type: "projectSeatView",
+      stateJson,
+    });
+  }
+
   async resolveAll(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],
     maxResolutions: number = 0,
   ): Promise<BatchResolveResult> {
+    // Intentionally no watchdog timeout: a batch resolve can be legitimately
+    // very long (a multi-thousand-item storm draining one chunk at a time),
+    // and a false timeout mid-drain is worse than a long wait. Residual risk:
+    // if the worker wedges *inside* resolveAll itself the promise never settles
+    // and the "Resolving…" overlay sticks. Accepted as a lower-severity UX
+    // bug than false-positiving a healthy long drain — revisit only if a
+    // bounded per-chunk timeout proves safe.
     return this.request<BatchResolveResult>({
       type: "resolveAll",
       requester,
@@ -262,6 +385,7 @@ export class EngineWorkerClient {
 
   dispose(): void {
     for (const [, entry] of this.pending) {
+      if (entry.timer) clearTimeout(entry.timer);
       entry.reject(new Error("Worker disposed"));
     }
     this.pending.clear();

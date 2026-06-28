@@ -17,8 +17,8 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AdditionalCostInstancePayment, CastTimingPermission, Duration, Effect, KickerVariant,
-    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
+    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -488,6 +488,10 @@ struct CastLinkSnapshot {
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
+    // CR 400.7d: the object paid as a cost to cast the spell (e.g. the
+    // emerge-sacrificed creature) is part of the cast-link family cleared on
+    // entry; snapshot and restore it like the other members.
+    cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -1575,6 +1579,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
+                    cast_cost_paid_object: obj.cast_cost_paid_object.clone(),
                 })
             })
             .flatten();
@@ -1654,6 +1659,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
+                obj.cast_cost_paid_object = link.cast_cost_paid_object;
             }
         }
         if to == Zone::Battlefield || from == Zone::Battlefield {

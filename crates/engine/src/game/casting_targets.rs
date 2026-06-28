@@ -25,6 +25,7 @@ use super::casting_costs::{
     finish_pending_cast_cost_or_pay,
 };
 use super::engine::EngineError;
+use super::priority;
 use super::restrictions;
 use super::stack;
 
@@ -339,8 +340,7 @@ pub(crate) fn handle_select_targets(
             player,
             events,
         );
-        state.priority_passes.clear();
-        state.priority_pass_count = 0;
+        priority::clear_priority_passes(state);
         return Ok(WaitingFor::Priority { player });
     }
 
@@ -448,8 +448,7 @@ pub(crate) fn handle_choose_target(
                     player,
                     events,
                 );
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
                     state,
                     events,

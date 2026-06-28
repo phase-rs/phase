@@ -3,7 +3,12 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
-import { formatMetadata, formatSuppliesDeck } from "../data/formatRegistry";
+import {
+  formatMetadata,
+  formatSuppliesDeck,
+  isSetupFormat,
+  SETUP_FORMATS,
+} from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
@@ -43,6 +48,12 @@ const GROUP_DOT_TONE: Record<FormatGroup, string> = {
   Limited: "bg-emerald-300",
   Multiplayer: "bg-emerald-300",
 };
+
+function setupDefaults(format: GameFormat): FormatConfig | null {
+  const metadata = formatMetadata(format);
+  if (!metadata || !isSetupFormat(metadata)) return null;
+  return metadata.default_config;
+}
 
 // --- Component ---
 
@@ -97,22 +108,24 @@ export function GameSetupPage() {
 
     // Allow direct format entry via ?format= search param
     const fmtParam = searchParams.get("format") as GameFormat | null;
-    if (fmtParam && FORMAT_DEFAULTS[fmtParam]) {
+    if (fmtParam && setupDefaults(fmtParam)) {
       applyFormat(fmtParam);
       return;
     }
 
     // Restore last-used format, or default to Commander
-    const fmt = lastFormat && FORMAT_DEFAULTS[lastFormat] ? lastFormat : "Commander";
-    const defaults = FORMAT_DEFAULTS[fmt];
+    const restoredLastFormat = lastFormat && setupDefaults(lastFormat) ? lastFormat : null;
+    const fmt = restoredLastFormat ?? "Commander";
+    const defaults = setupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
-    setPlayerCount(lastFormat ? lastPlayerCount : defaults.min_players);
-    setMatchType(lastFormat ? lastMatchType : "Bo1");
+    setPlayerCount(restoredLastFormat ? lastPlayerCount : defaults.min_players);
+    setMatchType(restoredLastFormat ? lastMatchType : "Bo1");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applyFormat(format: GameFormat) {
-    const defaults = FORMAT_DEFAULTS[format];
+    const defaults = setupDefaults(format);
+    if (!defaults) return;
     setSelectedFormat(format);
     setFormatConfig(defaults);
     setPlayerCount(defaults.min_players);
@@ -149,6 +162,7 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
+    if (formatConfig.format === "Planechase") return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
@@ -188,6 +202,7 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
+  const formatSupportsAi = selectedFormat !== "Planechase";
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && selectedCompat?.selected_format_compatible === false;
@@ -196,7 +211,8 @@ export function GameSetupPage() {
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+  const cannotStartAi =
+    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
 
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).
@@ -514,6 +530,12 @@ export function GameSetupPage() {
                 </div>
               )}
 
+              {!formatSupportsAi && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {t("gameSetup.aiUnsupportedFormat", { format: selectedFormat })}
+                </div>
+              )}
+
               {/* Separator */}
               <div className="border-t border-white/8" />
 
@@ -552,6 +574,7 @@ export function GameSetupPage() {
       >
         <div className="pb-4 lg:pb-6">
           <FormatPicker
+            formats={SETUP_FORMATS}
             onFormatSelect={(format) => {
               applyFormat(format);
               setFormatPickerOpen(false);

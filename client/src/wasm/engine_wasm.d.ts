@@ -9,6 +9,19 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * Build a game-scoped AI card-database subset from the loaded full database and
+ * the live game state, serialized as the `AiCardSubsetResult` tagged union
+ * (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
+ * worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
+ * the returned subset so its WASM instances don't each parse the full ~93MB
+ * corpus. Returns `{"kind":"full"}` defensively when the database or game state
+ * is absent (the engine is the single authority for this fallback — see
+ * `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
+ * and restored to the thread-local on every path.
+ */
+export function build_ai_card_subset(): string;
+
+/**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
  * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
  * classification — the frontend must not compute this from card lists itself.
@@ -223,6 +236,12 @@ export function load_card_database(json_str: string): number;
  */
 export function ping(): string;
 
+/**
+ * Project an authoritative seat view from Rust so frontend transports do not
+ * need to understand format topology details.
+ */
+export function project_seat_view(state_json: string): any;
+
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
 /**
@@ -330,6 +349,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
@@ -351,6 +371,7 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
+    readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];

@@ -3,6 +3,7 @@ use std::cell::Cell;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
     pub state_clone_for_legality: u64,
+    pub static_full_scans: u64,
     pub layers_full_eval: u64,
     pub layers_incremental: u64,
     pub layers_escalated: u64,
@@ -14,6 +15,12 @@ pub struct PerfCounterSnapshot {
     pub stack_batched_entries: u64,
     pub stack_inert_noop_batches: u64,
     pub stack_inert_noop_entries: u64,
+    pub legal_actions_spell_cost_sweeps: u64,
+    pub mana_aura_trigger_scans: u64,
+    pub crew_eligibility_scans: u64,
+    pub attackable_player_sweeps: u64,
+    pub combat_shadow_block_scans: u64,
+    pub granted_ability_provider_scans: u64,
 }
 
 thread_local! {
@@ -30,6 +37,7 @@ thread_local! {
     /// `AtomicU64`: that reintroduces the parallel-test flakiness this replaces.
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
         state_clone_for_legality: 0,
+        static_full_scans: 0,
         layers_full_eval: 0,
         layers_incremental: 0,
         layers_escalated: 0,
@@ -41,6 +49,12 @@ thread_local! {
         stack_batched_entries: 0,
         stack_inert_noop_batches: 0,
         stack_inert_noop_entries: 0,
+        legal_actions_spell_cost_sweeps: 0,
+        mana_aura_trigger_scans: 0,
+        crew_eligibility_scans: 0,
+        attackable_player_sweeps: 0,
+        combat_shadow_block_scans: 0,
+        granted_ability_provider_scans: 0,
     }) };
 }
 
@@ -54,6 +68,32 @@ fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
 
 pub fn record_state_clone_for_legality() {
     with_mut(|s| s.state_clone_for_legality += 1);
+}
+
+/// Counts every whole-battlefield / command-zone static sweep done for legality
+/// (each `check_static_ability` call). Combat/untap legality loops hoist a
+/// once-computed existence gate to drive this toward zero, collapsing O(N^2)
+/// per-loop scans to O(N).
+pub fn record_static_full_scan() {
+    with_mut(|s| s.static_full_scans += 1);
+}
+
+/// Counts every full-body execution of `blocker_can_block_shadow` (each a
+/// whole-battlefield `check_static_ability(CanBlockShadow)` sweep). The combat
+/// block-legality loops hoist a once-computed `CanBlockShadow` existence gate to
+/// drive this toward zero, collapsing the O(attackers×blockers×N) per-blocker
+/// scan to O(N) when no such static exists.
+pub fn record_combat_shadow_block_scan() {
+    with_mut(|s| s.combat_shadow_block_scans += 1);
+}
+
+/// Counts every per-provider `matches_target_filter` evaluation done while
+/// populating the per-controller provider cache in
+/// `expand_granted_activated_abilities`. Memoizing the matching-provider set by
+/// recipient controller collapses the O(recipients×objects) filter sweep to
+/// O(controllers×objects).
+pub fn record_granted_ability_provider_scan() {
+    with_mut(|s| s.granted_ability_provider_scans += 1);
 }
 
 pub fn record_layers_full_eval() {
@@ -96,6 +136,22 @@ pub fn record_stack_inert_noop_batch(entries: u32) {
         s.stack_inert_noop_batches += 1;
         s.stack_inert_noop_entries += u64::from(entries);
     });
+}
+
+pub fn record_legal_actions_spell_cost_sweep() {
+    with_mut(|s| s.legal_actions_spell_cost_sweeps += 1);
+}
+
+pub fn record_mana_aura_trigger_scan() {
+    with_mut(|s| s.mana_aura_trigger_scans += 1);
+}
+
+pub fn record_crew_eligibility_scan() {
+    with_mut(|s| s.crew_eligibility_scans += 1);
+}
+
+pub fn record_attackable_player_sweep() {
+    with_mut(|s| s.attackable_player_sweeps += 1);
 }
 
 pub fn snapshot() -> PerfCounterSnapshot {

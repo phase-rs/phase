@@ -1,7 +1,8 @@
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
-use nom::combinator::{opt, verify};
+use nom::bytes::complete::{tag, take_until};
+use nom::combinator::{opt, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -46,6 +47,41 @@ pub(crate) fn is_flashback_equal_mana_cost(lower: &str) -> bool {
     scan_contains(lower, "flashback cost")
         && scan_contains(lower, "equal to")
         && scan_contains(lower, "mana cost")
+}
+
+/// CR 702.34a + CR 601.2f: Split a compound flashback line that also carries a
+/// self-spell cost reduction (Visions of Ruin: "Flashback {8}{R}{R}. This spell
+/// costs {X} less to cast this way, …").
+pub(crate) fn split_flashback_trailing_self_spell_cost_reduction<'a>(
+    line: &'a str,
+    lower: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    const SPELL_MARKER: &str = ". this spell costs ";
+    const CARD_MARKER: &str = ". this card costs ";
+
+    if let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        preceded(
+            tag("flashback"),
+            value((), (take_until(SPELL_MARKER), tag(". "))),
+        )
+        .parse(input)
+    }) {
+        let flashback_len = line.len() - ". ".len() - reduction_text.len();
+        return Some((line[..flashback_len].trim(), reduction_text.trim()));
+    }
+
+    if let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        preceded(
+            tag("flashback"),
+            value((), (take_until(CARD_MARKER), tag(". "))),
+        )
+        .parse(input)
+    }) {
+        let flashback_len = line.len() - ". ".len() - reduction_text.len();
+        return Some((line[..flashback_len].trim(), reduction_text.trim()));
+    }
+
+    None
 }
 
 pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
@@ -294,8 +330,6 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // quote is required: scan_contains only matches at word starts, and "legend"
     // is glued to its opening quote ("legend) in the Oracle text.
     "\"legend rule\" doesn't apply",
-    "can block an additional",
-    "can block any number",
     "play an additional land",
     "play two additional lands",
     "triggers an additional time",
@@ -441,6 +475,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
+        return true;
+    }
+
+    if super::oracle_static::is_extra_blockers_static_candidate(lower) {
         return true;
     }
 
@@ -853,6 +891,19 @@ mod tests {
     fn unquoted_cant_block_static_unchanged() {
         // No quotes → fast path → classification unchanged.
         assert!(is_static_pattern("creatures you control can't block"));
+    }
+
+    #[test]
+    fn split_flashback_trailing_self_spell_cost_reduction_splits_visions_line() {
+        let line = "Flashback {8}{R}{R}. This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.";
+        let lower = line.to_lowercase();
+        let (flashback, reduction) =
+            split_flashback_trailing_self_spell_cost_reduction(line, &lower).unwrap();
+        assert_eq!(flashback, "Flashback {8}{R}{R}");
+        assert_eq!(
+            reduction,
+            "This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone."
+        );
     }
 
     #[test]

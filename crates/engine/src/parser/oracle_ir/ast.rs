@@ -188,6 +188,12 @@ pub(crate) enum PredicateAst {
     Restriction {
         effect: Effect,
         duration: Option<Duration>,
+        /// CR 509.1b + CR 611.2c: A conjoined-subject evasion grant ("<source>
+        /// and up to N other target creature(s) can't be blocked this turn",
+        /// Martha Jones) carries the SECOND conjunct's grant as a sub_ability
+        /// continuation, mirroring `Become`/`Continuous`. `None` for the common
+        /// single-subject restriction.
+        sub_ability: Option<Box<AbilityDefinition>>,
     },
     ImperativeFallback {
         text: String,
@@ -742,9 +748,18 @@ impl TargetedImperativeAst {
 pub(crate) enum TargetedImperativeAst {
     Tap {
         target: TargetFilter,
+        /// CR 115.1d + CR 701.26a: Variable target count for "tap up to N target
+        /// creatures" (Nyssa of Traken's "tap up to that many target creatures",
+        /// N = `EventContextAmount`). `None` for the common single-target
+        /// "tap target creature". Carried onto `ParsedEffectClause.multi_target`
+        /// at lowering so the targeting system surfaces the right number of slots.
+        multi_target: Option<MultiTargetSpec>,
     },
     Untap {
         target: TargetFilter,
+        /// CR 115.1d + CR 701.26b: Variable target count for "untap up to N target
+        /// creatures", mirroring [`TargetedImperativeAst::Tap`].
+        multi_target: Option<MultiTargetSpec>,
     },
     TapAll {
         target: TargetFilter,

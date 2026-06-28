@@ -899,6 +899,7 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "aiUnsupportedFormat": "{{format}} jest dostępny do hostowania gier wieloosobowych, ale mecze z AI nie są jeszcze obsługiwane.",
     "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
     "cedhWarningUntagged": "bez bracketu",
     "bracketViolation": {
@@ -1560,6 +1561,8 @@
     "crashBody": "phase.rs napotkał wewnętrzny błąd i nie może bezpiecznie kontynuować tej akcji. Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę. <strong>Zgłoś to</strong>, abyśmy mogli to naprawić.",
     "connectionTitle": "Utracono połączenie z silnikiem",
     "connectionBody": "phase.rs utracił połączenie z silnikiem gry — najczęściej spowodowane aktualizacją w tle aktywowaną w trakcie gry. Twoja ostatnia zapisana tura jest zachowana; odśwież, aby przywrócić grę.",
+    "timeoutTitle": "Silnik potrzebował zbyt dużo czasu",
+    "timeoutBody": "phase.rs nie zdążył obliczyć tej akcji w wyznaczonym czasie. Może się to zdarzyć na bardzo złożonych stołach (na przykład setki żetonów). Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę, i rozważ wyeksportowanie stanu, aby go zgłosić.",
     "diagnostic": "diagnostyka: {{reason}}",
     "showDetails": "Pokaż szczegóły",
     "exportGameState": "Eksportuj stan gry",
@@ -1842,5 +1845,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

@@ -123,7 +123,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     && waitingFor.data.player === playerId
     && waitingFor.data.scope.type === "Single";
   const currentTargetRefs = isHumanTargetSelection
-    ? waitingFor.data.selection.current_legal_targets
+    ? (waitingFor.data.selection?.current_legal_targets ?? [])
     : isRetargetChoice
       ? waitingFor.data.legal_new_targets
       : [];

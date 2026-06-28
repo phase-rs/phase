@@ -306,7 +306,11 @@ pub(crate) fn try_parse_impose_additional_cost(
 }
 
 /// Dynamic "for each" counts are extracted when present.
-pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_cost_modification(
+    text: &str,
+    lower: &str,
+    casting_as_variant: Option<crate::types::game_state::CastingVariant>,
+) -> Option<StaticDefinition> {
     let original_text = text;
     let (cost_text, leading_condition) =
         peel_leading_cost_modifier_condition(TextPair::new(text, lower));
@@ -599,6 +603,14 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         }
     }
 
+    // CR 601.2f: {X}-flavored self-spell reductions must bind X to a quantity
+    // (devotion, object counts, etc.). Emitting ModifyCost with multiplier 1
+    // and no dynamic_count silently under-reduces by {1} (Drag to the Underworld
+    // class when the where-X clause fails to lower).
+    if amount_is_variable_x && dynamic_count.is_none() {
+        return None;
+    }
+
     let amount = if amount_is_variable_x {
         ManaCost::generic(1)
     } else {
@@ -744,6 +756,18 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
             .is_ok()
     {
         definition.condition = Some(StaticCondition::DuringYourTurn);
+    }
+
+    // CR 601.2f + CR 702.34a: Caller-proven casting variant (e.g. Flashback from
+    // the compound-line parser) gates self-spell cost modifiers — never inferred
+    // from generic "cast this way" wording alone.
+    if let Some(variant) = casting_as_variant {
+        definition.condition = Some(match definition.condition.take() {
+            Some(existing) => StaticCondition::And {
+                conditions: vec![existing, StaticCondition::CastingAsVariant { variant }],
+            },
+            None => StaticCondition::CastingAsVariant { variant },
+        });
     }
 
     Some(definition)

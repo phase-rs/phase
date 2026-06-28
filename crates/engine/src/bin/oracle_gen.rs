@@ -345,9 +345,11 @@ fn write_oracle_subtypes(
         .into_iter()
         .collect();
     let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
+    // Emit a trailing newline so the committed file is POSIX-clean and a
+    // re-generation never produces a spurious no-newline diff.
     match serde_json::to_string_pretty(&list)
         .map_err(|e| e.to_string())
-        .and_then(|json| std::fs::write(&out_path, json).map_err(|e| e.to_string()))
+        .and_then(|json| std::fs::write(&out_path, format!("{json}\n")).map_err(|e| e.to_string()))
     {
         Ok(()) => eprintln!(
             "Wrote {} creature subtypes to {}",

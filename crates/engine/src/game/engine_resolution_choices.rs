@@ -3368,7 +3368,7 @@ pub(super) fn handle_resolution_choice(
                         ability_index,
                         pending.ability,
                         pending.activation_cost.as_ref(),
-                        pending.x_residual_activation,
+                        pending.activation_residual,
                         events,
                     )?;
                 } else {

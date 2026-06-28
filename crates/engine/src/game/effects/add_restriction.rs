@@ -60,7 +60,7 @@ fn fill_runtime_fields(
                 // read the trigger event per CR 508.5.
                 RestrictionPlayerScope::DefendingPlayer => {
                     if let Some(defender) =
-                        crate::game::combat::defending_player_for_attacker(state, ability.source_id)
+                        crate::game::combat::resolve_defending_player(state, ability.source_id)
                             .or_else(|| {
                                 super::myriad::defending_player_from_attack_event(
                                     state.current_trigger_event.as_ref(),
@@ -70,6 +70,16 @@ fn fill_runtime_fields(
                     {
                         *affected_players = RestrictionPlayerScope::SpecificPlayer(defender);
                     }
+                }
+                // CR 109.5 + CR 118.12: lower the per-iteration scoped player
+                // ("each opponent who does …" — The Second Doctor, City Hall) to
+                // a concrete id so the "during their next turn" expiry block below
+                // reads it as a `SpecificPlayer` and anchors on the restricted
+                // opponent, not the controller.
+                RestrictionPlayerScope::ScopedPlayer => {
+                    *affected_players = RestrictionPlayerScope::SpecificPlayer(
+                        ability.scoped_player.unwrap_or(ability.controller),
+                    );
                 }
                 RestrictionPlayerScope::AllPlayers
                 | RestrictionPlayerScope::SpecificPlayer(_)
@@ -285,6 +295,92 @@ mod tests {
                 source: ObjectId(7),
                 affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
                 activity: ProhibitedActivity::ActivateAbilities { .. },
+                ..
+            }
+        ));
+    }
+
+    /// CR 109.5 + CR 514.2 + CR 500.7: The Second Doctor / City Hall — the
+    /// per-iteration `ScopedPlayer` restriction resolves to the scoped opponent,
+    /// and a "during their next turn" duration anchors its expiry on THAT
+    /// opponent (the restricted player), not on the ability controller.
+    #[test]
+    fn scoped_player_scope_resolves_and_anchors_next_turn_on_scoped_player() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = GameState::new_two_player(42);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents,
+                    },
+                },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        });
+        // The per-player iteration bound the scoped player to the opponent.
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                // CR 109.5: the "during their next turn" expiry anchors on the
+                // restricted (scoped) opponent, not the controller (PlayerId(0)).
+                expiry: RestrictionExpiry::UntilEndOfNextTurnOf {
+                    player: PlayerId(1)
+                },
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::PlayerOrPermanents,
+                },
+            }
+        ));
+    }
+
+    /// CR 109.5: a `ScopedPlayer` restriction with no bound `scoped_player`
+    /// falls back to the controller — the same defensive fallback the parser
+    /// lowering relies on (`scoped_player.unwrap_or(controller)`).
+    #[test]
+    fn scoped_player_scope_falls_back_to_controller_when_unbound() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::Player,
+                    },
+                },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
                 ..
             }
         ));

@@ -21,7 +21,7 @@ use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
-use seat_reducer::types::{DeckChoice, SeatDelta, SeatKind, SeatState};
+use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use tracing::{debug, info, warn};
 
 use crate::filter::filter_state_for_player;
@@ -247,6 +247,7 @@ impl GameSession {
                         String::new()
                     },
                     kind,
+                    team_info: seat_team_info(&self.state.format_config, pid.0),
                     reserved: reservation.is_some(),
                     reservation_expires_at_ms: reservation.and_then(|r| r.expires_at_ms),
                 }
@@ -400,6 +401,8 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                planar_deck: deck.planar_deck.clone(),
+                scheme_deck: deck.scheme_deck.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
                 contraption_deck: deck.contraption_deck.clone(),
                 sticker_sheets: deck.sticker_sheets.clone(),
@@ -1433,6 +1436,54 @@ mod tests {
         assert!(result.is_ok());
         let (token2, _state) = result.unwrap();
         assert_eq!(token2.len(), 32);
+    }
+
+    #[test]
+    fn player_slot_info_omits_team_metadata_for_individual_formats() {
+        for format in [FormatConfig::standard(), FormatConfig::commander()] {
+            let mut mgr = SessionManager::new();
+            let (code, _) = mgr.create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format),
+            );
+
+            let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
+            assert_eq!(slots.len(), 2);
+            assert!(slots.iter().all(|slot| slot.team_info.is_none()));
+
+            let json = serde_json::to_value(&slots[0]).unwrap();
+            assert!(json.get("teamInfo").is_none());
+        }
+    }
+
+    #[test]
+    fn player_slot_info_includes_two_headed_giant_team_metadata() {
+        let mut mgr = SessionManager::new();
+        let (code, _) = mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            4,
+            MatchConfig::default(),
+            Some(FormatConfig::two_headed_giant()),
+        );
+
+        let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
+        let team_indices: Vec<u8> = slots
+            .iter()
+            .map(|slot| slot.team_info.unwrap().team_index)
+            .collect();
+        let positions: Vec<u8> = slots
+            .iter()
+            .map(|slot| slot.team_info.unwrap().position_in_team)
+            .collect();
+
+        assert_eq!(team_indices, vec![0, 0, 1, 1]);
+        assert_eq!(positions, vec![0, 1, 0, 1]);
     }
 
     #[test]
