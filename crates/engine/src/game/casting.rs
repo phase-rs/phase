@@ -960,7 +960,11 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
         })
 }
 
-fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
+/// CR 702.143d: the single authority for "any foretell cost it has" — reads
+/// the printed `Keyword::Foretell` cost off an object. Shared between the
+/// foretell special action (`handle_foretell`) and the effect-driven "becomes
+/// foretold" grant (`effects::grant_permission`).
+pub(crate) fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
     obj.keywords.iter().find_map(|keyword| match keyword {
         Keyword::Foretell(cost) => Some(cost.clone()),
         _ => None,

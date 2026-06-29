@@ -128,6 +128,7 @@ fn breeches_reflexive_flip_clauses_become_delayed_triggers() {
                 DelayedTriggerCondition::WhenNextEvent {
                     trigger: t,
                     or_trigger: None,
+                    ..
                 },
             effect: inner,
             ..
@@ -613,6 +614,7 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     let condition = DelayedTriggerCondition::WhenNextEvent {
         trigger: Box::new(trigger_def),
         or_trigger: None,
+        lifetime: engine::types::ability::DelayedTriggerLifetime::ThisTurn,
     };
     state.delayed_triggers.push(DelayedTrigger {
         condition,

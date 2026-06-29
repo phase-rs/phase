@@ -1306,10 +1306,18 @@ pub(super) fn parse_targeted_action_ast(
                 min_count,
             });
         }
-        let (count, after_count) = super::super::oracle_util::parse_count_expr(rest).unwrap_or((
-            crate::types::ability::QuantityExpr::Fixed { value: 1 },
-            rest,
-        ));
+        // Use the exclusion-aware sibling so a source-exclusion "another"
+        // ("sacrifice another creature or land") is reported as a typed
+        // `CountWord::SourceExclusion` instead of being silently consumed as a
+        // bare count of 1. `parse_count_expr` discards the word's identity, so
+        // without this the parsed target never regains `FilterProp::Another`
+        // and the source could sacrifice itself (Morkrut Necropod, #4513).
+        let (count, after_count, count_word) =
+            super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
+                crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                rest,
+                super::super::oracle_util::CountWord::Plain,
+            ));
         let (target_text, _) = super::strip_optional_target_prefix(after_count.trim_start());
         // Strip the "of their choice" / "of your choice" confirmation suffix —
         // CR 701.16b makes player choice the default, so the phrase is a no-op
@@ -1372,6 +1380,44 @@ pub(super) fn parse_targeted_action_ast(
         // sacrifice a non-Demon creature" must restrict the prompt to the
         // actor's permanents — sacrificing requires controlling the permanent.
         apply_actor_default(&mut target, ctx);
+        // Re-apply the source exclusion the count word stripped. The count
+        // grammar consumes "another " as a bare count of 1, discarding the
+        // exclusion, so the filter built from the remainder ("creature or land")
+        // carries no `FilterProp::Another` and would let the source sacrifice
+        // itself (Morkrut Necropod, #4513).
+        //
+        // Apply the exclusion to EVERY leg of an `Or` disjunction. "Another"
+        // means "not this source permanent"; it is required on any leg the
+        // source's type could match and is harmless (vacuous) on legs it cannot
+        // (a land is never the source creature). Marking only the first leg, or
+        // only same-type legs, leaves a self-sacrifice hole for a source that
+        // matches a non-first leg — e.g. Mukotai Soulripper, an artifact
+        // creature, in "sacrifice another creature or artifact".
+        //
+        // Single-type "sacrifice another <type>" exclusion is deliberately NOT
+        // applied here: it reduces a single-eligible mandatory sacrifice (e.g.
+        // Disciple of Bolas) to one option, routing it through the
+        // auto-sacrifice fast-path, which mis-resolves a follow-on "that
+        // creature's power" reference — a separate, pre-existing engine bug for
+        // its own fix.
+        //
+        // No CR annotation here: this is parser-grammar scoping of the word
+        // "another"; the exclusion itself is CR-annotated at the filter layer
+        // (`game/filter.rs` `FilterProp::Another`).
+        if matches!(
+            count_word,
+            super::super::oracle_util::CountWord::SourceExclusion
+        ) {
+            if let TargetFilter::Or { filters } = &mut target {
+                for leg in filters.iter_mut() {
+                    if let TargetFilter::Typed(typed) = leg {
+                        if !typed.properties.contains(&FilterProp::Another) {
+                            typed.properties.push(FilterProp::Another);
+                        }
+                    }
+                }
+            }
+        }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
             count,

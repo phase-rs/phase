@@ -955,7 +955,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. }
         | GameEvent::StartingPlayerContest { .. }
-        | GameEvent::Foretold { .. } => 0,
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. } => 0,
     }
 }
 
@@ -4485,6 +4486,55 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// CR 702.143c: an effect-driven `BecameForetold` is NOT the foretell
+    /// special action, so a "whenever you foretell a card" trigger
+    /// (`match_foretell`) must not fire on it — only the `Foretold` special-action
+    /// event satisfies it.
+    #[test]
+    fn became_foretold_does_not_satisfy_foretell_trigger() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Foretell Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let object_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Some Card".to_string(),
+            Zone::Exile,
+        );
+        let trigger = make_trigger(TriggerMode::Foretell);
+
+        // Negative: the effect-driven designation must not fire the trigger.
+        assert!(
+            !match_foretell(
+                &GameEvent::BecameForetold { object_id },
+                &trigger,
+                source,
+                &state
+            ),
+            "BecameForetold must not satisfy a foretell trigger (CR 702.143c)"
+        );
+
+        // Positive control: the genuine special action (same player) does.
+        assert!(
+            match_foretell(
+                &GameEvent::Foretold {
+                    player_id: PlayerId(0),
+                    object_id,
+                },
+                &trigger,
+                source,
+                &state
+            ),
+            "the foretell special action must satisfy a foretell trigger"
+        );
     }
 
     #[test]

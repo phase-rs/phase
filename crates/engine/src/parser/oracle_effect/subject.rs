@@ -4039,6 +4039,12 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }
             | StaticMode::CantUntap
+            // CR 702.26a + CR 101.2: the phase-in lock is granted to the parent
+            // ability's chosen target ("It can't phase in …"), so it must
+            // propagate onto that permanent's `static_definitions` as a
+            // `SpecificObject` transient grant — without `AddStaticMode` the TCE
+            // carries empty modifications and the phase-in gate never sees it.
+            | StaticMode::CantPhaseIn
             | StaticMode::CantGainLife
             | StaticMode::CantLoseLife
             | StaticMode::CantLoseTheGame
@@ -4125,6 +4131,12 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
             vec![StaticMode::CantCrew],
             (tag("crew"), opt(tag(" vehicles"))),
         ),
+        // CR 702.26a + CR 101.2: "phase in" prohibition (The Pandorica: "It
+        // can't phase in for as long as ~ remains tapped"). The negation prefix
+        // and any trailing "for as long as …" duration are owned by the caller
+        // (`parse_restriction_modes` / `strip_trailing_duration`); this atom
+        // matches only the bare verb phrase.
+        value(vec![StaticMode::CantPhaseIn], tag("phase in")),
     ))
     .parse(input)
 }
@@ -5745,6 +5757,69 @@ mod tests {
                 mode: StaticMode::CantUntap
             }
         )));
+    }
+
+    /// CR 702.26a + CR 101.2 + CR 611.2b: "It can't phase in for as long as ~
+    /// remains tapped" (The Pandorica) lowers to a `CantPhaseIn` continuous
+    /// restriction — NOT an `Effect::PhaseIn` (locks the dispatch-priority
+    /// finding: the ` can't ` subject split wins before imperative "phase in").
+    /// The `ForAsLongAs { SourceIsTapped }` duration is preserved and the
+    /// restriction propagates via `AddStaticMode` so it registers as a
+    /// `SpecificObject` transient grant on the parent target.
+    #[test]
+    fn cant_phase_in_builds_restriction_not_phase_in() {
+        // Mark a prior typed object referent so the "It" anaphor binds to the
+        // parent target, mirroring the activated-ability chain.
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..ParseContext::default()
+        };
+        let clause = try_parse_subject_restriction_clause(
+            "It can't phase in for as long as ~ remains tapped",
+            &mut ctx,
+        )
+        .expect("phase-in restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, not PhaseIn, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(
+            !matches!(clause.effect, Effect::PhaseIn { .. }),
+            "must not be an Effect::PhaseIn"
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantPhaseIn);
+        assert_eq!(
+            duration,
+            &Some(Duration::ForAsLongAs {
+                condition: crate::types::ability::StaticCondition::SourceIsTapped,
+            })
+        );
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn
+            }
+        )));
+    }
+
+    /// CR 702.26a + CR 101.2: the restriction grammar maps the "phase in" atom
+    /// to `CantPhaseIn` for any subject, proving the building block covers the
+    /// class (not one card). The negation/duration are owned by the caller.
+    #[test]
+    fn parse_restriction_modes_phase_in_atom() {
+        assert_eq!(
+            parse_restriction_modes("can't phase in"),
+            Some(vec![StaticMode::CantPhaseIn])
+        );
     }
 
     /// CR 102.1 + CR 103.1: "the player to your right" as a subject resolves to

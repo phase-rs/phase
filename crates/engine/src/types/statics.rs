@@ -1525,6 +1525,17 @@ pub enum StaticMode {
     },
     /// CR 702.122d: This creature can't crew Vehicles.
     CantCrew,
+    /// CR 702.26a + CR 101.2: A continuous restriction that prevents the named
+    /// permanent from phasing in (The Pandorica: "It can't phase in for as long
+    /// as ~ remains tapped"). CR 702.26a makes phasing-in a turn-based action at
+    /// the controller's untap step; this restriction is the CR 101.2 "can't"
+    /// that overrides it. Consulted by `execute_untap_step_phasing` (the
+    /// CR 702.26a TBA) and by `resolve_phase_in` (an explicit "phase in" effect
+    /// can't override an active "can't"). Granted as a `SpecificObject` transient
+    /// continuous effect carrying the rules-text `ForAsLongAs { SourceIsTapped }`
+    /// duration, so it self-expires (CR 611.2b) exactly when the source untaps or
+    /// leaves the battlefield (CR 110.5d).
+    CantPhaseIn,
     /// CR 702.122a / CR 702.171a / CR 702.184c: This creature contributes to a
     /// crew/saddle/station cost as though its power were modified (Reckoner
     /// Bankbuster: "as though its power were 2 greater") or using its toughness
@@ -2023,6 +2034,7 @@ impl StaticMode {
             | StaticMode::Goaded
             | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
+            | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
@@ -2345,6 +2357,7 @@ impl fmt::Display for StaticMode {
             // Tier 2
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
+            StaticMode::CantPhaseIn => write!(f, "CantPhaseIn"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
@@ -2798,6 +2811,7 @@ impl FromStr for StaticMode {
             // Tier 2
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
+            "CantPhaseIn" => StaticMode::CantPhaseIn,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
@@ -3358,6 +3372,7 @@ mod tests {
             // Tier 2: rule-mod statics
             StaticMode::CantTap,
             StaticMode::CantUntap,
+            StaticMode::CantPhaseIn,
             StaticMode::MustBeBlocked,
             StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,

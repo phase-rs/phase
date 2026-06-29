@@ -2283,6 +2283,41 @@ pub enum ResolutionCastSuccessAction {
     },
 }
 
+/// CR 603.7b: lifetime of a one-shot `WhenNextEvent` delayed trigger. CR 603.7b
+/// states a delayed triggered ability "will trigger only once—the next time its
+/// trigger event occurs—unless it has a stated duration, such as 'this turn.'"
+/// The firing semantics are identical (fire once on the next matching event);
+/// the only difference is whether that stated "this turn" duration is present.
+///
+/// - `ThisTurn` (CR 603.7b "stated duration, such as 'this turn'"): "When you
+///   next [event] **this turn** …" — bounded to the turn it was created. If the
+///   event never occurs that turn, the unfired trigger is pruned at
+///   end-of-turn cleanup. Coin-flip reflexives, "when you next cast a spell this
+///   turn", "when you next attack this turn", etc.
+/// - `Persistent` (CR 603.7b, no stated duration): an open-ended delayed trigger
+///   that "will trigger only once—the next time its trigger event occurs" with
+///   no "this turn" limit — it survives across turns until the event occurs. The
+///   Pandorica's "When ~ becomes untapped or leaves the battlefield, that
+///   permanent phases in" re-entry fires on a later turn's untap step, so it
+///   must not be pruned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DelayedTriggerLifetime {
+    /// CR 603.7b ("stated duration, such as 'this turn'"): bounded to the
+    /// creating turn; pruned at cleanup if unfired.
+    #[default]
+    ThisTurn,
+    /// CR 603.7b (no stated duration): open-ended; persists across turns until
+    /// the event fires.
+    Persistent,
+}
+
+impl DelayedTriggerLifetime {
+    /// Serde skip-helper: `ThisTurn` is the default and is omitted from JSON.
+    pub fn is_this_turn(&self) -> bool {
+        matches!(self, DelayedTriggerLifetime::ThisTurn)
+    }
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -2325,6 +2360,12 @@ pub enum DelayedTriggerCondition {
         /// only the first matching event fires the delayed ability.
         #[serde(default)]
         or_trigger: Option<Box<TriggerDefinition>>,
+        /// CR 603.7b: whether this one-shot trigger has a stated "this turn"
+        /// duration (`ThisTurn`, pruned at cleanup if unfired) or no stated
+        /// duration (`Persistent`, survives across turns until the event fires —
+        /// The Pandorica's untap/leave re-entry).
+        #[serde(default, skip_serializing_if = "DelayedTriggerLifetime::is_this_turn")]
+        lifetime: DelayedTriggerLifetime,
     },
 }
 

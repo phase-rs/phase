@@ -27,6 +27,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -390,7 +391,13 @@ fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     &cursor.effect
 }
 
-fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
+/// CR 608.2c: Resolve the grant target for an exile-zone cast-permission
+/// designation continuation ("it becomes plotted" / "it becomes foretold").
+/// Generic over the designation — a tracked-set exile binds the grant to the
+/// just-published set (`TrackedSetId(0)` sentinel); a single-object exile binds
+/// to the parent target (which falls back to the ability source for anaphoric
+/// "it" with no explicit target slot).
+fn exile_designation_grant_target(previous: &AbilityDefinition) -> TargetFilter {
     match deepest_effect(previous) {
         Effect::ChangeZone {
             destination: Zone::Exile,
@@ -440,6 +447,45 @@ fn parse_becomes_plotted_continuation(lower: &str) -> bool {
     ))
     .parse(text)
     .is_ok()
+}
+
+fn parse_becomes_foretold_continuation(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before all_consuming
+    let text = lower.trim().trim_end_matches('.').trim();
+    // CR 702.143d: Accept an optional "if you do," gate for symmetry with the
+    // plotted grammar (a future "you may exile a card. If you do, it becomes
+    // foretold." card slots in here). The continuation already attaches after
+    // the preceding exile instruction, so the gate prefix is part of the same
+    // become-foretold continuation grammar.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes foretold")),
+            value((), tag("that card becomes foretold")),
+            value((), tag("they become foretold")),
+        )),
+    ))
+    .parse(text)
+    .is_ok()
+}
+
+/// Detects "its foretell cost is <cost specification>" — an effect-defined
+/// foretell cost sentence (e.g. Ethereal Valkyrie: "Its foretell cost is its
+/// mana cost reduced by {2}."). When this sentence follows a
+/// `BecomesForetold` continuation, the cost-bearing form is not yet
+/// representable in `CastingPermission::Foretold`; the grant must be
+/// suppressed to avoid emitting a wrong zero-cost permission
+/// (CR 702.143d: effect-defined foretell costs are a separate class from
+/// printed `Keyword::Foretell` costs).
+pub(super) fn is_foretell_cost_override_sentence(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before prefix check
+    let text = lower.trim().trim_end_matches('.').trim();
+    tag::<_, _, OracleError<'_>>("its foretell cost is ")
+        .parse(text)
+        .is_ok()
 }
 
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
@@ -550,6 +596,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chars = text.chars().peekable();
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
+    // CR 111.3 (issue #4605): a created token has the abilities defined in its
+    // creation effect. Tracks whether the currently-open single-quoted span is a
+    // genuine NESTED ability quote — the inner ability of a token/permanent
+    // created inside a double-quoted granted ability (Urza's Saga:
+    // `... gains "... create a token with 'X.'"`). Only an anchored opener
+    // (`with '` / `and '` / `or '` / `, '`) opens such a span; a possessive or
+    // contraction apostrophe (`~'s`, `can't`) does not. Inside a genuine ability
+    // quote a `.` is part of the quoted text, NOT a sentence boundary.
+    let mut single_quote_is_ability = false;
     let mut in_double_quote = false;
     // CR 109.5 + CR 115.1: once a compound-subject-each head ("you and" / "~ and"
     // followed by "<noun> each") is detected, keep the WHOLE distributed body
@@ -581,7 +636,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 if is_possessive_apostrophe(&current, chars.peek().copied()) {
                     current.push(ch);
                 } else {
-                    in_single_quote = !in_single_quote;
+                    if in_single_quote {
+                        in_single_quote = false;
+                        single_quote_is_ability = false;
+                    } else {
+                        in_single_quote = true;
+                        // Anchor mirrors `extract_token_static_abilities`'s
+                        // single-quote pass: only `with '` / `and '` / `or '` /
+                        // `, '` opens a genuine nested ability span.
+                        single_quote_is_ability = ends_with_single_quote_ability_anchor(&current);
+                    }
                     current.push(ch);
                 }
             }
@@ -632,8 +696,18 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             // split here and reset the phantom single-quote state.
             // `in_double_quote` (a genuine quoted ability) still suppresses the
             // split.
-            '.' if paren_depth == 0 && !in_double_quote => {
+            // CR 111.3 (issue #4605): inside a genuine nested ability quote
+            // (`single_quote_is_ability`) the `.` belongs to the quoted text
+            // (`... with 'This token gets +1/+1 for each artifact you control.'`)
+            // and must NOT close the clause — otherwise the span is bisected and
+            // the token-creation effect loses its inner ability (and dispatches
+            // to the inner `Pump` instead of `Token`).
+            '.' if paren_depth == 0
+                && !in_double_quote
+                && !(in_single_quote && single_quote_is_ability) =>
+            {
                 in_single_quote = false;
+                single_quote_is_ability = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
@@ -2446,6 +2520,19 @@ fn starts_with_damage_clause(lower: &str) -> bool {
     }
 }
 
+/// CR 111.3 (issue #4605): true when the text accumulated right before an
+/// apostrophe ends at a phrase boundary that opens a nested quoted ability
+/// (`with '` / `and '` / `or '` / `, '`). Mirrors the opener anchors in
+/// `extract_token_static_abilities`'s single-quote pass, so a possessive
+/// (`~'s`) or contraction (`can't`) apostrophe is never treated as an
+/// ability-quote opener and a sentence-ending `.` keeps splitting normally.
+fn ends_with_single_quote_ability_anchor(current: &str) -> bool {
+    // allow-noncombinator: terminal suffix probe on the incremental chunk buffer during the char scan in `split_clause_sequence`, not parsing dispatch against raw oracle text (mirrors `current_ends_with_bare_and`).
+    ["with ", "and ", "or ", ", "]
+        .iter()
+        .any(|anchor| current.ends_with(anchor))
+}
+
 pub(super) fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
     let prev = current.chars().last();
     matches!(
@@ -3360,7 +3447,29 @@ pub(super) fn apply_clause_continuation(
                 kind,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::Plotted { turn_plotted: 0 },
-                    target: plotted_grant_target(previous),
+                    target: exile_designation_grant_target(previous),
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+            );
+            append_definition_to_sub_chain(previous, grant_def);
+        }
+        ContinuationAst::BecomesForetold => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 702.143d: The card becomes foretold. `cost` is a placeholder
+            // filled at resolution from the card's own Foretell keyword
+            // (`casting::foretell_cost`, the single authority for "any foretell
+            // cost it has"); `turn_foretold` is stamped at resolution, mirroring
+            // Plotted's `turn_plotted: 0` placeholder.
+            let grant_def = AbilityDefinition::new(
+                kind,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Foretold {
+                        cost: ManaCost::zero(),
+                        turn_foretold: 0,
+                    },
+                    target: exile_designation_grant_target(previous),
                     grantee: PermissionGrantee::ObjectOwner,
                 },
             );
@@ -3707,6 +3816,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::BecomesPlotted => true,
+        ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -5019,6 +5129,11 @@ pub(super) fn parse_followup_continuation_ast(
                 position: parse_put_chosen_cards_at_library_position(&lower)
                     .expect("guard parsed position"),
             })
+        }
+        Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
+            if parse_becomes_foretold_continuation(&lower) =>
+        {
+            Some(ContinuationAst::BecomesForetold)
         }
         Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
             if parse_becomes_plotted_continuation(&lower) =>

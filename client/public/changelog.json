@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 155,
+      "date": "2026-06-29",
+      "title": "Fblthp plots from the library",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Fblthp, Lost on the Range can now plot the top card of your library, with plot resolving as a true special action instead of using the stack\n• Words of Worship and Words of Wilding work: pay {1} to replace your next draw this turn with life gain or a Bear token\n• Locus of Enlightenment now has the activated abilities of the cards used to craft it\n• Nowhere to Run now lets you target opponents' hexproof creatures and shuts off their ward triggers\n• Fastbond-style extra land-play permission now parses as a continuous effect\n• Plot, unlock, and activated-ability cost reducers now apply to cards like Doc Aurlock, Inquisitive Glimmer, and Agatha of the Vile Cauldron\n\n🛠️ Cards That Now Work Right\n• Deflecting Swat, Bolt Bend, and Redirect can now retarget mass \"target player\" spells instead of offering only the current target\n• She-Hulk, Wallbreaker now puts counters on the blocked Hero, not a missing blocker binding\n• Mishra, Eminent One and similar temporary-token makers now sacrifice or tuck the created token at end step, not the source permanent\n• Ashling, the Limitless and Satya, Aetherflux Genius now ask for their delayed payment at the next end step, not when the token is created\n• Tamiyo, Inquisitive Student now returns from exile transformed after the third-card draw trigger\n• Super-Soldier Serum's \"attach any number\" trigger can now be declined by choosing zero Equipment\n• Captain America, Team Leader now puts +1/+1 counters on the entering Heroes\n• Heroic Defiance now checks the enchanted creature's color against the most common color among permanents\n• Brackish Blunder and similar \"if it was tapped\" riders now use last known tap state after the creature leaves\n• Faller's Faithful and similar \"up to one target\" riders no longer fire when you declined the target\n• Namor the Sub-Mariner now counts blue mana symbols and creates the right number of Merfolk\n• Jocasta Nu, Kishla Skimmer, Stridehangar, Weeping Angel, and counter-removal cards like Magma Pummeler now parse and resolve their missing riders more accurately\n\n⚔️ Combat & Gameplay\n• Reflexive \"if it/that...\" riders now stay conditional instead of firing unconditionally\n• Discard-then-draw \"that many\" effects now remember how many cards were actually discarded\n• Counter-removal costs and token-counting costs now preserve the correct counts\n• Auto-pass timers no longer fire after they go stale\n\n🖥️ Interface\n• Oldest-printing art requests now sort by release date and collector number, so old-frame art choices are more reliable\n• Top-of-library play and plot permissions now expose your own top card so the action has a visible card to click\n\n🌐 Multiplayer\n• Full-mode multiplayer game creation no longer deadlocks",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521243864479043617"
+    },
+    {
       "id": 154,
       "date": "2026-06-28",
       "title": "Alchemy perpetual buffs arrive",

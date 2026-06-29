@@ -194,7 +194,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // layers_dirty → Gate 1); mark the exerted object directly so its
             // display reflects the exert even on the layers-clean path.
             GameEvent::CreatureExerted { object_id }
-            | GameEvent::Foretold { object_id, .. } => {
+            | GameEvent::Foretold { object_id, .. }
+            | GameEvent::BecameForetold { object_id } => {
                 mark_public_state_object_dirty(state, *object_id);
             }
             GameEvent::CreatureEnlisted {
