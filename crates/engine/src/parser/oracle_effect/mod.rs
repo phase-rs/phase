@@ -14110,6 +14110,7 @@ fn lower_subject_predicate_ast(
                         | TargetFilter::DefendingPlayer
                         | TargetFilter::PostReplacementSourceController
                         | TargetFilter::PostReplacementDamageTarget
+                        | TargetFilter::PostReplacementDamageTargetOwner
                         | TargetFilter::Owner
                         | TargetFilter::SpecificPlayer { .. }
                 ) {
@@ -17822,6 +17823,17 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 /// slots are statically declared as `TargetFilter` or `Option<TargetFilter>`.
 /// Variants not listed here keep their target slots untouched; **add an arm
 /// when introducing a new target-bearing variant** so future rewrites cover it.
+///
+/// **`Effect::Shuffle` is intentionally EXCLUDED** and must stay that way:
+/// several callers of this walker rewrite `TriggeringPlayer` /
+/// `ParentTargetController` / `ParentTarget` (e.g.
+/// `replace_player_anaphor_with_parent_target`), which are exactly the refs a
+/// `Shuffle { target }` carries. Adding a `Shuffle` arm here would silently
+/// rewrite unrelated cards' `Shuffle { target: TriggeringPlayer }` (Thada Adel,
+/// Acquisitor; Earwig Squad). Shuffle-target anaphors must be rewritten at their
+/// narrowly-scoped call sites instead (see
+/// `rewrite_parent_target_to_post_replacement_damage_target` in
+/// `oracle_replacement.rs`).
 /// Variant list mirrors `replace_target_with_parent` plus a handful of
 /// player-targetable effects (Draw, LoseLife, Discard, Mill, Scry, Surveil,
 /// RevealFromHand) whose `target` field is a `TargetFilter` and can therefore
@@ -23555,6 +23567,33 @@ mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::AttachmentKind;
+
+    /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
+    /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
+    /// `ParentTarget` (exactly the refs a `Shuffle` carries); visiting `Shuffle`
+    /// would silently regress `Shuffle { target: TriggeringPlayer }` cards
+    /// (Thada Adel, Acquisitor; Earwig Squad). Shuffle-target anaphors are
+    /// rewritten at their narrowly-scoped call sites instead (see
+    /// `rewrite_parent_target_to_post_replacement_damage_target` in
+    /// `oracle_replacement.rs`). This test locks that exclusion in place.
+    #[test]
+    fn each_target_filter_mut_does_not_visit_shuffle() {
+        let mut effect = Effect::Shuffle {
+            target: TargetFilter::TriggeringPlayer,
+        };
+        // Closure rewrites ANY visited filter to SelfRef; if Shuffle were
+        // visited, the target would flip and the assertion would fail.
+        each_target_filter_mut(&mut effect, &mut |f| *f = TargetFilter::SelfRef);
+        assert!(
+            matches!(
+                effect,
+                Effect::Shuffle {
+                    target: TargetFilter::TriggeringPlayer
+                }
+            ),
+            "the shared walker must not visit Effect::Shuffle"
+        );
+    }
 
     // ── MSH-F Sub-Plan A: Cosmic Cube — dynamic mana-value cast permission ──
 

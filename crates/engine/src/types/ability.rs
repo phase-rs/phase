@@ -3716,6 +3716,21 @@ pub enum TargetFilter {
     /// "that player exiles that many cards" where the affected player is the
     /// damage recipient, not the replacement source or damage source.
     PostReplacementDamageTarget,
+    /// CR 108.3 + CR 400.3 + CR 615.5: Resolves to the *owner* of the prevented
+    /// event's damage recipient. Event-driven analog of `ParentTargetOwner`
+    /// (owner-projection), exactly as `PostReplacementDamageTarget` is the
+    /// event-driven analog of `ParentTarget`. Used by "prevent that damage and
+    /// that creature's owner shuffles it into their library" (Weeping Angel),
+    /// where "their library" is the recipient's OWNER's library (CR 108.3),
+    /// routed there by CR 400.3 — NOT the shield controller's library.
+    ///
+    /// Resolves the OWNER (not controller) of the object in
+    /// `state.post_replacement_event_target` — mirrors
+    /// `PostReplacementSourceController`'s player-projection mechanism, NOT
+    /// `PostReplacementDamageTarget`'s raw object return. CR 109.4 (controller)
+    /// is the rule this variant is deliberately DISTINCT from; the same
+    /// owner-vs-controller split the sibling `ParentTargetOwner` cites.
+    PostReplacementDamageTargetOwner,
     /// CR 508.5 / CR 508.5a: Resolves to the defending player for the source
     /// attacking creature, looked up per attacker through
     /// `combat::defending_player_for_attacker`.
@@ -11247,6 +11262,7 @@ impl TargetFilter {
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
         )

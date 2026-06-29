@@ -76,8 +76,8 @@ use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
     attach_die_result_branches_to_chain, normalize_self_refs_for_static,
-    parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_escape_keyword,
-    parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
+    parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_harmonize_keyword,
+    parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
@@ -3513,7 +3513,7 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8f: Kicker / Multikicker / Replicate cost lines — must run BEFORE Priority 9
         // (spell catch-all) so these keyword declarations on spell cards don't become Unimplemented.
-        // We cannot use is_keyword_cost_line here because it would also catch "escape", "flashback",
+        // We cannot use is_keyword_cost_line here because it would also catch "flashback"
         // etc. whose specific em-dash parsers run between Priority 9 and Priority 13.
         // Note: "mayhem" IS in is_keyword_cost_line and is handled at Priority 1b via MTGJSON
         // keywords when present; this guard catches it when keywords[] is empty.
@@ -3775,15 +3775,12 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // CR 702.138: Escape — parse cost and exile count from Oracle text.
-        // Must run before is_keyword_cost_line so the em-dash format is intercepted.
-        if lower_starts_with(&lower, "escape") && line.contains('\u{2014}') {
-            if let Some(escape_kw) = parse_escape_keyword(&line) {
-                result.extracted_keywords.push(escape_kw);
-                i += 1;
-                continue;
-            }
-        }
+        // CR 702.138a: Escape is extracted by the generic keyword-cost guards —
+        // the `is_spell` guard above (Priority 9) for instants/sorceries and the
+        // `is_keyword_cost_line` guard below (Priority 13) for permanents — via the
+        // `escape—` branch registered in `parse_keyword_from_oracle`, alongside its
+        // evoke/embalm/eternalize/escalate em-dash siblings. No dedicated intercept
+        // is needed here.
 
         // CR 702.24: Cumulative upkeep — parse cost from Oracle text.
         // Must run before is_keyword_cost_line so the line is not silently skipped.
@@ -5458,6 +5455,38 @@ mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{CountScope, DoorLockOp};
+
+    #[test]
+    fn escape_keyword_extracted_on_instants_and_sorceries() {
+        // CR 702.138a: Escape is castable from graveyard regardless of card type.
+        // The em-dash alt-cost branch in `parse_keyword_from_oracle` must surface
+        // escape to BOTH generic keyword-cost guards (spell at Priority 9 and
+        // permanent at Priority 13), so extraction is card-type-agnostic.
+        let esc = "Escape\u{2014}{2}{U}{R}, Exile four other cards from your graveyard. \
+                   (You may cast this card from your graveyard for its escape cost.)";
+        for types in [["Instant"], ["Sorcery"], ["Creature"], ["Enchantment"]] {
+            let t: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+            let parsed = parse_oracle_text(esc, "X", &[], &t, &[]);
+            assert!(
+                matches!(
+                    parsed.extracted_keywords.as_slice(),
+                    [Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs }))]
+                        if matches!(costs.as_slice(),
+                            [AbilityCost::Mana { .. },
+                             AbilityCost::Exile { count: 4, zone: Some(Zone::Graveyard), .. }])
+                ),
+                "escape not extracted for types {types:?}: {:?}",
+                parsed.extracted_keywords
+            );
+            assert!(
+                !parsed
+                    .abilities
+                    .iter()
+                    .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+                "escape line must not leave an Unimplemented ability for types {types:?}"
+            );
+        }
+    }
 
     /// CR 207.2c + CR 602.1: an activated ability may carry an italic ability-word
     /// label before its cost ("Mental Organism — Pay 3 life: ~ connives" —
