@@ -233,6 +233,15 @@ pub struct LKISnapshot {
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default, with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
+    /// CR 110.5 + CR 110.5d: Tap status as it last existed on the battlefield.
+    /// A permanent's tapped/untapped status is battlefield-only — once the object
+    /// leaves a public zone it is neither tapped nor untapped, so a look-back rider
+    /// ("Return target creature to its owner's hand. If it was tapped, ..." —
+    /// Brackish Blunder) must read this captured value via `FilterProp::Tapped`
+    /// (use_lki). `#[serde(default)]` ⇒ pre-existing saved states deserialize to
+    /// `tapped = false`.
+    #[serde(default)]
+    pub tapped: bool,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.

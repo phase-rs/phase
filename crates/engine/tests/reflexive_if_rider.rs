@@ -44,6 +44,10 @@ const DRIFTGLOOM: &str =
     "When this creature enters, exile target creature an opponent controls until this \
      creature leaves the battlefield. If that creature had power 2 or less, put a +1/+1 \
      counter on this creature.";
+// Verified identical to the engine's authoritative card data (data/mtgish-cards.json:
+// PutPermanentIntoItsOwnersHand → If(IsTapped) → CreateTokens(MapToken)).
+const BRACKISH_BLUNDER: &str =
+    "Return target creature to its owner's hand. If it was tapped, create a Map token.";
 
 /// Number of `+1/+1` counters on `object`.
 fn plus_counters(
@@ -295,5 +299,71 @@ fn driftgloom_no_counter_when_exiled_creature_power_gt_2() {
         plus_counters(outcome.state(), coyote),
         0,
         "power-3 exiled creature must NOT yield a counter (rider must be gated)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Brackish Blunder — "If it was tapped" (Tapped, LKI snapshot). The bounce
+// (Return to hand) moves the creature OFF the battlefield BEFORE the rider
+// resolves, so the rider reads the exit-time tap state captured into the LKI
+// snapshot (CR 110.5d: an object not on the battlefield is neither tapped nor
+// untapped — the live object cannot answer). This pair is the discriminator:
+// tapped → Map token; untapped → none.
+//
+// Revert-probe (MEASURED): reverting the `filter.rs` zone-change `Tapped` arm
+// from the `lki_cache` read back to `=> false` makes the TAPPED case fail —
+// the Map token never appears (the rider reads false post-bounce).
+// ---------------------------------------------------------------------------
+
+/// RUNTIME (positive) — CR 110.5 + CR 400.7. A TAPPED creature bounced by
+/// Brackish Blunder satisfies "if it was tapped" against its exit-time LKI
+/// snapshot, so a Map token is created.
+#[test]
+fn brackish_blunder_creates_map_when_target_was_tapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brackish Blunder", true, BRACKISH_BLUNDER)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // CR 110.5a: tap the victim so the exit-time LKI snapshot records tapped=true.
+    runner.state_mut().objects.get_mut(&victim).unwrap().tapped = true;
+
+    let outcome = runner.cast(spell).target_object(victim).resolve();
+
+    outcome.assert_zone(&[victim], Zone::Hand);
+    assert_eq!(
+        battlefield_named(outcome.state(), "Map"),
+        1,
+        "tapped bounced creature must yield a Map token (rider fires)"
+    );
+}
+
+/// RUNTIME (negative / discriminator) — an UNTAPPED bounced creature fails the
+/// gate; NO Map token. This negative guards the PARSER half: if the rider's
+/// condition parsed to `null` (pre-recognizer), it would fire UNCONDITIONALLY and
+/// the untapped case would wrongly create a Map, failing this assertion. The
+/// POSITIVE test above guards the RUNTIME half (the `filter.rs` lki_cache arm).
+/// Together the pair is non-vacuous on both halves.
+#[test]
+fn brackish_blunder_no_map_when_target_untapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brackish Blunder", true, BRACKISH_BLUNDER)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    // Victim left UNTAPPED (default).
+
+    let outcome = runner.cast(spell).target_object(victim).resolve();
+
+    outcome.assert_zone(&[victim], Zone::Hand);
+    assert_eq!(
+        battlefield_named(outcome.state(), "Map"),
+        0,
+        "untapped bounced creature must NOT yield a Map token (rider gated)"
     );
 }

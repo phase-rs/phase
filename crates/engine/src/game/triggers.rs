@@ -10098,6 +10098,7 @@ pub mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters,
+                tapped: false,
             },
         );
 

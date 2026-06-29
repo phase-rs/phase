@@ -1916,6 +1916,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: lki_counters,
+                tapped: false,
             },
         );
 

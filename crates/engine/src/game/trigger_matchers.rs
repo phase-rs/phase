@@ -754,6 +754,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,

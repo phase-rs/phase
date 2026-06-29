@@ -387,7 +387,8 @@ pub fn resolve_event_context_target(
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageTarget => {
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         // CR 108.3 + CR 608.2c: `ParentTargetOwner` may fall back to the source's
@@ -621,6 +622,7 @@ fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
     )
 }
 
@@ -895,6 +897,21 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             Some(TargetRef::Player(controller))
         }
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
+        // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
+        // recipient ("that creature's owner shuffles it into their library").
+        // Mirrors `PostReplacementSourceController`'s player-projection but reads
+        // the recipient slot and projects to OWNER (CR 108.3), not the source
+        // slot / controller (CR 109.4). Routed here to the recipient's owner's
+        // library by CR 400.3.
+        TargetFilter::PostReplacementDamageTargetOwner => {
+            match &state.post_replacement_event_target {
+                Some(TargetRef::Object(id)) => {
+                    state.objects.get(id).map(|o| TargetRef::Player(o.owner))
+                }
+                Some(TargetRef::Player(p)) => Some(TargetRef::Player(*p)),
+                None => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1987,6 +2004,40 @@ mod tests {
         let result = resolve_event_context_target(
             &state,
             &TargetFilter::PostReplacementSourceController,
+            ObjectId(999),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn post_replacement_damage_target_owner_resolves_to_recipient_owner_not_controller() {
+        // CR 108.3 + CR 400.3 + CR 615.5: Weeping Angel — "that creature's owner
+        // shuffles it into their library" must resolve to the recipient's OWNER,
+        // not its controller. Stolen-creature guard (owner != controller): the
+        // damage recipient `c1` is OWNED by P1 but currently CONTROLLED by P0
+        // (e.g. P0 — Weeping Angel's controller — has gained control of it). The
+        // owner ref must return P1 so the shuffle routes to P1's library
+        // (CR 400.3), NOT P0's. A controller-projection (the wrong resolution)
+        // would return P0 and fail this assertion.
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state.objects.get_mut(&c1).unwrap().controller = PlayerId(0);
+        state.post_replacement_event_target = Some(TargetRef::Object(c1));
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementDamageTargetOwner,
+            ObjectId(999),
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn post_replacement_damage_target_owner_returns_none_when_slot_empty() {
+        // Defensive: only resolves inside the post-replacement window.
+        let (state, _c0, _c1) = setup_with_creatures();
+        assert!(state.post_replacement_event_target.is_none());
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementDamageTargetOwner,
             ObjectId(999),
         );
         assert_eq!(result, None);

@@ -13484,6 +13484,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
+                tapped: false,
             },
         );
 

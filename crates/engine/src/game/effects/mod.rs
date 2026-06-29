@@ -1257,6 +1257,7 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         colors: record.colors.clone(),
         chosen_attributes: Vec::new(),
         counters: Default::default(),
+        tapped: false,
     }
 }
 
@@ -8386,6 +8387,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![ChosenAttribute::Player(PlayerId(1))],
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
 
@@ -10537,6 +10539,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: Default::default(),
+                tapped: false,
             },
         );
         let events = vec![
