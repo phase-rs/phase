@@ -3,11 +3,11 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    CounteredSpellDestination, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TargetFilter,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterAdjustment,
+    CounterSourceRider, CounteredSpellDestination, DoorLockOp, Duration, Effect, FaceDownProfile,
+    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1386,6 +1386,14 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+    },
+    /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): "Remove that counter ...
+    /// or put another of those counters on it." The single target object is
+    /// established by the preceding `TargetOnly` clause; this clause only records
+    /// the operation set the controller may choose among at resolution. Lowers to
+    /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
+    ChooseCounterAdjustment {
+        adjustment: CounterAdjustment,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
