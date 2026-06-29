@@ -7905,7 +7905,6 @@ mod tests {
         assert!(zombie.extra_core_types.is_empty());
         assert_eq!(zombie.subtypes, vec!["Zombie".to_string()]);
 
-
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).
         assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
