@@ -9880,20 +9880,26 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
     }
 }
 
-/// CR 122.1 + CR 608.2d (Clockspinning sentence 2): recognize "remove that
-/// counter [from <anaphor>] or put another of those counters on <anaphor>" and
-/// return the operation set the controller may choose among. The singular "that
-/// counter" / plural "those counters" deictic anaphors are unique to the
-/// "choose a counter, then adjust it" class, so this is a self-contained
-/// combinator over the full clause — it deliberately does NOT delegate to the
-/// shared `parse_counter_anaphor` authority (which gates the remove-all sentinel
-/// path and has no singular "that counter" arm; extending it would wrongly widen
-/// that dispatch for unrelated cards).
+/// CR 122.1 + CR 608.2d (Clockspinning sentence 2): recognize the three forms
+/// of the "choose a counter, then adjust it" clause and return the operation set
+/// the controller may choose among:
 ///
-/// The object anaphor on either side ("that permanent or card" / "that permanent"
-/// / "that card" / "it") is a don't-care: the established target is reused via
-/// the parent `TargetOnly` chain. Returns `None` for every other "remove …"
-/// clause, leaving the existing remove path unchanged.
+/// - `AddOrRemove`: "remove that counter [from <anaphor>] or put another of
+///   those counters on <anaphor>" — Clockspinning.
+/// - `Remove`: "remove that counter [from <anaphor>]" — remove-only variants.
+/// - `Add`: "put another of those counters on <anaphor>" — add-only variants.
+///
+/// The singular "that counter" / plural "those counters" deictic anaphors are
+/// unique to the "choose a counter, then adjust it" class, so this is a
+/// self-contained combinator over the full clause — it deliberately does NOT
+/// delegate to the shared `parse_counter_anaphor` authority (which gates the
+/// remove-all sentinel path and has no singular "that counter" arm; extending
+/// it would wrongly widen that dispatch for unrelated cards).
+///
+/// The object anaphor on either side ("that permanent or card" / "that
+/// permanent" / "that card" / "it") is a don't-care: the established target is
+/// reused via the parent `TargetOnly` chain. Returns `None` for every other
+/// remove/add clause, leaving existing paths unchanged.
 fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment> {
     type E<'a> = OracleError<'a>;
 
@@ -9913,20 +9919,46 @@ fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment>
     }
 
     let clause = lower.trim_end_matches(['.', ' ']);
-    // Remove leg: "remove that counter [from <anaphor>]".
-    let (rest, _) = tag::<_, _, E>("remove that counter").parse(clause).ok()?;
-    let (rest, _) = opt(preceded(tag::<_, _, E>(" from "), counter_object_anaphor))
+
+    // Remove-based forms share the "remove that counter [from <anaphor>]"
+    // prefix. Try AddOrRemove (longer form) before Remove-only so the shared
+    // prefix does not short-circuit into the wrong variant.
+    if let Ok((rest, _)) = tag::<_, _, E>("remove that counter").parse(clause) {
+        let (rest, _) = opt(preceded(tag::<_, _, E>(" from "), counter_object_anaphor))
+            .parse(rest)
+            .ok()?;
+        // AddOrRemove: remove leg followed by "or put another of those counters
+        // on <anaphor>".
+        if let Ok((rest2, _)) = preceded(
+            tag::<_, _, E>(" or put another of those counters on "),
+            counter_object_anaphor,
+        )
         .parse(rest)
-        .ok()?;
-    // Add-back leg: "or put another of those counters on <anaphor>".
-    let (rest, _) = tag::<_, _, E>(" or put another of those counters on ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = counter_object_anaphor(rest).ok()?;
-    if !rest.is_empty() {
+        {
+            if rest2.is_empty() {
+                return Some(CounterAdjustment::AddOrRemove);
+            }
+        }
+        // Remove-only: the remove clause consumed the entire clause.
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Remove);
+        }
         return None;
     }
-    Some(CounterAdjustment::AddOrRemove)
+
+    // Add-only: "put another of those counters on <anaphor>".
+    if let Ok((rest, _)) = preceded(
+        tag::<_, _, E>("put another of those counters on "),
+        counter_object_anaphor,
+    )
+    .parse(clause)
+    {
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Add);
+        }
+    }
+
+    None
 }
 
 pub(super) fn parse_zone_counter_ast(
@@ -10692,6 +10724,67 @@ mod tests {
         );
         assert_eq!(
             try_parse_choose_counter_adjustment("remove all +1/+1 counters from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the remove-only form ("remove that counter [from <anaphor>]"
+    /// without an add-back clause) parses as `Remove`, making the `Remove`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_remove_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from it"),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent."),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent or card"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Clause without an explicit "from <anaphor>" phrase.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Must NOT fire for an ordinary type-specific remove.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove a +1/+1 counter from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the add-only form ("put another of those counters on <anaphor>")
+    /// without a preceding remove clause parses as `Add`, making the `Add`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_add_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on it"),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on that permanent."),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "put another of those counters on that permanent or card"
+            ),
+            Some(CounterAdjustment::Add)
+        );
+        // Must NOT fire for an ordinary PutCounter clause.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put a +1/+1 counter on it"),
             None
         );
     }

@@ -504,4 +504,133 @@ mod tests {
         assert!(CounterAdjustment::AddOrRemove.allows_add());
         assert!(CounterAdjustment::AddOrRemove.allows_remove());
     }
+
+    /// CR 122.1 + CR 702.62b + CR 115.1: verifies that a suspended card in
+    /// exile (bearing the Suspend keyword and a time counter) is accepted by the
+    /// battlefield∪exile-suspended `Or` target filter through the live
+    /// `find_legal_targets` path, not just via direct target injection.
+    ///
+    /// Also confirms that a battlefield permanent with counters is offered, while
+    /// an exiled card that lacks the Suspend keyword is not.
+    #[test]
+    fn suspended_card_is_a_legal_target_through_filter() {
+        use crate::game::targeting::find_legal_targets;
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::keywords::{Keyword, KeywordKind};
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Clockspinning".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A suspended card in exile: must have the Suspend keyword + time counter
+        // to satisfy both legs of the exile filter (CR 702.62b).
+        //
+        // Off-zone keyword evaluation (filter.rs `HasKeywordKind`) delegates to
+        // `off_zone_has_keyword_kind` → `effective_off_zone_keywords` which
+        // reads `base_keywords`, not the battlefield-layer `keywords` field.
+        // Push to `base_keywords` here so the `HasKeywordKind{Suspend}` predicate
+        // fires correctly for a card in exile.
+        let suspended = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Suspended Card".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.base_keywords.push(Keyword::Suspend {
+                count: 3,
+                cost: ManaCost::zero(),
+            });
+            obj.counters.insert(CounterType::Time, 3);
+        }
+
+        // A battlefield permanent with counters — must also be a legal target.
+        let battlefield_perm = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(1),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battlefield_perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+        }
+
+        // An exiled card WITHOUT the Suspend keyword — must NOT be offered even
+        // though it carries a time counter (CR 702.62b: suspend requires the
+        // keyword, not just the counter).
+        let bare_exile = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "Bare Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&bare_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Time, 1);
+
+        // The Or filter mirrors the parser output for Clockspinning sentence 1:
+        // battlefield permanent OR suspended card in exile with ≥1 time counter.
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }],
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::InZone { zone: Zone::Exile },
+                        FilterProp::HasKeywordKind {
+                            value: KeywordKind::Suspend,
+                        },
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Time),
+                            comparator: Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source);
+
+        // The suspended card must be offered as a legal target via the live
+        // targeting path (not just via direct injection).
+        assert!(
+            targets.contains(&TargetRef::Object(suspended)),
+            "suspended card in exile must be a legal target; got {targets:?}"
+        );
+        // The battlefield permanent must also be legal.
+        assert!(
+            targets.contains(&TargetRef::Object(battlefield_perm)),
+            "battlefield permanent must be a legal target; got {targets:?}"
+        );
+        // The bare exiled card (no Suspend keyword) must NOT be legal.
+        assert!(
+            !targets.contains(&TargetRef::Object(bare_exile)),
+            "exiled card without Suspend must not be offered; got {targets:?}"
+        );
+    }
 }
