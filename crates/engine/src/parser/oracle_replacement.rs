@@ -13028,6 +13028,62 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
     }
 
+    /// CR 614.1c + CR 707.9: The Master, Formed Anew — "you may have ~ enter as a
+    /// copy of a creature card in exile with a takeover counter on it." The copy
+    /// SOURCE is an exile-zoned card constrained by a takeover-counter predicate.
+    /// The full source phrase (zone clause THEN counter clause) must flow through
+    /// `parse_type_phrase` with no leftover, so the optional Moved/Battlefield
+    /// clone replacement registers and its `BecomeCopy` target filter carries both
+    /// `InZone { Exile }` and the `Counters { OfType("takeover"), GE, 1 }` source
+    /// predicate (honored at runtime by `find_copy_targets` scanning exile).
+    #[test]
+    fn the_master_enter_as_copy_of_exile_card_with_takeover_counter() {
+        let def = parse_replacement_line(
+            "You may have The Master enter as a copy of a creature card in exile with a takeover counter on it.",
+            "The Master, Formed Anew",
+        )
+        .expect("must register a clone replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+
+        let execute = def.execute.as_ref().expect("execute must be present");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!(
+                "non-tapped clone must have BecomeCopy, got {:?}",
+                execute.effect
+            );
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed copy-source filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "copy source must be a creature filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Exile })),
+            "copy source zone must be exile, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic(ct)),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                } if ct == "takeover"
+            )),
+            "copy source must require a takeover counter, got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn mockingbird_clone_replacement_uses_typed_copy_metadata() {
         let def = parse_replacement_line(
