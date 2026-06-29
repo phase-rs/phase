@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
+from datetime import UTC
 from pathlib import Path
 
 import pr_review
@@ -224,6 +227,42 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(contributor["quality_signals"], {"wrong-seam": 1})
         self.assertEqual(contributor["confidence"], "low")
 
+    def test_quality_entry_without_login_does_not_attach_to_pr_activity(self) -> None:
+        events = [
+            {
+                "event_type": "approved_enqueued",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "head",
+            },
+            {
+                "event_type": "quality_entry",
+                "timestamp": "2026-06-28T01:00:00Z",
+                "event_id": "b",
+                "pr": 1,
+                "quality": {"signals": ["wrong-seam"]},
+            },
+        ]
+
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=True,
+        )
+
+        self.assertEqual(model["prs"][0]["event_count"], 1)
+        self.assertEqual(model["contributors"][0]["quality_signals"], {})
+
+    def test_parse_event_datetime_rejects_non_string_and_normalizes_naive_time(self) -> None:
+        parsed = pr_review.parse_event_datetime("2026-06-28T00:00:00")
+
+        self.assertIsNone(pr_review.parse_event_datetime(123))
+        self.assertEqual(parsed.tzinfo, UTC)
+
     def test_low_sample_size_gets_insufficient_data_label(self) -> None:
         events = [
             {
@@ -298,6 +337,86 @@ class PrReviewTests(unittest.TestCase):
 
         self.assertEqual(model["contributors"][0]["terminal_prs"], 1)
         self.assertEqual(model["contributors"][0]["accepted_or_enqueued"], 1)
+
+    def test_github_refresh_warns_on_empty_response(self) -> None:
+        events = [
+            {
+                "event_type": "approved_enqueued",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "head",
+            }
+        ]
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=True,
+        )
+        original = pr_review.gh_pr_analytics_state
+        pr_review.gh_pr_analytics_state = lambda _repo, _pr_number: None
+        try:
+            pr_review.apply_github_refresh(model, "phase-rs/phase", min_prs=1, author=None)
+        finally:
+            pr_review.gh_pr_analytics_state = original
+
+        self.assertEqual(
+            model["warnings"],
+            ["failed to refresh PR 1: empty or invalid response"],
+        )
+
+    def test_command_analytics_sorts_json_without_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            events = [
+                {
+                    "event_type": "changes_requested",
+                    "timestamp": "2026-06-28T00:00:00Z",
+                    "event_id": "a",
+                    "pr": 1,
+                    "author": "low-score",
+                    "head_sha": "head",
+                },
+                {
+                    "event_type": "approved_enqueued",
+                    "timestamp": "2026-06-28T00:01:00Z",
+                    "event_id": "b",
+                    "pr": 2,
+                    "author": "high-score",
+                    "head_sha": "head",
+                },
+            ]
+            for event in events:
+                pr_review.append_event(state_dir, event)
+            args = type(
+                "Args",
+                (),
+                {
+                    "state_dir": state_dir,
+                    "days": None,
+                    "author": None,
+                    "min_prs": 1,
+                    "include_open": False,
+                    "refresh_github": False,
+                    "repo": "phase-rs/phase",
+                    "limit": None,
+                    "sort": "score",
+                    "format": "json",
+                },
+            )()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                pr_review.command_analytics(args)
+            model = json.loads(output.getvalue())
+
+        self.assertEqual(
+            [contributor["login"] for contributor in model["contributors"]],
+            ["high-score", "low-score"],
+        )
 
     def test_wrapper_script_exists_and_is_executable(self) -> None:
         wrapper = Path(__file__).resolve().parent / "pr-analytics"

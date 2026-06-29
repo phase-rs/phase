@@ -348,12 +348,15 @@ def event_sort_key(event: dict[str, Any]) -> tuple[str, str]:
 
 
 def parse_event_datetime(value: str | None) -> datetime | None:
-    if not value:
+    if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> list[dict[str, Any]]:
@@ -765,11 +768,12 @@ def build_analytics_model(
     for event in filtered_events:
         event_type = event.get("event_type")
         login = contributor_login_for_event(event)
-        if event_type == "quality_entry" and login:
-            signals = event.get("quality", {}).get("signals", [])
-            quality = contributor_quality.setdefault(str(login), {})
-            for signal in signals:
-                add_counter(quality, str(signal))
+        if event_type == "quality_entry":
+            if login:
+                signals = event.get("quality", {}).get("signals", [])
+                quality = contributor_quality.setdefault(str(login), {})
+                for signal in signals:
+                    add_counter(quality, str(signal))
             continue
         pr = event.get("pr")
         if pr is None:
@@ -980,6 +984,9 @@ def apply_github_refresh(model: dict[str, Any], repo: str, min_prs: int, author:
             live = gh_pr_analytics_state(repo, int(pr["pr"]))
         except subprocess.CalledProcessError as exc:
             warnings.append(f"failed to refresh PR {pr['pr']}: {exc}")
+            continue
+        if not isinstance(live, dict):
+            warnings.append(f"failed to refresh PR {pr['pr']}: empty or invalid response")
             continue
         refreshed += 1
         state = str(live.get("state") or "").upper()
@@ -1636,8 +1643,7 @@ def command_analytics(args: argparse.Namespace) -> int:
         if not args.include_open:
             filter_open_prs(model, args.min_prs, args.author, True)
         model["filters"]["include_open"] = args.include_open
-    if args.limit is not None:
-        model["contributors"] = sorted_contributors(model["contributors"], args.sort, args.limit)
+    model["contributors"] = sorted_contributors(model["contributors"], args.sort, args.limit)
     if args.format == "json":
         print(json.dumps(model, indent=2, sort_keys=True))
     else:
