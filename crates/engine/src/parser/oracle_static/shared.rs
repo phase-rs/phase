@@ -744,6 +744,15 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
     for segment in &segments {
         let segment_defs = parse_static_line_multi_inner(segment);
         if segment_defs.is_empty() {
+            // CR 602.5b + CR 602.5c: An "activate ... only once each turn" rider
+            // carries no standalone static — it folds a once-per-turn use-restriction
+            // cap into the immediately-preceding `GrantAllActivatedAbilitiesOf`
+            // (Locus of Enlightenment, and any future "<grant abilities>. activate
+            // those only once each turn." card). This is the shared grant-rider
+            // primitive, composed with the standard grant parse — not a card hook.
+            if fold_grant_cap_rider(segment, &mut defs) {
+                continue;
+            }
             // A non-static sentence (or one the static pipeline can't classify)
             // means this isn't a pure sibling-static line — defer the whole
             // line to the single-sentence fallback rather than emitting a

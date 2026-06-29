@@ -116,9 +116,10 @@ mod support {
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
-        apply_spell_keyword_subject_constraints, parse_chosen_qualifier_subject,
-        parse_continuous_modifications, parse_quoted_ability_modifications,
-        push_grant_clause_modifications, split_keyword_list, RuleStaticPredicate,
+        apply_spell_keyword_subject_constraints, fold_grant_cap_rider,
+        parse_chosen_qualifier_subject, parse_continuous_modifications,
+        parse_quoted_ability_modifications, push_grant_clause_modifications, split_keyword_list,
+        RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,

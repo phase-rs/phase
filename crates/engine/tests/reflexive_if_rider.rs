@@ -367,3 +367,163 @@ fn brackish_blunder_no_map_when_target_untapped() {
         "untapped bounced creature must NOT yield a Map token (rider gated)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Faller's Faithful — Part B: optional-declined-target guard (CR 601.2c + CR
+// 608.2c). "When this creature enters, destroy up to one other target creature.
+// If that creature wasn't dealt damage this turn, its controller draws two
+// cards." The antecedent is a *variable-number-of-targets* ("up to one") slot;
+// when it's announced with ZERO targets (declined), the rider's anaphor "that
+// creature" has no antecedent (CR 608.2c), so the rider must NOT fire.
+//
+// Before Part B, the rider's `Not{TargetMatchesFilter{WasDealtDamageThisTurn}}`
+// fell back to the trigger source (Faller's itself) when no target was chosen →
+// Faller's wasn't dealt damage → Not(false) = TRUE → the draw wrongly fired (for
+// the source's controller, the `ParentTargetController` event-context fallback).
+// The fix conjoins the rider with `HasObjectTarget`, so a declined optional
+// target reads false and the rider is suppressed.
+// ---------------------------------------------------------------------------
+
+const FALLERS_FAITHFUL: &str = "When this creature enters, destroy up to one other \
+     target creature. If that creature wasn't dealt damage this turn, its controller \
+     draws two cards.";
+
+// A MANDATORY single-target sibling (no "up to one") — the lowering's
+// `min_is_fixed_zero()` guard is false here, so the `HasObjectTarget` wrapper is
+// never applied. Proves the gate is a no-op for the 7 clean S01 mandatory cards.
+const FAITHFUL_MANDATORY: &str = "When this creature enters, destroy target creature. \
+     If that creature wasn't dealt damage this turn, its controller draws two cards.";
+
+/// Net cards drawn by `player` since stack commit.
+fn hand_drawn(outcome: &engine::game::scenario::CastOutcome, player: PlayerId) -> i64 {
+    outcome.hand_drawn(player)
+}
+
+/// RUNTIME (the Part B fix / discriminator) — CR 601.2c. Declining the optional
+/// "up to one" target (no object target chosen) must NOT fire the rider: nobody
+/// draws. REVERT-PROBE: remove the `gate_reflexive_rider_on_declined_optional_target`
+/// call in lower.rs and the rider fires via the trigger-source fallback, so the
+/// ability controller (P0) wrongly draws 2 and this assertion fails.
+#[test]
+fn fallers_faithful_no_draw_when_optional_target_declined() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fallers = scenario
+        .add_creature_to_hand_from_oracle(P0, "Faller's Faithful", 2, 2, FALLERS_FAITHFUL)
+        .id();
+    // A legal "other" creature IS available — the controller chooses zero anyway.
+    let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    // Both players have draws available so a wrongly-fired draw is observable on
+    // either side (the fallback recipient is the source controller, P0).
+    scenario.add_spell_to_library_top(P0, "P0 Filler A", true);
+    scenario.add_spell_to_library_top(P0, "P0 Filler B", true);
+    scenario.add_spell_to_library_top(P1, "P1 Filler A", true);
+    scenario.add_spell_to_library_top(P1, "P1 Filler B", true);
+    let mut runner = scenario.build();
+
+    // Declare NO target → the "up to one" slot is declined (zero targets).
+    let outcome = runner.cast(fallers).resolve();
+
+    outcome.assert_zone(&[bystander], Zone::Battlefield);
+    assert_eq!(
+        hand_drawn(&outcome, P0),
+        0,
+        "declined optional target must NOT draw for the controller (rider gated by HasObjectTarget)"
+    );
+    assert_eq!(
+        hand_drawn(&outcome, P1),
+        0,
+        "declined optional target must NOT draw for anyone"
+    );
+}
+
+/// RUNTIME (positive — chosen, undamaged) — CR 608.2c. Choosing the optional
+/// target and destroying an UNDAMAGED creature fires the rider: that creature's
+/// controller (P1) draws two cards. Proves the `HasObjectTarget` conjunct is
+/// trivially true when a target IS chosen (the fix does not break the live path).
+#[test]
+fn fallers_faithful_draws_when_target_chosen_and_undamaged() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fallers = scenario
+        .add_creature_to_hand_from_oracle(P0, "Faller's Faithful", 2, 2, FALLERS_FAITHFUL)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler A", true);
+    scenario.add_spell_to_library_top(P1, "P1 Filler B", true);
+    let mut runner = scenario.build();
+    // No damage record this turn → "wasn't dealt damage" holds.
+
+    let outcome = runner.cast(fallers).target_object(victim).resolve();
+
+    outcome.assert_zone(&[victim], Zone::Graveyard);
+    assert_eq!(
+        hand_drawn(&outcome, P1),
+        2,
+        "destroyed undamaged creature's controller must draw two cards"
+    );
+}
+
+/// RUNTIME (negative — chosen, damaged) — CR 120.6 + CR 400.7. Choosing the
+/// optional target but destroying a creature that WAS dealt damage this turn
+/// fails the `Not{WasDealtDamageThisTurn}` gate: no draw. This is the within-fix
+/// discriminator that the rider condition is still evaluated (not blanket-true)
+/// in the chosen case.
+#[test]
+fn fallers_faithful_no_draw_when_target_chosen_but_damaged() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fallers = scenario
+        .add_creature_to_hand_from_oracle(P0, "Faller's Faithful", 2, 2, FALLERS_FAITHFUL)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler A", true);
+    scenario.add_spell_to_library_top(P1, "P1 Filler B", true);
+    let mut runner = scenario.build();
+
+    // CR 120.9: record battlefield damage on the victim this turn.
+    runner
+        .state_mut()
+        .damage_dealt_this_turn
+        .push_back(DamageRecord {
+            target: TargetRef::Object(victim),
+            amount: 2,
+            ..Default::default()
+        });
+
+    let outcome = runner.cast(fallers).target_object(victim).resolve();
+
+    outcome.assert_zone(&[victim], Zone::Graveyard);
+    assert_eq!(
+        hand_drawn(&outcome, P1),
+        0,
+        "destroyed DAMAGED creature must NOT draw (Not{{WasDealtDamageThisTurn}} false)"
+    );
+}
+
+/// RUNTIME (no-op proof) — a MANDATORY single-target rider (`multi_target ==
+/// None`, so `min_is_fixed_zero()` is false) is NOT wrapped by the gate and
+/// fires exactly as before: the destroyed undamaged creature's controller draws.
+/// Guards the 7 clean S01 cards against the gate over-applying. (The existing
+/// Sold Out / Driftgloom positive tests above are the broader no-op proof.)
+#[test]
+fn mandatory_single_target_rider_still_fires_unwrapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature_to_hand_from_oracle(P0, "Faithful Mandatory", 2, 2, FAITHFUL_MANDATORY)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler A", true);
+    scenario.add_spell_to_library_top(P1, "P1 Filler B", true);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(host).target_object(victim).resolve();
+
+    outcome.assert_zone(&[victim], Zone::Graveyard);
+    assert_eq!(
+        hand_drawn(&outcome, P1),
+        2,
+        "mandatory-target rider must fire unchanged (gate must not wrap multi_target == None)"
+    );
+}

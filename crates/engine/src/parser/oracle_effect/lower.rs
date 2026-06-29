@@ -207,6 +207,89 @@ fn patch_self_ref_head_tap_anaphor(def: &mut AbilityDefinition) {
     walk(def, false);
 }
 
+/// CR 601.2c + CR 608.2c: Guard a reflexive-target rider against a *declined*
+/// optional antecedent target. When an ability declares a variable number of
+/// targets that may be zero — "destroy **up to one** target creature"
+/// (`multi_target.min_is_fixed_zero()`, CR 601.2c) — and chains a conditional
+/// rider whose condition anaphors that target ("**if that creature** wasn't
+/// dealt damage this turn, its controller draws two cards"), declining the
+/// target leaves the rider's `TargetMatchesFilter` with no antecedent. At
+/// runtime that condition falls back to the trigger source (effects/mod.rs), so
+/// a `Not`-wrapped rider wrongly fires. Conjoining the rider condition with
+/// `HasObjectTarget` (`And{[HasObjectTarget, existing]}`) suppresses the rider
+/// when no object target was chosen, while leaving the chosen-target case
+/// unchanged (the conjunct is trivially true).
+///
+/// The optional-target context is threaded DOWN the chain via an inner `walk`: a node
+/// whose own `multi_target` is `None` inherits its parent's optionality, so a
+/// rider nested deeper than the immediate `sub_ability` — or hanging off an
+/// `else_ability` — is still gated against the declined PARENT target (CR 608.2c:
+/// read the whole text; the anaphor binds the parent's chosen target, not the
+/// intervening instruction). A node that declares its OWN targets establishes a
+/// NEW antecedent and recomputes optionality from its own `multi_target`, so a
+/// mandatory intervening target (always present) does NOT spuriously gate a rider
+/// that anaphors it. Both `sub_ability` and `else_ability` conditions are gated.
+///
+/// Class-level (Faller's Faithful, Sunpearl Kirin, Zephyr Sentinel, Rescue //
+/// Pepper Potts), both polarities. No-op for mandatory-single-target
+/// antecedents: those carry `multi_target == None` at the head with no optional
+/// ancestor, so optionality is false and the wrapper is never applied. Idempotent
+/// — an already-wrapped `And{..}` is not itself a reflexive-target condition, so
+/// re-lowering does not double-wrap.
+fn gate_reflexive_rider_on_declined_optional_target(def: &mut AbilityDefinition) {
+    // CR 601.2c + CR 608.2c: wrap a child's reflexive-target rider so a declined
+    // optional antecedent target suppresses it; a non-reflexive condition (or no
+    // condition) is left untouched.
+    fn gate_child_condition(child: &mut AbilityDefinition) {
+        if let Some(existing) = child.condition.take() {
+            if is_reflexive_target_condition(&existing) {
+                child.condition = Some(AbilityCondition::And {
+                    conditions: vec![AbilityCondition::HasObjectTarget, existing],
+                });
+            } else {
+                child.condition = Some(existing);
+            }
+        }
+    }
+    // Carry the parent's optional-target context down the chain; a node that
+    // declares its own targets establishes a NEW antecedent and recomputes it.
+    fn walk(def: &mut AbilityDefinition, parent_optional: bool) {
+        let optional_here = match def.multi_target.as_ref() {
+            Some(mt) => mt.min_is_fixed_zero(),
+            None => parent_optional,
+        };
+        if optional_here {
+            if let Some(sub) = def.sub_ability.as_deref_mut() {
+                gate_child_condition(sub);
+            }
+            if let Some(els) = def.else_ability.as_deref_mut() {
+                gate_child_condition(els);
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            walk(sub, optional_here);
+        }
+        if let Some(els) = def.else_ability.as_deref_mut() {
+            walk(els, optional_here);
+        }
+    }
+    walk(def, false);
+}
+
+/// CR 608.2c: A reflexive-target condition reads the parent's chosen target via
+/// an anaphor ("that creature"/"it"/"that much"), so a declined optional target
+/// leaves it without an antecedent. `TargetMatchesFilter` (current/LKI target
+/// match) and `PreviousEffectAmount` ("that much") are the affected shapes, in
+/// either polarity (`Not`-wrapped).
+fn is_reflexive_target_condition(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::PreviousEffectAmount { .. } => true,
+        AbilityCondition::Not { condition } => is_reflexive_target_condition(condition),
+        _ => false,
+    }
+}
+
 /// CR 608.2c: True for `TargetFilter`s that refer to a PLAYER (or set of players),
 /// which therefore do NOT establish a new permanent antecedent for a chained
 /// tap/untap "him"/"it" anaphor (see [`patch_self_ref_head_tap_anaphor`]).
@@ -235,6 +318,189 @@ fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::SpecificPlayer { .. }
     )
+}
+
+#[cfg(test)]
+mod gate_reflexive_rider_tests {
+    use super::*;
+
+    /// "if that creature wasn't dealt damage this turn" — the reflexive-target
+    /// rider shape (`Not{TargetMatchesFilter{use_lki}}`) that anaphors the parent's
+    /// chosen target.
+    fn reflexive_rider() -> AbilityCondition {
+        AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::WasDealtDamageThisTurn]),
+                ),
+                use_lki: true,
+            }),
+        }
+    }
+
+    fn draw_effect() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTargetController,
+        }
+    }
+
+    /// Leaf rider node carrying `condition`.
+    fn leaf_with_condition(condition: AbilityCondition) -> Box<AbilityDefinition> {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        def.condition = Some(condition);
+        Box::new(def)
+    }
+
+    /// A head that declares an OPTIONAL "up to one" target (`min_is_fixed_zero()`).
+    fn optional_head() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        def.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        def
+    }
+
+    /// True iff `condition` is the gated form `And{[HasObjectTarget, reflexive_rider]}`.
+    fn is_gated(condition: &Option<AbilityCondition>) -> bool {
+        matches!(
+            condition,
+            Some(AbilityCondition::And { conditions })
+                if conditions.as_slice()
+                    == [AbilityCondition::HasObjectTarget, reflexive_rider()]
+        )
+    }
+
+    /// Baseline: the immediate `sub_ability` rider under an optional head is gated.
+    /// (Passes under both the old direct-child code and the threaded fix.)
+    #[test]
+    fn direct_rider_under_optional_head_is_gated() {
+        let mut head = optional_head();
+        head.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&sub.condition),
+            "direct rider must be gated: {:?}",
+            sub.condition
+        );
+    }
+
+    /// DISCRIMINATOR (nested): head[up to one] → sub1[own `multi_target == None`,
+    /// non-reflexive `IsYourTurn`] → sub2[reflexive rider]. The rider is two levels
+    /// below the optional antecedent. The fix threads the parent's optionality
+    /// through sub1 (which declares no own target), so sub2 is gated; the
+    /// intervening non-reflexive condition is left untouched. REVERT-PROBE: the old
+    /// direct-child recursion recomputes optionality from sub1's own `multi_target`
+    /// (`None` → false), so sub2 is NOT gated and this assertion fails.
+    #[test]
+    fn nested_deeper_rider_under_optional_head_is_gated() {
+        let mut sub1 = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        sub1.condition = Some(AbilityCondition::IsYourTurn);
+        sub1.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+        let mut head = optional_head();
+        head.sub_ability = Some(Box::new(sub1));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub1 = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub1.condition,
+            Some(AbilityCondition::IsYourTurn),
+            "intervening non-reflexive condition must be left untouched"
+        );
+        let sub2 = sub1.sub_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&sub2.condition),
+            "deeper rider must be gated with HasObjectTarget (bug: old code lost the guard here): {:?}",
+            sub2.condition
+        );
+    }
+
+    /// DISCRIMINATOR (else): head[up to one] → else_ability[reflexive rider]. The
+    /// fix gates the else branch's own reflexive condition. REVERT-PROBE: the old
+    /// code only gated `sub_ability` and never touched `else_ability`, so this
+    /// assertion fails.
+    #[test]
+    fn else_branch_rider_under_optional_head_is_gated() {
+        let mut head = optional_head();
+        head.else_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let els = head.else_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&els.condition),
+            "else-branch rider must be gated: {:?}",
+            els.condition
+        );
+    }
+
+    /// NEGATIVE (new mandatory antecedent): head[up to one] → sub1[own EXACT(1)
+    /// target — a NEW, always-present antecedent] → sub2[reflexive rider]. sub2's
+    /// "that creature" anaphors sub1's mandatory target, which is never declined, so
+    /// the rider must NOT be gated. Guards against a naive fix that threads the
+    /// parent's optionality unconditionally past a node that establishes its own
+    /// target.
+    #[test]
+    fn mandatory_intervening_target_does_not_gate_deeper_rider() {
+        let mut sub1 = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        sub1.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }));
+        sub1.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+        let mut head = optional_head();
+        head.sub_ability = Some(Box::new(sub1));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub2 = head
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            sub2.condition,
+            Some(reflexive_rider()),
+            "rider under a mandatory own-target antecedent must NOT be gated"
+        );
+    }
+
+    /// NO-OP: a mandatory single-target head (`multi_target == Some(exact(1))`,
+    /// `min_is_fixed_zero()` false, no optional ancestor) does not gate its rider —
+    /// the 7 clean S01 mandatory cards are unaffected.
+    #[test]
+    fn mandatory_head_does_not_gate_rider() {
+        let mut head = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        head.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }));
+        head.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.condition,
+            Some(reflexive_rider()),
+            "mandatory single-target head must not wrap its rider"
+        );
+    }
+
+    /// NO-OP: a non-reflexive condition under an optional head is left untouched
+    /// (the gate only wraps reflexive-target riders).
+    #[test]
+    fn non_reflexive_rider_under_optional_head_untouched() {
+        let mut head = optional_head();
+        head.sub_ability = Some(leaf_with_condition(AbilityCondition::IsYourTurn));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::IsYourTurn),
+            "non-reflexive condition must be left untouched"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1619,6 +1885,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // ParentTarget to SelfRef so it binds the source, while a real/optional
     // target head (Tyvar Kell) keeps ParentTarget and no-ops when declined.
     patch_self_ref_head_tap_anaphor(&mut result);
+    // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
+    // "up to one" antecedent target is declined (no object target chosen).
+    gate_reflexive_rider_on_declined_optional_target(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;

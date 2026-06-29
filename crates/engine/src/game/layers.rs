@@ -21,10 +21,10 @@ use crate::game::quantity::{
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    ChosenSubtypeKind, CommanderOwnership, ContinuousModification, CopiableValues, Duration,
-    Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
-    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
+    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
+    CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope,
+    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -2711,13 +2711,16 @@ fn active_continuous_effects_from_static_definitions(
             // set is recomputed each pass and reuses the existing GrantAbility
             // apply + dedup. The meta-effect itself has no standalone layer-6
             // behaviour, so skip pushing it.
-            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source } = modification {
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } =
+                modification
+            {
                 effects.extend(expand_granted_activated_abilities(
                     state,
                     source_id,
                     timestamp,
                     &affected_filter,
                     source,
+                    cap.as_ref(),
                 ));
                 continue;
             }
@@ -2842,12 +2845,19 @@ fn expand_granted_static_effects(
 /// are granted. Synthesized effects target the recipient via `SelfRef`, reusing
 /// the layer-6 `GrantAbility` apply and its structural dedup, and are recomputed
 /// each pass so the granted set tracks the current `source` membership.
+///
+/// CR 602.5b + CR 602.5c: When `cap` is `Some`, that use-restriction is injected
+/// into each donated ability's `activation_restrictions` before it is granted, so
+/// the acquired ability carries (and is enforced under) the granting card's
+/// frequency limit (Locus of Enlightenment's "once each turn"). `None` leaves the
+/// donated abilities uncapped — the required default for every other grant.
 fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
     host_timestamp: u64,
     host_affected_filter: &TargetFilter,
     source: &TargetFilter,
+    cap: Option<&ActivationRestriction>,
 ) -> Vec<ActiveContinuousEffect> {
     let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
     let mut out = Vec::new();
@@ -2921,6 +2931,19 @@ fn expand_granted_activated_abilities(
                 if ability.kind != crate::types::ability::AbilityKind::Activated {
                     continue;
                 }
+                // CR 602.5b + CR 602.5c: A granting card's use-restriction (Locus
+                // of Enlightenment's "activate only once each turn") travels with
+                // the acquired ability. Inject it into the donated def's
+                // `activation_restrictions` so the existing per-(recipient,
+                // ability_index) enforcement in `game/restrictions.rs` applies it.
+                // Guard against duplicating an identical restriction the provider
+                // already prints. `None` (every other grant) leaves it uncapped.
+                let mut donated = ability.clone();
+                if let Some(restriction) = cap {
+                    if !donated.activation_restrictions.contains(restriction) {
+                        donated.activation_restrictions.push(restriction.clone());
+                    }
+                }
                 out.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
@@ -2930,7 +2953,7 @@ fn expand_granted_activated_abilities(
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
                     modification: ContinuousModification::GrantAbility {
-                        definition: Box::new(ability.clone()),
+                        definition: Box::new(donated),
                     },
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
@@ -8999,6 +9022,7 @@ mod tests {
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9036,6 +9060,155 @@ mod tests {
             host_obj.abilities.iter().any(|a| a == &granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
+        );
+    }
+
+    /// CR 702.167c + CR 613.1f: Locus of Enlightenment — "Locus of Enlightenment
+    /// has each activated ability of the exiled cards used to craft it." Built
+    /// end-to-end through the real parser (`parse_oracle_text` →
+    /// `GrantAllActivatedAbilitiesOf { ExiledBySource }`) and the real
+    /// `evaluate_layers` expansion, with the craft pile modeled as persistent
+    /// `ExileLinkKind::CraftMaterial` links (CR 702.167c).
+    ///
+    /// Discriminating along the `ExiledBySource` source axis: a card exiled to
+    /// craft Locus donates its activated ability, while a card exiled by a
+    /// DIFFERENT source does not (proving the grant is scoped to Locus's own
+    /// craft pile, not any exiled card). Reverting the parser's source-set arm so
+    /// the grant no longer routes to `ExiledBySource` would strand the positive
+    /// assertion.
+    #[test]
+    fn locus_grants_craft_pile_activated_abilities() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect,
+            QuantityExpr,
+        };
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Locus carries the parser-produced craft-pile grant static.
+        let locus = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Locus of Enlightenment".to_string(),
+            Zone::Battlefield,
+        );
+        let parsed = parse_oracle_text(
+            "Locus of Enlightenment has each activated ability of the exiled cards \
+             used to craft it. You may activate each of those abilities only once \
+             each turn.",
+            "Locus of Enlightenment",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Locus L1 parses to exactly one grant static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&locus).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // A card exiled to craft Locus (CraftMaterial link to Locus), with a
+        // {T}: gain 2 life ability — its ability SHOULD be granted to Locus.
+        let material = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Craft Material".to_string(),
+            Zone::Exile,
+        );
+        let material_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&material).unwrap().abilities)
+            .push(material_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: material,
+            source_id: locus,
+            kind: ExileLinkKind::CraftMaterial,
+        });
+
+        // A card exiled by a DIFFERENT source (not Locus) with a {T}: gain 9
+        // life ability — excluded by the `ExiledBySource` scoping (host = Locus).
+        let other_source = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(0),
+            "Other Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_exiled = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Other Exiled".to_string(),
+            Zone::Exile,
+        );
+        let other_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 9 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&other_exiled).unwrap().abilities)
+            .push(other_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: other_exiled,
+            source_id: other_source,
+            kind: ExileLinkKind::CraftMaterial,
+        });
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // CR 602.5b + CR 602.5c: the parsed grant carries the once-per-turn rider,
+        // so the donated ability is the craft material's ability WITH
+        // `OnlyOnceEachTurn` injected into its `activation_restrictions` — not the
+        // bare original. The capped form proves the cap travels end-to-end through
+        // the real parser → `evaluate_layers` expansion.
+        let mut capped_material_ability = material_ability.clone();
+        capped_material_ability
+            .activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+
+        let locus_obj = state.objects.get(&locus).unwrap();
+        assert!(
+            locus_obj
+                .abilities
+                .iter()
+                .any(|a| a == &capped_material_ability),
+            "Locus must gain the craft material's activated ability capped at \
+             once-per-turn; got {:?}",
+            locus_obj.abilities
+        );
+        // Discriminating: the UNCAPPED original must NOT appear — if the cap
+        // injection were dropped, the donated ability would equal the bare
+        // `material_ability` and this assertion would flip.
+        assert!(
+            !locus_obj.abilities.iter().any(|a| a == &material_ability),
+            "Locus must NOT gain the UNCAPPED craft-material ability — the \
+             once-per-turn cap must be injected (CR 602.5b)"
+        );
+        assert!(
+            !locus_obj.abilities.iter().any(|a| a == &other_ability),
+            "Locus must NOT gain an ability of a card exiled by a different \
+             source (ExiledBySource is scoped to Locus's own craft pile)"
         );
     }
 
@@ -9451,6 +9624,7 @@ mod tests {
                 ))
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9499,7 +9673,7 @@ mod tests {
         // is unambiguous (evaluate_layers re-runs the expansion each pass; this
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
@@ -9554,6 +9728,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9592,7 +9767,7 @@ mod tests {
         // Single deterministic invocation: two distinct recipient controllers ⟹
         // two cache entries ⟹ two full provider sweeps (2×M scans).
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans,

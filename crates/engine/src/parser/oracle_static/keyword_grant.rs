@@ -756,13 +756,74 @@ fn parse_grant_all_activated_abilities_source(
     all_consuming(preceded(
         (
             opt(alt((tag::<_, _, OracleError<'_>>("has "), tag("have ")))),
-            tag("all activated abilities of "),
+            // CR 613.1f: plural ("all activated abilities of") and the singular
+            // distributive ("each activated ability of", Locus of Enlightenment)
+            // grant the same set — both leaves of the grant-phrase axis.
+            alt((
+                tag("all activated abilities of "),
+                tag("each activated ability of "),
+            )),
         ),
         grant_source_noun_phrase,
     ))
     .parse(p)
     .ok()
     .map(|(_, source)| source)
+}
+
+/// CR 602.5b + CR 602.5c: The "you may activate each of those abilities only once
+/// each turn" use-restriction rider that follows an ability-grant sentence, mapped
+/// to the typed `ActivationRestriction::OnlyOnceEachTurn`. Decomposed into its
+/// grammatical axes — permission (`you may activate`), the granted-set anaphor
+/// (`each of those abilities`), and the frequency cap (`only once each turn`, the
+/// semantic key) — so the cap is a *meaningfully parsed* restriction, not a
+/// verbatim sentence consumed and discarded.
+fn parse_activate_once_each_turn_rider(input: &str) -> OracleResult<'_, ActivationRestriction> {
+    value(
+        ActivationRestriction::OnlyOnceEachTurn,
+        (
+            tag("you may activate "),
+            tag("each of those abilities"),
+            tag(" only once each turn"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 602.5b + CR 602.5c: Fold an "activate ... only once each turn" use-restriction
+/// rider (a trailing sentence that yields no standalone static) into the `cap` of
+/// the most recently emitted `GrantAllActivatedAbilitiesOf` modification, returning
+/// `true` when the fold lands. Returns `false` when `segment` is not the rider, or
+/// when there is no still-uncapped ability grant preceding it to attach to.
+///
+/// This is the SHARED grant-rider primitive: it composes the once-per-turn cap with
+/// the STANDARD grant parse (sentence 1 → `GrantAllActivatedAbilitiesOf` via the
+/// ordinary continuous-clause dispatch) during normal sentence splitting
+/// (`parse_multi_sentence_statics`), so any "<grant activated abilities>. You may
+/// activate each of those abilities only once each turn." card is capped — over any
+/// grant source, with no card-specific whole-line hook. The restriction travels
+/// with the granted abilities (CR 602.5c — a use-restriction acquired with an
+/// ability applies to that acquired ability), which the layer-6 expansion injects
+/// and `game/restrictions.rs` enforces per `(recipient, ability_index)`.
+pub(super) fn fold_grant_cap_rider(segment: &str, defs: &mut [StaticDefinition]) -> bool {
+    let lower = segment.trim().trim_end_matches('.').trim().to_lowercase();
+    let Ok((_, restriction)) =
+        all_consuming(parse_activate_once_each_turn_rider).parse(lower.as_str())
+    else {
+        return false;
+    };
+    // Attach to the most recent grant modification that is still uncapped.
+    for def in defs.iter_mut().rev() {
+        for modification in def.modifications.iter_mut().rev() {
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, .. } = modification {
+                if cap.is_none() {
+                    *cap = Some(restriction);
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// CR 613.1f + CR 607.2a + CR 201.2: The source-set noun phrase of an
@@ -890,6 +951,21 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
 /// filter so the grant tracks only matching exiled cards.
 fn grant_exiled_source(input: &str) -> OracleResult<'_, crate::types::ability::TargetFilter> {
     alt((
+        // CR 702.167c: "the exiled card[s] used to craft it/~" — the craft pile
+        // (cards exiled to pay the craft cost that returned this permanent). The
+        // craft materials are linked to the host by `ExileLinkKind::CraftMaterial`,
+        // which `ExiledBySource` reads kind-agnostically. Tried before the bare
+        // "the exiled card" arm so the longer craft phrase wins (Locus of
+        // Enlightenment).
+        value(
+            TargetFilter::ExiledBySource,
+            (
+                tag("the exiled card"),
+                opt(tag("s")),
+                tag(" used to craft "),
+                alt((tag("it"), tag("~"))),
+            ),
+        ),
         value(TargetFilter::ExiledBySource, tag("the exiled card")),
         // "all [creature] cards exiled with it/~". The optional "creature"
         // qualifier intersects `ExiledBySource` with the Creature type filter
@@ -1001,7 +1077,10 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // only the exact `ExiledBySource` forms; typed ("creature cards exiled with
     // it"), counter-gated, and battlefield sources stay a gap (follow-ups).
     if let Some(source) = parse_grant_all_activated_abilities_source(unquoted_tp.lower) {
-        return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source }];
+        // CR 602.5b: the grant sentence itself carries no use-restriction — the
+        // once-per-turn cap (Locus) is folded in separately by `fold_grant_cap_rider`
+        // when the trailing rider sentence is present, so this stays uncapped.
+        return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap: None }];
     }
 
     // CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" / "gain all

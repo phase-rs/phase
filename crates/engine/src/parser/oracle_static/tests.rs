@@ -5716,11 +5716,146 @@ fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
         assert_eq!(
             mods,
             vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-                source: TargetFilter::ExiledBySource
+                source: TargetFilter::ExiledBySource,
+                cap: None,
             }],
             "predicate: {predicate}"
         );
     }
+}
+
+/// CR 702.167c + CR 613.1f: "each activated ability of the exiled cards used to
+/// craft it/~" (Locus of Enlightenment) maps to `GrantAllActivatedAbilitiesOf
+/// { ExiledBySource }` — the singular "each activated ability" grant phrase and
+/// the craft-pile source-set arm both resolve to the kind-agnostic exiled-cards
+/// filter.
+#[test]
+fn parse_continuous_modifications_grants_each_activated_ability_of_craft_pile() {
+    use crate::types::ability::TargetFilter;
+    for predicate in [
+        "has each activated ability of the exiled cards used to craft it",
+        "has each activated ability of the exiled cards used to craft ~",
+        // The plural grant phrase + craft source must resolve identically.
+        "all activated abilities of the exiled card used to craft it",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::ExiledBySource,
+                // CR 602.5b: bare predicate — no rider sentence reaches this path,
+                // so the craft grant is uncapped here (the cap appears only on the
+                // full two-sentence Locus line; see the whole-line test below).
+                cap: None,
+            }],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 702.167c + CR 613.1f + CR 602.5b: Locus of Enlightenment's full L1 line
+/// (grant + once-per-turn rider, two sentences) parses as ONE SelfRef static
+/// carrying the craft-pile ability grant. The rider is parsed into
+/// `cap: Some(OnlyOnceEachTurn)` — the meaningfully typed use-restriction that the
+/// layer-6 expansion injects into each donated ability — not consumed and
+/// discarded.
+#[test]
+fn locus_of_enlightenment_grant_static_parses_whole_line() {
+    use crate::types::ability::{ActivationRestriction, TargetFilter};
+    let defs = parse_static_line_multi(
+        "~ has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn.",
+    );
+    assert_eq!(defs.len(), 1, "expected one grant static, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
+
+    // Discriminating: the SAME grant sentence WITHOUT the rider must stay
+    // uncapped (cap: None) — proving the cap is sourced from the parsed rider,
+    // not blanket-applied to every craft grant.
+    let no_rider = parse_static_line_multi(
+        "~ has each activated ability of the exiled cards used to craft it.",
+    );
+    assert_eq!(
+        no_rider.len(),
+        1,
+        "expected one grant static, got {no_rider:?}"
+    );
+    assert_eq!(
+        no_rider[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: None,
+        }]
+    );
+}
+
+/// CR 602.5b + CR 602.5c + CR 613.1f: the once-per-turn rider-fold is a SHARED
+/// primitive over ANY grant source, not a Locus/craft-pile special case. A grant
+/// with a DIFFERENT source (Drana and Linvala's "all creatures your opponents
+/// control") followed by the same rider must fold `cap: Some(OnlyOnceEachTurn)`
+/// onto that grant — proving the cap attaches to whatever
+/// `GrantAllActivatedAbilitiesOf` precedes the rider, regardless of its source.
+/// This FAILS if the fold is hard-coded to `ExiledBySource`/Locus.
+#[test]
+fn grant_cap_rider_folds_over_any_grant_source() {
+    use crate::types::ability::{
+        ActivationRestriction, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+    };
+    use crate::types::zones::Zone;
+    let defs = parse_static_line_multi(
+        "~ has all activated abilities of all creatures your opponents control. You may activate each of those abilities only once each turn.",
+    );
+    assert_eq!(defs.len(), 1, "expected one grant static, got {defs:?}");
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            // NOT ExiledBySource — a different source, proving generality.
+            source: TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
+}
+
+/// CR 702.167c + CR 602.5b: Locus parses to the capped grant through the STANDARD
+/// production dispatch (`parse_oracle_text`) — sentence 1 via the ordinary grant
+/// source parser, sentence 2 folded by the shared rider-fold — with no
+/// card-specific whole-line hook.
+#[test]
+fn locus_cap_via_standard_oracle_dispatch() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{ActivationRestriction, TargetFilter};
+    let parsed = parse_oracle_text(
+        "Locus of Enlightenment has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn.",
+        "Locus of Enlightenment",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "expected exactly one grant static, got {:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed.statics[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
 }
 
 /// CR 613.1f + CR 607.2a + CR 205.3: "all creature cards exiled with it/~" narrows
@@ -5736,6 +5871,7 @@ fn parse_continuous_modifications_grants_creature_cards_exiled() {
                 TargetFilter::ExiledBySource,
             ],
         },
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creature cards exiled with it",
@@ -5764,6 +5900,7 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
                     prop: Box::new(FilterProp::SameName),
                 }]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of creatures you control that don't have the same name as it",
@@ -5799,6 +5936,7 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
                 },
             ],
         },
+        cap: None,
     };
     for predicate in [
         "all activated abilities of each other creature with a +1/+1 counter on it",
@@ -5825,6 +5963,7 @@ fn parse_grant_all_activated_abilities_opponents_creatures() {
                     zone: Zone::Battlefield,
                 }]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creatures your opponents control",
@@ -5847,6 +5986,7 @@ fn parse_grant_all_activated_abilities_creature_cards_in_graveyards() {
         source: TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
             zone: Zone::Graveyard,
         }])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creature cards in all graveyards",
@@ -5869,6 +6009,7 @@ fn parse_grant_all_activated_abilities_all_lands() {
         source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
             zone: Zone::Battlefield,
         }])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all lands on the battlefield",
@@ -5901,6 +6042,7 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
                     },
                 ]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all legendary creatures you control",
@@ -5931,6 +6073,7 @@ fn parse_grant_all_activated_abilities_artifact_cards_in_your_graveyard() {
                 zone: Zone::Graveyard,
             },
         ])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all artifact cards in your graveyard",
