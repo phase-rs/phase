@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -22,7 +22,6 @@ import { RichLabel } from "../mana/RichLabel.tsx";
 export function TargetingOverlay() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
-  const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -66,12 +65,12 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
-  // CR 601.2c: display-only hint when this slot is announced by a player other
-  // than the local viewer ("of an opponent's choice", e.g. Volcanic Offering).
-  // The engine's WaitingFor.player already routed the prompt to the announcer;
-  // this only labels the slot. No game logic in the client.
-  const isOpponentChosenSlot =
-    activeSlot?.chooser != null && activeSlot.chooser !== localPlayerId;
+  // CR 601.2c: display-only hint that this slot is announced by a non-controller
+  // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
+  // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
+  // this overlay — so the slot is labelled whenever it carries any `chooser`.
+  // This only labels the slot; no game logic in the client.
+  const isOpponentChosenSlot = activeSlot?.chooser != null;
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
       ? waitingFor.data.source_id
