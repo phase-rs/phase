@@ -9976,6 +9976,13 @@ pub enum Effect {
         /// Permanents in scope for the final sacrifice sweep.
         #[serde(default = "default_target_filter_permanent")]
         sacrifice_filter: TargetFilter,
+        /// CR 107.1c + CR 701.21a: When `Some`, the chooser keeps ANY number of
+        /// `choose_filter` permanents whose combined power is at most this cap
+        /// (Slaughter the Strong: "any number of creatures they control with
+        /// total power 4 or less"), instead of one permanent per `categories`
+        /// entry. `categories` is empty in this mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_power_cap: Option<QuantityExpr>,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.

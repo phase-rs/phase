@@ -1365,6 +1365,22 @@ export type WaitingFor =
       all_kept: ObjectId[];
       scoped_players: PlayerId[];
     } }
+  // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of eligible
+  // creatures whose combined power is at most `cap`; the rest are sacrificed.
+  | { type: "KeepWithinTotalPowerChoice"; data: {
+      player: PlayerId;
+      target_player: PlayerId;
+      eligible: ObjectId[];
+      cap: number;
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      source_id: ObjectId;
+      source_controller?: PlayerId;
+      remaining_players: PlayerId[];
+      all_kept: ObjectId[];
+      scoped_players: PlayerId[];
+    } }
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
   // into two piles for an `Effect::SeparateIntoPiles`. `player` is the
@@ -1665,6 +1681,7 @@ export type GameAction =
   | { type: "ChooseRoomDoor"; data: { object_id: ObjectId; op: DoorLockOp; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
+  | { type: "ChooseKeptCreatures"; data: { kept: ObjectId[] } }
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }

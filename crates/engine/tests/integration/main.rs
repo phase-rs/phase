@@ -524,6 +524,7 @@ mod sentinel_sliver_vigilance_grant;
 mod serras_emissary_chosen_card_type_protection;
 mod sin_spiras_punishment_repeat;
 mod skullwinder_chosen_opponent;
+mod slaughter_the_strong_total_power_4380;
 mod sliver_static_grants;
 mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;

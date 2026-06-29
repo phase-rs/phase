@@ -640,6 +640,13 @@ pub enum GameAction {
     SelectCategoryPermanents {
         choices: Vec<Option<ObjectId>>,
     },
+    /// CR 107.1c + CR 701.21a: Answer to `WaitingFor::KeepWithinTotalPowerChoice`
+    /// (Slaughter the Strong) — the subset of eligible creatures to keep. Every id
+    /// must be in the prompt's `eligible` set and their combined power must not
+    /// exceed `cap`; the rest are sacrificed.
+    ChooseKeptCreatures {
+        kept: Vec<ObjectId>,
+    },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
     /// before mana is paid.
@@ -1344,6 +1351,7 @@ impl GameAction {
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
+            | GameAction::ChooseKeptCreatures { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }

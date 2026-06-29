@@ -5534,8 +5534,22 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
     ))
     .parse(input)?;
     let (input, _) = tag("all other ").parse(input)?;
-    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    let (input, filter) =
+        alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
     Ok((input, Some(filter)))
+}
+
+/// CR 701.21a: Parse "creatures [they/you/that player] control[s]" — the sacrifice
+/// domain for Slaughter the Strong's "sacrifices all other creatures they control".
+fn parse_creature_domain(input: &str) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("creatures ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((input, TargetFilter::Typed(TypedFilter::creature())))
 }
 
 fn parse_nonland_permanent_domain(
@@ -6675,6 +6689,7 @@ mod tests {
             chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            total_power_cap: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(

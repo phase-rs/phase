@@ -22265,6 +22265,7 @@ pub mod tests {
                 sacrifice_filter: crate::types::ability::TargetFilter::Typed(
                     crate::types::ability::TypedFilter::permanent(),
                 ),
+                total_power_cap: None,
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);

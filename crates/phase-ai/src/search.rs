@@ -1071,6 +1071,27 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCategoryPermanents { choices })
         }
 
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): keep the most creatures
+        // whose running power total fits the cap (lowest power first) — a valid,
+        // non-trivial fallback that minimises self-sacrifice.
+        WaitingFor::KeepWithinTotalPowerChoice { eligible, cap, .. } => {
+            let power = |id: &engine::types::identifiers::ObjectId| {
+                state.objects.get(id).and_then(|o| o.power).unwrap_or(0)
+            };
+            let mut by_power = eligible.clone();
+            by_power.sort_by_key(power);
+            let mut kept = Vec::new();
+            let mut total = 0i32;
+            for id in by_power {
+                let p = power(&id);
+                if total + p <= *cap {
+                    total += p;
+                    kept.push(id);
+                }
+            }
+            Some(GameAction::ChooseKeptCreatures { kept })
+        }
+
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override

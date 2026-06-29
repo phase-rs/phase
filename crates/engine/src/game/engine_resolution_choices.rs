@@ -132,6 +132,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
 }
@@ -3853,6 +3854,91 @@ pub(super) fn handle_resolution_choice(
                 // scan this action's events and drains any prior parked queue;
                 // B2 (paused) batches this action's sacrifice events for a
                 // later drain.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                    }
+                } else {
+                    let trigger_events: Vec<GameEvent> = events
+                        [events_before_sacrifice..events_after_sacrifice]
+                        .iter()
+                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                        .cloned()
+                        .collect();
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            }
+        }
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): player kept a subset of
+        // their creatures within the total-power cap; sacrifice the rest.
+        (
+            WaitingFor::KeepWithinTotalPowerChoice {
+                player,
+                target_player: _,
+                eligible,
+                cap,
+                choose_filter,
+                sacrifice_filter,
+                chooser_scope,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_kept,
+                scoped_players,
+            },
+            GameAction::ChooseKeptCreatures { kept },
+        ) => {
+            // Validate: every kept creature is eligible, and the combined power of
+            // the (deduped) kept set is within the cap.
+            let mut chosen = Vec::new();
+            for id in &kept {
+                if !eligible.contains(id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Creature {id:?} is not eligible to keep"
+                    )));
+                }
+                if !chosen.contains(id) {
+                    chosen.push(*id);
+                }
+            }
+            let kept_power = effects::choose_and_sacrifice_rest::total_power(state, &chosen);
+            if kept_power > cap {
+                return Err(EngineError::InvalidAction(format!(
+                    "Kept creatures' total power {kept_power} exceeds {cap}"
+                )));
+            }
+            all_kept.extend(chosen);
+
+            // `step_total_power` either pauses for the next chooser or, when no
+            // players remain, sacrifices the unchosen (stamping that slice itself).
+            let events_before_sacrifice = events.len();
+            set_priority(state, player);
+            effects::choose_and_sacrifice_rest::step_total_power(
+                state,
+                source_id,
+                source_controller,
+                chooser_scope,
+                &remaining_players,
+                all_kept,
+                &choose_filter,
+                &sacrifice_filter,
+                cap,
+                &scoped_players,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            if matches!(
+                state.waiting_for,
+                WaitingFor::KeepWithinTotalPowerChoice { .. }
+            ) {
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                let events_after_sacrifice = events.len();
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    resume_with_error_propagation(state, events)?;
+                }
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(wf));

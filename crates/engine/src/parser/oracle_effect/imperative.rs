@@ -3729,12 +3729,14 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
             categories,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
             ..
         } => ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::ControllerForAll,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         },
         other => other,
     })
@@ -3786,6 +3788,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
                     chooser_scope: CategoryChooserScope::EachPlayerSelf,
                     choose_filter: permanent_filter(),
                     sacrifice_filter: permanent_filter(),
+                    total_power_cap: None,
                 });
             }
         }
@@ -3802,6 +3805,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
             sacrifice_filter: choose_filter.clone(),
             choose_filter,
+            total_power_cap: None,
         });
     }
 
@@ -3818,7 +3822,43 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
             sacrifice_filter: choose_filter.clone(),
             choose_filter,
+            total_power_cap: None,
         });
+    }
+
+    // Pattern 4 (Slaughter the Strong): "any number of creatures they control with
+    // total power N or less" — CR 107.1c + CR 701.21a. Each chooser keeps a chosen
+    // subset of their creatures whose combined power is at most N, then sacrifices
+    // all other creatures they control. `categories` is empty in this mode; the
+    // total-power cap drives an interactive subset choice in the resolver.
+    if let Ok((rest, _)) =
+        preceded(opt(tag::<_, _, E>("any number of ")), tag("creatures ")).parse(rest_lower)
+    {
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, E>("they control"),
+            tag("you control"),
+            tag("that player controls"),
+        ))
+        .parse(rest)
+        {
+            if let Ok((rest, cap)) = preceded(
+                tag::<_, _, E>(" with total power "),
+                nom_primitives::parse_number,
+            )
+            .parse(rest)
+            {
+                if tag::<_, _, E>(" or less").parse(rest).is_ok() {
+                    let creatures = TargetFilter::Typed(TypedFilter::creature());
+                    return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                        categories: Vec::new(),
+                        chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                        choose_filter: creatures.clone(),
+                        sacrifice_filter: creatures,
+                        total_power_cap: Some(QuantityExpr::Fixed { value: cap as i32 }),
+                    });
+                }
+            }
+        }
     }
 
     None
@@ -4023,11 +4063,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser_scope,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         } => Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         },
         // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
         // lowering surfaces only the first slot — the chained `TargetOnly`
@@ -14090,6 +14132,7 @@ mod tests {
                 chooser_scope,
                 choose_filter,
                 sacrifice_filter,
+                ..
             }) => {
                 assert_eq!(
                     categories,

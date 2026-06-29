@@ -1175,6 +1175,42 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        WaitingFor::KeepWithinTotalPowerChoice {
+            player,
+            eligible,
+            cap,
+            ..
+        } => {
+            // Offer a few valid kept-subsets within the cap: keep nothing
+            // (sacrifice all) and a greedy subset that keeps the most creatures
+            // (lowest power first while the running total fits the cap).
+            let power = |id: &ObjectId| state.objects.get(id).and_then(|o| o.power).unwrap_or(0);
+            let mut by_power = eligible.clone();
+            by_power.sort_by_key(power);
+            let mut greedy = Vec::new();
+            let mut total = 0i32;
+            for id in by_power {
+                let p = power(&id);
+                if total + p <= *cap {
+                    total += p;
+                    greedy.push(id);
+                }
+            }
+            let mut keeps: Vec<Vec<ObjectId>> = vec![Vec::new()];
+            if !greedy.is_empty() {
+                keeps.push(greedy);
+            }
+            keeps
+                .into_iter()
+                .map(|kept| {
+                    candidate(
+                        GameAction::ChooseKeptCreatures { kept },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {
             player,

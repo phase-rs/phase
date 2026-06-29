@@ -1724,6 +1724,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::LearnChoice { .. }
             // Digital-only Alchemy spellbook choice pauses resolution; stash
             // the printed tail until SubmitSpellbookDraft resumes the chain.

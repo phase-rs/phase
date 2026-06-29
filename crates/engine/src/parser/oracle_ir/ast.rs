@@ -1125,6 +1125,9 @@ pub(crate) enum ChooseImperativeAst {
         chooser_scope: crate::types::ability::CategoryChooserScope,
         choose_filter: crate::types::ability::TargetFilter,
         sacrifice_filter: crate::types::ability::TargetFilter,
+        /// Slaughter the Strong: keep ANY number of `choose_filter` permanents
+        /// whose combined power is at most this cap, instead of one per category.
+        total_power_cap: Option<crate::types::ability::QuantityExpr>,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).

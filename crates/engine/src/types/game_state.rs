@@ -4238,6 +4238,34 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
+    /// CR 107.1c + CR 701.21a (Slaughter the Strong): `player` keeps any number of
+    /// `target_player`'s `eligible` creatures whose combined power is at most
+    /// `cap`, then the rest are sacrificed. Entered only when keeping all eligible
+    /// creatures would exceed the cap (otherwise the keep-all case auto-resolves).
+    KeepWithinTotalPowerChoice {
+        player: PlayerId,
+        target_player: PlayerId,
+        /// The chooser's creatures eligible to be kept (battlefield objects).
+        eligible: Vec<ObjectId>,
+        /// CR 208.3: maximum combined power of the kept subset.
+        cap: i32,
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        source_id: ObjectId,
+        #[serde(default)]
+        source_controller: PlayerId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// Creatures kept by previous players — protected from the sacrifice sweep.
+        all_kept: Vec<ObjectId>,
+        /// APNAP-ordered set of players within the effect's `player_scope`.
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+    },
     /// CR 707.10c: When a spell is copied, the controller may choose new targets.
     /// Each slot shows the current target and legal alternatives.
     CopyRetarget {
@@ -4573,6 +4601,7 @@ impl WaitingFor {
             WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
@@ -4699,6 +4728,7 @@ impl WaitingFor {
             | WaitingFor::AssistChoosePlayer { player, .. }
             | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::AssignBlockerDamage { player, .. }

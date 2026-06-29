@@ -318,6 +318,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectCategoryPermanents { choices } => {
             bound_list("SelectCategoryPermanents.choices", choices.len())?;
         }
+        GameAction::ChooseKeptCreatures { kept } => {
+            bound_list("ChooseKeptCreatures.kept", kept.len())?;
+        }
         GameAction::SubmitPhyrexianChoices { choices } => {
             bound_list("SubmitPhyrexianChoices.choices", choices.len())?;
         }
