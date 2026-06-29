@@ -6442,18 +6442,13 @@ fn static_each_player_may_play_an_additional_land() {
 }
 
 #[test]
-fn static_anchor_choice_player_may_play_an_additional_land() {
-    let def = parse_static_line(
-        "Each player who last chose green anchor may play an additional land during each of their turns.",
-    )
-    .unwrap();
-    assert_eq!(def.mode, StaticMode::MayPlayAdditionalLand);
-    assert_eq!(def.affected, Some(TargetFilter::Player));
-    assert_eq!(
-        def.description.as_deref(),
-        Some(
-            "Each player who last chose green anchor may play an additional land during each of their turns."
+fn static_anchor_choice_land_drop_stays_unsupported_until_choice_filter_exists() {
+    assert!(
+        parse_static_line(
+            "Each player who last chose green anchor may play an additional land during each of their turns.",
         )
+        .is_none(),
+        "chosen-word player subjects must not be widened to all players"
     );
 }
 
