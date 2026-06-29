@@ -1399,39 +1399,60 @@ pub fn validate_blockers_for_player(
                     continue;
                 }
 
-                // Check if any unassigned defending creature could legally block
-                // this attacker AND (for the filtered form) match the filter. If
-                // so, the declaration is illegal because that creature should
-                // have been assigned. CR 509.1b: a creature that can't legally
-                // block doesn't make the requirement obey-able.
+                // Check if any defending creature not yet assigned to THIS
+                // attacker could legally block it AND (for the filtered form)
+                // match the filter. If so, the declaration is illegal because
+                // that creature should have been assigned. CR 509.1b: a
+                // creature that can't legally block doesn't make the
+                // requirement obey-able.
+                //
+                // CR 509.1c: a creature already blocking another attacker is
+                // still "able" to block this one if it has spare block
+                // capacity granted by ExtraBlockers — mirror of the
+                // MustBeBlockedByAll path at line ~1496 above.
                 let has_available_blocker = state.battlefield.iter().any(|id| {
-                    if assigned_blockers.contains(id) {
+                    // Skip creatures already assigned to this specific attacker
+                    // — they're already counted in the `satisfied` check above.
+                    if blockers_per_attacker
+                        .get(&attacker_id)
+                        .is_some_and(|blockers| blockers.contains(id))
+                    {
                         return false;
                     }
                     let Some(obj) = state.objects.get(id) else {
                         return false;
                     };
-                    obj.controller == player
-                        && obj.card_types.core_types.contains(&CoreType::Creature)
-                        && !obj.tapped
-                        && can_block_pair_with_precomputed(
+                    if obj.controller != player
+                        || !obj.card_types.core_types.contains(&CoreType::Creature)
+                        || obj.tapped
+                    {
+                        return false;
+                    }
+                    // A creature blocking other attacker(s) is only "able" to
+                    // also block this one if it has spare block capacity.
+                    // CR 509.1c: a blocker at its per-creature limit cannot
+                    // take on an additional block.
+                    let assigned_count = attackers_per_blocker.get(id).copied().unwrap_or(0);
+                    if assigned_count >= extra_block_limit(state, obj) {
+                        return false;
+                    }
+                    can_block_pair_with_precomputed(
+                        state,
+                        *id,
+                        attacker_id,
+                        &blocker_restriction,
+                        &block_restriction,
+                        &blocker_allowed,
+                        can_block_shadow_exists,
+                    ) && match by {
+                        None => true,
+                        Some(filter) => matches_target_filter(
                             state,
                             *id,
-                            attacker_id,
-                            &blocker_restriction,
-                            &block_restriction,
-                            &blocker_allowed,
-                            can_block_shadow_exists,
-                        )
-                        && match by {
-                            None => true,
-                            Some(filter) => matches_target_filter(
-                                state,
-                                *id,
-                                filter,
-                                &FilterContext::from_source(state, src_id),
-                            ),
-                        }
+                            filter,
+                            &FilterContext::from_source(state, src_id),
+                        ),
+                    }
                 });
 
                 if has_available_blocker {
@@ -7126,6 +7147,57 @@ mod tests {
         assert!(validate_blockers(&state, &[(dalek, attacker)]).is_ok());
         // Both blockers assigned (Dalek satisfies it): legal.
         assert!(validate_blockers(&state, &[(dalek, attacker), (non_dalek, attacker)]).is_ok());
+    }
+
+    /// CR 509.1c: a Dalek already blocking another attacker but with spare
+    /// block capacity (ExtraBlockers) is still "able" to satisfy the filtered
+    /// `MustBeBlocked { by: Some(Dalek) }` requirement. Not assigning it is
+    /// illegal; assigning it to both attackers is legal.
+    #[test]
+    fn must_be_blocked_filtered_counts_multi_blocker_spare_capacity() {
+        let mut state = setup();
+        let ace = create_creature(&mut state, PlayerId(0), "Ace's Bat", 3, 3);
+        add_must_be_blocked_by_dalek(&mut state, ace);
+        let other_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // A Dalek with ExtraBlockers { count: Some(1) } — can block 2 creatures.
+        let dalek = create_creature(&mut state, PlayerId(1), "Dalek Drone", 2, 2);
+        state
+            .objects
+            .get_mut(&dalek)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Dalek".to_string());
+        state
+            .objects
+            .get_mut(&dalek)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(ace, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        // Dalek blocks the other attacker but not Ace — illegal: the Dalek has
+        // spare capacity and could also block Ace.
+        assert!(
+            validate_blockers(&state, &[(dalek, other_attacker)]).is_err(),
+            "Dalek with spare capacity blocking elsewhere must still cover Ace"
+        );
+        // Dalek blocks both — legal: Dalek satisfies the filtered requirement,
+        // and its spare-capacity slot is used for the other attacker.
+        assert!(
+            validate_blockers(&state, &[(dalek, ace), (dalek, other_attacker)]).is_ok(),
+            "Dalek assigned to both attackers should be legal"
+        );
     }
 
     /// CR 509.1c "if able": with NO able Dalek, the filtered requirement is
