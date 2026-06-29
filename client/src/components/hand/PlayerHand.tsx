@@ -46,17 +46,6 @@ function getHandOverlap(handSize: number): string {
   return `calc(var(--hand-card-w) * ${overlap})`;
 }
 
-// Per-card rotation in degrees. Total fan span is clamped to ±18° regardless of
-// hand size, so the bigger the hand the more upright each card sits.
-function getCardRotation(index: number, handSize: number): number {
-  if (handSize <= 1) return 0;
-  const center = (handSize - 1) / 2;
-  // Cap per-card delta at 6° (preserves look for small hands), otherwise
-  // distribute a 36° total fan across the hand.
-  const delta = Math.min(6, 36 / (handSize - 1));
-  return (index - center) * delta;
-}
-
 // Quadratic arc lift coefficient. Scales down as the hand grows so the parabola
 // stays inside the hand band instead of pushing edge cards off-screen.
 function getArcCoefficient(handSize: number): number {
@@ -75,10 +64,9 @@ function getArcCoefficient(handSize: number): number {
 //
 // `k` is a card's absolute position across the row: exile cards occupy [0, E),
 // hand cards [E, E + H), graveyard cards [E + H, N). When there are no wings
-// (N === H, E === 0) this is identical to the old hand-only geometry —
-// rotation(k) === getCardRotation(k, H) and arc(k) === the hand's old arcOffset
-// for every k — so a wing-less hand (and its drag-to-reorder system) is
-// completely undisturbed; only the wing case changes.
+// (N === H, E === 0) a hand card at index i sits at k === i, so the hand keeps
+// its familiar standalone fan; wings only ever shift the shared center, never
+// the hand's reorder bookkeeping (index/handSize stay hand-local).
 function fanGeometry(totalCards: number) {
   const center = (totalCards - 1) / 2;
   // Size the SHAPE (tilt + arc) from at least two cards so a lone card / wing
@@ -234,16 +222,17 @@ export function PlayerHand() {
 
       // Average fan tilt of the flanking card(s) (single neighbor at an edge) —
       // drives both the arrow's lean and the direction it lifts to reach the
-      // (tilted) slot's top edge. Uses the hand-only tilt (`rects` are hand cards
-      // only): exact when no castable wings are present (then it equals each
-      // card's rendered `fan.rotation`), and a harmless approximation in the rare
-      // case a wing is shown mid-reorder — the arrow is a transient drag cue.
+      // (tilted) slot's top edge. Computed from the SAME whole-row fanGeometry
+      // the cards actually render with (hand card `idx` sits at fan position
+      // `E + idx`), so the arrow stays aligned — and on the correct side — even
+      // when castable exile/graveyard wings shift the fan center off the hand.
       let angle = 0;
       if (slot != null) {
         const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
+        const fan = fanGeometry(exileCards.length + rects.length + graveyardCards.length);
         const rotations = [left, right]
           .filter((idx): idx is number => idx != null)
-          .map((idx) => getCardRotation(idx, rects.length));
+          .map((idx) => fan.rotation(exileCards.length + idx));
         if (rotations.length) angle = rotations.reduce((a, b) => a + b, 0) / rotations.length;
       }
 
@@ -294,7 +283,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV],
+    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -791,7 +780,10 @@ const HandCard = memo(function HandCard({
       }`}
       style={{
         marginLeft,
-        zIndex: isDragging ? 9999 : isSelected ? 20 : index,
+        // Selected card sits above every non-selected hand card. Offset by
+        // handSize (not a fixed 20) so it still wins in a Commander-sized hand
+        // whose plain indices can exceed 20.
+        zIndex: isDragging ? 9999 : isSelected ? handSize + 20 : index,
       }}
       {...longPressHandlers}
     >
