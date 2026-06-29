@@ -3000,6 +3000,15 @@ pub(super) fn parse_choose_ast(
         return Some(ast);
     }
 
+    // CR 702.62b + CR 608.2c: "choose a suspended card you own" (Amy Pond) — a
+    // zone-implicit Exile selection lacking the "in/from <zone>" connector
+    // `try_parse_choose_from_zone` requires. Checked before the "choose " strip +
+    // `is_choose_as_targeting` fallback so the clause routes to the interactive
+    // ChooseFromZone seam instead of being treated as targeting.
+    if let Some(ast) = try_parse_choose_suspended_card(lower) {
+        return Some(ast);
+    }
+
     // CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: "choose a card [at random]
     // exiled this way / exiled with ~" — the impulse-exile choose anaphor. The
     // "exiled this way" referent is the chain's tracked set (the cards exiled by
@@ -3243,6 +3252,60 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     }
 
     None
+}
+
+/// CR 702.62b + CR 608.2c: "choose a suspended card [you own]" — an interactive
+/// selection of a suspended card (exile + suspend + time counter), with an optional
+/// ownership qualifier. No explicit `in/from <zone>` connector, so
+/// `try_parse_choose_from_zone` does not claim it. Routes to the
+/// `ChooseFromZone { Exile }` seam so the runtime pauses for the player's pick
+/// before any chained continuation resolves. Checked before `is_choose_as_targeting`
+/// so the clause is claimed here. Composed entirely from nom combinators; the
+/// candidate filter reuses the shared `suspended_card_filter` building block.
+///
+/// Attested forms:
+/// - "choose a suspended card you own" (Amy Pond, CR 108.3 — owned by controller)
+/// - "choose a suspended card an opponent owns" (sibling coverage, CR 108.3)
+/// - "choose a suspended card" (no ownership restriction — any player's suspended card)
+fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, _) = alt((tag::<_, _, E>("choose "), tag("you choose ")))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, E>("a "), tag("an "))).parse(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, E>("suspended cards"), tag("suspended card")))
+        .parse(rest)
+        .ok()?;
+    // Parse optional ownership qualifier.  Supported forms:
+    //   "you own"            → Some(ControllerRef::You)
+    //   "an opponent owns"   → Some(ControllerRef::Opponent)
+    //   <no qualifier>       → None (any player's suspended card)
+    // Require the clause to end here: if a chain failed to split, an unparsed
+    // trailing continuation ("… and remove that many time counters from it") would
+    // be left over — bail so the line falls to a documented strict failure rather
+    // than a silent misparse that drops the counter clause.
+    let (rest, owner) = opt(alt((
+        value(ControllerRef::You, tag::<_, _, E>(" you own")),
+        value(ControllerRef::Opponent, tag(" an opponent owns")),
+    )))
+    .parse(rest)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones: vec![Zone::Exile],
+        zone_owner: ZoneOwner::Controller,
+        // CR 108.3: ownership restricted by the parsed qualifier (None = any player).
+        filter: crate::parser::oracle_quantity::suspended_card_filter(owner),
+        chooser: Chooser::Controller,
+        up_to: false,
+        // CR 608.2d: controller-directed selection, never random.
+        selection: CardSelectionMode::Chosen,
+    })
 }
 
 fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
@@ -13784,6 +13847,59 @@ mod tests {
             }
             other => panic!("Expected FromTrackedSet with count=2, got {other:?}"),
         }
+    }
+
+    /// CR 702.62b + CR 608.2c: "choose a suspended card you own" (Amy Pond) routes
+    /// to a `ChooseFromZone { Exile, Controller }` with the canonical suspended-card
+    /// filter, even though it has no explicit "in/from <zone>" connector.
+    #[test]
+    fn parse_choose_suspended_card_you_own() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        let text = "choose a suspended card you own";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed suspended-card filter, got {filter:?}");
+                };
+                assert!(tf.properties.contains(&FilterProp::HasKeywordKind {
+                    value: crate::types::keywords::KeywordKind::Suspend,
+                }));
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }));
+                assert!(tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
+                assert!(tf.properties.contains(&FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Time),
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                }));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    /// Anti-misparse guard: an unsplit chain ("… and remove that many time
+    /// counters from it" still attached) must NOT be claimed as a bare suspended
+    /// selection — bail so the line falls to a strict failure, never a silent
+    /// drop of the counter clause.
+    #[test]
+    fn choose_suspended_card_requires_clause_boundary() {
+        let text = "choose a suspended card you own and remove that many time counters from it";
+        let lower = text.to_lowercase();
+        assert!(super::try_parse_choose_suspended_card(&lower).is_none());
     }
 
     #[test]

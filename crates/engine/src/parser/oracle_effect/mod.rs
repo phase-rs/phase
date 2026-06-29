@@ -20996,6 +20996,17 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(sub) = inner_clause.sub_ability {
                 inner_def.sub_ability = Some(sub);
             }
+            // CR 118.12a (issue #4369): a payment-unless on the delayed
+            // instruction itself ("...next end step, sacrifice it unless you pay
+            // {cost}" — Ashling, the Limitless; Satya, Aetherflux Genius) is
+            // extracted at chunk level into `unless_pay`, but it belongs to the
+            // DELAYED sacrifice, not the outer trigger. Move it onto the inner
+            // delayed def and consume it so it is not also applied to the outer
+            // CreateDelayedTrigger wrapper. The trigger-level
+            // `extract_unless_pay_modifier` declines to hoist the same clause.
+            if let Some(up) = unless_pay.take() {
+                inner_def.unless_pay = Some(up);
+            }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),
@@ -21482,7 +21493,45 @@ pub(crate) fn parse_effect_chain_ir(
         // *named clause*, not the trigger condition. The SelfRef prior-clause
         // test is structural over the parsed clause and its nested sub-ability
         // chain — no string heuristic.
-        if typed_trigger_subject
+        //
+        // CR 712.2 (issue #4543): the typed-subject branch covers the typed
+        // members of this class (Ajani). The transform-flip-from-exile cards
+        // (Tamiyo, Inquisitive Student: "When you draw your third card in a turn,
+        // exile Tamiyo, then return her to the battlefield transformed") have a
+        // PLAYER subject, so `typed_trigger_subject` is false and the bare "her"
+        // would default to `TriggeringSource` — but the CardDrawn event has no
+        // resolvable source, so the return fizzles and the permanent is stranded
+        // in exile. Detect that specific structural class — a prior "exile ~"
+        // (ChangeZone→Exile, SelfRef) followed by a TRANSFORMED return
+        // (ChangeZone→Battlefield, `enter_transformed`) — and bind to the source
+        // there too. The `enter_transformed` requirement keeps Cecil-style
+        // "untap ~. transform it" (ParentTarget) and plain "exile ~. return it"
+        // (Aetherling) untouched.
+        // Narrowly: only the BROKEN binding (`TriggeringSource`, which the
+        // CardDrawn/player-subject event cannot resolve — Tamiyo). Cards whose
+        // return already binds correctly (`TrackedSet`/`ParentTarget` — the
+        // saga and flip-walker classes like Azusa's Many Journeys, Jace, Vryn's
+        // Prodigy) are left untouched: they are bound by their own (working)
+        // rewrites and must not be re-pointed.
+        let exile_then_return_transformed = matches!(
+            &clause.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                enter_transformed: true,
+                ..
+            }
+        ) && clauses.last().is_some_and(|prev| {
+            matches!(
+                &prev.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        });
+        if (typed_trigger_subject || exile_then_return_transformed)
             && has_anaphoric_reference(&text_lower)
             && clauses
                 .last()

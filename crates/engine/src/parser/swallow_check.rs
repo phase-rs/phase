@@ -601,6 +601,12 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             | StaticMode::MayPlayAdditionalLand
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: "The top card of your
+            // library has plot" / "You may plot [filter] cards from the top of
+            // your library" — opt-in plot-from-library (Fblthp). The plot special
+            // action (CR 702.170b) is taken at the player's discretion.
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             // CR 702.8: "You may cast this spell as though it had flash" —
             // opt-in cast-timing permission.
             | StaticMode::CastWithFlash
@@ -1442,6 +1448,13 @@ fn detect_dynamic_qty(
         "SelfManaCost",
         "SelfManaValue",
         "TargetManaCost",
+        // CR 702.170a: "The plot cost is equal to its mana cost" — the plot cost
+        // is intrinsic to the `TopOfLibraryHasPlot` static (computed at synthesis
+        // from the live top card's mana_cost), not a stored `QuantityExpr`. The
+        // static's presence in the AST is the coverage marker, mirroring the
+        // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
+        // cost" (Fblthp, Lost on the Range).
+        "TopOfLibraryHasPlot",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -3646,6 +3659,66 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 400.11 + CR 701.23j: Wish-cycle and planeswalker wishboard fetches must
+    /// lower to SearchOutsideGame without Optional_YouMay swallow warnings (issue #2276).
+    #[test]
+    fn optional_you_may_accepts_wishboard_creature_or_land_and_loyalty_fetches() {
+        let living_wish = parse_named(
+            "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile Living Wish.",
+            "Living Wish",
+            &["Sorcery"],
+        );
+        assert!(
+            !living_wish.abilities.iter().any(def_tree_has_unimplemented),
+            "Living Wish must parse without Unimplemented"
+        );
+        let living = living_wish
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Living Wish outside-game search");
+        assert!(matches!(living, Effect::SearchOutsideGame { count, .. } if count.is_up_to()));
+        assert!(!has_swallowed_detector(&living_wish, "Optional_YouMay"));
+
+        let karn = parse_named(
+            "[−2]: You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
+            "Karn, the Great Creator",
+            &["Planeswalker"],
+        );
+        assert!(
+            !karn.abilities.iter().any(def_tree_has_unimplemented),
+            "Karn -2 must parse without Unimplemented"
+        );
+        let karn_search = karn
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Karn -2 outside-game search");
+        assert!(matches!(
+            karn_search,
+            Effect::SearchOutsideGame {
+                source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
+                ..
+            }
+        ));
+        assert!(!has_swallowed_detector(&karn, "Optional_YouMay"));
+
+        let vivien = parse_named(
+            "[−5]: You may reveal a creature card you own from outside the game and put it into your hand.",
+            "Vivien, Arkbow Ranger",
+            &["Planeswalker"],
+        );
+        assert!(
+            !vivien.abilities.iter().any(def_tree_has_unimplemented),
+            "Vivien -5 must parse without Unimplemented"
+        );
+        assert!(vivien
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::SearchOutsideGame { .. })));
+        assert!(!has_swallowed_detector(&vivien, "Optional_YouMay"));
+    }
+
     #[test]
     fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
         use crate::types::ability::PlayerFilter;
@@ -4750,6 +4823,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
+    /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
+    /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
+    /// raise a DynamicQty swallow warning — the static's presence is the carrier
+    /// (mirrors the SelfManaCost precedent). Reverting the marker re-reds Fblthp.
+    #[test]
+    fn dynamic_qty_accepts_plot_cost_equal_to_mana_cost() {
+        let parsed = parse_named(
+            "You may look at the top card of your library any time.\n\
+             The top card of your library has plot. The plot cost is equal to its mana cost.\n\
+             You may plot nonland cards from the top of your library.",
+            "Fblthp, Lost on the Range",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

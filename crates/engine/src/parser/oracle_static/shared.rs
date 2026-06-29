@@ -1516,6 +1516,12 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "it shares a color with the most common color among all permanents
+    // [or a color tied for most common]" (Heroic Defiance)
+    if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "the chosen color is [color]"
     if let Some(color_name) = nom_tag_lower(tp.lower, tp.lower, "the chosen color is ") {
         let trimmed = color_name.trim().trim_end_matches('.');
@@ -1741,6 +1747,15 @@ pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticC
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
         return Some(condition);
     }
+    // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when
+    // <condition> is false — fall back to the shared static-condition parser and
+    // negate, so a recognized inner condition (e.g. Heroic Defiance's most-common-
+    // color check) gates the grant instead of being swallowed as Unrecognized.
+    if let Some(condition) = parse_static_condition(original) {
+        return Some(StaticCondition::Not {
+            condition: Box::new(condition),
+        });
+    }
     // Preserve the Oracle unless rider in the AST so swallow/coverage see a
     // `condition` slot even when the inner clause is not yet decomposed.
     Some(StaticCondition::Not {
@@ -1917,6 +1932,28 @@ pub(crate) fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::Man
     }
 
     None
+}
+
+/// CR 105.2 + CR 611.3a: "it shares a color with the most common color among all
+/// permanents[ or a color tied for most common]" (Heroic Defiance) →
+/// `SharesColorWithMostCommonColorAmongPermanents`. The optional "or a color tied
+/// for most common" tail is redundant — the runtime predicate already treats
+/// every color at the maximum count as most-common — so both phrasings map to the
+/// same condition.
+pub(crate) fn parse_shares_most_common_color_condition(lower: &str) -> Option<StaticCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "it shares a color with the most common color among all permanents",
+    )
+    .parse(lower)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(
+        " or a color tied for most common",
+    ))
+    .parse(rest)
+    .ok()?;
+    rest.trim()
+        .is_empty()
+        .then_some(StaticCondition::SharesColorWithMostCommonColorAmongPermanents)
 }
 
 /// CR 611.3a: "[N] or more [type] are on the battlefield" → a count

@@ -828,6 +828,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 crate::types::events::GameEvent::Saddled { mount_id, .. } => {
                     Some(TargetRef::Object(*mount_id))
                 }
+                // CR 603.2 + CR 608.2c: "that [creature/permanent]" on a zone-change
+                // trigger (Captain America, Team Leader's "that Hero") is the entering
+                // object when it is not the trigger source itself (Abigale's "that
+                // creature" anaphor must still inherit the chosen target).
+                crate::types::events::GameEvent::ZoneChanged { object_id, .. }
+                    if *object_id != source_id =>
+                {
+                    Some(TargetRef::Object(*object_id))
+                }
                 _ => None,
             }
         }
@@ -4154,6 +4163,49 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(creature)]);
+    }
+
+    /// CR 603.2 + CR 608.2c: "that Hero" on a zone-change ETB trigger is the
+    /// entering object (Captain America, Team Leader — issue #4564).
+    #[test]
+    fn resolved_targets_parent_target_for_zone_changed_event_returns_trigger_source() {
+        let (mut state, trigger_source, entering) = {
+            let mut state = GameState::new_two_player(7);
+            let trigger_source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Captain America, Team Leader".to_string(),
+                Zone::Battlefield,
+            );
+            let entering = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Other Hero".to_string(),
+                Zone::Battlefield,
+            );
+            (state, trigger_source, entering)
+        };
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                entering,
+                Some(crate::types::zones::Zone::Hand),
+                crate::types::zones::Zone::Battlefield,
+            )),
+        });
+        let ability = make_resolved_with_targets(vec![], trigger_source);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(entering)],
+            "ParentTarget on a zone-change trigger must bind to the entering object"
+        );
     }
 
     /// CR 603.2c + CR 608.2c: batched attack triggers pump every attacker that

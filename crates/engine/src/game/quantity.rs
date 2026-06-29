@@ -510,6 +510,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         }
         StaticCondition::Not { condition } => static_condition_uses_unspent_mana(condition),
         StaticCondition::DevotionGE { .. }
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::IsPresent { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }

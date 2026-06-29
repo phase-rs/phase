@@ -5614,6 +5614,31 @@ pub struct StaticSourceIndex {
     pub command_sources: im::Vector<ObjectId>,
 }
 
+/// CR 608.2: The resolution-scoped triggering-event context of an ability that
+/// paused for an interactive `ChooseFromZoneChoice`. An ability's resolution is a
+/// single, ongoing process (CR 608.2); when it parks on a player choice,
+/// `stack::resolve_top` runs to completion and unconditionally clears the live
+/// trigger context. These three values are exactly the inputs the
+/// `EventContextAmount` ("that many") cascade in `game::quantity` consults, so
+/// they are captured while still live and restored around the continuation drain
+/// when the player answers — letting an `EventContextAmount` sub_ability
+/// (Amy Pond: "choose a suspended card you own and remove that many time counters
+/// from it") read the triggering event's amount after the pause. Building-block
+/// generalization of the `pending_optional_trigger_event` /
+/// `pending_optional_trigger_match_count` pair (The Ur-Dragon) and the
+/// `WaitingFor::ChooseObjectsSelection` save/restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvingTriggerContext {
+    /// CR 608.2: The triggering event — source of `extract_amount_from_event`.
+    pub event: Option<GameEvent>,
+    /// CR 603.2c: The firing trigger's filtered subject/occurrence count (the
+    /// batched "that many"); outranks the event amount in the cascade.
+    pub match_count: Option<u32>,
+    /// CR 706.4: A die result recorded earlier in this resolution ("roll a die …
+    /// remove that many counters"); outranks the event amount in the cascade.
+    pub die_result: Option<i32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -6686,6 +6711,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_trigger_match_count: Option<u32>,
 
+    /// CR 608.2 + CR 603.2c + CR 706.4: The resolution-scoped trigger context of
+    /// an ability that paused for an interactive `ChooseFromZoneChoice`, captured
+    /// while still live (before `stack::resolve_top` clears it) and restored
+    /// around the continuation drain in the `ChooseFromZoneChoice` handler so an
+    /// `EventContextAmount` ("that many") sub_ability resolves the triggering
+    /// event's amount after the pause (Amy Pond). Set on every single-pool
+    /// `ChooseFromZone` raise (`None` for non-trigger ChooseFromZone) and consumed
+    /// by `.take()` in the handler, so it never persists beyond one round-trip.
+    /// It must survive the pause→answer action boundary, so it is intentionally
+    /// NOT in the `apply()`-top transient clear. Building-block generalization of
+    /// `pending_optional_trigger_event` / `pending_optional_trigger_match_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choose_zone_trigger_context: Option<ResolvingTriggerContext>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -7718,6 +7757,7 @@ impl GameState {
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
+            pending_choose_zone_trigger_context: None,
             may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
@@ -8243,6 +8283,8 @@ impl PartialEq for GameState {
             && self.current_trigger_match_count == other.current_trigger_match_count
             && self.pending_optional_trigger_match_count
                 == other.pending_optional_trigger_match_count
+            && self.pending_choose_zone_trigger_context
+                == other.pending_choose_zone_trigger_context
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             // CR 603.12a: K is nonzero AT the per-iteration `OptionalEffectChoice`
             // pause (a serde boundary across separate `apply()` calls). It is

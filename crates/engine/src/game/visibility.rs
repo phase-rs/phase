@@ -143,6 +143,23 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // surfaced as draw order anywhere the viewer can observe it.
     let sandbox_self_library_visible =
         state.format_config.allow_debug_actions && state.debug_permitted.contains(&viewer);
+    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
+    // specified player." A player with a continuous "you may look at the top
+    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
+    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
+    // library top. Engine-authoritative exposure (never client-side): the
+    // top-of-library object is the source/render target of cast-from-top
+    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
+    // would be redacted for the very player allowed to act on it. The derived
+    // `can_look_at_top_of_library` flag already encodes the static check;
+    // `can_view_private_for_player` extends the look to a player controlling
+    // this player's turn, mirroring the private-look / face-down look paths.
+    let look_top_visible: HashSet<ObjectId> = filtered
+        .players
+        .iter()
+        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
+        .filter_map(|p| p.library.front().copied())
+        .collect();
     let all_library_ids: Vec<ObjectId> = filtered
         .players
         .iter()
@@ -163,6 +180,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             // contain dig cards, so the exclusion still applies.
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id))
+            // CR 701.20e: own (or controlled-turn) library top under a
+            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
+            || look_top_visible.contains(&obj_id)
             || (sandbox_self_library_visible && owner == Some(viewer));
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)

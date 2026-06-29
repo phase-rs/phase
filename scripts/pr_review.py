@@ -415,9 +415,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_outcome == "DEFER-FE":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif local_event_type == "held":
-        action = "blocked"
-        reason = "local_hold_current_head"
     elif local_event_type in {
         "review_blocked",
         "changes_requested",
@@ -660,6 +657,10 @@ def command_inspect(args: argparse.Namespace) -> int:
     acting_login = args.acting_login or gh_user()
     pr = gh_pr_view(args.repo, args.pr)
     packet = make_packet(pr, policy, acting_login, args.mode)
+    packet["local_current_event"] = latest_events_by_pr_head(args.state_dir).get(
+        (args.pr, pr.get("headRefOid") or "")
+    )
+    packet["recommendation"] = recommend_from_packet(packet)
     print(json_dumps(packet))
     return 0
 
@@ -669,6 +670,10 @@ def command_recommend(args: argparse.Namespace) -> int:
     acting_login = args.acting_login or gh_user()
     pr = gh_pr_view(args.repo, args.pr)
     packet = make_packet(pr, policy, acting_login, "full")
+    packet["local_current_event"] = latest_events_by_pr_head(args.state_dir).get(
+        (args.pr, pr.get("headRefOid") or "")
+    )
+    packet["recommendation"] = recommend_from_packet(packet)
     recommendation = packet["recommendation"]
     if packet["completeness"] != "complete" and recommendation["advisory_action"].endswith("_for_handler"):
         recommendation = {
