@@ -26,6 +26,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -389,7 +390,13 @@ fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     &cursor.effect
 }
 
-fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
+/// CR 608.2c: Resolve the grant target for an exile-zone cast-permission
+/// designation continuation ("it becomes plotted" / "it becomes foretold").
+/// Generic over the designation — a tracked-set exile binds the grant to the
+/// just-published set (`TrackedSetId(0)` sentinel); a single-object exile binds
+/// to the parent target (which falls back to the ability source for anaphoric
+/// "it" with no explicit target slot).
+fn exile_designation_grant_target(previous: &AbilityDefinition) -> TargetFilter {
     match deepest_effect(previous) {
         Effect::ChangeZone {
             destination: Zone::Exile,
@@ -435,6 +442,29 @@ fn parse_becomes_plotted_continuation(lower: &str) -> bool {
             value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
             value((), tag("that card becomes plotted")),
             value((), tag("they become plotted")),
+        )),
+    ))
+    .parse(text)
+    .is_ok()
+}
+
+fn parse_becomes_foretold_continuation(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before all_consuming
+    let text = lower.trim().trim_end_matches('.').trim();
+    // CR 702.143d: Accept an optional "if you do," gate for symmetry with the
+    // plotted grammar (a future "you may exile a card. If you do, it becomes
+    // foretold." card slots in here). The continuation already attaches after
+    // the preceding exile instruction, so the gate prefix is part of the same
+    // become-foretold continuation grammar.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes foretold")),
+            value((), tag("that card becomes foretold")),
+            value((), tag("they become foretold")),
         )),
     ))
     .parse(text)
@@ -3327,7 +3357,29 @@ pub(super) fn apply_clause_continuation(
                 kind,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::Plotted { turn_plotted: 0 },
-                    target: plotted_grant_target(previous),
+                    target: exile_designation_grant_target(previous),
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+            );
+            append_definition_to_sub_chain(previous, grant_def);
+        }
+        ContinuationAst::BecomesForetold => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 702.143d: The card becomes foretold. `cost` is a placeholder
+            // filled at resolution from the card's own Foretell keyword
+            // (`casting::foretell_cost`, the single authority for "any foretell
+            // cost it has"); `turn_foretold` is stamped at resolution, mirroring
+            // Plotted's `turn_plotted: 0` placeholder.
+            let grant_def = AbilityDefinition::new(
+                kind,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Foretold {
+                        cost: ManaCost::zero(),
+                        turn_foretold: 0,
+                    },
+                    target: exile_designation_grant_target(previous),
                     grantee: PermissionGrantee::ObjectOwner,
                 },
             );
@@ -3674,6 +3726,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::BecomesPlotted => true,
+        ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -4985,6 +5038,11 @@ pub(super) fn parse_followup_continuation_ast(
                 position: parse_put_chosen_cards_at_library_position(&lower)
                     .expect("guard parsed position"),
             })
+        }
+        Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
+            if parse_becomes_foretold_continuation(&lower) =>
+        {
+            Some(ContinuationAst::BecomesForetold)
         }
         Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
             if parse_becomes_plotted_continuation(&lower) =>

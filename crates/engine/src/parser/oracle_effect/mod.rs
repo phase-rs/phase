@@ -40353,6 +40353,60 @@ mod tests {
         );
     }
 
+    /// CR 702.143d: The Foretold Soldier — "exile it face down. It becomes
+    /// foretold." The second sentence must chain a `GrantCastingPermission`
+    /// with `CastingPermission::Foretold` onto the exile (mirroring the plotted
+    /// path), not fall through to an unimplemented "become" gap.
+    #[test]
+    fn parse_exile_it_face_down_then_it_becomes_foretold() {
+        let def = parse_effect_chain(
+            "Exile it face down. It becomes foretold.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .expect("foretold grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        // `cost` is a parse-time placeholder filled at resolution from the
+        // card's own Foretell keyword; `turn_foretold` is stamped at resolution.
+        assert!(matches!(
+            permission,
+            CastingPermission::Foretold {
+                turn_foretold: 0,
+                ..
+            }
+        ));
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+
+        // No `Unimplemented` may remain anywhere in the resolved chain.
+        let mut cursor = Some(&def);
+        while let Some(node) = cursor {
+            assert!(
+                !matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "foretold chain must not contain Unimplemented: {:?}",
+                node.effect
+            );
+            cursor = node.sub_ability.as_deref();
+        }
+    }
+
     #[test]
     fn advanced_reconstruction_body_uses_random_exile_and_tracked_permission() {
         let def = parse_effect_chain(

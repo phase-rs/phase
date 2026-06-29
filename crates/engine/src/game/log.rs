@@ -134,7 +134,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
-        | GameEvent::Foretold { .. } => LogCategory::Zone,
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -1216,6 +1217,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" foretold "),
             card_seg(state, *object_id),
         ],
+        // CR 702.143d: an effect made an exiled card foretold (no foretelling
+        // player — the card itself became foretold).
+        GameEvent::BecameForetold { object_id } => {
+            vec![card_seg(state, *object_id), text(" becomes foretold")]
+        }
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
