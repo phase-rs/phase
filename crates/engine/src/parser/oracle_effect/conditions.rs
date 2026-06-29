@@ -3265,6 +3265,7 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })
         }
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => None,
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::WasCast { .. } => None,
         StaticCondition::IsPresent { filter } => {

@@ -21331,3 +21331,70 @@ fn draw_from_bottom_singular_opponents() {
         }
     );
 }
+
+/// CR 611.3a (Heroic Defiance): an Aura's "Enchanted creature gets +3/+3 unless
+/// <condition>" grant must parse the P/T bonus AND attach the negated condition
+/// — the grant applies precisely when the condition is false. Here the condition
+/// is the most-common-color predicate, so the gate is
+/// `Not(SharesColorWithMostCommonColorAmongPermanents)`.
+#[test]
+fn heroic_defiance_pt_grant_gated_on_most_common_color() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+3 unless it shares a color with the most common \
+         color among all permanents or a color tied for most common.",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T grant");
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 }),
+        "grant must add +3 power, got {:?}",
+        grant.modifications
+    );
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 3 }),
+        "grant must add +3 toughness, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SharesColorWithMostCommonColorAmongPermanents),
+        }),
+        "the +3/+3 must be gated on Not(shares-most-common-color)"
+    );
+}
+
+/// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
+/// inside the quoted ability — the attached-subject grant parser must not lift it
+/// onto the static grant as a condition. Coral Net grants a triggered ability
+/// whose text contains "…unless you discard a card."; the static must surface a
+/// `GrantTrigger` with no spurious `condition`.
+#[test]
+fn granted_ability_inner_unless_stays_inside_quoted_ability() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has \"At the beginning of your upkeep, sacrifice this \
+         creature unless you discard a card.\"",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous granted-ability static");
+    assert!(
+        grant
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "the granted triggered ability must survive intact, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition, None,
+        "the granted ability's inner `unless` must NOT become a static-grant condition"
+    );
+}

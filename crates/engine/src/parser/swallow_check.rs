@@ -3646,6 +3646,66 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 400.11 + CR 701.23j: Wish-cycle and planeswalker wishboard fetches must
+    /// lower to SearchOutsideGame without Optional_YouMay swallow warnings (issue #2276).
+    #[test]
+    fn optional_you_may_accepts_wishboard_creature_or_land_and_loyalty_fetches() {
+        let living_wish = parse_named(
+            "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile Living Wish.",
+            "Living Wish",
+            &["Sorcery"],
+        );
+        assert!(
+            !living_wish.abilities.iter().any(def_tree_has_unimplemented),
+            "Living Wish must parse without Unimplemented"
+        );
+        let living = living_wish
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Living Wish outside-game search");
+        assert!(matches!(living, Effect::SearchOutsideGame { count, .. } if count.is_up_to()));
+        assert!(!has_swallowed_detector(&living_wish, "Optional_YouMay"));
+
+        let karn = parse_named(
+            "[−2]: You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
+            "Karn, the Great Creator",
+            &["Planeswalker"],
+        );
+        assert!(
+            !karn.abilities.iter().any(def_tree_has_unimplemented),
+            "Karn -2 must parse without Unimplemented"
+        );
+        let karn_search = karn
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Karn -2 outside-game search");
+        assert!(matches!(
+            karn_search,
+            Effect::SearchOutsideGame {
+                source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
+                ..
+            }
+        ));
+        assert!(!has_swallowed_detector(&karn, "Optional_YouMay"));
+
+        let vivien = parse_named(
+            "[−5]: You may reveal a creature card you own from outside the game and put it into your hand.",
+            "Vivien, Arkbow Ranger",
+            &["Planeswalker"],
+        );
+        assert!(
+            !vivien.abilities.iter().any(def_tree_has_unimplemented),
+            "Vivien -5 must parse without Unimplemented"
+        );
+        assert!(vivien
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::SearchOutsideGame { .. })));
+        assert!(!has_swallowed_detector(&vivien, "Optional_YouMay"));
+    }
+
     #[test]
     fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
         use crate::types::ability::PlayerFilter;

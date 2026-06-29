@@ -6,8 +6,9 @@ use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
     eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_recipient_attacking_owner_target,
-    eval_source_entered_this_turn, eval_source_has_dealt_damage, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    eval_shares_color_with_most_common_color, eval_source_entered_this_turn,
+    eval_source_has_dealt_damage, eval_source_in_zone, eval_source_is_attacking,
+    eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -665,6 +666,12 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
+        // color…" — the color check is on the recipient (the enchanted creature),
+        // not the Aura source, so it must route through the recipient-eval path.
+        // Like `RecipientAttackingOwnerTarget`, the `Not` wrapper above recurses,
+        // so the positive inner condition is what reports `true` here.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         // CR 509.1b + CR 506.2: the attacking creature (recipient) is the subject
         // of the owner-attack check, so this MUST route through the recipient-eval
         // path. The `Not` wrapper above already recurses, so the positive inner
@@ -718,6 +725,8 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         // Devotion is a sum of mana symbols across permanents you control — pure
         // board composition.
         StaticCondition::DevotionGE { .. } => true,
+        // Reads the color histogram over every battlefield permanent.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         // "you control [filter]" / "a [filter] is on the battlefield" — membership
         // is battlefield population. `IsPresent` has no zone field (always a
         // battlefield-presence check), so it is unconditionally population
@@ -856,6 +865,8 @@ fn entered_object_perturbs_static_condition(
         // Commander presence — conservatively perturb (a commander entering can
         // flip it; not worth a precise commander membership test here).
         StaticCondition::ControlsCommander { .. } => true,
+        // A colored permanent entering can shift the most-common-color histogram.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
             .iter()
             .any(|c| entered_object_perturbs_static_condition(state, entered_id, ctx, c)),
@@ -1105,7 +1116,12 @@ fn evaluate_condition_with_context(
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        // CR 400.7: True when the source permanent entered the battlefield this turn.
+        // CR 105.2 + CR 611.3a: the subject is the recipient (the enchanted
+        // creature, "it"), not the Aura source; fall back to the source only when
+        // evaluated without a recipient (the source gate defers to per-recipient).
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            eval_shares_color_with_most_common_color(state, recipient_id.unwrap_or(source_id))
+        }
         StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
         // damage since entering the battlefield (sticky). The "hasn't dealt damage
