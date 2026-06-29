@@ -8402,6 +8402,36 @@ mod tests {
         );
     }
 
+    /// L1 / CR 104.4b: an object's `timestamp` is layer-ordering metadata
+    /// (CR 613.7) that `objects_content_eq` deliberately omits, like
+    /// `incarnation`. Two states differing ONLY in a per-object timestamp must
+    /// confirm as a repeat — otherwise a mandatory loop that re-stamps a
+    /// permanent every iteration (a repeated transform or re-attach) would never
+    /// draw. Revert-failing: adding `timestamp` to `objects_content_eq`'s
+    /// allow-list makes the two states differ and this assertion fail.
+    #[test]
+    fn loop_states_equal_ignores_object_timestamp() {
+        let mut a = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+
+        let mut b = a.clone();
+        let ts_a = b.objects[&ObjectId(500)].timestamp;
+        b.objects.get_mut(&ObjectId(500)).unwrap().timestamp = ts_a + 7;
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in an object's CR 613.7 timestamp must confirm as a repeat"
+        );
+    }
+
     /// CR 104.4b: pool-unit `pip_id` is a runtime/UI identity tag stamped with a
     /// unique monotonic value each time mana enters a pool. It must NOT affect
     /// game-state equality, otherwise a mandatory loop that floats mana every

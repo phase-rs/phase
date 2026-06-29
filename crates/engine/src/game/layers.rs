@@ -5591,6 +5591,122 @@ mod tests {
         assert_eq!(bear_obj.toughness, Some(4));
     }
 
+    /// Creates an enchantment in hand whose static sets `victim`'s color. The
+    /// static is mirrored onto `base_static_definitions` so it survives the
+    /// layers reset once the enchantment enters. The returned ObjectId is
+    /// assigned at creation, BEFORE the enchantment enters the battlefield.
+    fn make_offboard_color_setter(
+        state: &mut GameState,
+        name: &str,
+        color: ManaColor,
+        victim: ObjectId,
+    ) -> ObjectId {
+        let id = create_object(state, CardId(0), PlayerId(0), name.to_string(), Zone::Hand);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: victim })
+            .modifications(vec![ContinuousModification::SetColor {
+                colors: vec![color],
+            }]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+        obj.static_definitions.push(def);
+        id
+    }
+
+    /// D1: two SAME-sublayer (layer 5 color-set) statics on permanents entered
+    /// in REVERSE ObjectId order through the real `move_to_zone` entry path. The
+    /// later-entering permanent's effect must win on its CR 613.7d timestamp,
+    /// NOT on the coincidental ObjectId tiebreak. Reverting the battlefield-entry
+    /// stamp (Step 1) leaves both timestamps at 0, collapsing the sort to
+    /// ObjectId order so the higher-id blue painter would win instead.
+    #[test]
+    fn entry_timestamp_orders_same_sublayer_color_set_by_chronology() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Lower ObjectId = red, higher ObjectId = blue.
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let painter_blue =
+            make_offboard_color_setter(&mut state, "Painter Blue", ManaColor::Blue, bear);
+        assert!(
+            painter_red.0 < painter_blue.0,
+            "red must have the lower ObjectId so chronology and ObjectId disagree"
+        );
+
+        // Enter in REVERSE ObjectId order: blue (higher id) first, red last.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_blue, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].color,
+            vec![ManaColor::Red],
+            "later-entering source must win same-sublayer color set (CR 613.7d)"
+        );
+    }
+
+    /// D1 negative sibling: entries in ObjectId order keep the higher-ObjectId
+    /// winner — chronology and ObjectId agree, so the result is unchanged.
+    #[test]
+    fn entry_timestamp_matches_objectid_order_when_aligned() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let painter_blue =
+            make_offboard_color_setter(&mut state, "Painter Blue", ManaColor::Blue, bear);
+
+        // Enter in ObjectId order: red (lower id) first, blue (higher id) last.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, painter_blue, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].color, vec![ManaColor::Blue]);
+    }
+
+    /// D2: a static continuous effect (CR 613.7d) and a resolution-generated
+    /// transient continuous effect (CR 613.7b) must interleave by true
+    /// timestamp. The transient blue is created FIRST (lower timestamp); the
+    /// static red permanent enters LATER (higher timestamp), so red wins.
+    /// Reverting Step 1 leaves the static permanent at timestamp 0, which sorts
+    /// BEFORE the transient (timestamp >= 1), so the transient blue would win.
+    #[test]
+    fn static_and_transient_color_interleave_by_true_timestamp() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let aux = make_creature(&mut state, "Aux", 1, 1, PlayerId(0));
+
+        // Transient SetColor blue created first -> lower timestamp.
+        state.add_transient_continuous_effect(
+            aux,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::Blue],
+            }],
+            None,
+        );
+
+        // Static SetColor red on a permanent entering later -> higher timestamp.
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].color,
+            vec![ManaColor::Red],
+            "later-created static effect must win over the earlier transient (CR 613.7b/d chronology)"
+        );
+    }
+
     #[test]
     fn test_dependency_ordering_overrides_timestamp() {
         let mut state = setup();
