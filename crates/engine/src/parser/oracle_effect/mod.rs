@@ -19734,17 +19734,17 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 702.62a/b + CR 611.2a + CR 608.2c: "Cards exiled this way [that
-        // don't have <kw>] gain <kw>." — the plural / set-referencing sibling of
-        // the singular "If it doesn't have suspend, it gains suspend" keyword
-        // grant (Jhoira of the Ghitu, The Tenth Doctor). Emits a `GenericEffect`
-        // keyword grant bound to the chain's exiled-card tracked set via
-        // `ParentTarget`. The clause carries a `SourceLacksKeyword` condition from
-        // the "that don't have <kw>" restrictive clause, but that condition is
-        // inert at runtime today (it resolves against the spell, which never has
-        // the keyword, not the exiled card), so the grant currently fires
-        // unconditionally. Requires a prior exile clause to publish the tracked
-        // set it broadcasts to (The Wedding of River Song).
+        // CR 702.62a + CR 702.62b + CR 611.2a + CR 608.2c: "Cards exiled this
+        // way gain <kw>." — the plural / set-referencing sibling of the singular
+        // "If it doesn't have suspend, it gains suspend" keyword grant (Jhoira of
+        // the Ghitu, The Tenth Doctor). Emits a `GenericEffect` keyword grant
+        // bound to the chain's exiled-card tracked set via `ParentTarget`.
+        // NOTE: The "that don't have <kw>" restrictive clause form strict-fails
+        // (returns None here) — a correct per-card exclusion requires an
+        // object-scoped condition that does not yet exist in the engine. See
+        // `try_parse_exiled_this_way_keyword_grant` for the full explanation.
+        // Requires a prior exile clause to publish the tracked set it broadcasts
+        // to.
         if !clauses.is_empty() {
             if let Some(parsed) =
                 subject::try_parse_exiled_this_way_keyword_grant(normalized_text, ctx)

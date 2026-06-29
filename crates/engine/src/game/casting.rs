@@ -19797,20 +19797,23 @@ mod tests {
         );
     }
 
-    /// The Wedding of River Song (WHO) — runtime proof of the Defect C parser
-    /// fix. Drives the real cast pipeline (CastSpell → resolution) and asserts:
+    /// The Wedding of River Song (WHO) — runtime regression for the core chain.
+    /// Drives the real cast pipeline (CastSpell → resolution) and asserts:
     /// (a) the controller draws two cards; (b) the controller's nonland card is
-    /// exiled with time counters = its mana value (CR 122.1) and (c) gains suspend
-    /// from the set-referencing "Cards exiled this way that don't have suspend
-    /// gain suspend" grant (CR 702.62b) — proving the grant reaches the chain
-    /// tracked set even across the deferred "does the same" `Unimplemented`
-    /// strict-failure clause that sits between the exile and the grant.
+    /// exiled with time counters = its mana value (CR 122.1).
     ///
-    /// "Then target opponent does the same" is a documented strict-failure (no
-    /// opponent exile happens) pending cross-cutting engine targeting work; see
-    /// the executor's scope-expansion note.
+    /// The "Cards exiled this way that don't have suspend gain suspend" clause
+    /// (Defect C) is a *documented strict-failure* — the "that don't have <kw>"
+    /// restrictive clause strict-fails to `Unimplemented` because the correct
+    /// per-card object-scoped condition (applying `SourceLacksKeyword` per exiled
+    /// card, not per spell source) does not yet exist in the engine. The exiled
+    /// card therefore does NOT gain suspend at runtime — this is expected, not a
+    /// regression. See `try_parse_exiled_this_way_keyword_grant` for details.
+    ///
+    /// "Then target opponent does the same" is also a documented strict-failure
+    /// (no opponent exile happens) pending cross-cutting engine targeting work.
     #[test]
-    fn wedding_of_river_song_grants_suspend_to_exiled_card() {
+    fn wedding_of_river_song_exiles_card_and_draws_two() {
         use super::super::engine::apply_as_current;
         use crate::game::keywords::object_has_effective_keyword_kind;
         use crate::game::scenario::GameScenario;
@@ -19942,14 +19945,15 @@ mod tests {
         // (b) The controller's nonland card was exiled.
         assert_eq!(state.objects[&p0_card].zone, Zone::Exile);
 
-        // (c) The set-referencing grant suspended the exiled card — the core
-        // Defect C proof: "Cards exiled this way that don't have suspend gain
-        // suspend" reaches the chain tracked set end-to-end, even across the
-        // intervening deferred "does the same" strict-failure clause. Before this
-        // fix the grant was `Effect::Unimplemented` and no suspend was granted.
+        // (c) The "that don't have suspend" restrictive clause is a documented
+        // strict-failure: the exiled card must NOT gain suspend (the grant
+        // produces Unimplemented, not GenericEffect{AddKeyword(Suspend)}).
+        // This assertion locks in the strict-failure boundary so we notice if
+        // the overgrant is accidentally reintroduced.
         assert!(
-            object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
-            "the exiled card must gain suspend from the set-referencing grant"
+            !object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
+            "the exiled card must NOT gain suspend: the 'that don't have' clause \
+             is a strict-failure until object-scoped condition support exists"
         );
     }
 

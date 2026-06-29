@@ -2847,28 +2847,33 @@ fn build_continuous_clause(
     })
 }
 
-/// CR 702.62a/b + CR 611.2a + CR 608.2c: Recognize the plural, set-referencing
-/// "Cards exiled this way [that don't have <kw>] gain <kw>" continuous keyword
-/// grant (The Wedding of River Song). This is the plural / relative-clause
-/// sibling of the singular "If it doesn't have suspend, it gains suspend" grant
-/// (Jhoira of the Ghitu, The Tenth Doctor): the subject "cards exiled this way"
-/// is a back-reference (CR 608.2c "this way") to the chain's tracked set, which
-/// the `GenericEffect` resolver broadcasts the grant to via `ParentTarget`.
+/// CR 702.62a + CR 702.62b + CR 611.2a + CR 608.2c: Recognize the plural,
+/// set-referencing "cards exiled this way gain <kw>" continuous keyword grant.
+/// This is the plural / relative-clause sibling of the singular "If it doesn't
+/// have suspend, it gains suspend" grant (Jhoira of the Ghitu, The Tenth
+/// Doctor): the subject "cards exiled this way" is a back-reference (CR 608.2c
+/// "this way") to the chain's tracked set, which the `GenericEffect` resolver
+/// broadcasts the grant to via `ParentTarget`.
 ///
 /// Parameterized on the keyword (never Suspend-hardcoded) so it covers the whole
-/// "cards exiled this way that don't have <kw> gain <kw>" class (only the
-/// "exiled this way" head is matched today — no "affected this way" arm). The
-/// produced clause is byte-for-byte the Jhoira/Tenth suspend-grant shape,
-/// attaching a `SourceLacksKeyword` condition lifted from the "that don't have
-/// <kw>" restrictive clause when present (CR 702.62a). NOTE: that condition is
-/// inert at runtime today — `evaluate_condition` resolves `SourceLacksKeyword`
-/// against the ability's `source_id` (the spell, which never has <kw>), not the
-/// exiled card, so the grant fires unconditionally and an already-<kw> card is
-/// granted <kw> a redundant second time. This matches the singular Jhoira/Tenth
-/// limitation; a correct per-card exclusion needs a typed object-scoped condition
-/// (e.g. the proposed `CostPaidObjectLacksKeyword`). Returns `None`
-/// (strict-failure to `Unimplemented`) for any predicate that is not a recognized
-/// "gain <kw>" keyword grant.
+/// "cards exiled this way gain <kw>" class (only the "exiled this way" head is
+/// matched today — no "affected this way" arm). The produced clause is
+/// byte-for-byte the Jhoira/Tenth suspend-grant shape.
+///
+/// The optional "that don't have <kw>" restrictive clause (CR 702.62a) is
+/// recognised by the parser but results in a strict-failure (`None`) because
+/// `evaluate_condition` resolves `SourceLacksKeyword` against the ability's
+/// `source_id` (the spell, which never carries the keyword), not each individual
+/// exiled card. Attaching the condition therefore produces an unconditional
+/// overgrant — already-<kw> cards would still receive a redundant grant. A
+/// correct per-card exclusion requires an object-scoped condition variant (e.g.
+/// `CostPaidObjectLacksKeyword`) that does not yet exist in the engine. Until
+/// that building block is added, "cards exiled this way that don't have <kw>
+/// gain <kw>" is a documented strict-failure deferred to `Unimplemented`.
+///
+/// Returns `None` (strict-failure to `Unimplemented`) when the restrictive
+/// clause is present or when the predicate is not a recognised "gain <kw>"
+/// keyword grant.
 pub(super) fn try_parse_exiled_this_way_keyword_grant(
     text: &str,
     ctx: &ParseContext,
@@ -2888,31 +2893,23 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
         .parse(i)
     })?;
 
-    // Optional restrictive "that don't have <kw>" → `SourceLacksKeyword` condition
-    // (runtime-inert today; see the fn doc above for the object-scope limitation).
-    // The keyword text runs up to the " gain" verb (CR 702.62a). The negation is
-    // composed by prefix nesting (sum, not product): " that do" + optional "es"
-    // + ("n't" | " not") covers don't / doesn't / do not / does not.
+    // Detect the restrictive "that don't have <kw>" clause (CR 702.62a).
+    // When present, strict-fail: the correct object-scoped condition
+    // (`evaluate_condition` per exiled card, not per spell source) is not
+    // yet implemented. Attaching `SourceLacksKeyword` here would silently
+    // overgrant — see the fn doc for the full explanation.
     let after_head_lower = after_head.to_lowercase();
-    let restrictive = nom_on_lower(after_head, &after_head_lower, |i| {
+    let has_restrictive = nom_on_lower(after_head, &after_head_lower, |i| {
         let (i, _) = tag(" that do").parse(i)?;
         let (i, _) = opt(tag("es")).parse(i)?;
         let (i, _) = alt((tag("n't"), tag(" not"))).parse(i)?;
         let (i, _) = tag(" have ").parse(i)?;
-        let (i, kw_text) = take_until(" gain").parse(i)?;
-        Ok((i, kw_text.trim().to_string()))
+        let (i, _) = take_until(" gain").parse(i)?;
+        Ok((i, ()))
     });
-
-    let (predicate_text, lacked): (&str, Option<Keyword>) = match restrictive {
-        Some((kw_text, rest)) => {
-            let keyword: Keyword = kw_text.parse().ok()?;
-            if matches!(keyword, Keyword::Unknown(_)) {
-                return None;
-            }
-            (rest, Some(keyword))
-        }
-        None => (after_head, None),
-    };
+    if has_restrictive.is_some() {
+        return None;
+    }
 
     // The predicate must be a "gain <kw>" continuous keyword grant; reuse the
     // shared `build_continuous_clause` machinery (which applies the keyword-driven
@@ -2925,12 +2922,7 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
         inherits_parent: false,
         is_optional: false,
     };
-    let mut clause = build_continuous_clause(application, predicate_text.trim(), ctx)?;
-    if let Some(keyword) = lacked {
-        clause.condition =
-            Some(crate::types::ability::AbilityCondition::SourceLacksKeyword { keyword });
-    }
-    Some(clause)
+    build_continuous_clause(application, after_head.trim(), ctx)
 }
 
 /// Strip "for each [clause]" suffix from text so that duration extraction can find
@@ -4930,32 +4922,20 @@ mod tests {
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
 
-    // CR 702.62a/b + CR 611.2a: "Cards exiled this way that don't have suspend
-    // gain suspend" (The Wedding of River Song) — the plural / set-referencing
-    // sibling of the singular Jhoira/Tenth "if it doesn't have suspend, it gains
-    // suspend". Must produce the same GenericEffect{AddKeyword(Suspend),
-    // ParentTarget, Permanent} shape carrying a SourceLacksKeyword condition
-    // (inert at runtime today — see try_parse_exiled_this_way_keyword_grant).
+    // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
+    // (unconditional form — no "that don't have" clause) must produce the
+    // GenericEffect{AddKeyword(Suspend), ParentTarget, Permanent} shape that
+    // matches the singular Jhoira/Tenth suspend-grant, with no condition set.
     #[test]
     fn exiled_this_way_suspend_grant_matches_singular_shape() {
-        use crate::types::ability::AbilityCondition;
         use crate::types::keywords::Keyword;
         let ctx = ParseContext::default();
-        let clause = try_parse_exiled_this_way_keyword_grant(
-            "Cards exiled this way that don't have suspend gain suspend",
-            &ctx,
-        )
-        .expect("should recognize the set-referencing suspend grant");
+        let clause =
+            try_parse_exiled_this_way_keyword_grant("Cards exiled this way gain suspend", &ctx)
+                .expect("should recognize the unconditional set-referencing suspend grant");
         assert_eq!(clause.duration, Some(Duration::Permanent));
-        assert_eq!(
-            clause.condition,
-            Some(AbilityCondition::SourceLacksKeyword {
-                keyword: Keyword::Suspend {
-                    count: 0,
-                    cost: crate::types::mana::ManaCost::default(),
-                },
-            })
-        );
+        // No condition on the unconditional form.
+        assert_eq!(clause.condition, None);
         let Effect::GenericEffect {
             static_abilities,
             duration,
@@ -4976,24 +4956,16 @@ mod tests {
     }
 
     // Building-block proof: the recognizer is parameterized on the keyword, not
-    // Suspend-hardcoded. A synthetic "… that don't have flying gain flying"
-    // yields an AddKeyword(Flying) grant gated by SourceLacksKeyword(Flying).
+    // Suspend-hardcoded. A synthetic "cards exiled this way gain flying" must
+    // produce an AddKeyword(Flying) grant with no condition.
     #[test]
     fn exiled_this_way_grant_is_keyword_parameterized() {
-        use crate::types::ability::AbilityCondition;
         use crate::types::keywords::Keyword;
         let ctx = ParseContext::default();
-        let clause = try_parse_exiled_this_way_keyword_grant(
-            "Cards exiled this way that don't have flying gain flying",
-            &ctx,
-        )
-        .expect("should recognize a keyword-parameterized set grant");
-        assert_eq!(
-            clause.condition,
-            Some(AbilityCondition::SourceLacksKeyword {
-                keyword: Keyword::Flying,
-            })
-        );
+        let clause =
+            try_parse_exiled_this_way_keyword_grant("Cards exiled this way gain flying", &ctx)
+                .expect("should recognize a keyword-parameterized set grant");
+        assert_eq!(clause.condition, None);
         let Effect::GenericEffect {
             static_abilities, ..
         } = &clause.effect
@@ -5006,6 +4978,31 @@ mod tests {
                 keyword: Keyword::Flying
             }
         )));
+    }
+
+    // Strict-failure guard: the "that don't have <kw>" restrictive clause
+    // produces a documented strict-failure (None) because the correct per-card
+    // object-scoped condition is not yet implemented. Both keyword variants must
+    // be rejected so the chunk falls through to Unimplemented.
+    #[test]
+    fn exiled_this_way_with_restrictive_clause_is_strict_failure() {
+        let ctx = ParseContext::default();
+        assert!(
+            try_parse_exiled_this_way_keyword_grant(
+                "Cards exiled this way that don't have suspend gain suspend",
+                &ctx,
+            )
+            .is_none(),
+            "suspend restrictive clause must strict-fail"
+        );
+        assert!(
+            try_parse_exiled_this_way_keyword_grant(
+                "Cards exiled this way that don't have flying gain flying",
+                &ctx,
+            )
+            .is_none(),
+            "flying restrictive clause must strict-fail"
+        );
     }
 
     // Strict-failure guard: a non-"gain <kw>" predicate after the subject head
@@ -5021,18 +5018,16 @@ mod tests {
         .is_none());
     }
 
-    // CR 608.2c: The Wedding of River Song — full spell chain. Defect C ("cards
-    // exiled this way that don't have suspend gain suspend") must lower to the
-    // Jhoira suspend-grant shape. Defect B ("then target opponent does the same")
-    // is a *documented* `Unimplemented` strict-failure — NOT the prior silently-
-    // degenerate `ChangeZone{empty, Opponent}` misparse — pending cross-cutting
-    // engine targeting work (mid-chain `TargetOnly` slot collection + opponent-
-    // choice routing).
+    // CR 608.2c: The Wedding of River Song — full spell chain. Both Defect B
+    // ("then target opponent does the same") and Defect C ("cards exiled this
+    // way that don't have suspend gain suspend") are documented strict-failures
+    // (`Unimplemented`): Defect B pending cross-cutting opponent-choice routing,
+    // Defect C pending an object-scoped condition variant that applies per
+    // exiled card rather than per spell source (see
+    // try_parse_exiled_this_way_keyword_grant). Neither should degenerate into
+    // the prior silent `ChangeZone{empty, Opponent}` misparse.
     #[test]
-    fn wedding_of_river_song_chain_lowers_without_unimplemented() {
-        use crate::types::ability::AbilityCondition;
-        use crate::types::keywords::Keyword;
-
+    fn wedding_of_river_song_chain_strict_failures_are_documented() {
         let def = super::super::parse_effect_chain(
             "Draw two cards, then you may exile a nonland card from your hand with a \
              number of time counters on it equal to its mana value. Then target \
@@ -5076,47 +5071,28 @@ mod tests {
             "the degenerate empty-Opponent exile misparse must be gone"
         );
 
-        // Defect C: a GenericEffect suspend grant gated by SourceLacksKeyword.
-        let suspend_grant = def_chain_find_suspend_grant(&def);
-        assert!(
-            suspend_grant,
-            "expected a GenericEffect suspend grant from 'cards exiled this way … gain suspend'"
-        );
-
-        // The suspend-grant def carries the SourceLacksKeyword(Suspend) condition
-        // (runtime-inert today; resolves against the spell, not the exiled card).
-        fn find_lacks_suspend(def: &AbilityDefinition) -> bool {
+        // Defect C: "cards exiled this way that don't have suspend gain suspend"
+        // must NOT produce a GenericEffect suspend grant. The "that don't have"
+        // restrictive clause strict-fails until an object-scoped condition exists.
+        fn chain_has_suspend_grant(def: &AbilityDefinition) -> bool {
+            use crate::types::keywords::Keyword;
             let here = matches!(
-                &def.condition,
-                Some(AbilityCondition::SourceLacksKeyword {
-                    keyword: Keyword::Suspend { .. }
-                })
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword { keyword: Keyword::Suspend { .. } }
+                    )))
             );
             here || def
                 .sub_ability
                 .as_ref()
-                .is_some_and(|s| find_lacks_suspend(s))
+                .is_some_and(|s| chain_has_suspend_grant(s))
         }
         assert!(
-            find_lacks_suspend(&def),
-            "expected SourceLacksKeyword(Suspend) gate on the grant def"
+            !chain_has_suspend_grant(&def),
+            "Defect C must not produce a GenericEffect suspend grant (strict-failure expected)"
         );
-    }
-
-    fn def_chain_find_suspend_grant(def: &AbilityDefinition) -> bool {
-        use crate::types::keywords::Keyword;
-        let here = matches!(
-            &*def.effect,
-            Effect::GenericEffect { static_abilities, .. }
-                if static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(
-                    m,
-                    ContinuousModification::AddKeyword { keyword: Keyword::Suspend { .. } }
-                )))
-        );
-        here || def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|s| def_chain_find_suspend_grant(s))
     }
 
     // CR 611.3a + CR 702.16: Dominaria's Judgment — "creatures you control gain
