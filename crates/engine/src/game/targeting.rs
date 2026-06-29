@@ -1306,21 +1306,24 @@ pub fn resolve_effect_player_ref(
         // controller. CR 601.2c normally makes the controller announce every
         // target; this card text overrides the announcer for this one slot.
         //
-        // Deterministic stand-in: prefer an opponent already targeted by the
-        // resolving spell, otherwise the first opponent in seat order. In a 3+
-        // player game CR 700.2e (by analogy — that rule is mode-specific) lets the
-        // controller pick *which* opponent makes a non-controller choice; we do
-        // not yet model that interactive sub-choice, so the first seat-order
-        // opponent is a deterministic placeholder for it.
+        // CR 601.2c + CR 115.1: in a multiplayer game the controller chooses
+        // which opponent announces; that choice is recorded on the cast's
+        // `SpellContext` (`announcing_opponent`) and takes precedence. Falling
+        // back: an opponent already targeted by the resolving spell, otherwise
+        // the first opponent in seat order (the single-opponent case, where
+        // there is no decision to make).
         TargetFilter::Opponent => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(player) => {
-                    crate::game::players::is_opponent(state, ability.controller, *player)
-                        .then_some(*player)
-                }
-                _ => None,
+            .context
+            .announcing_opponent
+            .filter(|&chosen| crate::game::players::is_opponent(state, ability.controller, chosen))
+            .or_else(|| {
+                ability.targets.iter().find_map(|target| match target {
+                    TargetRef::Player(player) => {
+                        crate::game::players::is_opponent(state, ability.controller, *player)
+                            .then_some(*player)
+                    }
+                    _ => None,
+                })
             })
             .or_else(|| {
                 crate::game::players::opponents(state, ability.controller)

@@ -1185,6 +1185,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
 
+        // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
+        // controller picks which opponent announces; fall back to the first.
+        WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },

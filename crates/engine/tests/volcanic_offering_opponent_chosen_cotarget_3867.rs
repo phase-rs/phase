@@ -207,3 +207,107 @@ fn bulk_select_targets_for_mixed_chooser_spell_is_rejected() {
         "bulk SelectTargets must be rejected for a spell with an opponent-chosen slot"
     );
 }
+
+/// CR 601.2c + CR 115.1 (#4349 review [HIGH]): In a multiplayer game the spell
+/// CONTROLLER chooses which opponent announces an "of an opponent's choice"
+/// slot — not seat order. This drives a 3-player cast and proves the controller
+/// can pick the NON-first opponent (P2) as the announcer; the previous
+/// placeholder always routed the choice to the first seat-order opponent (P1).
+#[test]
+fn controller_chooses_non_first_opponent_as_announcer_in_three_player_game() {
+    let p2 = PlayerId(2);
+
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Both opponents control a nonbasic land and a creature, so every slot has a
+    // legal target regardless of which opponent the controller picks.
+    let land_p1 = nonbasic_land(&mut scenario, P1, "P1 Land");
+    let creature_p1 = scenario.add_creature(P1, "P1 Creature", 5, 5).id();
+    let land_p2 = nonbasic_land(&mut scenario, p2, "P2 Land");
+    let creature_p2 = scenario.add_creature(p2, "P2 Creature", 5, 5).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Volcanic Offering", true, VOLCANIC_OFFERING)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let spell_card = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free instant must succeed");
+
+    // With two opponents, the controller is first asked which one announces.
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseAnnouncingOpponent {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, P0,
+                "the controller chooses the announcing opponent"
+            );
+            assert!(
+                candidates.contains(&P1) && candidates.contains(&p2),
+                "both opponents are candidates, got {candidates:?}"
+            );
+        }
+        other => panic!("expected ChooseAnnouncingOpponent, got {other:?}"),
+    }
+
+    // The controller picks the NON-first opponent (P2).
+    runner
+        .act(GameAction::ChooseAnnouncingOpponent { opponent: p2 })
+        .expect("controller picks P2 as the announcer");
+
+    // Slot 0: controller announces a nonbasic land an opponent controls.
+    assert_eq!(current_announcer(&runner.state().waiting_for), P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_p1)),
+        })
+        .expect("controller announces P1's land");
+
+    // Slot 1 ("of an opponent's choice"): announced by the CHOSEN opponent P2,
+    // proving the controller's non-first selection is honored (not seat-order P1).
+    assert_eq!(
+        current_announcer(&runner.state().waiting_for),
+        p2,
+        "the opponent-chosen slot is announced by the controller-selected opponent P2"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_p2)),
+        })
+        .expect("P2 announces the second land");
+
+    // Slot 2: controller again.
+    assert_eq!(current_announcer(&runner.state().waiting_for), P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(creature_p1)),
+        })
+        .expect("controller announces P1's creature");
+
+    // Slot 3 ("of an opponent's choice"): announced by P2 again.
+    assert_eq!(
+        current_announcer(&runner.state().waiting_for),
+        p2,
+        "the final opponent-chosen slot is announced by P2"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(creature_p2)),
+        })
+        .expect("P2 announces the second creature");
+
+    // CR 115.1: the spell is controlled by its controller, not the announcer.
+    let stack_entry = runner.state().stack.last().expect("spell is on the stack");
+    assert_eq!(stack_entry.controller, P0);
+}

@@ -17175,6 +17175,12 @@ pub enum KickerVariant {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 601.2c + CR 115.1: For a target slot announced by "an opponent's
+    /// choice", the opponent the spell's controller chose to make that choice.
+    /// In a multiplayer game the controller picks which opponent announces;
+    /// `None` until that choice is made (and for the single-opponent default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcing_opponent: Option<PlayerId>,
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,

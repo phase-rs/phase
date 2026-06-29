@@ -5045,6 +5045,17 @@ pub enum WaitingFor {
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
+    /// CR 601.2c + CR 115.1: A spell with an "of an opponent's choice" target slot
+    /// is being cast in a multiplayer game; the controller (`player`) chooses
+    /// which opponent will announce that slot's target. Only entered with two or
+    /// more opponents (one opponent has no decision). `candidates` is the legal
+    /// opponent set; `pending_cast` carries the in-flight cast so target
+    /// declaration resumes (deferred) once the announcer is chosen.
+    ChooseAnnouncingOpponent {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
     /// bottom of their library. Choices are made in APNAP order. `remaining` holds
     /// the next player/card pairs still awaiting a choice.
@@ -5786,6 +5797,7 @@ impl WaitingFor {
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
@@ -5923,6 +5935,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashChooseOpponent { player, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }

@@ -11074,6 +11074,41 @@ fn continue_with_prepared(
             .map(|ability| ability.target_constraints.clone())
             .unwrap_or_default();
 
+        // CR 601.2c + CR 115.1: When a slot is announced by an opponent ("of an
+        // opponent's choice") and the controller has two or more opponents, the
+        // controller first chooses which opponent announces. Defer target
+        // declaration until that choice is recorded; a single-opponent cast has
+        // no decision and proceeds straight through.
+        if resolved.context.announcing_opponent.is_none()
+            && target_slots.iter().any(|slot| slot.chooser.is_some())
+        {
+            let candidates = crate::game::players::opponents(state, player);
+            if candidates.len() >= 2 {
+                let mut pending = PendingCast::new(
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    prepared.mana_cost.clone(),
+                );
+                pending.base_cost = Some(prepared.base_mana_cost.clone());
+                pending.casting_variant = prepared.casting_variant;
+                pending.cast_timing_permission = prepared.cast_timing_permission;
+                pending.distribute = prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone());
+                pending.origin_zone = prepared.origin_zone;
+                pending.payment_mode = prepared.payment_mode;
+                pending.target_constraints = target_constraints;
+                pending.deferred_target_selection = true;
+                return Ok(WaitingFor::ChooseAnnouncingOpponent {
+                    player,
+                    candidates,
+                    pending_cast: Box::new(pending),
+                });
+            }
+        }
+
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
         // selection path so the sacrifice prompt appears first.

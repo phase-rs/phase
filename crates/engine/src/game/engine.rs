@@ -4592,6 +4592,36 @@ fn apply_action(
             casting::apply_post_x_cost_modifiers(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
+        // CR 601.2c + CR 115.1: The spell controller chose which opponent announces
+        // an "of an opponent's choice" target slot. Record it on the in-flight cast
+        // and resume the (deferred) target declaration; `resolve_effect_player_ref`
+        // now routes that slot's chooser to the controller-selected opponent.
+        (
+            WaitingFor::ChooseAnnouncingOpponent {
+                player,
+                candidates,
+                pending_cast,
+            },
+            GameAction::ChooseAnnouncingOpponent { opponent },
+        ) => {
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Player {opponent:?} is not an eligible announcing opponent"
+                )));
+            }
+            let caster = *player;
+            let chosen = opponent;
+            let mut pending = (**pending_cast).clone();
+            // Each ability link resolves its own slot chooser, so record the
+            // chosen announcer on every link in the chain (sub-abilities own the
+            // later "of an opponent's choice" slots).
+            let mut node = Some(&mut pending.ability);
+            while let Some(link) = node {
+                link.context.announcing_opponent = Some(chosen);
+                node = link.sub_ability.as_deref_mut();
+            }
+            casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
+        }
         // CR 702.132a: Assist — caster chooses another player to help pay generic,
         // or declines. `assist_state` was set to `Offered` when the offer was made,
         // so both branches simply (re)enter the payment step from where they resume.
