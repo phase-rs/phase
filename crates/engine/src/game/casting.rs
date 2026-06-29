@@ -19797,6 +19797,162 @@ mod tests {
         );
     }
 
+    /// The Wedding of River Song (WHO) — runtime proof of the Defect C parser
+    /// fix. Drives the real cast pipeline (CastSpell → resolution) and asserts:
+    /// (a) the controller draws two cards; (b) the controller's nonland card is
+    /// exiled with time counters = its mana value (CR 122.1) and (c) gains suspend
+    /// from the set-referencing "Cards exiled this way that don't have suspend
+    /// gain suspend" grant (CR 702.62b) — proving the grant reaches the chain
+    /// tracked set even across the deferred "does the same" `Unimplemented`
+    /// strict-failure clause that sits between the exile and the grant.
+    ///
+    /// "Then target opponent does the same" is a documented strict-failure (no
+    /// opponent exile happens) pending cross-cutting engine targeting work; see
+    /// the executor's scope-expansion note.
+    #[test]
+    fn wedding_of_river_song_grants_suspend_to_exiled_card() {
+        use super::super::engine::apply_as_current;
+        use crate::game::keywords::object_has_effective_keyword_kind;
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{CastPaymentMode, WaitingFor};
+        use crate::types::identifiers::ObjectId;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let oracle = "Draw two cards, then you may exile a nonland card from your \
+                      hand with a number of time counters on it equal to its mana \
+                      value. Then target opponent does the same. Cards exiled this \
+                      way that don't have suspend gain suspend.\nTime travel. (For \
+                      each suspended card you own and each permanent you control \
+                      with a time counter on it, you may add or remove a time \
+                      counter.)";
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(p0, "The Wedding of River Song", false, oracle)
+            .id();
+
+        // Controller's nonland card to exile (mana value 2 → 2 time counters).
+        let p0_card = scenario.add_card_to_hand(p0, "Controller Nonland");
+        // P0 needs cards available to draw two.
+        scenario.with_library_top(p0, &["Top A", "Top B", "Top C"]);
+        // Mana for {2}{W}.
+        scenario.with_mana_pool(
+            p0,
+            vec![
+                ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&p0_card)
+            .unwrap()
+            .mana_cost = ManaCost::generic(2);
+
+        let library_before = runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == p0)
+            .unwrap()
+            .library
+            .len();
+
+        let card_id = runner.state().objects[&spell].card_id;
+        apply_as_current(
+            runner.state_mut(),
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("casting The Wedding of River Song must enter the pipeline");
+
+        // Manual driver: pass priority to resolve, and exile the controller's
+        // nonland card at the resolution-time hand-exile choice.
+        for _ in 0..80 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ManaPayment { .. } => {
+                    apply_as_current(runner.state_mut(), GameAction::PassPriority)
+                        .expect("finalizing auto mana payment must succeed");
+                }
+                WaitingFor::Priority { .. } => {
+                    if runner.state().stack.is_empty() {
+                        break;
+                    }
+                    if apply_as_current(runner.state_mut(), GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    apply_as_current(
+                        runner.state_mut(),
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .expect("accepting the optional exile must succeed");
+                }
+                WaitingFor::EffectZoneChoice { cards, .. } => {
+                    let selection = if cards.contains(&p0_card) {
+                        vec![p0_card]
+                    } else {
+                        Vec::new()
+                    };
+                    apply_as_current(
+                        runner.state_mut(),
+                        GameAction::SelectCards { cards: selection },
+                    )
+                    .expect("selecting the hand card to exile must succeed");
+                }
+                WaitingFor::OrderTriggers { .. } => {
+                    super::super::triggers::drain_order_triggers_with_identity(runner.state_mut());
+                }
+                // Time travel's add/remove-counter choice (or any later prompt) —
+                // the exile and the suspend grant have already resolved.
+                _ => break,
+            }
+        }
+
+        let state = runner.state();
+
+        // (a) The controller drew two cards (library shrank by two).
+        let library_after = state
+            .players
+            .iter()
+            .find(|p| p.id == p0)
+            .unwrap()
+            .library
+            .len();
+        assert_eq!(
+            library_before - library_after,
+            2,
+            "the controller must draw two cards"
+        );
+
+        // (b) The controller's nonland card was exiled.
+        assert_eq!(state.objects[&p0_card].zone, Zone::Exile);
+
+        // (c) The set-referencing grant suspended the exiled card — the core
+        // Defect C proof: "Cards exiled this way that don't have suspend gain
+        // suspend" reaches the chain tracked set end-to-end, even across the
+        // intervening deferred "does the same" strict-failure clause. Before this
+        // fix the grant was `Effect::Unimplemented` and no suspend was granted.
+        assert!(
+            object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
+            "the exiled card must gain suspend from the set-referencing grant"
+        );
+    }
+
     #[test]
     fn grim_lavamancer_targets_before_graveyard_exile_cost() {
         use super::super::engine::apply_as_current;

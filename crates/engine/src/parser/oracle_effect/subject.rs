@@ -2847,6 +2847,92 @@ fn build_continuous_clause(
     })
 }
 
+/// CR 702.62a/b + CR 611.2a + CR 608.2c: Recognize the plural, set-referencing
+/// "Cards exiled this way [that don't have <kw>] gain <kw>" continuous keyword
+/// grant (The Wedding of River Song). This is the plural / relative-clause
+/// sibling of the singular "If it doesn't have suspend, it gains suspend" grant
+/// (Jhoira of the Ghitu, The Tenth Doctor): the subject "cards exiled this way"
+/// is a back-reference (CR 608.2c "this way") to the chain's tracked set, which
+/// the `GenericEffect` resolver broadcasts the grant to via `ParentTarget`.
+///
+/// Parameterized on the keyword (never Suspend-hardcoded) so it covers the whole
+/// "cards exiled this way that don't have <kw> gain <kw>" class (only the
+/// "exiled this way" head is matched today — no "affected this way" arm). The
+/// produced clause is byte-for-byte the Jhoira/Tenth suspend-grant shape,
+/// attaching a `SourceLacksKeyword` condition lifted from the "that don't have
+/// <kw>" restrictive clause when present (CR 702.62a). NOTE: that condition is
+/// inert at runtime today — `evaluate_condition` resolves `SourceLacksKeyword`
+/// against the ability's `source_id` (the spell, which never has <kw>), not the
+/// exiled card, so the grant fires unconditionally and an already-<kw> card is
+/// granted <kw> a redundant second time. This matches the singular Jhoira/Tenth
+/// limitation; a correct per-card exclusion needs a typed object-scoped condition
+/// (e.g. the proposed `CostPaidObjectLacksKeyword`). Returns `None`
+/// (strict-failure to `Unimplemented`) for any predicate that is not a recognized
+/// "gain <kw>" keyword grant.
+pub(super) fn try_parse_exiled_this_way_keyword_grant(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Strip the set-referencing subject head ("cards exiled this way") — a
+    // back-reference (CR 608.2c) to the chain's exiled-card tracked set.
+    let (_, after_head) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag("the cards exiled this way"),
+                tag("a card exiled this way"),
+                tag("cards exiled this way"),
+            )),
+        )
+        .parse(i)
+    })?;
+
+    // Optional restrictive "that don't have <kw>" → `SourceLacksKeyword` condition
+    // (runtime-inert today; see the fn doc above for the object-scope limitation).
+    // The keyword text runs up to the " gain" verb (CR 702.62a). The negation is
+    // composed by prefix nesting (sum, not product): " that do" + optional "es"
+    // + ("n't" | " not") covers don't / doesn't / do not / does not.
+    let after_head_lower = after_head.to_lowercase();
+    let restrictive = nom_on_lower(after_head, &after_head_lower, |i| {
+        let (i, _) = tag(" that do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag("n't"), tag(" not"))).parse(i)?;
+        let (i, _) = tag(" have ").parse(i)?;
+        let (i, kw_text) = take_until(" gain").parse(i)?;
+        Ok((i, kw_text.trim().to_string()))
+    });
+
+    let (predicate_text, lacked): (&str, Option<Keyword>) = match restrictive {
+        Some((kw_text, rest)) => {
+            let keyword: Keyword = kw_text.parse().ok()?;
+            if matches!(keyword, Keyword::Unknown(_)) {
+                return None;
+            }
+            (rest, Some(keyword))
+        }
+        None => (after_head, None),
+    };
+
+    // The predicate must be a "gain <kw>" continuous keyword grant; reuse the
+    // shared `build_continuous_clause` machinery (which applies the keyword-driven
+    // `Suspend → Permanent` duration rule per CR 611.2a). `target.is_some()` maps
+    // `affected` to the runtime-bound `ParentTarget` back-reference.
+    let application = SubjectApplication {
+        affected: TargetFilter::ParentTarget,
+        target: Some(TargetFilter::ParentTarget),
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    };
+    let mut clause = build_continuous_clause(application, predicate_text.trim(), ctx)?;
+    if let Some(keyword) = lacked {
+        clause.condition =
+            Some(crate::types::ability::AbilityCondition::SourceLacksKeyword { keyword });
+    }
+    Some(clause)
+}
+
 /// Strip "for each [clause]" suffix from text so that duration extraction can find
 /// "until end of turn" that precedes it. Returns the text up to "for each" (or the
 /// original text if "for each" is not present). Only used for duration extraction —
@@ -4843,6 +4929,194 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
+
+    // CR 702.62a/b + CR 611.2a: "Cards exiled this way that don't have suspend
+    // gain suspend" (The Wedding of River Song) — the plural / set-referencing
+    // sibling of the singular Jhoira/Tenth "if it doesn't have suspend, it gains
+    // suspend". Must produce the same GenericEffect{AddKeyword(Suspend),
+    // ParentTarget, Permanent} shape carrying a SourceLacksKeyword condition
+    // (inert at runtime today — see try_parse_exiled_this_way_keyword_grant).
+    #[test]
+    fn exiled_this_way_suspend_grant_matches_singular_shape() {
+        use crate::types::ability::AbilityCondition;
+        use crate::types::keywords::Keyword;
+        let ctx = ParseContext::default();
+        let clause = try_parse_exiled_this_way_keyword_grant(
+            "Cards exiled this way that don't have suspend gain suspend",
+            &ctx,
+        )
+        .expect("should recognize the set-referencing suspend grant");
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+        assert_eq!(
+            clause.condition,
+            Some(AbilityCondition::SourceLacksKeyword {
+                keyword: Keyword::Suspend {
+                    count: 0,
+                    cost: crate::types::mana::ManaCost::default(),
+                },
+            })
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &clause.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", clause.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        assert_eq!(static_abilities.len(), 1);
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Suspend { .. }
+            }
+        )));
+    }
+
+    // Building-block proof: the recognizer is parameterized on the keyword, not
+    // Suspend-hardcoded. A synthetic "… that don't have flying gain flying"
+    // yields an AddKeyword(Flying) grant gated by SourceLacksKeyword(Flying).
+    #[test]
+    fn exiled_this_way_grant_is_keyword_parameterized() {
+        use crate::types::ability::AbilityCondition;
+        use crate::types::keywords::Keyword;
+        let ctx = ParseContext::default();
+        let clause = try_parse_exiled_this_way_keyword_grant(
+            "Cards exiled this way that don't have flying gain flying",
+            &ctx,
+        )
+        .expect("should recognize a keyword-parameterized set grant");
+        assert_eq!(
+            clause.condition,
+            Some(AbilityCondition::SourceLacksKeyword {
+                keyword: Keyword::Flying,
+            })
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &clause.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", clause.effect);
+        };
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }
+        )));
+    }
+
+    // Strict-failure guard: a non-"gain <kw>" predicate after the subject head
+    // must decline (return None) so the chunk falls through to normal dispatch
+    // rather than producing a wrong continuous grant.
+    #[test]
+    fn exiled_this_way_grant_declines_non_keyword_predicate() {
+        let ctx = ParseContext::default();
+        assert!(try_parse_exiled_this_way_keyword_grant(
+            "Cards exiled this way are put into their owner's graveyard",
+            &ctx,
+        )
+        .is_none());
+    }
+
+    // CR 608.2c: The Wedding of River Song — full spell chain. Defect C ("cards
+    // exiled this way that don't have suspend gain suspend") must lower to the
+    // Jhoira suspend-grant shape. Defect B ("then target opponent does the same")
+    // is a *documented* `Unimplemented` strict-failure — NOT the prior silently-
+    // degenerate `ChangeZone{empty, Opponent}` misparse — pending cross-cutting
+    // engine targeting work (mid-chain `TargetOnly` slot collection + opponent-
+    // choice routing).
+    #[test]
+    fn wedding_of_river_song_chain_lowers_without_unimplemented() {
+        use crate::types::ability::AbilityCondition;
+        use crate::types::keywords::Keyword;
+
+        let def = super::super::parse_effect_chain(
+            "Draw two cards, then you may exile a nonland card from your hand with a \
+             number of time counters on it equal to its mana value. Then target \
+             opponent does the same. Cards exiled this way that don't have suspend \
+             gain suspend.\nTime travel.",
+            AbilityKind::Spell,
+        );
+
+        // Walk the whole def + sub_ability tree collecting every effect.
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Some(sub) = &def.sub_ability {
+                collect(sub, out);
+            }
+            if let Some(els) = &def.else_ability {
+                collect(els, out);
+            }
+        }
+        let mut effects = Vec::new();
+        collect(&def, &mut effects);
+
+        // Defect B: "does the same" lowers to a DOCUMENTED strict-failure keyed on
+        // the typed subject — never the degenerate `ChangeZone{empty, Opponent}`.
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Unimplemented { name, .. } if name == "target_opponent_does_the_same"
+            )),
+            "expected the documented 'does the same' strict-failure, got {effects:#?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: crate::types::zones::Zone::Exile,
+                    target: TargetFilter::Typed(tf),
+                    ..
+                } if tf.controller == Some(ControllerRef::Opponent) && tf.type_filters.is_empty()
+            )),
+            "the degenerate empty-Opponent exile misparse must be gone"
+        );
+
+        // Defect C: a GenericEffect suspend grant gated by SourceLacksKeyword.
+        let suspend_grant = def_chain_find_suspend_grant(&def);
+        assert!(
+            suspend_grant,
+            "expected a GenericEffect suspend grant from 'cards exiled this way … gain suspend'"
+        );
+
+        // The suspend-grant def carries the SourceLacksKeyword(Suspend) condition
+        // (runtime-inert today; resolves against the spell, not the exiled card).
+        fn find_lacks_suspend(def: &AbilityDefinition) -> bool {
+            let here = matches!(
+                &def.condition,
+                Some(AbilityCondition::SourceLacksKeyword {
+                    keyword: Keyword::Suspend { .. }
+                })
+            );
+            here || def
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| find_lacks_suspend(s))
+        }
+        assert!(
+            find_lacks_suspend(&def),
+            "expected SourceLacksKeyword(Suspend) gate on the grant def"
+        );
+    }
+
+    fn def_chain_find_suspend_grant(def: &AbilityDefinition) -> bool {
+        use crate::types::keywords::Keyword;
+        let here = matches!(
+            &*def.effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword { keyword: Keyword::Suspend { .. } }
+                )))
+        );
+        here || def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|s| def_chain_find_suspend_grant(s))
+    }
 
     // CR 611.3a + CR 702.16: Dominaria's Judgment — "creatures you control gain
     // protection from white if you control a Plains, from blue if you control an

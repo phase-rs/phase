@@ -19734,6 +19734,92 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 702.62a/b + CR 611.2a + CR 608.2c: "Cards exiled this way [that
+        // don't have <kw>] gain <kw>." — the plural / set-referencing sibling of
+        // the singular "If it doesn't have suspend, it gains suspend" keyword
+        // grant (Jhoira of the Ghitu, The Tenth Doctor). Emits a `GenericEffect`
+        // keyword grant bound to the chain's exiled-card tracked set via
+        // `ParentTarget`. The clause carries a `SourceLacksKeyword` condition from
+        // the "that don't have <kw>" restrictive clause, but that condition is
+        // inert at runtime today (it resolves against the spell, which never has
+        // the keyword, not the exiled card), so the grant currently fires
+        // unconditionally. Requires a prior exile clause to publish the tracked
+        // set it broadcasts to (The Wedding of River Song).
+        if !clauses.is_empty() {
+            if let Some(parsed) =
+                subject::try_parse_exiled_this_way_keyword_grant(normalized_text, ctx)
+            {
+                clauses.push(ClauseIr {
+                    parsed,
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
+        // CR 608.2c + CR 601.2c: "[then] target opponent does the same / does
+        // so." — replicate the immediately-preceding sibling effect for a
+        // targeted opponent (The Wedding of River Song). A correct runtime needs
+        // (a) the mid-chain `TargetOnly { Opponent }` to be collected as a
+        // cast-time target slot and (b) the opponent's resolution-time choice to
+        // route to the targeted player across the `EffectZoneChoice` continuation
+        // — cross-cutting engine targeting/continuation work tracked in the
+        // set-audit backlog. Until that lands, emit a *documented* strict-failure
+        // (`Unimplemented`) rather than a silently-degenerate exile-nothing
+        // misparse: a flagged gap beats a wrong parse (CLAUDE.md #1 hard rule).
+        // The `DoesTheSameSubject` typing is preserved so the eventual fix and
+        // the deferred "each opponent … does the same" fanout slot in cleanly.
+        if !clauses.is_empty() {
+            if let Some(subject) = sequence::try_parse_does_the_same_clause(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: sequence::does_the_same_unimplemented_name(subject),
+                        description: Some(normalized_text.to_string()),
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
         // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
         // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
         if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {

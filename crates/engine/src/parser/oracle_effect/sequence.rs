@@ -14,6 +14,7 @@ use super::super::oracle_util::{contains_possessive, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
@@ -5920,10 +5921,96 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
     }
 }
 
+/// CR 608.2c + CR 601.2c: Parse "[then] target opponent does the same / does so."
+/// — an effect-replication directive (The Wedding of River Song). The clause has
+/// no effect of its own; it *would* replicate the immediately-preceding sibling
+/// clause for a targeted opponent. NOT YET IMPLEMENTED: there is no
+/// `SpecialClause::DoesTheSame` variant and no antecedent-cloning lowering. The
+/// chunk loop instead emits a *documented* `Effect::Unimplemented` (keyed by
+/// `does_the_same_unimplemented_name`) for a recognized match — a typed
+/// strict-failure, never a silent misparse. The future fix (a `DoesTheSame`
+/// special clause whose lowering clones the antecedent action and retargets it
+/// onto the opponent's own objects, CR 608.2d) is tracked as backlog work; the
+/// typed `DoesTheSameSubject` return is preserved so it can slot in cleanly.
+///
+/// Combinators only — `opt`/`value`/`tag`/`alt`. The whole chunk must be consumed
+/// (modulo a trailing period) so unrelated phrases ("… at the same time", "does
+/// the same for enchantment cards") fall through to normal dispatch rather than
+/// being silently swallowed. The "each opponent … does the same" player-set
+/// fanout is a deferred sibling of `DoesTheSameSubject` (see its doc comment).
+pub(super) fn try_parse_does_the_same_clause(text: &str) -> Option<DoesTheSameSubject> {
+    let lower = text.to_lowercase();
+    let (subject, rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, subject) =
+            value(DoesTheSameSubject::TargetOpponent, tag("target opponent")).parse(i)?;
+        // Prefix nesting (sum, not product): " do" + optional "es" +
+        // (" the same" | " so") covers does/do × the-same/so.
+        let (i, _) = tag(" do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag(" the same"), tag(" so"))).parse(i)?;
+        Ok((i, subject))
+    })?;
+    if rest.trim().trim_end_matches('.').trim().is_empty() {
+        Some(subject)
+    } else {
+        None
+    }
+}
+
+/// Stable `Effect::Unimplemented` name for a recognized-but-deferred "does the
+/// same" subject. The replication's runtime needs cross-cutting engine targeting
+/// work (mid-chain `TargetOnly` slot collection + opponent-choice routing), so
+/// the clause is emitted as a *documented* strict-failure keyed on the typed
+/// subject — never a silently-degenerate misparse.
+pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> String {
+    match subject {
+        DoesTheSameSubject::TargetOpponent => "target_opponent_does_the_same".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
+    // the preceding sibling effect for a targeted opponent. The recognizer must
+    // accept the "does the same", "does so", and leading-"then" phrasings.
+    #[test]
+    fn does_the_same_recognizes_target_opponent_phrasings() {
+        for phrasing in [
+            "target opponent does the same",
+            "Then target opponent does the same.",
+            "then target opponent does so",
+            "Target opponent does so.",
+        ] {
+            assert_eq!(
+                try_parse_does_the_same_clause(phrasing),
+                Some(DoesTheSameSubject::TargetOpponent),
+                "should recognize {phrasing:?}"
+            );
+        }
+    }
+
+    // Guard: the recognizer must NOT swallow unrelated "same" phrases or a
+    // "does the same for <category>" player-set/category fanout (deferred), so
+    // they fall through to normal dispatch instead of being silently dropped.
+    #[test]
+    fn does_the_same_rejects_unrelated_phrases() {
+        for phrasing in [
+            "all changes happen at the same time",
+            "target opponent does the same for enchantment cards",
+            "each opponent does the same",
+            "target opponent draws a card",
+        ] {
+            assert_eq!(
+                try_parse_does_the_same_clause(phrasing),
+                None,
+                "should reject {phrasing:?}"
+            );
+        }
+    }
 
     // CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile — "exile a Human
     // you control and an artifact you control" splits into two clauses, the
