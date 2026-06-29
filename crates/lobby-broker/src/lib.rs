@@ -13,6 +13,7 @@ pub mod inbound_guard;
 pub mod lobby;
 pub mod protocol;
 pub mod reservation_auth;
+pub mod tournament;
 pub mod validation;
 
 pub use broker::{
@@ -31,10 +32,12 @@ pub use lobby::{
 };
 pub use protocol::{
     parse_lobby_client_message, DraftLobbyMetadata, LobbyClientMessage, LobbyGame,
-    LobbyServerMessage, ParsedFrame, ServerMode, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    LobbyServerMessage, PairingView, ParsedFrame, ServerMode, TournamentStanding, TournamentStatus,
+    TournamentSummary, TournamentView, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 pub use reservation_auth::{
     conn_holds_reservation, consume_owned_reservation, release_owned_reservation,
     ReservationConsume, ReservationRelease, NOT_OWNED_RESERVATION,
 };
+pub use tournament::{TournamentManager, MAX_TOURNAMENT_ENTRIES, MAX_TOURNAMENT_PLAYERS};
 pub use validation::validate_lobby_message;

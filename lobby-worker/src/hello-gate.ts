@@ -12,6 +12,8 @@ export interface ConnAttachment {
   subscribed: boolean;
   host_game: string | null;
   reservations: unknown[];
+  tournament_organizer: string | null;
+  joined_tournaments: Array<[string, string]>;
 }
 
 export function classifyHelloGate(

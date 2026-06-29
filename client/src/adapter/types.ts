@@ -195,6 +195,64 @@ export interface JoinTargetInfo {
   reservation_expires_at_ms?: number | null;
 }
 
+/** Tournament lifecycle phase from the lobby broker. */
+export type TournamentStatus = "registration" | "in_progress" | "completed";
+
+/** Browse-row summary for open tournaments. */
+export interface TournamentSummary {
+  tournamentCode: string;
+  name: string;
+  organizerName: string;
+  createdAt: number;
+  status: TournamentStatus;
+  playerCount: number;
+  totalRounds: number;
+  currentRound: number;
+}
+
+/** A single row in the standings table. */
+export interface TournamentStanding {
+  playerKey: string;
+  displayName: string;
+  dropped: boolean;
+  matchPoints: number;
+  matchWins: number;
+  matchLosses: number;
+  matchDraws: number;
+  gameWins: number;
+  gameLosses: number;
+  omwPercentage: number;
+  gwPercentage: number;
+  ogwPercentage: number;
+}
+
+/** A pairing for the current round. */
+export interface PairingView {
+  matchId: string;
+  round: number;
+  table: number;
+  playerAKey: string;
+  playerAName: string;
+  playerBKey?: string | null;
+  playerBName?: string | null;
+  reported: boolean;
+  winnerPlayerKey?: string | null;
+}
+
+/** Full tournament state broadcast by the broker. */
+export interface TournamentView {
+  tournamentCode: string;
+  name: string;
+  organizerName: string;
+  createdAt: number;
+  status: TournamentStatus;
+  totalRounds: number;
+  currentRound: number;
+  playerCount: number;
+  standings: TournamentStanding[];
+  pairings: PairingView[];
+}
+
 // ── Match / Series ───────────────────────────────────────────────────────
 
 export type MatchType = "Bo1" | "Bo3";

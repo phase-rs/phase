@@ -16,11 +16,12 @@ use tracing::{debug, info, warn};
 
 use crate::env::BrokerEnv;
 use crate::lobby::{LobbyManager, RegisterGameRequest};
-use crate::protocol::{LobbyClientMessage, LobbyServerMessage, ServerMode};
+use crate::protocol::{LobbyClientMessage, LobbyServerMessage, ServerMode, TournamentStatus};
 use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
     NOT_OWNED_RESERVATION,
 };
+use crate::tournament::{MatchResult, TournamentManager, MAX_TOURNAMENT_ENTRIES};
 
 /// Capacity cap for the broker path. `LobbyManager` is otherwise unbounded —
 /// without this gate an abusive client could pin arbitrary entries in memory
@@ -55,6 +56,11 @@ pub struct ConnState {
     /// `(game_code, token)` reservations this connection holds, released on
     /// disconnect or explicit release/consume.
     pub reservations: Vec<(String, String)>,
+    /// Tournament code this connection created as organizer, if any.
+    pub tournament_organizer: Option<String>,
+    /// `(tournament_code, player_key)` entries for self-service drop and
+    /// result-report authorization.
+    pub joined_tournaments: Vec<(String, String)>,
 }
 
 /// A side effect the shell must perform after a broker call. **Order within a
@@ -108,12 +114,14 @@ pub fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitC
 #[derive(Serialize, Deserialize)]
 pub struct Broker {
     lobby: LobbyManager,
+    tournaments: TournamentManager,
 }
 
 impl Broker {
     pub fn new() -> Self {
         Self {
             lobby: LobbyManager::new(),
+            tournaments: TournamentManager::new(),
         }
     }
 
@@ -129,6 +137,14 @@ impl Broker {
     /// lobby operations (see [`Broker::lobby`]).
     pub fn lobby_mut(&mut self) -> &mut LobbyManager {
         &mut self.lobby
+    }
+
+    pub fn tournaments(&self) -> &TournamentManager {
+        &self.tournaments
+    }
+
+    pub fn tournaments_mut(&mut self) -> &mut TournamentManager {
+        &mut self.tournaments
     }
 
     /// Single entry for client frames. Returns the ordered side effects the
@@ -164,10 +180,16 @@ impl Broker {
                 debug!("lobby subscription");
                 conn.subscribed = true;
                 let games = self.lobby.public_games();
-                debug!(games = games.len(), "sending lobby state");
+                let tournaments = self.tournaments.public_summaries();
+                debug!(
+                    games = games.len(),
+                    tournaments = tournaments.len(),
+                    "sending lobby state"
+                );
                 vec![
                     Outbound::AddSubscriber,
                     Outbound::ToSelf(LobbyServerMessage::LobbyUpdate { games }),
+                    Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { tournaments }),
                     Outbound::SendPlayerCountToSelf,
                 ]
             }
@@ -253,6 +275,46 @@ impl Broker {
             LobbyClientMessage::UnregisterLobby { game_code } => {
                 self.handle_unregister(conn, game_code)
             }
+
+            LobbyClientMessage::CreateTournament {
+                name,
+                display_name,
+                total_rounds,
+            } => self.handle_create_tournament(conn, name, display_name, total_rounds, env),
+
+            LobbyClientMessage::JoinTournament {
+                tournament_code,
+                display_name,
+            } => self.handle_join_tournament(conn, tournament_code, display_name, env),
+
+            LobbyClientMessage::DropFromTournament { tournament_code } => {
+                self.handle_drop_tournament(conn, tournament_code)
+            }
+
+            LobbyClientMessage::StartTournamentRound { tournament_code } => {
+                self.handle_start_tournament_round(conn, tournament_code, env)
+            }
+
+            LobbyClientMessage::ReportMatchResult {
+                tournament_code,
+                match_id,
+                winner_player_key,
+                player_a_wins,
+                player_b_wins,
+            } => self.handle_report_match_result(
+                conn,
+                tournament_code,
+                match_id,
+                winner_player_key,
+                player_a_wins,
+                player_b_wins,
+            ),
+
+            LobbyClientMessage::EndTournament { tournament_code } => {
+                self.handle_end_tournament(conn, tournament_code)
+            }
+
+            LobbyClientMessage::ListTournaments => self.handle_list_tournaments(conn),
         }
     }
 
@@ -288,6 +350,19 @@ impl Broker {
             }
         }
 
+        if let Some(tournament_code) = conn.tournament_organizer.take() {
+            let existed = self.tournaments.has_tournament(&tournament_code);
+            self.tournaments.unregister_tournament(&tournament_code);
+            if existed {
+                info!(tournament = %tournament_code, "organizer disconnected — tournament removed");
+                out.push(Outbound::ToSubscribers(
+                    LobbyServerMessage::TournamentCompleted { tournament_code },
+                ));
+            }
+        }
+
+        conn.joined_tournaments.clear();
+
         // Subscriber pruning on close is shell-owned (it drops the closed
         // sender). The core only signals it if the conn was subscribed.
         if conn.subscribed {
@@ -303,13 +378,23 @@ impl Broker {
     /// stays in the shell — it pulls the expired codes from
     /// [`Broker::lobby_mut`]`.check_expired` directly.
     pub fn reap_expired(&mut self, timeout_secs: u64, env: &impl BrokerEnv) -> Vec<Outbound> {
-        self.lobby
+        let mut out: Vec<Outbound> = self
+            .lobby
             .check_expired(timeout_secs, env)
             .into_iter()
             .map(|game_code| {
                 Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code })
             })
-            .collect()
+            .collect();
+
+        for code in self.tournaments.check_expired(timeout_secs, env) {
+            out.push(Outbound::ToSubscribers(
+                LobbyServerMessage::TournamentCompleted {
+                    tournament_code: code,
+                },
+            ));
+        }
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -724,6 +809,278 @@ impl Broker {
             vec![]
         }
     }
+
+    fn handle_create_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        name: String,
+        display_name: String,
+        total_rounds: u8,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        if conn.client_hello.is_none() {
+            return vec![error("ClientHello required before any other message")];
+        }
+
+        let mut out = Vec::new();
+
+        if let Some(previous) = conn.tournament_organizer.take() {
+            let existed = self.tournaments.has_tournament(&previous);
+            self.tournaments.unregister_tournament(&previous);
+            if existed {
+                out.push(Outbound::ToSubscribers(
+                    LobbyServerMessage::TournamentCompleted {
+                        tournament_code: previous,
+                    },
+                ));
+            }
+        }
+
+        if self.tournaments.len() >= MAX_TOURNAMENT_ENTRIES {
+            out.push(error(
+                "Server tournament list is full, please try again shortly",
+            ));
+            return out;
+        }
+
+        let tournament_code = env.new_game_code();
+        let player_key = env.new_token();
+
+        self.tournaments.register_tournament(
+            &tournament_code,
+            name,
+            display_name.clone(),
+            total_rounds,
+            env,
+        );
+
+        if let Err(reason) =
+            self.tournaments
+                .join_tournament(&tournament_code, display_name, player_key.clone())
+        {
+            return vec![error(&reason)];
+        }
+
+        conn.tournament_organizer = Some(tournament_code.clone());
+        conn.joined_tournaments
+            .push((tournament_code.clone(), player_key.clone()));
+
+        out.push(Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+            tournament_code: tournament_code.clone(),
+            player_key,
+        }));
+
+        if let Some(view) = self.tournaments.to_view(&tournament_code) {
+            out.push(Outbound::ToSubscribers(
+                LobbyServerMessage::TournamentUpdate { tournament: view },
+            ));
+            out.push(Outbound::ToSubscribers(
+                LobbyServerMessage::TournamentListUpdate {
+                    tournaments: self.tournaments.public_summaries(),
+                },
+            ));
+        }
+
+        out
+    }
+
+    fn handle_join_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        tournament_code: String,
+        display_name: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        if conn.client_hello.is_none() {
+            return vec![error("ClientHello required before any other message")];
+        }
+
+        let player_key = env.new_token();
+        match self
+            .tournaments
+            .join_tournament(&tournament_code, display_name, player_key.clone())
+        {
+            Ok(()) => {
+                conn.joined_tournaments
+                    .push((tournament_code.clone(), player_key));
+                let mut out = vec![];
+                if let Some(view) = self.tournaments.to_view(&tournament_code) {
+                    out.push(Outbound::ToSelf(LobbyServerMessage::TournamentUpdate {
+                        tournament: view.clone(),
+                    }));
+                    out.push(Outbound::ToSubscribers(
+                        LobbyServerMessage::TournamentUpdate { tournament: view },
+                    ));
+                    out.push(Outbound::ToSubscribers(
+                        LobbyServerMessage::TournamentListUpdate {
+                            tournaments: self.tournaments.public_summaries(),
+                        },
+                    ));
+                }
+                out
+            }
+            Err(reason) => vec![error(&reason)],
+        }
+    }
+
+    fn handle_drop_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        tournament_code: String,
+    ) -> Vec<Outbound> {
+        let player_key = match conn_player_key(conn, &tournament_code) {
+            Some(key) => key,
+            None => return vec![error("You are not registered in this tournament")],
+        };
+        match self.tournaments.drop_player(&tournament_code, &player_key) {
+            Ok(()) => {
+                conn.joined_tournaments
+                    .retain(|(code, _)| code != &tournament_code);
+                broadcast_tournament_update(self, &tournament_code)
+            }
+            Err(reason) => vec![error(&reason)],
+        }
+    }
+
+    fn handle_start_tournament_round(
+        &mut self,
+        conn: &mut ConnState,
+        tournament_code: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        if !conn
+            .tournament_organizer
+            .as_deref()
+            .is_some_and(|c| c == tournament_code)
+        {
+            return vec![error("Only the tournament organizer can start a round")];
+        }
+        match self.tournaments.start_round(&tournament_code, env) {
+            Ok(()) => {
+                let tournament = self.tournaments.get(&tournament_code);
+                let completed = tournament
+                    .map(|t| t.status == TournamentStatus::Completed)
+                    .unwrap_or(false);
+                let mut out = broadcast_tournament_update(self, &tournament_code);
+                if completed {
+                    out.push(Outbound::ToSubscribers(
+                        LobbyServerMessage::TournamentCompleted {
+                            tournament_code: tournament_code.clone(),
+                        },
+                    ));
+                    out.push(Outbound::ToSubscribers(
+                        LobbyServerMessage::TournamentListUpdate {
+                            tournaments: self.tournaments.public_summaries(),
+                        },
+                    ));
+                }
+                out
+            }
+            Err(reason) => vec![error(&reason)],
+        }
+    }
+
+    fn handle_report_match_result(
+        &mut self,
+        conn: &mut ConnState,
+        tournament_code: String,
+        match_id: String,
+        winner_player_key: Option<String>,
+        player_a_wins: u8,
+        player_b_wins: u8,
+    ) -> Vec<Outbound> {
+        let pairing = match self.tournaments.get(&tournament_code) {
+            Some(t) => t.pairings.iter().find(|p| p.match_id == match_id).cloned(),
+            None => return vec![error(&format!("Tournament not found: {tournament_code}"))],
+        };
+        let Some(pairing) = pairing else {
+            return vec![error(&format!("Pairing not found: {match_id}"))];
+        };
+
+        let is_organizer = conn
+            .tournament_organizer
+            .as_deref()
+            .is_some_and(|c| c == tournament_code);
+        let player_key = conn_player_key(conn, &tournament_code);
+        let authorized = is_organizer
+            || player_key.as_deref().is_some_and(|k| k == pairing.player_a)
+            || pairing
+                .player_b
+                .as_deref()
+                .is_some_and(|b| player_key.as_deref() == Some(b));
+        if !authorized {
+            return vec![error("Not authorized to report this match result")];
+        }
+
+        let result = MatchResult {
+            winner_player_key,
+            player_a_wins,
+            player_b_wins,
+        };
+        match self
+            .tournaments
+            .report_result(&tournament_code, &match_id, result)
+        {
+            Ok(()) => broadcast_tournament_update(self, &tournament_code),
+            Err(reason) => vec![error(&reason)],
+        }
+    }
+
+    fn handle_end_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        tournament_code: String,
+    ) -> Vec<Outbound> {
+        if !conn
+            .tournament_organizer
+            .as_deref()
+            .is_some_and(|c| c == tournament_code)
+        {
+            return vec![error(
+                "Only the tournament organizer can end the tournament",
+            )];
+        }
+        match self.tournaments.end_tournament(&tournament_code) {
+            Ok(()) => {
+                conn.tournament_organizer = None;
+                let mut out = broadcast_tournament_update(self, &tournament_code);
+                out.push(Outbound::ToSubscribers(
+                    LobbyServerMessage::TournamentCompleted {
+                        tournament_code: tournament_code.clone(),
+                    },
+                ));
+                out.push(Outbound::ToSubscribers(
+                    LobbyServerMessage::TournamentListUpdate {
+                        tournaments: self.tournaments.public_summaries(),
+                    },
+                ));
+                out
+            }
+            Err(reason) => vec![error(&reason)],
+        }
+    }
+
+    fn handle_list_tournaments(&self, _conn: &ConnState) -> Vec<Outbound> {
+        vec![Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate {
+            tournaments: self.tournaments.public_summaries(),
+        })]
+    }
+}
+
+fn conn_player_key(conn: &ConnState, tournament_code: &str) -> Option<String> {
+    conn.joined_tournaments
+        .iter()
+        .find(|(code, _)| code == tournament_code)
+        .map(|(_, key)| key.clone())
+}
+
+fn broadcast_tournament_update(broker: &Broker, tournament_code: &str) -> Vec<Outbound> {
+    match broker.tournaments.to_view(tournament_code) {
+        Some(tournament) => vec![Outbound::ToSubscribers(
+            LobbyServerMessage::TournamentUpdate { tournament },
+        )],
+        None => vec![],
+    }
 }
 
 impl Default for Broker {
@@ -918,8 +1275,12 @@ mod tests {
             out[1],
             Outbound::ToSelf(LobbyServerMessage::LobbyUpdate { .. })
         ));
-        assert_eq!(out[2], Outbound::SendPlayerCountToSelf);
-        assert_eq!(out.len(), 3);
+        assert!(matches!(
+            out[2],
+            Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { .. })
+        ));
+        assert_eq!(out[3], Outbound::SendPlayerCountToSelf);
+        assert_eq!(out.len(), 4);
         assert!(conn.subscribed);
     }
 
@@ -1558,14 +1919,29 @@ mod tests {
     }
 
     #[test]
-    fn ping_returns_pong() {
+    fn create_tournament_registers_organizer_and_broadcasts() {
         let env = FakeEnv::new();
         let mut broker = Broker::new();
         let mut conn = ConnState::default();
-        let out = broker.handle(&mut conn, LobbyClientMessage::Ping { timestamp: 7 }, &env);
-        assert_eq!(
-            out.as_slice(),
-            [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 7 })]
+        hello(&mut conn, &mut broker, &env);
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Swiss".into(),
+                display_name: "TO".into(),
+                total_rounds: 3,
+            },
+            &env,
         );
+        assert!(matches!(
+            out[0],
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated { .. })
+        ));
+        assert!(matches!(
+            out[1],
+            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { .. })
+        ));
+        assert!(conn.tournament_organizer.is_some());
+        assert_eq!(conn.joined_tournaments.len(), 1);
     }
 }

@@ -11,6 +11,8 @@ use lobby_broker::inbound_guard::{
     LookupJoinTargetInbound,
 };
 use lobby_broker::validation::{
+    validate_create_tournament_fields, validate_join_tournament_fields,
+    validate_report_match_result_fields, validate_tournament_code,
     validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
     UpdateLobbyMetadataFields,
 };
@@ -153,6 +155,34 @@ pub fn guard_client_message_before_dispatch(
             player_token,
         } => guard_reconnect_draft(draft_code, player_token),
         ClientMessage::SpectateDraft { draft_code } => guard_spectate_draft(draft_code),
+        ClientMessage::CreateTournament {
+            name,
+            display_name,
+            total_rounds,
+        } => validate_create_tournament_fields(name, display_name, *total_rounds),
+        ClientMessage::JoinTournament {
+            tournament_code,
+            display_name,
+        } => validate_join_tournament_fields(tournament_code, display_name),
+        ClientMessage::DropFromTournament { tournament_code }
+        | ClientMessage::StartTournamentRound { tournament_code }
+        | ClientMessage::EndTournament { tournament_code } => {
+            validate_tournament_code(tournament_code)
+        }
+        ClientMessage::ReportMatchResult {
+            tournament_code,
+            match_id,
+            winner_player_key,
+            player_a_wins,
+            player_b_wins,
+        } => validate_report_match_result_fields(
+            tournament_code,
+            match_id,
+            winner_player_key.as_deref(),
+            *player_a_wins,
+            *player_b_wins,
+        ),
+        ClientMessage::ListTournaments => Ok(()),
     }
 }
 
@@ -229,6 +259,34 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             consumed_reservation_tokens,
         }),
         ClientMessage::UnregisterLobby { game_code } => validate_unregister_lobby_fields(game_code),
+        ClientMessage::CreateTournament {
+            name,
+            display_name,
+            total_rounds,
+        } => validate_create_tournament_fields(name, display_name, *total_rounds),
+        ClientMessage::JoinTournament {
+            tournament_code,
+            display_name,
+        } => validate_join_tournament_fields(tournament_code, display_name),
+        ClientMessage::DropFromTournament { tournament_code }
+        | ClientMessage::StartTournamentRound { tournament_code }
+        | ClientMessage::EndTournament { tournament_code } => {
+            validate_tournament_code(tournament_code)
+        }
+        ClientMessage::ReportMatchResult {
+            tournament_code,
+            match_id,
+            winner_player_key,
+            player_a_wins,
+            player_b_wins,
+        } => validate_report_match_result_fields(
+            tournament_code,
+            match_id,
+            winner_player_key.as_deref(),
+            *player_a_wins,
+            *player_b_wins,
+        ),
+        ClientMessage::ListTournaments => Ok(()),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }

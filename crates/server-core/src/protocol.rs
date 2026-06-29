@@ -57,7 +57,10 @@ pub struct AiSeatRequest {
 // re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
 // and the broker reference the same struct. The serde shape is unchanged —
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
-pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
+pub use lobby_broker::protocol::{
+    DraftLobbyMetadata, LobbyGame, PairingView, TournamentStanding, TournamentStatus,
+    TournamentSummary, TournamentView,
+};
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
 
@@ -202,6 +205,33 @@ pub enum ClientMessage {
     UnregisterLobby {
         game_code: String,
     },
+    CreateTournament {
+        name: String,
+        display_name: String,
+        #[serde(default = "default_swiss_rounds")]
+        total_rounds: u8,
+    },
+    JoinTournament {
+        tournament_code: String,
+        display_name: String,
+    },
+    DropFromTournament {
+        tournament_code: String,
+    },
+    StartTournamentRound {
+        tournament_code: String,
+    },
+    ReportMatchResult {
+        tournament_code: String,
+        match_id: String,
+        winner_player_key: Option<String>,
+        player_a_wins: u8,
+        player_b_wins: u8,
+    },
+    EndTournament {
+        tournament_code: String,
+    },
+    ListTournaments,
     CreateDraftWithSettings {
         display_name: String,
         set_code: String,
@@ -249,6 +279,10 @@ fn default_player_count() -> u8 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_swiss_rounds() -> u8 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +464,19 @@ pub enum ServerMessage {
         filled_seats: u8,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
+    },
+    TournamentCreated {
+        tournament_code: String,
+        player_key: String,
+    },
+    TournamentUpdate {
+        tournament: TournamentView,
+    },
+    TournamentCompleted {
+        tournament_code: String,
+    },
+    TournamentListUpdate {
+        tournaments: Vec<TournamentSummary>,
     },
     DraftCreated {
         draft_code: String,
@@ -1806,8 +1853,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_11() {
-        assert_eq!(PROTOCOL_VERSION, 11);
+    fn protocol_version_is_12() {
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     #[test]

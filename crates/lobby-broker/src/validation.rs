@@ -220,6 +220,47 @@ pub fn validate_unregister_lobby_fields(game_code: &str) -> Result<(), String> {
     validate_token("game_code", game_code, MAX_GAME_CODE_LEN)
 }
 
+pub fn validate_tournament_code(tournament_code: &str) -> Result<(), String> {
+    validate_token("tournament_code", tournament_code, MAX_GAME_CODE_LEN)
+}
+
+pub fn validate_create_tournament_fields(
+    name: &str,
+    display_name: &str,
+    total_rounds: u8,
+) -> Result<(), String> {
+    validate_required_label("name", name, MAX_ROOM_NAME_LEN)?;
+    validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
+    if total_rounds == 0 || total_rounds > 15 {
+        return Err("total_rounds must be between 1 and 15".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_join_tournament_fields(
+    tournament_code: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    validate_tournament_code(tournament_code)?;
+    validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)
+}
+
+pub fn validate_report_match_result_fields(
+    tournament_code: &str,
+    match_id: &str,
+    winner_player_key: Option<&str>,
+    player_a_wins: u8,
+    player_b_wins: u8,
+) -> Result<(), String> {
+    validate_tournament_code(tournament_code)?;
+    validate_token("match_id", match_id, MAX_GAME_CODE_LEN)?;
+    validate_optional_token("winner_player_key", winner_player_key, MAX_TOKEN_LEN)?;
+    if player_a_wins > 3 || player_b_wins > 3 {
+        return Err("game win counts must be at most 3".to_string());
+    }
+    Ok(())
+}
+
 /// Validate every client-supplied field of a parsed lobby message against the
 /// size/shape bounds above. Returns the first violation as a human-readable
 /// reason suitable for an `Error` reply. Server-populated reply types
@@ -301,7 +342,32 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             validate_unregister_lobby_fields(game_code)?;
         }
         // No client-supplied bounded fields.
-        M::SubscribeLobby | M::UnsubscribeLobby | M::Ping { .. } => {}
+        M::SubscribeLobby | M::UnsubscribeLobby | M::Ping { .. } | M::ListTournaments => {}
+        M::CreateTournament {
+            name,
+            display_name,
+            total_rounds,
+        } => validate_create_tournament_fields(name, display_name, *total_rounds)?,
+        M::JoinTournament {
+            tournament_code,
+            display_name,
+        } => validate_join_tournament_fields(tournament_code, display_name)?,
+        M::DropFromTournament { tournament_code }
+        | M::StartTournamentRound { tournament_code }
+        | M::EndTournament { tournament_code } => validate_tournament_code(tournament_code)?,
+        M::ReportMatchResult {
+            tournament_code,
+            match_id,
+            winner_player_key,
+            player_a_wins,
+            player_b_wins,
+        } => validate_report_match_result_fields(
+            tournament_code,
+            match_id,
+            winner_player_key.as_deref(),
+            *player_a_wins,
+            *player_b_wins,
+        )?,
     }
 
     Ok(())

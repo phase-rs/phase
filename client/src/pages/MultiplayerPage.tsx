@@ -810,6 +810,18 @@ export function MultiplayerPage() {
         )}
 
         {view === "lobby" && (
+          <div className="mb-4 w-full max-w-3xl">
+            <button
+              type="button"
+              onClick={() => navigate("/tournament")}
+              className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/80 transition hover:bg-white/10"
+            >
+              Swiss tournaments
+            </button>
+          </div>
+        )}
+
+        {view === "lobby" && (
           <LobbyView
             // Remount on server change so local lobby state (playerCount,
             // game list) resets and the subscription effect re-runs against

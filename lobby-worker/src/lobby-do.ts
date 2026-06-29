@@ -54,6 +54,8 @@ const DEFAULT_CONN = {
   subscribed: false,
   host_game: null,
   reservations: [],
+  tournament_organizer: null,
+  joined_tournaments: [],
 };
 
 /** Boundary mirror of `lobby_broker_wasm::OutboundDto`. */

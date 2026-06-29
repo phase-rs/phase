@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -179,6 +179,37 @@ pub enum LobbyClientMessage {
     UnregisterLobby {
         game_code: String,
     },
+    CreateTournament {
+        name: String,
+        display_name: String,
+        #[serde(default = "default_swiss_rounds")]
+        total_rounds: u8,
+    },
+    JoinTournament {
+        tournament_code: String,
+        display_name: String,
+    },
+    DropFromTournament {
+        tournament_code: String,
+    },
+    StartTournamentRound {
+        tournament_code: String,
+    },
+    ReportMatchResult {
+        tournament_code: String,
+        match_id: String,
+        winner_player_key: Option<String>,
+        player_a_wins: u8,
+        player_b_wins: u8,
+    },
+    EndTournament {
+        tournament_code: String,
+    },
+    ListTournaments,
+}
+
+fn default_swiss_rounds() -> u8 {
+    3
 }
 
 fn default_player_count() -> u8 {
@@ -257,6 +288,94 @@ pub enum LobbyServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
+    TournamentCreated {
+        tournament_code: String,
+        player_key: String,
+    },
+    TournamentUpdate {
+        tournament: TournamentView,
+    },
+    TournamentCompleted {
+        tournament_code: String,
+    },
+    TournamentListUpdate {
+        tournaments: Vec<TournamentSummary>,
+    },
+}
+
+/// Lifecycle phase of a Swiss tournament.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TournamentStatus {
+    Registration,
+    InProgress,
+    Completed,
+}
+
+/// Full tournament state broadcast to subscribers and participants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TournamentView {
+    pub tournament_code: String,
+    pub name: String,
+    pub organizer_name: String,
+    pub created_at: u64,
+    pub status: TournamentStatus,
+    pub total_rounds: u8,
+    pub current_round: u8,
+    pub player_count: u32,
+    pub standings: Vec<TournamentStanding>,
+    pub pairings: Vec<PairingView>,
+}
+
+/// Browse-row summary for open tournaments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TournamentSummary {
+    pub tournament_code: String,
+    pub name: String,
+    pub organizer_name: String,
+    pub created_at: u64,
+    pub status: TournamentStatus,
+    pub player_count: u32,
+    pub total_rounds: u8,
+    pub current_round: u8,
+}
+
+/// A single row in the standings table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TournamentStanding {
+    pub player_key: String,
+    pub display_name: String,
+    pub dropped: bool,
+    pub match_points: u32,
+    pub match_wins: u32,
+    pub match_losses: u32,
+    pub match_draws: u32,
+    pub game_wins: u32,
+    pub game_losses: u32,
+    pub omw_percentage: f64,
+    pub gw_percentage: f64,
+    pub ogw_percentage: f64,
+}
+
+/// A pairing visible for the current round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingView {
+    pub match_id: String,
+    pub round: u8,
+    pub table: u8,
+    pub player_a_key: String,
+    pub player_a_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_b_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_b_name: Option<String>,
+    pub reported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winner_player_key: Option<String>,
 }
 
 /// Advertised role of the server. Mirrors `server_core::protocol::ServerMode`
@@ -310,6 +429,13 @@ fn is_known_lobby_tag(tag: &str) -> bool {
             | "Ping"
             | "UpdateLobbyMetadata"
             | "UnregisterLobby"
+            | "CreateTournament"
+            | "JoinTournament"
+            | "DropFromTournament"
+            | "StartTournamentRound"
+            | "ReportMatchResult"
+            | "EndTournament"
+            | "ListTournaments"
     )
 }
 

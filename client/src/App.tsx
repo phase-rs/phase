@@ -28,8 +28,11 @@ const CoveragePage = lazy(() => import("./pages/CoveragePage").then((m) => ({ de
 const DraftLandingPage = lazy(() => import("./pages/DraftLandingPage").then((m) => ({ default: m.DraftLandingPage })));
 const DraftPage = lazy(() => import("./pages/DraftPage").then((m) => ({ default: m.DraftPage })));
 const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ default: m.DraftPodPage })));
-const DraftSpectatorPage = lazy(() =>
-  import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
+const TournamentLandingPage = lazy(() =>
+  import("./pages/TournamentLandingPage").then((m) => ({ default: m.TournamentLandingPage })),
+);
+const TournamentPage = lazy(() =>
+  import("./pages/TournamentPage").then((m) => ({ default: m.TournamentPage })),
 );
 
 function DevStrict({ children }: { children: ReactNode }) {
@@ -108,6 +111,8 @@ function AppContent() {
             <Route path="/" element={<DevStrict><MenuPage /></DevStrict>} />
             <Route path="/setup" element={<DevStrict><GameSetupPage /></DevStrict>} />
             <Route path="/multiplayer" element={<DevStrict><MultiplayerPage /></DevStrict>} />
+            <Route path="/tournament" element={<DevStrict><TournamentLandingPage /></DevStrict>} />
+            <Route path="/tournament/:code" element={<DevStrict><TournamentPage /></DevStrict>} />
             <Route path="/my-decks" element={<DevStrict><MyDecksPage /></DevStrict>} />
             <Route path="/deck-builder" element={<DevStrict><DeckBuilderPage /></DevStrict>} />
             <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />

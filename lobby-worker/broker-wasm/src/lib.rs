@@ -104,11 +104,18 @@ fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::JoinGameWithPassword { .. }
         | LobbyClientMessage::LookupJoinTarget { .. }
         | LobbyClientMessage::UpdateLobbyMetadata { .. }
-        | LobbyClientMessage::UnregisterLobby { .. } => true,
+        | LobbyClientMessage::UnregisterLobby { .. }
+        | LobbyClientMessage::CreateTournament { .. }
+        | LobbyClientMessage::JoinTournament { .. }
+        | LobbyClientMessage::DropFromTournament { .. }
+        | LobbyClientMessage::StartTournamentRound { .. }
+        | LobbyClientMessage::ReportMatchResult { .. }
+        | LobbyClientMessage::EndTournament { .. } => true,
         LobbyClientMessage::ClientHello { .. }
         | LobbyClientMessage::SubscribeLobby
         | LobbyClientMessage::UnsubscribeLobby
-        | LobbyClientMessage::Ping { .. } => false,
+        | LobbyClientMessage::Ping { .. }
+        | LobbyClientMessage::ListTournaments => false,
     }
 }
 

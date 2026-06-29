@@ -519,6 +519,8 @@ struct SocketIdentity {
     /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
     /// `SessionManager` cleanup).
     lobby_host_game: Option<String>,
+    lobby_tournament_organizer: Option<String>,
+    lobby_joined_tournaments: Vec<(String, String)>,
     seat_reservations: Vec<(String, String)>,
     lobby_reservations: Vec<(String, String)>,
     /// Set when this socket is participating in a draft session.
@@ -664,12 +666,18 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         },
 
         // Lobby-only-exclusive.
-        ClientMessage::UpdateLobbyMetadata { .. } | ClientMessage::UnregisterLobby { .. } => {
-            match mode {
-                ServerMode::Full => Some(FULL_MODE_REJECTION),
-                ServerMode::LobbyOnly => None,
-            }
-        }
+        ClientMessage::UpdateLobbyMetadata { .. }
+        | ClientMessage::UnregisterLobby { .. }
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::EndTournament { .. }
+        | ClientMessage::ListTournaments => match mode {
+            ServerMode::Full => Some(FULL_MODE_REJECTION),
+            ServerMode::LobbyOnly => None,
+        },
     }
 }
 
@@ -752,6 +760,8 @@ impl SocketIdentity {
             subscribed: self.lobby_subscribed,
             host_game: self.lobby_host_game.clone(),
             reservations: self.lobby_reservations.clone(),
+            tournament_organizer: self.lobby_tournament_organizer.clone(),
+            joined_tournaments: self.lobby_joined_tournaments.clone(),
         }
     }
 
@@ -762,6 +772,8 @@ impl SocketIdentity {
         self.lobby_subscribed = conn.subscribed;
         self.lobby_host_game = conn.host_game;
         self.lobby_reservations = conn.reservations;
+        self.lobby_tournament_organizer = conn.tournament_organizer;
+        self.lobby_joined_tournaments = conn.joined_tournaments;
     }
 }
 
@@ -1379,6 +1391,8 @@ async fn handle_socket(
         session_span: None,
         client_hello: None,
         lobby_host_game: None,
+        lobby_tournament_organizer: None,
+        lobby_joined_tournaments: Vec::new(),
         seat_reservations: Vec::new(),
         lobby_reservations: Vec::new(),
         draft_code: None,
@@ -1685,6 +1699,20 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             filled_seats,
             reservation_token,
         },
+        L::TournamentCreated {
+            tournament_code,
+            player_key,
+        } => ServerMessage::TournamentCreated {
+            tournament_code,
+            player_key,
+        },
+        L::TournamentUpdate { tournament } => ServerMessage::TournamentUpdate { tournament },
+        L::TournamentCompleted { tournament_code } => {
+            ServerMessage::TournamentCompleted { tournament_code }
+        }
+        L::TournamentListUpdate { tournaments } => {
+            ServerMessage::TournamentListUpdate { tournaments }
+        }
     }
 }
 
@@ -1780,6 +1808,45 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
         ClientMessage::UnregisterLobby { game_code } => L::UnregisterLobby {
             game_code: game_code.clone(),
         },
+        ClientMessage::CreateTournament {
+            name,
+            display_name,
+            total_rounds,
+        } => L::CreateTournament {
+            name: name.clone(),
+            display_name: display_name.clone(),
+            total_rounds: *total_rounds,
+        },
+        ClientMessage::JoinTournament {
+            tournament_code,
+            display_name,
+        } => L::JoinTournament {
+            tournament_code: tournament_code.clone(),
+            display_name: display_name.clone(),
+        },
+        ClientMessage::DropFromTournament { tournament_code } => L::DropFromTournament {
+            tournament_code: tournament_code.clone(),
+        },
+        ClientMessage::StartTournamentRound { tournament_code } => L::StartTournamentRound {
+            tournament_code: tournament_code.clone(),
+        },
+        ClientMessage::ReportMatchResult {
+            tournament_code,
+            match_id,
+            winner_player_key,
+            player_a_wins,
+            player_b_wins,
+        } => L::ReportMatchResult {
+            tournament_code: tournament_code.clone(),
+            match_id: match_id.clone(),
+            winner_player_key: winner_player_key.clone(),
+            player_a_wins: *player_a_wins,
+            player_b_wins: *player_b_wins,
+        },
+        ClientMessage::EndTournament { tournament_code } => L::EndTournament {
+            tournament_code: tournament_code.clone(),
+        },
+        ClientMessage::ListTournaments => L::ListTournaments,
         _ => return None,
     })
 }
@@ -5616,6 +5683,24 @@ async fn handle_client_message(
             )
             .await;
         }
+
+        ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::EndTournament { .. }
+        | ClientMessage::ListTournaments => {
+            dispatch_broker(
+                &client_msg,
+                lobby,
+                lobby_subscribers,
+                player_count,
+                tx,
+                identity,
+            )
+            .await;
+        }
     }
 }
 
@@ -6377,6 +6462,8 @@ mod handshake_tests {
             session_span: None,
             client_hello: None,
             lobby_host_game: None,
+            lobby_tournament_organizer: None,
+            lobby_joined_tournaments: Vec::new(),
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
             draft_code: None,
