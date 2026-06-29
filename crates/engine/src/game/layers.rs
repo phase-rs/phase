@@ -2662,6 +2662,14 @@ pub(crate) fn active_continuous_effects_from_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
 ) -> Vec<ActiveContinuousEffect> {
+    // CR 613.7n: a static ability's continuous effect inherits `source.timestamp`,
+    // which is the object's battlefield-entry timestamp drawn in `move_to_zone`
+    // (zones.rs) when the object is put onto the battlefield. When a resolving
+    // spell/ability puts an object onto the battlefield and sets its
+    // characteristics (CR 611.2e), the entry timestamp is drawn first, then that
+    // same resolution emits its characteristic-setting transient, which draws a
+    // strictly later `next_timestamp()`. So the object's own static receives the
+    // earlier relative timestamp by construction — no explicit tiebreak needed.
     active_continuous_effects_from_static_definitions(
         state,
         source.id,
@@ -2854,8 +2862,8 @@ fn expand_granted_static_effects(
         ) {
             continue;
         }
-        let recipient_controller = match state.objects.get(&recipient_id) {
-            Some(obj) => obj.controller,
+        let (recipient_controller, recipient_timestamp) = match state.objects.get(&recipient_id) {
+            Some(obj) => (obj.controller, obj.timestamp),
             None => continue,
         };
         // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
@@ -2884,9 +2892,15 @@ fn expand_granted_static_effects(
                 transient_id: None,
                 mod_index,
                 layer: modification.layer(),
-                // Inherit the host's timestamp so ordering within a layer is
-                // stable and reproducible per CR 613.7.
-                timestamp: host_timestamp,
+                // CR 613.7a (1st sentence): a granted static ability's continuous
+                // effect uses the later of the recipient's timestamp and the
+                // granting effect's (host) timestamp. Because these effects are
+                // re-synthesized every layer pass, a recipient that later receives a
+                // new timestamp (transform/face-up/re-attach) automatically
+                // re-stamps here on the next pass. The cross-grant relative-order
+                // preservation clause (multiple granted statics on one recipient) is
+                // deferred — unobservable with current cards.
+                timestamp: host_timestamp.max(recipient_timestamp),
                 modification: modification.clone(),
                 affected_filter: inner_affected.clone(),
                 condition: retained_inner_condition.clone(),
@@ -3518,6 +3532,15 @@ fn order_with_dependencies(
         }
     }
 
+    // CR 613.8c (tracking): the rule requires the order of remaining effects to be
+    // RE-EVALUATED after each effect is applied (an unapplied effect may become
+    // dependent on / independent of other unapplied effects). This is NOT
+    // implemented: the dependency graph above is computed ONCE and the Kahn pass
+    // below consumes that fixed graph without re-running `depends_on` between
+    // applications. Impact is zero today because `depends_on` is state-blind (see
+    // its doc comment) — its answers cannot change mid-pass, so compute-once equals
+    // iterative re-evaluation. This re-evaluation MUST be added if/when `depends_on`
+    // becomes state-aware (the two are coupled).
     let mut ordered = Vec::with_capacity(sorted.len());
     let mut processed = vec![false; sorted.len()];
 
@@ -3525,6 +3548,13 @@ fn order_with_dependencies(
         let Some(next) = (0..sorted.len()).find(|&idx| !processed[idx] && in_degree[idx] == 0)
         else {
             // CR 613.8b: Dependency cycle — fall back to timestamp ordering.
+            // CR 613.8b (tracking): the rule reverts ONLY the effects that are IN
+            // the dependency loop to timestamp order, leaving non-loop dependent
+            // effects ordered normally. This implementation is coarser: on ANY
+            // cycle it reverts the WHOLE layer bucket (`sorted`) to timestamp
+            // order. Deferred and unreachable today — no current card forms a
+            // dependency loop under the state-blind `depends_on` (see its doc
+            // comment), so the loop-only-vs-whole-bucket distinction is unobservable.
             return sorted.iter().map(|effect| (*effect).clone()).collect();
         };
 
@@ -3553,6 +3583,23 @@ pub(crate) fn order_active_continuous_effects(
 
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
+///
+/// CR 613.8a (tracking): this is a SHAPE-based approximation of the rule's
+/// "depend on" relation, deliberately state-blind (note the unused `_state`). It
+/// keys off the static structure of `b`'s modification kind and `a`'s filter
+/// shape rather than asking whether applying `b` would actually change the text,
+/// existence, what-it-applies-to, or what-it-does of `a` in the current state.
+/// This makes it both over-broad (any type/ability/PT change is treated as a
+/// dependency whenever `a`'s filter merely references that axis, even if `b` can't
+/// change `a`'s membership) and under-broad (it ignores existence/value/color
+/// dependencies the rule covers). It is nonetheless correct for every current
+/// card because, being state-blind, the predicate is invariant across an apply
+/// pass, so the dependency order computed once equals the order an iterative
+/// re-evaluation would produce — i.e. it reduces to timestamp order with the same
+/// observable result. Upgrading this to a state-aware predicate REQUIRES the
+/// CR 613.8c re-evaluation fix in `order_with_dependencies` (the two are coupled):
+/// a state-aware `depends_on` would change its answers as effects are applied, so
+/// a single Kahn pass would no longer be sound.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
     // CR 613.7a + CR 613.8a: A single static ability's modifications share one
     // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
@@ -14348,6 +14395,97 @@ mod tests {
         assert!(
             !opc.has_keyword(&Keyword::Lifelink),
             "Opponent commander no lifelink"
+        );
+    }
+
+    /// CR 613.7a (1st sentence): a granted static ability's continuous effect uses
+    /// the LATER of the host (granting effect) timestamp and the recipient's own
+    /// timestamp. This test drives the real `evaluate_layers` → `apply_layers` →
+    /// `expand_granted_static_effects` path and discriminates the fix: it is the
+    /// case where the recipient acquires a timestamp LATER than the host after the
+    /// grant is established, with a competing same-sublayer setter whose timestamp
+    /// falls strictly between them.
+    ///
+    /// Timestamps: host (grantor) = 10, competing setter = 20, recipient = 30
+    /// (re-stamped later than the host, as happens on transform/face-up/re-attach).
+    /// The host grants `SetPower {1}` to the recipient; the competing static sets
+    /// the recipient's power to 7. Both land in the SetPT (set) sublayer, so the
+    /// later timestamp wins (last-applied-wins on a value set).
+    ///
+    /// With the fix, the granted effect's timestamp is `max(10, 30) = 30 > 20`, so
+    /// it applies AFTER the competing setter and the recipient's power is 1.
+    /// REVERT-FAILING ASSERTION: `assert_eq!(recipient.power, Some(1))`. On revert
+    /// to `timestamp: host_timestamp`, the granted effect uses 10 < 20, applies
+    /// BEFORE the competing setter, and the recipient's power would be 7 — the
+    /// assertion flips.
+    #[test]
+    fn granted_static_timestamp_is_max_of_host_and_recipient() {
+        let mut state = setup();
+
+        // Recipient creature, re-stamped to a LATER timestamp (30) than the host —
+        // models a recipient that transforms / turns face up / is re-attached after
+        // the grant is established, so the recipient's timestamp exceeds the host's
+        // — the case CR 613.7a (1st sentence) "whichever is later" must resolve.
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, PlayerId(0));
+        state.objects.get_mut(&recipient).unwrap().timestamp = 30;
+
+        // Host (grantor) at the EARLIEST timestamp (10). Its static grants an inner
+        // `SetPower {1}` static targeting the recipient via the GrantStaticAbility
+        // path that flows through `expand_granted_static_effects`.
+        let host = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let inner = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: recipient })
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(inner),
+                    }]),
+            );
+        }
+
+        // Competing same-sublayer setter at the MIDDLE timestamp (20): sets the
+        // recipient's power to 7. Its timestamp falls strictly between the host (10)
+        // and the recipient (30).
+        let competing = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Competing Setter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&competing).unwrap();
+            obj.timestamp = 20;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: recipient })
+                    .modifications(vec![ContinuousModification::SetPower { value: 7 }]),
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let recipient_obj = state.objects.get(&recipient).unwrap();
+        // CR 613.7a (1st sentence): granted effect ts = max(host=10, recipient=30) =
+        // 30 > competing=20, so the granted `SetPower {1}` applies last and wins.
+        assert_eq!(
+            recipient_obj.power,
+            Some(1),
+            "granted SetPower must use max(host, recipient) timestamp (30) and win \
+             over the competing setter at ts=20; reverting to host_timestamp (10) \
+             would let the competing setter win with power=7"
         );
     }
 
