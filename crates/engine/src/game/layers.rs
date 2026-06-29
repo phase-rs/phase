@@ -1444,6 +1444,61 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
     }
 }
 
+/// CR 613.1 + CR 707.2 + CR 708.2: seed live characteristics from base_*; shared
+/// by Step-1 top-of-pass reset and the CR 613.2b Layer-1b face-down re-seed.
+///
+/// Assigns the live copiable-characteristic fields from their `base_*` baseline,
+/// exactly mirroring the Step-1 reset block field-for-field. Does NOT call
+/// `sync_missing_base_characteristics`, and does NOT touch controller, the
+/// combat-assignment flags, or `derive_suspected_abilities` — those stay inline
+/// in Step 1 (they are not part of the face-down CR 708.2a re-seed).
+fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
+    obj.name = obj.base_name.clone();
+    obj.power = obj.base_power;
+    obj.toughness = obj.base_toughness;
+    obj.loyalty = obj.base_loyalty;
+    obj.card_types = obj.base_card_types.clone();
+    obj.mana_cost = obj.base_mana_cost.clone();
+    obj.keywords = obj.base_keywords.clone();
+    // CR 613.1: Reset live ability fields to the printed-card baseline.
+    // Post Commit 2 of Arc-share migration: both sides are `Arc<Vec<T>>`
+    // (via `Definitions<T>`-holds-`Arc`), so this reset is a refcount
+    // bump — no deep copy of ability data per layer pass per permanent.
+    // Subsequent layer effects that mutate `obj.abilities` / definitions
+    // trigger copy-on-write via `Arc::make_mut`.
+    obj.abilities = Arc::clone(&obj.base_abilities);
+    obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
+    obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
+    obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
+    obj.color = obj.base_color.clone();
+    // Reset the display-identity pointer to its baseline; the Copy layer
+    // re-applies the copied source's `printed_ref` below for objects
+    // under a copy effect, so a temporary copy's art reverts on expiry.
+    obj.printed_ref = obj.base_printed_ref.clone();
+    // Reset display routing to the object's own derived baseline so a
+    // copy effect's override (set by `CopyValues` below) reverts on
+    // expiry. Display routing is derived state, not a copiable value
+    // (CR 707.2): a true token — created by a token-making effect
+    // (CR 111.1), so carrying no printed identity — routes to the token
+    // art database; everything else (a real card, or a token-copy *of a
+    // real card*, which carries `base_printed_ref`) routes to the card
+    // database. Deriving here (rather than storing a `base_display_source`)
+    // keeps tokens in pre-existing saved states correct on load.
+    obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
+        DisplaySource::Token
+    } else {
+        DisplaySource::Card
+    };
+    // A nontoken never has its own token-art pointer, so clear it to its
+    // baseline (`None`); a copy-of-token effect re-applies the source
+    // token's `token_image_ref` below while active. A true token keeps
+    // its own pointer (its baseline), which the copy layer overrides only
+    // while it is copying another object.
+    if !obj.is_token {
+        obj.token_image_ref = None;
+    }
+}
+
 /// Unconditional full layer evaluation (CR 613.1).
 ///
 /// Production code must NOT call this directly — go through [`flush_layers`],
@@ -1484,52 +1539,15 @@ pub fn evaluate_layers(state: &mut GameState) {
     // remains intact; they are frozen until phase-in marks layers dirty and
     // re-includes them.
     let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
+    // CR 613.2b: collect face-down permanents to re-apply their CR 708.2 profile
+    // after Layer 1a.
+    let mut face_down_ids: Vec<ObjectId> = Vec::new();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
-            obj.name = obj.base_name.clone();
-            obj.power = obj.base_power;
-            obj.toughness = obj.base_toughness;
-            obj.loyalty = obj.base_loyalty;
-            obj.card_types = obj.base_card_types.clone();
-            obj.mana_cost = obj.base_mana_cost.clone();
-            obj.keywords = obj.base_keywords.clone();
-            // CR 613.1: Reset live ability fields to the printed-card baseline.
-            // Post Commit 2 of Arc-share migration: both sides are `Arc<Vec<T>>`
-            // (via `Definitions<T>`-holds-`Arc`), so this reset is a refcount
-            // bump — no deep copy of ability data per layer pass per permanent.
-            // Subsequent layer effects that mutate `obj.abilities` / definitions
-            // trigger copy-on-write via `Arc::make_mut`.
-            obj.abilities = Arc::clone(&obj.base_abilities);
-            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
-            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
-            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
-            obj.color = obj.base_color.clone();
-            // Reset the display-identity pointer to its baseline; the Copy layer
-            // re-applies the copied source's `printed_ref` below for objects
-            // under a copy effect, so a temporary copy's art reverts on expiry.
-            obj.printed_ref = obj.base_printed_ref.clone();
-            // Reset display routing to the object's own derived baseline so a
-            // copy effect's override (set by `CopyValues` below) reverts on
-            // expiry. Display routing is derived state, not a copiable value
-            // (CR 707.2): a true token — created by a token-making effect
-            // (CR 111.1), so carrying no printed identity — routes to the token
-            // art database; everything else (a real card, or a token-copy *of a
-            // real card*, which carries `base_printed_ref`) routes to the card
-            // database. Deriving here (rather than storing a `base_display_source`)
-            // keeps tokens in pre-existing saved states correct on load.
-            obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
-                DisplaySource::Token
-            } else {
-                DisplaySource::Card
-            };
-            // A nontoken never has its own token-art pointer, so clear it to its
-            // baseline (`None`); a copy-of-token effect re-applies the source
-            // token's `token_image_ref` below while active. A true token keeps
-            // its own pointer (its baseline), which the copy layer overrides only
-            // while it is copying another object.
-            if !obj.is_token {
-                obj.token_image_ref = None;
+            seed_live_characteristics_from_base(obj);
+            if obj.face_down {
+                face_down_ids.push(id);
             }
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
@@ -1591,6 +1609,18 @@ pub fn evaluate_layers(state: &mut GameState) {
         // gather so those sticker-granted statics participate in this pass
         // without broadening the non-sticker top-of-pass rebuild contract.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
+    // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
+    // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
+    // permanent's characteristics to its CR 708.2a profile (persisted in base_*),
+    // overriding the copy/merge. A Mirrorweaved/cloned face-down permanent stays a
+    // face-down 2/2 (or its FaceDownProfile, e.g. disguise/cloak ward {2}). Scoped to
+    // the collected face-down set so the common (no face-down) case is free.
+    for &id in &face_down_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            seed_live_characteristics_from_base(obj);
+        }
     }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
@@ -14958,6 +14988,245 @@ mod tests {
         assert!(
             !r.has_keyword(&Keyword::Indestructible),
             "Mono-R creature must NOT gain indestructible"
+        );
+    }
+
+    // ── CR 613.2b Layer 1b: face-down characteristics override copy/merge ─────
+
+    use crate::game::effects::become_copy;
+    use crate::game::morph::apply_face_down_creature_characteristics;
+    use crate::game::printed_cards::intrinsic_copiable_values;
+    use crate::types::ability::{FaceDownProfile, ResolvedAbility, TargetRef};
+    use crate::types::keywords::WardCost;
+
+    fn make_face_down(
+        state: &mut GameState,
+        player: PlayerId,
+        profile: FaceDownProfile,
+        real_name: &str,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            real_name.to_string(),
+            Zone::Battlefield,
+        );
+        // Snapshot the real face BEFORE overwriting it, so the controller view
+        // can reveal the hidden card while observers see "Hidden Card".
+        let back = crate::game::printed_cards::snapshot_object_face(&state.objects[&id]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        apply_face_down_creature_characteristics(obj, &profile);
+        obj.back_face = Some(back);
+        id
+    }
+
+    fn become_copy_ability(
+        target: ObjectId,
+        source: ObjectId,
+        player: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            player,
+        )
+    }
+
+    // Plan test 1: Mirrorweave (BecomeCopy) onto a face-down morph must leave it a
+    // face-down 2/2 — its CR 708.2a profile overrides the Layer-1a copy at Layer 1b
+    // (CR 613.2b + CR 708.10).
+    #[test]
+    fn mirrorweave_onto_face_down_stays_2_2() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let beast = make_creature(&mut state, "Big Beast", 4, 5, player);
+        let morph = make_face_down(
+            &mut state,
+            player,
+            FaceDownProfile::vanilla_2_2(),
+            "Secret Bear",
+        );
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, morph, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        let m = &state.objects[&morph];
+        assert_eq!(
+            m.power,
+            Some(2),
+            "Layer 1b re-seeds the face-down 2/2 over the copy"
+        );
+        assert_eq!(m.toughness, Some(2));
+        assert_eq!(m.name, "", "a face-down permanent has no name (CR 708.2a)");
+        assert!(m.face_down);
+
+        // SIBLING: a face-up creature under the same BecomeCopy DOES become the copy.
+        let clone = make_creature(&mut state, "Plain Clone", 1, 1, player);
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, clone, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+        let c = &state.objects[&clone];
+        assert_eq!(
+            c.name, "Big Beast",
+            "a face-up creature still becomes the copy"
+        );
+        assert_eq!(c.power, Some(4));
+        assert_eq!(c.toughness, Some(5));
+    }
+
+    // Plan test 2: a cloaked (ward {2}) face-down permanent that becomes a copy of
+    // a creature with no ward retains ward {2} — Layer 1b re-seeds its CR 708.2a
+    // profile (CR 708.10).
+    #[test]
+    fn cloaked_face_down_retains_ward_under_copy() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let bear = make_creature(&mut state, "Bear", 2, 2, player);
+        let cloaked = make_face_down(
+            &mut state,
+            player,
+            FaceDownProfile::cloaked_2_2(),
+            "Secret Ace",
+        );
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::generic(2)));
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(bear, cloaked, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&cloaked].keywords.contains(&ward),
+            "Layer 1b re-seeds the cloak ward {{2}} over the copy (CR 708.10)"
+        );
+        // NEGATIVE: the copy source (Bear) has no ward — the ward comes from the
+        // face-down re-seed, not the copied creature.
+        assert!(!state.objects[&bear].keywords.contains(&ward));
+    }
+
+    // Plan test 3: a raw CopyValues transient on a face-down object is overridden
+    // by Layer 1b (live == base_*); the same copy on a non-face-down object still
+    // applies (Layer 1b is a no-op when nothing is face down).
+    #[test]
+    fn layer_1b_overrides_copy_for_face_down_object() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let donor = make_creature(&mut state, "Donor", 7, 7, player);
+        let donor_values = intrinsic_copiable_values(&state.objects[&donor]);
+        let fd = make_face_down(&mut state, player, FaceDownProfile::vanilla_2_2(), "Hidden");
+
+        state.add_transient_continuous_effect(
+            fd,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: fd },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(donor_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+
+        let o = &state.objects[&fd];
+        assert_eq!(o.power, o.base_power, "Layer 1b restores live to base_*");
+        assert_eq!(o.power, Some(2));
+        assert_eq!(o.name, "");
+
+        // EMPTY-SET: a fresh state with NO face-down objects — Layer 1b is a no-op
+        // and a normal copy applies unchanged.
+        let mut state2 = setup();
+        let donor2 = make_creature(&mut state2, "Donor", 7, 7, player);
+        let donor_values2 = intrinsic_copiable_values(&state2.objects[&donor2]);
+        let plain = make_creature(&mut state2, "Plain", 1, 1, player);
+        state2.add_transient_continuous_effect(
+            plain,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: plain },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(donor_values2),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state2);
+        assert_eq!(
+            state2.objects[&plain].power,
+            Some(7),
+            "non-face-down copy still applies (1b no-op)"
+        );
+        assert_eq!(state2.objects[&plain].name, "Donor");
+    }
+
+    // Plan test 7: after a Mirrorweave onto a face-down morph, an opponent sees a
+    // hidden 2/2 (not the copied identity), while the controller still sees the
+    // real back-face name. The redacted power must be the face-down 2/2, proving
+    // Layer 1b hid the copy from observers.
+    #[test]
+    fn opponent_sees_hidden_2_2_not_copied_identity() {
+        use crate::game::visibility::filter_state_for_viewer;
+
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let beast = make_creature(&mut state, "Big Beast", 4, 5, controller);
+        let morph = make_face_down(
+            &mut state,
+            controller,
+            FaceDownProfile::vanilla_2_2(),
+            "Secret Bear",
+        );
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, morph, controller),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        let opp_view = filter_state_for_viewer(&state, opponent);
+        let opp = opp_view.objects.get(&morph).unwrap();
+        assert_eq!(opp.name, "Hidden Card");
+        assert_eq!(
+            opp.power,
+            Some(2),
+            "opponent sees the face-down 2/2, not the copied 4/5"
+        );
+        assert!(opp.face_down);
+
+        let ctrl_view = filter_state_for_viewer(&state, controller);
+        let ctrl = ctrl_view.objects.get(&morph).unwrap();
+        assert_eq!(
+            ctrl.name, "Secret Bear",
+            "the controller still sees the real back-face identity"
         );
     }
 }
