@@ -471,6 +471,22 @@ fn parse_becomes_foretold_continuation(lower: &str) -> bool {
     .is_ok()
 }
 
+/// Detects "its foretell cost is <cost specification>" — an effect-defined
+/// foretell cost sentence (e.g. Ethereal Valkyrie: "Its foretell cost is its
+/// mana cost reduced by {2}."). When this sentence follows a
+/// `BecomesForetold` continuation, the cost-bearing form is not yet
+/// representable in `CastingPermission::Foretold`; the grant must be
+/// suppressed to avoid emitting a wrong zero-cost permission
+/// (CR 702.143d: effect-defined foretell costs are a separate class from
+/// printed `Keyword::Foretell` costs).
+pub(super) fn is_foretell_cost_override_sentence(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before prefix check
+    let text = lower.trim().trim_end_matches('.').trim();
+    tag::<_, _, OracleError<'_>>("its foretell cost is ")
+        .parse(text)
+        .is_ok()
+}
+
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
     (
         tag::<_, _, OracleError<'_>>("put "),
