@@ -1773,12 +1773,17 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
 /// `alt(...)` tuple, which is already at nom's arity limit.
 fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
     let (rest, _) = tag("remove ").parse(s)?;
-    // Bound the counter-token search to this conjunct.
+    // Bound the counter-token search to THIS conjunct segment only, so a
+    // "counter" token in a LATER conjunct ("remove it from combat and counter
+    // target spell") cannot trigger a false split.
     let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
         Ok((_, seg)) => seg,
         Err(_) => rest,
     };
-    value((), (take_until("counter"), tag("counter"))).parse(segment)
+    // Check on the bounded segment but return `rest` (not the truncated segment
+    // remainder) as the remaining input — correct nom discipline.
+    let _ = value((), (take_until("counter"), tag("counter"))).parse(segment)?;
+    Ok((rest, ()))
 }
 
 /// Inner implementation operating on pre-lowercased input.
@@ -9174,6 +9179,34 @@ mod tests {
         // "counter" must not false-split.
         assert!(!starts_bare_and_clause(
             "remove it from combat and counter target spell"
+        ));
+    }
+
+    /// Regression evidence for the four cards flagged in the §C parse-diff
+    /// report (Magma Pummeler, Midnight Oil, Ventifact Bottle, Jumbo Imp).
+    /// Each card's "and remove … counter" conjunct IS a genuine independent
+    /// instruction in the Oracle text, so splitting it is semantically correct
+    /// and improves coverage — the pre-PR parse silently dropped the counter
+    /// removal from all four. These asserts document the INTENDED behavior and
+    /// serve as evidence that the drift is expected, not a regression.
+    #[test]
+    fn remove_counter_split_expected_drift_cards() {
+        // Magma Pummeler: "prevent that damage and remove that many +1/+1
+        // counters from it" — conjunct passed to starts_bare_and_clause.
+        assert!(starts_bare_and_clause(
+            "remove that many +1/+1 counters from it"
+        ));
+        // Midnight Oil: "draw an additional card and remove two hour counters
+        // from this enchantment" — counter-removal is a separate instruction.
+        assert!(starts_bare_and_clause(
+            "remove two hour counters from this enchantment"
+        ));
+        // Ventifact Bottle: "tap it and remove all charge counters from it".
+        assert!(starts_bare_and_clause("remove all charge counters from it"));
+        // Jumbo Imp: "roll a six-sided die and remove a number of +1/+1
+        // counters from this creature equal to the result".
+        assert!(starts_bare_and_clause(
+            "remove a number of +1/+1 counters from this creature equal to the result"
         ));
     }
 

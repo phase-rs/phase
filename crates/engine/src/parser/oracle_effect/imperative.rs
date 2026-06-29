@@ -3254,15 +3254,19 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     None
 }
 
-/// CR 702.62b + CR 608.2c: "choose a suspended card you own" (Amy Pond's
-/// combat-damage trigger) — an interactive selection of a suspended card (exile +
-/// suspend + time counter) from the controller's owned cards, with no explicit
-/// `in/from <zone>` connector (so `try_parse_choose_from_zone` does not claim it).
-/// Routes to the `ChooseFromZone { Exile }` seam so the runtime pauses for the
-/// player's pick before the chained "remove that many time counters from it"
-/// continuation resolves. Checked before `is_choose_as_targeting` so the clause
-/// is claimed here. Composed entirely from nom combinators; the candidate filter
-/// reuses the shared `suspended_card_filter` building block.
+/// CR 702.62b + CR 608.2c: "choose a suspended card [you own]" — an interactive
+/// selection of a suspended card (exile + suspend + time counter), with an optional
+/// ownership qualifier. No explicit `in/from <zone>` connector, so
+/// `try_parse_choose_from_zone` does not claim it. Routes to the
+/// `ChooseFromZone { Exile }` seam so the runtime pauses for the player's pick
+/// before any chained continuation resolves. Checked before `is_choose_as_targeting`
+/// so the clause is claimed here. Composed entirely from nom combinators; the
+/// candidate filter reuses the shared `suspended_card_filter` building block.
+///
+/// Attested forms:
+/// - "choose a suspended card you own" (Amy Pond, CR 108.3 — owned by controller)
+/// - "choose a suspended card an opponent owns" (sibling coverage, CR 108.3)
+/// - "choose a suspended card" (no ownership restriction — any player's suspended card)
 fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
@@ -3273,12 +3277,20 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
     let (rest, _) = alt((tag::<_, _, E>("suspended cards"), tag("suspended card")))
         .parse(rest)
         .ok()?;
-    // The attested form qualifies ownership ("you own"). Require the clause to end
-    // here (after the optional qualifier): if a chain failed to split, an unparsed
+    // Parse optional ownership qualifier.  Supported forms:
+    //   "you own"            → Some(ControllerRef::You)
+    //   "an opponent owns"   → Some(ControllerRef::Opponent)
+    //   <no qualifier>       → None (any player's suspended card)
+    // Require the clause to end here: if a chain failed to split, an unparsed
     // trailing continuation ("… and remove that many time counters from it") would
     // be left over — bail so the line falls to a documented strict failure rather
     // than a silent misparse that drops the counter clause.
-    let (rest, _) = opt(tag::<_, _, E>(" you own")).parse(rest).ok()?;
+    let (rest, owner) = opt(alt((
+        value(ControllerRef::You, tag::<_, _, E>(" you own")),
+        value(ControllerRef::Opponent, tag(" an opponent owns")),
+    )))
+    .parse(rest)
+    .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -3287,8 +3299,8 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
         count: 1,
         zones: vec![Zone::Exile],
         zone_owner: ZoneOwner::Controller,
-        // CR 108.3: the cards are owned by the ability's controller ("you own").
-        filter: crate::parser::oracle_quantity::suspended_card_filter(ControllerRef::You),
+        // CR 108.3: ownership restricted by the parsed qualifier (None = any player).
+        filter: crate::parser::oracle_quantity::suspended_card_filter(owner),
         chooser: Chooser::Controller,
         up_to: false,
         // CR 608.2d: controller-directed selection, never random.
