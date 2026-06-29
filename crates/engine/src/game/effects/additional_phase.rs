@@ -149,18 +149,28 @@ pub fn resolve(
                 anchor: bundle_anchor,
                 phase: follow_up,
                 attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
         // CR 508.1c: Only the scheduled combat phase carries the attacker
         // restriction; follow-up main/upkeep phases never restrict attacks.
+        // CR 611.2c: Record the scheduling spell's source ObjectId so that
+        // `passes_combat_attacker_restriction` can evaluate source-relative
+        // filter predicates against the actual source rather than ObjectId(0).
+        let restriction = if phase == Phase::BeginCombat {
+            resolved_restriction.clone()
+        } else {
+            None
+        };
         state.extra_phases.push(ExtraPhase {
             anchor: bundle_anchor,
             phase,
-            attacker_restriction: if phase == Phase::BeginCombat {
-                resolved_restriction.clone()
+            attacker_restriction_source: if restriction.is_some() {
+                Some(ability.source_id)
             } else {
                 None
             },
+            attacker_restriction: restriction,
         });
     }
 
@@ -263,6 +273,7 @@ mod tests {
             anchor,
             phase,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         }
     }
 

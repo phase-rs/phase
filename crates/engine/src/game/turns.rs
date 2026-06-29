@@ -93,10 +93,16 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // natural combats are never restricted. The field persists untouched through
     // DeclareAttackers/DeclareBlockers/CombatDamage (entered with next != BeginCombat)
     // and is cleared at end of combat (CR 511.3).
+    // CR 611.2c: also propagate the source ObjectId so that
+    // `passes_combat_attacker_restriction` can evaluate source-relative
+    // restriction predicates against the scheduling spell's actual object.
     if next == Phase::BeginCombat {
         state.current_combat_attacker_restriction = removed
             .as_ref()
             .and_then(|ep| ep.attacker_restriction.clone());
+        state.current_combat_attacker_restriction_source = removed
+            .as_ref()
+            .and_then(|ep| ep.attacker_restriction_source);
     }
 
     enter_phase(state, next, events);
@@ -138,6 +144,7 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
     // additional-combat attacker restriction (Last Night Together / Bumi).
     state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -2201,6 +2208,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 511.3: the combat phase is over — its attacker restriction
                 // (Last Night Together / Bumi) ends with it.
                 state.current_combat_attacker_restriction = None;
+                state.current_combat_attacker_restriction_source = None;
                 super::layers::prune_end_of_combat_effects(state);
                 for obj in state.objects.iter_mut().map(|(_, v)| v) {
                     obj.replacement_definitions
@@ -2501,6 +2509,7 @@ mod tests {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
                 attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         state.phase = Phase::EndCombat;
         advance_phase(&mut state, &mut events);
@@ -3427,6 +3436,7 @@ mod tests {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3454,6 +3464,7 @@ mod tests {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3480,6 +3491,7 @@ mod tests {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         // Walk the phase machine forward and record each phase entered.
@@ -3534,11 +3546,13 @@ mod tests {
             anchor: Phase::EndCombat,
             phase: Phase::PostCombatMain,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3587,6 +3601,7 @@ mod tests {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
                 attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
 

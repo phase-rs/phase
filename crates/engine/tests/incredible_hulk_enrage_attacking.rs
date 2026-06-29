@@ -140,6 +140,7 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         }),
         hulk_tapped: state.objects[&hulk].tapped,
     }

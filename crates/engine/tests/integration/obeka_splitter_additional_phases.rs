@@ -48,6 +48,7 @@ fn obeka_combat_damage_pushes_one_extra_upkeep_per_damage_point() {
         anchor: Phase::Upkeep,
         phase: Phase::Upkeep,
         attacker_restriction: None,
+        attacker_restriction_source: None,
     };
     assert_eq!(
         runner.state().extra_phases,

@@ -726,6 +726,7 @@ mod tests {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -750,6 +751,7 @@ mod tests {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
                 attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
 
@@ -796,6 +798,7 @@ mod tests {
             anchor: Phase::Upkeep,
             phase: Phase::Upkeep,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let v = ResourceVector::snapshot(&state);

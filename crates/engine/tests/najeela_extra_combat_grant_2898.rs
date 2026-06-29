@@ -189,6 +189,7 @@ fn najeela_applies_untap_grant_and_extra_combat() {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
+            attacker_restriction_source: None,
         }),
         "extra combat phase must be scheduled; got {:?}",
         state.extra_phases

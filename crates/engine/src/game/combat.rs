@@ -607,14 +607,25 @@ pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -
         // resolves `ControllerRef::You` against the active player. A bare
         // `FilterContext::neutral()` carries no `source_controller` and would make
         // such a restriction match nothing, wrongly excluding the active player's
-        // creatures. The current concrete-set / controller-None `Typed` subjects
-        // (Last Night Together's chosen set, Bumi's "land creatures") are
-        // unaffected; this only future-proofs controller-scoped subjects.
+        // creatures.
+        // CR 611.2c: use the actual scheduling spell's ObjectId (stored on
+        // `ExtraPhase.attacker_restriction_source` and propagated to
+        // `current_combat_attacker_restriction_source`) so source-relative
+        // restriction predicates resolve against the correct object rather than
+        // the dummy `ObjectId(0)` sentinel. The current concrete-set / Typed
+        // subjects (Last Night Together's chosen set, Bumi's "land creatures")
+        // are unaffected by the source; this correctly future-proofs
+        // controller-scoped and source-colour subjects.
         Some(filter) => matches_target_filter(
             state,
             obj_id,
             filter,
-            &FilterContext::from_source_with_controller(ObjectId(0), state.active_player),
+            &FilterContext::from_source_with_controller(
+                state
+                    .current_combat_attacker_restriction_source
+                    .unwrap_or(ObjectId(0)),
+                state.active_player,
+            ),
         ),
     }
 }

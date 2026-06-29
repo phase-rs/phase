@@ -210,35 +210,6 @@ fn resolve_counter_placement_target<'a>(
         let offset = text.len() - rem.len();
         return (TargetFilter::TriggeringSource, &text[offset..], None);
     }
-    // CR 608.2c: "each of them" is the plural-pronoun anaphor to the parent
-    // ability's chosen targets (Last Night Together: "Put two +1/+1 counters on
-    // each of them"). `parse_target` maps this bare pronoun to an EMPTY `Typed`
-    // filter, which matches every battlefield permanent — so the placement would
-    // land counters on ALL permanents instead of the two chosen creatures. The
-    // singular "it"/"that creature" forms are handled above and the demonstrative
-    // "those <type>" form keeps its tracked-set mapping in `parse_target`; the
-    // "each of them" pronoun is the remaining gap. Gate strictly on that surface
-    // (a trailing word boundary excludes "...themselves"), then resolve through
-    // the shared subject-application anaphora authority (`subject.rs`), which maps
-    // it to `ParentTarget`. The resolver binds it to the chosen objects via
-    // `ability.targets`.
-    if let Some(((), after)) = nom_on_lower(on_rest, on_rest, |i| {
-        let (i, ()) = value((), tag("each of them")).parse(i)?;
-        let (i, ()) =
-            value((), peek(alt((eof, tag(" "), tag("."), tag(","), tag(";"))))).parse(i)?;
-        Ok((i, ()))
-    }) {
-        if let Some(application) = super::subject::parse_subject_application(on_text, ctx) {
-            if matches!(application.affected, TargetFilter::ParentTarget) {
-                let offset = lower.len() - after.len();
-                return (
-                    TargetFilter::ParentTarget,
-                    &text[offset..],
-                    application.multi_target,
-                );
-            }
-        }
-    }
     // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
     // not the counter count. Strip it and emit a MultiTargetSpec.
     let (target_text, multi) = if let Some(((), after_up_to)) =
