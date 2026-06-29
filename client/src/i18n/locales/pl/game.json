@@ -1442,6 +1442,10 @@
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
   },
+  "keepWithinTotalPower": {
+    "title": "Wybierz stworzenia do zatrzymania",
+    "subtitle": "Zatrzymaj stworzenia o łącznej sile {{cap}} lub mniejszej; reszta zostaje poświęcona."
+  },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."

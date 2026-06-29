@@ -1442,6 +1442,10 @@
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
+  "keepWithinTotalPower": {
+    "title": "Kreaturen zum Behalten wählen",
+    "subtitle": "Behalte Kreaturen mit Gesamtstärke {{cap}} oder weniger; der Rest wird geopfert."
+  },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."

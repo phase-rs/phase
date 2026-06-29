@@ -54,8 +54,8 @@ export function KeepWithinTotalPowerChoiceModal({
 
   return (
     <ChoiceOverlay
-      title={t("categoryChoice.title")}
-      subtitle={`Keep creatures with total power ${data.cap} or less; the rest are sacrificed.`}
+      title={t("keepWithinTotalPower.title")}
+      subtitle={t("keepWithinTotalPower.subtitle", { cap: data.cap })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!withinCap} />}
     >
       <div

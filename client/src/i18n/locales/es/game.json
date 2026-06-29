@@ -1442,6 +1442,10 @@
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
   },
+  "keepWithinTotalPower": {
+    "title": "Elige criaturas para conservar",
+    "subtitle": "Conserva criaturas con fuerza total {{cap}} o menos; el resto se sacrifica."
+  },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
