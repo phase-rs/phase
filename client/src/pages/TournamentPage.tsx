@@ -23,7 +23,7 @@ export function TournamentPage() {
 
   const [tournament, setTournament] = useState<TournamentView | null>(null);
   const [playerKey, setPlayerKey] = useState<string | null>(state.playerKey ?? null);
-  const [isOrganizer, setIsOrganizer] = useState(Boolean(state.organizer));
+  const isOrganizer = Boolean(state.organizer);
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
