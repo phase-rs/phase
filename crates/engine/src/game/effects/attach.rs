@@ -431,6 +431,10 @@ pub fn attach_to(
     // is just the filtered view, so derive it from the single read rather than
     // querying the attachment's host twice.
     let prior_host = current_attachment_target(state, attachment_id);
+    // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
+    // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
+    // different host; false only on a same-host re-attach (CR 701.3b keeps the stamp).
+    let moving_to_new_host = prior_host != Some(TargetRef::Object(target_id));
     let old_target = prior_host.filter(|target| *target != TargetRef::Object(target_id));
 
     // CR 701.3a: Attaching moves attachment onto target.
@@ -456,7 +460,7 @@ pub fn attach_to(
 
     // CR 613.7e + CR 701.3c: first attach (None) or a move to a different host
     // bumps the timestamp; a same-host re-attach (CR 701.3b) does not.
-    if prior_host != Some(TargetRef::Object(target_id)) {
+    if moving_to_new_host {
         let ts = state.next_timestamp();
         if let Some(attachment) = state.objects.get_mut(&attachment_id) {
             attachment.timestamp = ts;
@@ -683,6 +687,10 @@ pub fn attach_to_player(
     // `old_target` collapses both to `None`. Derive the filtered view from the
     // single read rather than querying the attachment's host twice.
     let prior_host = current_attachment_target(state, attachment_id);
+    // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
+    // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
+    // different player; false only on a same-player re-attach (CR 701.3b keeps the stamp).
+    let moving_to_new_host = prior_host != Some(TargetRef::Player(target_player));
     let old_target = prior_host.filter(|target| *target != TargetRef::Player(target_player));
 
     // CR 701.3a: If already attached to an object, detach from that object's
@@ -704,7 +712,7 @@ pub fn attach_to_player(
 
     // CR 613.7e + CR 701.3c: first attach (None) or a move to a different player
     // host bumps the timestamp; a same-player re-attach (CR 701.3b) does not.
-    if prior_host != Some(TargetRef::Player(target_player)) {
+    if moving_to_new_host {
         let ts = state.next_timestamp();
         if let Some(attachment) = state.objects.get_mut(&attachment_id) {
             attachment.timestamp = ts;
