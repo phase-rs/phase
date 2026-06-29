@@ -19791,10 +19791,10 @@ pub(crate) fn parse_effect_chain_ir(
         if !clauses.is_empty() {
             if let Some(subject) = sequence::try_parse_does_the_same_clause(normalized_text) {
                 clauses.push(ClauseIr {
-                    parsed: parsed_clause(Effect::Unimplemented {
-                        name: sequence::does_the_same_unimplemented_name(subject),
-                        description: Some(normalized_text.to_string()),
-                    }),
+                    parsed: parsed_clause(Effect::unimplemented(
+                        sequence::does_the_same_unimplemented_name(subject),
+                        normalized_text.to_string(),
+                    )),
                     boundary: chunk.boundary_after,
                     condition: None,
                     is_optional: false,

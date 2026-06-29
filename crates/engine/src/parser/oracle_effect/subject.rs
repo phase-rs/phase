@@ -5059,6 +5059,7 @@ mod tests {
         assert!(
             effects.iter().any(|e| matches!(
                 e,
+                // allow-noncombinator: test assertion on the stable snake_case Unimplemented pattern-class key, not parser dispatch
                 Effect::Unimplemented { name, .. } if name == "target_opponent_does_the_same"
             )),
             "expected the documented 'does the same' strict-failure, got {effects:#?}"
