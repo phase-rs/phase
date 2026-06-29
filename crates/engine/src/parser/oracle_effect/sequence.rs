@@ -1759,6 +1759,28 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
     .parse(rest)
 }
 
+/// CR 608.2c + CR 122.1: "remove <quantity> <type> counter[s] [from it]" as a
+/// bare-`" and "` conjunct is an independent imperative instruction, not a
+/// noun-phrase continuation of the prior conjunct. Amy Pond: "choose a suspended
+/// card you own and remove that many time counters from it" — without this split
+/// the counter-removal clause is swallowed and never reaches the RemoveCounter
+/// dispatcher. The discriminator is a `counter` token within THIS conjunct's
+/// segment (bounded at the next `" and "` boundary so a later unrelated
+/// `counter`/`counter target` token can't trigger a false split), which keeps
+/// non-counter `remove ` conjuncts ("remove it from combat" — Gustcloak) on the
+/// un-split path. Mirrors the trailing `.or()` arms
+/// (`starts_target_continuous_clause_lower`) rather than expanding the verb-prefix
+/// `alt(...)` tuple, which is already at nom's arity limit.
+fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("remove ").parse(s)?;
+    // Bound the counter-token search to this conjunct.
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    value((), (take_until("counter"), tag("counter"))).parse(segment)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -2038,6 +2060,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
     // under nom's 21-arm limit.
     .or(value((), starts_each_player_predicate_clause_lower))
+    // CR 608.2c + CR 122.1: a bare "remove <quantity> <type> counter[s] …"
+    // conjunct is an independent counter-removal instruction (Amy Pond). Trailing
+    // `.or()` arm (mirroring `starts_target_continuous_clause_lower`) so the
+    // verb-prefix `alt(...)` cluster stays under nom's 21-arm limit.
+    .or(value((), starts_remove_counter_clause_lower))
     // CR 205.1a + CR 613.1d + CR 702.171b: a bare "becomes <descriptor>"
     // conjunct joined by " and " is a second animation/designation predicate whose
     // subject is carried over (anaphorically) from the prior conjunct — the same
@@ -9123,6 +9150,31 @@ mod tests {
         ));
         // Possessive noun phrase — not a predicate clause.
         assert!(!starts_bare_and_clause("each opponent's creatures"));
+    }
+
+    /// CR 608.2c + CR 122.1: a bare "remove <quantity> <type> counter[s] …"
+    /// conjunct is an independent clause start (Amy Pond's "choose a suspended
+    /// card you own and remove that many time counters from it"). The "counter"
+    /// token within the conjunct is the discriminator; a non-counter "remove …"
+    /// continuation (Gustcloak's "remove it from combat") is left un-split.
+    #[test]
+    fn bare_and_clause_starts_on_remove_counter() {
+        assert!(starts_bare_and_clause(
+            "remove that many time counters from it"
+        ));
+        assert!(starts_bare_and_clause("remove a +1/+1 counter"));
+        assert!(starts_bare_and_clause("remove two time counters from it"));
+        // NO-REGRESSION negatives: non-counter "remove …" conjuncts stay un-split.
+        assert!(!starts_bare_and_clause("remove it from combat"));
+        assert!(!starts_bare_and_clause(
+            "remove that creature from the game"
+        ));
+        // The counter token must be in THIS conjunct, not a later one: a
+        // non-counter "remove" segment whose downstream conjunct mentions a
+        // "counter" must not false-split.
+        assert!(!starts_bare_and_clause(
+            "remove it from combat and counter target spell"
+        ));
     }
 
     /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each

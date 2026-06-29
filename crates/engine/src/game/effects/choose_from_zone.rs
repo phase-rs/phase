@@ -8,7 +8,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, ResolvingTriggerContext, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -89,6 +89,25 @@ pub fn resolve(
 
     // CR 700.2: Determine who makes the choice.
     let choosing_player = resolve_chooser(state, ability, chooser);
+
+    // CR 608.2: An ability's resolution is a single ongoing process. This
+    // interactive pause makes `stack::resolve_top` run to completion and
+    // unconditionally clear the live, resolution-scoped trigger context; preserve
+    // it here (this site runs inside `execute_effect`, before that clear) so an
+    // `EventContextAmount` ("that many") sub_ability continuation resolves the
+    // triggering event's amount after the pause (Amy Pond). Restored by the
+    // `ChooseFromZoneChoice` handler around the continuation drain. Set
+    // unconditionally on every single-pool raise: the `.then` yields `None` for a
+    // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
+    // resolution can never carry over; consumed by `.take()` in the handler.
+    state.pending_choose_zone_trigger_context = (state.current_trigger_event.is_some()
+        || state.current_trigger_match_count.is_some()
+        || state.die_result_this_resolution.is_some())
+    .then(|| ResolvingTriggerContext {
+        event: state.current_trigger_event.clone(),
+        match_count: state.current_trigger_match_count,
+        die_result: state.die_result_this_resolution,
+    });
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -790,6 +809,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::zones::Zone;
 
@@ -810,6 +830,165 @@ mod tests {
         // Round-trips back to an equal value.
         let back: ChooseFromZoneConstraint = serde_json::from_value(value).unwrap();
         assert_eq!(back, constraint);
+    }
+
+    /// CR 608.2 + CR 702.62b + CR 122.1: Amy Pond's combat-damage trigger
+    /// ("choose a suspended card you own and remove that many time counters from
+    /// it") must resolve `that many` to the combat damage AFTER the interactive
+    /// `ChooseFromZone` pause, removing the counters from the CHOSEN card. This is
+    /// the deliverable proof: without the `ResolvingTriggerContext` save/restore
+    /// the `EventContextAmount` continuation reads `None` → removes 0; without the
+    /// §D anaphor rebind the counters strip off Amy instead of the chosen card.
+    fn amy_pond_setup(
+        time_counters: u32,
+        combat_damage: u32,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        use crate::game::scenario::GameScenario;
+        use crate::game::triggers::process_triggers;
+        use crate::types::events::GameEvent;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::CombatDamage);
+        let amy = scenario
+            .add_creature(PlayerId(0), "Amy Pond", 2, 2)
+            .from_oracle_text(
+                "Whenever ~ deals combat damage to a player, choose a suspended card \
+                 you own and remove that many time counters from it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let suspended;
+        {
+            let state = runner.state_mut();
+            state.active_player = PlayerId(0);
+
+            // A suspended card you own in exile with `time_counters` time counters.
+            suspended = create_object(
+                state,
+                CardId(900),
+                PlayerId(0),
+                "Suspended Spell".to_string(),
+                Zone::Exile,
+            );
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            let suspend_kw = Keyword::Suspend {
+                count: time_counters,
+                cost: ManaCost::generic(2),
+            };
+            // CR 702.62b: off-battlefield keyword queries read `base_keywords`
+            // (the printed face), so the suspended card must carry Suspend there.
+            obj.keywords.push(suspend_kw.clone());
+            obj.base_keywords.push(suspend_kw);
+            obj.counters.insert(CounterType::Time, time_counters);
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types.core_types.push(CoreType::Sorcery);
+
+            // Amy deals `combat_damage` combat damage to a player → trigger fires.
+            // A SelfRef `DamageDone` trigger listens on the per-source
+            // `DamageDealt` event (CR 510.2), not the aggregate
+            // `CombatDamageDealtToPlayer` (which is for non-SelfRef observers).
+            let event = GameEvent::DamageDealt {
+                source_id: amy,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: combat_damage,
+                is_combat: true,
+                excess: 0,
+            };
+            process_triggers(state, std::slice::from_ref(&event));
+            crate::game::stack::resolve_top(state, &mut Vec::new());
+        }
+        (runner, amy, suspended)
+    }
+
+    #[test]
+    fn amy_pond_removes_combat_damage_time_counters_from_chosen_card_after_pause() {
+        use crate::types::actions::GameAction;
+
+        let (mut runner, amy, suspended) = amy_pond_setup(3, 2);
+
+        // The trigger paused on the interactive ChooseFromZone, and the resolving
+        // trigger context was captured for the EventContextAmount continuation.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseFromZoneChoice { .. }
+            ),
+            "expected ChooseFromZoneChoice pause, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            runner.state().pending_choose_zone_trigger_context.is_some(),
+            "the resolving trigger context must be captured across the pause"
+        );
+
+        crate::game::engine::apply(
+            runner.state_mut(),
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![suspended],
+            },
+        )
+        .expect("selecting the suspended card must succeed");
+
+        // EventContextAmount = 2 combat damage → 3 - 2 = 1 left on the CHOSEN card.
+        // `== 1` rejects a spurious batched `match_count` of 1 (which would leave 2)
+        // and proves the §D rebinding put the counters on the chosen card, not Amy.
+        assert_eq!(
+            runner.state().objects[&suspended]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "removed exactly the combat-damage amount (2) from the chosen card"
+        );
+        assert_eq!(
+            runner.state().objects[&amy]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "Amy Pond's own counters are untouched"
+        );
+        assert!(
+            runner.state().pending_choose_zone_trigger_context.is_none(),
+            "the stash is consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn amy_pond_removes_all_time_counters_when_damage_equals_counters() {
+        use crate::types::actions::GameAction;
+
+        let (mut runner, _amy, suspended) = amy_pond_setup(2, 2);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+
+        crate::game::engine::apply(
+            runner.state_mut(),
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![suspended],
+            },
+        )
+        .expect("selecting the suspended card must succeed");
+
+        // EventContextAmount = 2 → removes the last 2 of 2 time counters → 0 left
+        // (CR 702.62a free-cast on last-counter removal is existing behavior).
+        assert_eq!(
+            runner.state().objects[&suspended]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "all time counters removed when damage equals the counter count"
+        );
     }
 
     #[test]

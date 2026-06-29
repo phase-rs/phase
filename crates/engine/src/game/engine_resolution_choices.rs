@@ -2239,7 +2239,28 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
+            // CR 608.2: Restore the paused resolution's trigger context (captured
+            // at the `ChooseFromZone` raise) so an `EventContextAmount` ("that
+            // many") sub_ability reads the triggering event's amount — Amy Pond:
+            // "choose a suspended card you own and remove that many time counters
+            // from it". Save/restore (not a bare clear) keeps this re-entrant: a
+            // nested `ChooseFromZone` in the drained continuation re-captures, and
+            // the `prev` values are restored after the inner drain, leaving no
+            // stale leak past the action boundary. Mirrors
+            // `WaitingFor::ChooseObjectsSelection` and the
+            // `pending_optional_trigger_event` round-trip.
+            let prev_trigger_event = state.current_trigger_event.clone();
+            let prev_trigger_match_count = state.current_trigger_match_count;
+            let prev_die_result = state.die_result_this_resolution;
+            if let Some(ctx) = state.pending_choose_zone_trigger_context.take() {
+                state.current_trigger_event = ctx.event;
+                state.current_trigger_match_count = ctx.match_count;
+                state.die_result_this_resolution = ctx.die_result;
+            }
             effects::drain_pending_continuation(state, events);
+            state.current_trigger_event = prev_trigger_event;
+            state.current_trigger_match_count = prev_trigger_match_count;
+            state.die_result_this_resolution = prev_die_result;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
