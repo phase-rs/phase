@@ -921,6 +921,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExileResolvingSpellInsteadOfGraveyard
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
@@ -945,6 +946,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

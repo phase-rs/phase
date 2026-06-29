@@ -1254,6 +1254,28 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.138a: Escape with em-dash cost — composite mana + exile-from-graveyard
+    // ("escape—{2}{U}{R}, exile four other cards from your graveyard"). Mirrors the
+    // evoke/embalm/eternalize/escalate em-dash siblings above: detection is a
+    // structural split on the em-dash inside `parse_escape_keyword`, which delegates
+    // the comma-separated cost list wholesale to `parse_oracle_cost` (nom
+    // combinators), composing the clauses into `AbilityCost::Composite`. Escape
+    // appears on instants/sorceries (Run for Your Life, Cling to Dust) as well as
+    // permanents (Uro, Kroxa); registering it here lets BOTH `is_keyword_cost_line`
+    // guards in `dispatch_line_nom` (the `is_spell` guard and the general
+    // keyword-cost guard) extract it uniformly with its alt-cost siblings, instead
+    // of relying on a position-sensitive dedicated intercept. The `tag` prefix gate
+    // is required because `parse_escape_keyword` splits on *any* em-dash; without it
+    // an unrelated em-dash line could misfire.
+    if tag::<_, _, OracleError<'_>>("escape\u{2014}")
+        .parse(text)
+        .is_ok()
+    {
+        if let Some(kw) = super::oracle_special::parse_escape_keyword(text) {
+            return Some(kw);
+        }
+    }
+
     // CR 702.74a: "hideaway N" — parameterized keyword.
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
@@ -3338,6 +3360,36 @@ mod tests {
         assert!(is_keyword_cost_line(
             "escape\u{2014}{w}, exile two other cards from your graveyard."
         ));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_escape_em_dash() {
+        // CR 702.138a: Escape joins the em-dash alt-cost keyword family.
+        // parse_keyword_from_oracle receives already-lowercased oracle text.
+        use crate::types::keywords::EscapeCost;
+        let kw = parse_keyword_from_oracle(
+            "escape\u{2014}{2}{u}{r}, exile four other cards from your graveyard",
+        )
+        .expect("escape em-dash keyword must parse");
+        match kw {
+            Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) => {
+                assert!(
+                    matches!(
+                        costs.as_slice(),
+                        [
+                            AbilityCost::Mana { .. },
+                            AbilityCost::Exile {
+                                count: 4,
+                                zone: Some(Zone::Graveyard),
+                                ..
+                            }
+                        ]
+                    ),
+                    "unexpected escape composite cost: {costs:?}"
+                );
+            }
+            other => panic!("expected Keyword::Escape(NonMana(Composite)), got {other:?}"),
+        }
     }
 
     #[test]

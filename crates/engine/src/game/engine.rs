@@ -128,6 +128,17 @@ fn handle_unlock_room_door(
         }
     };
 
+    // CR 116.2m + CR 118.7a: Reduce the door's generic unlock cost by the
+    // player's active `ReduceActionCost { action: UnlockDoor }` statics
+    // (Inquisitive Glimmer — "Unlock costs you pay cost {1} less") before
+    // payment. Single authority shared with the plot path.
+    let cost = casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        crate::types::mana::SpecialAction::UnlockDoor,
+        cost,
+    );
+
     // CR 116.2m + CR 709.5e + CR 106.6: The unlock cost is a special action's
     // mana cost. Route payment through `PaymentContext::SpecialAction(UnlockDoor)`
     // so spend-restricted mana ("only to … unlock doors", Smoky Lounge) is
@@ -8991,6 +9002,115 @@ mod tests {
         assert_eq!(
             pool_left, 0,
             "the restricted mana must be spent on the unlock"
+        );
+    }
+
+    /// CR 116.2m + CR 709.5e + CR 118.7a: Inquisitive Glimmer — "Unlock costs
+    /// you pay cost {1} less." Reduces the generic component of a Room door's
+    /// unlock cost before payment, via the single-authority special-action
+    /// reducer shared with the plot path.
+    ///
+    /// Drives the full `apply()` pipeline (`GameAction::UnlockRoomDoor` →
+    /// `handle_unlock_room_door`). Discriminating: a {3}-generic door with
+    /// Inquisitive out is payable with only {2} in the pool (cost reduced to
+    /// {2}); WITHOUT the static the same {2} pool can't pay {3} and the unlock
+    /// errors. Reverting the engine.rs reduction line makes the with-static case
+    /// require {3} and fail.
+    #[test]
+    fn inquisitive_glimmer_reduces_room_unlock_cost() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let make_state = |with_glimmer: bool| {
+            let mut state = setup_game_at_main_phase();
+            let room = create_object(
+                &mut state,
+                CardId(950),
+                PlayerId(0),
+                "Test Room".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&room).unwrap();
+                obj.card_types.subtypes.push("Room".to_string());
+                obj.room_unlocks = Some(Default::default());
+                // CR 709.5e: the left door's unlock cost is the object's mana
+                // cost — a flat {3} generic here.
+                obj.mana_cost = ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3,
+                };
+            }
+            if with_glimmer {
+                let glimmer = create_object(
+                    &mut state,
+                    CardId(951),
+                    PlayerId(0),
+                    "Inquisitive Glimmer".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&glimmer).unwrap();
+                obj.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Creature);
+                obj.static_definitions =
+                    vec![StaticDefinition::new(StaticMode::ReduceActionCost {
+                        action: crate::types::mana::SpecialAction::UnlockDoor,
+                        mode: CostModifyMode::Reduce,
+                        amount: 1,
+                    })]
+                    .into();
+            }
+            // Fund exactly {2} of generic-payable mana.
+            {
+                let player = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == PlayerId(0))
+                    .unwrap();
+                for _ in 0..2 {
+                    player
+                        .mana_pool
+                        .add(ManaUnit::new(ManaType::Colorless, room, false, vec![]));
+                }
+            }
+            (state, room)
+        };
+
+        // With Inquisitive: {3} → {2}, payable with the {2} pool → door unlocks.
+        let (mut state, room) = make_state(true);
+        apply_as_current(
+            &mut state,
+            GameAction::UnlockRoomDoor {
+                object_id: room,
+                door: RoomDoor::Left,
+            },
+        )
+        .expect("reduced unlock cost ({2}) must be payable with {2} in pool");
+        assert!(
+            state
+                .objects
+                .get(&room)
+                .unwrap()
+                .room_unlocks
+                .unwrap()
+                .left_unlocked,
+            "door must unlock at the reduced cost"
+        );
+
+        // Without Inquisitive: {3} > {2} pool → unlock fails.
+        let (mut state2, room2) = make_state(false);
+        assert!(
+            apply_as_current(
+                &mut state2,
+                GameAction::UnlockRoomDoor {
+                    object_id: room2,
+                    door: RoomDoor::Left,
+                },
+            )
+            .is_err(),
+            "without the reduction the {{3}} unlock cost exceeds the {{2}} pool"
         );
     }
 

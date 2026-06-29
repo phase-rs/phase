@@ -9,6 +9,9 @@ cli = ["tracing-subscriber"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
+# Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
+# `combo-verify` tool bin. Excluded from the default lib / WASM surface.
+combo-verify = []
 
 [dependencies]
 serde = { workspace = true }
@@ -53,6 +56,12 @@ required-features = ["cli"]
 name = "rules-audit"
 path = "src/bin/rules_audit.rs"
 required-features = ["audit"]
+test = false
+
+[[bin]]
+name = "combo-verify"
+path = "src/bin/combo_verify.rs"
+required-features = ["combo-verify"]
 test = false
 
 [[bin]]

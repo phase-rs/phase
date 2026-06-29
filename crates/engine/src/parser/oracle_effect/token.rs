@@ -9,8 +9,8 @@ use nom::Parser;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter,
+    ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -417,6 +417,29 @@ fn parse_token_description_with_context(
         } else {
             return None;
         };
+    // CR 603.2 + CR 603.4 + CR 107.4: "create that many tokens" on a colored-pip
+    // cast trigger (Namor the Sub-Mariner) back-references the cast spell's
+    // colored-symbol count (EventSource), not the generic EventContextAmount —
+    // a SpellCast event carries no amount, so EventContextAmount resolves to 0.
+    // The qualifier color was staged onto the context from the trigger's
+    // "with one or more <color> mana symbols in its mana cost" valid_card phrase.
+    // Gated on `pending_mana_symbol_count_color`, so Chatterfang-style "that many"
+    // counters (color None) are untouched.
+    if matches!(
+        &count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    ) {
+        if let Some(color) = ctx.pending_mana_symbol_count_color {
+            count = QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::EventSource,
+                    color: Some(color),
+                },
+            };
+        }
+    }
     // CR 508.4: Seed `tapped` from the inline "tapped and attacking" suffix
     // detected earlier so the "tapped " / "untapped " leading-word loop below
     // can still flip it if the token text also carries a leading "tapped".

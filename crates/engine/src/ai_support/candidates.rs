@@ -3136,6 +3136,35 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    // CR 702.170f + CR 116.2k: Plot the top card of the library as a special
+    // action (Fblthp, Lost on the Range). Surfaced as the runtime-granted
+    // activated plot ability that lives only on the authorized top card, offered
+    // via the existing `GameAction::ActivateAbility` — a top-card-only query,
+    // never a generic library loop (no non-top library card carries the ability).
+    // `can_activate_ability_now` independently enforces the CR 702.170a sorcery-
+    // speed timing (main phase + empty stack + active player); the `is_active`
+    // + `stack_empty` guard just short-circuits the battlefield scan off-turn.
+    if is_active && stack_empty {
+        if let Some((top_id, _src_id)) = casting::top_of_library_plot_source(state, player) {
+            for (i, ability_def) in casting::activated_ability_definitions(state, top_id) {
+                if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                    && ability_def.activation_zone == Some(crate::types::zones::Zone::Library)
+                    && !crate::game::mana_abilities::is_mana_ability(&ability_def)
+                    && casting::can_activate_ability_now(state, player, top_id, i)
+                {
+                    actions.push(candidate(
+                        GameAction::ActivateAbility {
+                            source_id: top_id,
+                            ability_index: i,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
+                }
+            }
+        }
+    }
+
     // CR 702.61a: Crew/Saddle/Station are activated abilities — blocked by split second.
     if !split_second_active {
         // Loop-invariant hoist: the set of this player's untapped creatures (and

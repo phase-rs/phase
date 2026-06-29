@@ -459,6 +459,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -510,6 +511,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         }
         StaticCondition::Not { condition } => static_condition_uses_unspent_mana(condition),
         StaticCondition::DevotionGE { .. }
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::IsPresent { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
@@ -2293,6 +2295,11 @@ fn resolve_ref(
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
+            // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
+            // trigger/effect context, it may refer to the variable count chosen
+            // for the spell or activated ability's cost (for example, "Remove
+            // any number of counters: Create that many tokens.").
+            .or_else(|| chosen_x.map(u32_to_i32_saturating))
             // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
             // if it had one or more <X> counters on it, put that many <X> counters
             // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
@@ -3690,18 +3697,7 @@ fn resolve_mana_symbols_in_mana_cost(
     targets: &[TargetRef],
 ) -> i32 {
     object_for_scope(state, scope, ctx, targets)
-        .map(|obj| match &obj.mana_cost {
-            ManaCost::Cost { shards, .. } => usize_to_i32_saturating(
-                shards
-                    .iter()
-                    .filter(|shard| match color {
-                        Some(c) => shard.contributes_to(c),
-                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
-                    })
-                    .count(),
-            ),
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
-        })
+        .map(|obj| obj.mana_cost.count_colored_pips(color))
         .unwrap_or(0)
 }
 
@@ -5037,6 +5033,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -10710,6 +10707,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         state.current_trigger_event =
@@ -10770,6 +10768,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let power = resolve_quantity_with_targets(
@@ -10915,6 +10914,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -10978,6 +10978,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         assert!(
@@ -11039,6 +11040,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11097,6 +11099,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11148,6 +11151,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11210,6 +11214,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11249,6 +11254,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -11867,6 +11873,7 @@ mod tests {
                     colors: vec![],
                     counters: Default::default(),
                     chosen_attributes: vec![],
+                    tapped: false,
                 },
             );
             state.exile_links.push(ExileLink {

@@ -3452,6 +3452,7 @@ mod tests {
                 condition: DelayedTriggerCondition::WhenNextEvent {
                     trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
@@ -3512,6 +3513,7 @@ mod tests {
                         trigger
                     }),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(copy_effect),
                 uses_tracked_set: false,

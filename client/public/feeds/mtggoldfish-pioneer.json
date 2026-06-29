@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-28T00:00:00Z",
+  "updated": "2026-06-29T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -150,8 +150,8 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Overgrown Tomb"
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
         },
         {
           "count": 4,
@@ -159,7 +159,7 @@
         },
         {
           "count": 1,
-          "name": "Overgrown Tomb"
+          "name": "Wastewood Verge"
         },
         {
           "count": 1,
@@ -174,12 +174,12 @@
           "name": "Emeritus of Abundance"
         },
         {
-          "count": 1,
-          "name": "Fatal Push"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
-          "count": 1,
-          "name": "Forest"
+          "count": 3,
+          "name": "Swamp"
         },
         {
           "count": 3,
@@ -187,23 +187,19 @@
         },
         {
           "count": 4,
-          "name": "Mutavault"
+          "name": "Overgrown Tomb"
         },
         {
           "count": 4,
           "name": "Llanowar Wastes"
         },
         {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
           "count": 4,
           "name": "Professor Dellian Fel"
         },
         {
-          "count": 4,
-          "name": "Blooming Marsh"
+          "count": 1,
+          "name": "Restless Cottage"
         },
         {
           "count": 2,
@@ -214,8 +210,8 @@
           "name": "Sheoldred, the Apocalypse"
         },
         {
-          "count": 2,
-          "name": "Swamp"
+          "count": 1,
+          "name": "Forest"
         },
         {
           "count": 1,
@@ -226,40 +222,24 @@
           "name": "Tear Asunder"
         },
         {
-          "count": 1,
-          "name": "Abrupt Decay"
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 3,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 1,
-          "name": "Wastewood Verge"
-        },
-        {
-          "count": 2,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
-          "name": "Restless Cottage"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Mutavault"
         },
         {
           "count": 1,
           "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Abrupt Decay"
         }
       ],
       "sideboard": [
@@ -268,7 +248,7 @@
           "name": "Culling Ritual"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Duress"
         },
         {
@@ -289,15 +269,11 @@
         },
         {
           "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 2,
           "name": "Withering Curse"
         },
         {
-          "count": 1,
-          "name": "Duress"
+          "count": 2,
+          "name": "Unlicensed Hearse"
         }
       ]
     },
@@ -817,19 +793,19 @@
       "sideboard": [
         {
           "count": 1,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 2,
-          "name": "Path of Peril"
+          "name": "Bitter Triumph"
         },
         {
           "count": 1,
-          "name": "Languish"
+          "name": "Path of Peril"
         },
         {
           "count": 2,
-          "name": "Graveyard Trespasser"
+          "name": "Languish"
+        },
+        {
+          "count": 1,
+          "name": "Gix's Command"
         },
         {
           "count": 3,
@@ -849,7 +825,11 @@
         },
         {
           "count": 1,
-          "name": "Bitter Triumph"
+          "name": "End of the Hunt"
+        },
+        {
+          "count": 1,
+          "name": "Preacher of the Schism"
         }
       ]
     },

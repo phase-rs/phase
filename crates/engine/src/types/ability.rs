@@ -75,6 +75,24 @@ pub enum ZoneOwner {
     /// Kaya, Spirits' Justice's −2 ("For each other player, exile up to one
     /// target creature that player controls").
     EachOpponent,
+    /// CR 400.1 + CR 607.2a: The referenced zone is scanned across ALL owners —
+    /// ownership imposes no restriction, and the effect's `TargetFilter`
+    /// performs every bit of scoping. Used when the candidate pool's membership
+    /// is defined by something other than ownership, so owner-gating would
+    /// wrongly drop valid cards. The motivating case is "a creature card exiled
+    /// with [this source]" (Koh, the Face Stealer): exile is a zone shared by
+    /// all players (CR 400.1), and "exiled with [source]" is a linked-ability
+    /// reference (CR 607.2a) whose membership is the source's linked-exile set
+    /// regardless of who owns each card — and Koh typically exiles *opponents'*
+    /// creatures, so gating to the controller's own exiled cards empties the
+    /// pool. This is the single-pool owner-agnostic leaf of the scope axis:
+    /// distinct from [`ZoneOwner::EachPlayer`]/[`ZoneOwner::EachOpponent`],
+    /// which iterate one prompt per player and accumulate into a tracked set —
+    /// this raises ONE prompt over the whole-zone union. Mirrors the
+    /// `ScopedPlayer`-on-Battlefield branch in `collect_direct_zone_cards`
+    /// (scan broadly, let the filter narrow), but with no owner restriction at
+    /// all.
+    AllOwners,
 }
 
 /// CR 105.1 + CR 205.2: A fixed, closed enumeration whose members an effect
@@ -848,6 +866,18 @@ pub enum ChosenAttribute {
     /// label is stored case-canonicalised to match `ChoiceType::Labeled`'s
     /// capitalised option list.
     Label(String),
+    /// CR 613.1f + CR 611.2c + CR 400.7: A remembered card object — the "last
+    /// chosen card" for cards like Koh, the Face Stealer ("Koh has all activated
+    /// and triggered abilities of the last chosen card"). Unlike every other
+    /// variant, this is NOT a player-prompted choice category: it is written by
+    /// `Effect::RememberCard` directly from the resolution chain's tracked set,
+    /// not produced through `ChoiceType`/`ChoiceValue`/`from_choice` (the same
+    /// engine-set precedent as `TributeOutcome`). It is consumed by
+    /// `TargetFilter::ChosenCard` at Layer-6 grant evaluation, and — being stored
+    /// in `chosen_attributes` — is cleared automatically when the source permanent
+    /// changes zones (CR 400.7), which is exactly the lifetime Koh's grant needs.
+    /// Replace-on-rechoose: `RememberCard` removes any prior `Card` before pushing.
+    Card(ObjectId),
 }
 
 impl ChosenAttribute {
@@ -884,6 +914,14 @@ impl ChosenAttribute {
             // idiom). The stored single label is one of those options.
             Self::Label(label) => ChoiceType::Labeled {
                 options: vec![label.clone()],
+            },
+            // Engine-set, never player-prompted (written by `Effect::RememberCard`
+            // from a tracked set, not via `from_choice`). `choice_type()` has no
+            // callers for this variant; the empty `Labeled` template mirrors the
+            // `Keyword`/`TributeOutcome` placeholder idiom rather than inventing a
+            // spurious object-choice category.
+            Self::Card(_) => ChoiceType::Labeled {
+                options: Vec::new(),
             },
         }
     }
@@ -2283,6 +2321,41 @@ pub enum ResolutionCastSuccessAction {
     },
 }
 
+/// CR 603.7b: lifetime of a one-shot `WhenNextEvent` delayed trigger. CR 603.7b
+/// states a delayed triggered ability "will trigger only once—the next time its
+/// trigger event occurs—unless it has a stated duration, such as 'this turn.'"
+/// The firing semantics are identical (fire once on the next matching event);
+/// the only difference is whether that stated "this turn" duration is present.
+///
+/// - `ThisTurn` (CR 603.7b "stated duration, such as 'this turn'"): "When you
+///   next [event] **this turn** …" — bounded to the turn it was created. If the
+///   event never occurs that turn, the unfired trigger is pruned at
+///   end-of-turn cleanup. Coin-flip reflexives, "when you next cast a spell this
+///   turn", "when you next attack this turn", etc.
+/// - `Persistent` (CR 603.7b, no stated duration): an open-ended delayed trigger
+///   that "will trigger only once—the next time its trigger event occurs" with
+///   no "this turn" limit — it survives across turns until the event occurs. The
+///   Pandorica's "When ~ becomes untapped or leaves the battlefield, that
+///   permanent phases in" re-entry fires on a later turn's untap step, so it
+///   must not be pruned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DelayedTriggerLifetime {
+    /// CR 603.7b ("stated duration, such as 'this turn'"): bounded to the
+    /// creating turn; pruned at cleanup if unfired.
+    #[default]
+    ThisTurn,
+    /// CR 603.7b (no stated duration): open-ended; persists across turns until
+    /// the event fires.
+    Persistent,
+}
+
+impl DelayedTriggerLifetime {
+    /// Serde skip-helper: `ThisTurn` is the default and is omitted from JSON.
+    pub fn is_this_turn(&self) -> bool {
+        matches!(self, DelayedTriggerLifetime::ThisTurn)
+    }
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -2325,6 +2398,12 @@ pub enum DelayedTriggerCondition {
         /// only the first matching event fires the delayed ability.
         #[serde(default)]
         or_trigger: Option<Box<TriggerDefinition>>,
+        /// CR 603.7b: whether this one-shot trigger has a stated "this turn"
+        /// duration (`ThisTurn`, pruned at cleanup if unfired) or no stated
+        /// duration (`Persistent`, survives across turns until the event fires —
+        /// The Pandorica's untap/leave re-entry).
+        #[serde(default, skip_serializing_if = "DelayedTriggerLifetime::is_this_turn")]
+        lifetime: DelayedTriggerLifetime,
     },
 }
 
@@ -2647,6 +2726,13 @@ pub enum FilterProp {
     /// of `BlockingSource`; used by "choose a creature that saddled it this turn"
     /// (Calamity, Galloping Inferno).
     SaddledSource,
+    /// CR 702.51c: Matches a creature that convoked the filter source — i.e. was
+    /// tapped to pay the source spell's convoke cost, recorded in the source
+    /// object's `convoked_creatures`. Source-relative, mirroring `SaddledSource`
+    /// / `BlockingSource`. Membership analogue of
+    /// `QuantityRef::ConvokedCreatureCount` (both read `convoked_creatures`).
+    /// Used by "a creature that convoked this spell" (Everything Comes to Dust).
+    ConvokedSource,
     /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
     /// `controller` relative to the ability source ("each battle they protect").
     ProtectorMatches {
@@ -2836,6 +2922,19 @@ pub enum FilterProp {
     ColorCount {
         comparator: Comparator,
         count: u8,
+    },
+    /// CR 107.4 + CR 202.1: Matches objects whose count of colored mana symbols
+    /// in the printed mana cost satisfies `comparator` against `value`.
+    /// `color: Some(c)` counts symbols contributing to color `c` (hybrid /
+    /// monocolored-hybrid / Phyrexian via `ManaCostShard::contributes_to`,
+    /// CR 107.4a/107.4e/107.4f); `color: None` counts each colored symbol once.
+    /// `value` is a printed constant. Filter sibling of
+    /// `QuantityRef::ManaSymbolsInManaCost`; both delegate the pip count to the
+    /// single counting authority `ManaCost::count_colored_pips`.
+    ManaSymbolCount {
+        color: Option<ManaColor>,
+        comparator: Comparator,
+        value: i32,
     },
     /// Matches objects with a specific supertype (Basic, Legendary, Snow).
     HasSupertype {
@@ -3544,6 +3643,15 @@ pub enum TargetFilter {
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
     CostPaidObject,
+    /// CR 613.1f + CR 611.2c + CR 400.7: Resolves to the single card most recently
+    /// recorded on the FILTER's source object via `ChosenAttribute::Card` (written
+    /// by `Effect::RememberCard`). Models "the last chosen card" — Koh, the Face
+    /// Stealer's Layer-6 grant source. Live, not snapshotted: re-evaluated each
+    /// layer pass, so re-choosing replaces the grant and the chosen card leaving
+    /// its zone (CR 400.7 — a new object) drops the grant. The object matcher
+    /// reads `chosen_attributes` from the source (not the resolving ability), so
+    /// the static grant resolves it against the permanent that HAS the static.
+    ChosenCard,
     /// Matches exactly the objects in a tracked set.
     /// CR 603.7: Delayed triggers act on specific objects from the originating effect.
     TrackedSet {
@@ -3696,6 +3804,21 @@ pub enum TargetFilter {
     /// "that player exiles that many cards" where the affected player is the
     /// damage recipient, not the replacement source or damage source.
     PostReplacementDamageTarget,
+    /// CR 108.3 + CR 400.3 + CR 615.5: Resolves to the *owner* of the prevented
+    /// event's damage recipient. Event-driven analog of `ParentTargetOwner`
+    /// (owner-projection), exactly as `PostReplacementDamageTarget` is the
+    /// event-driven analog of `ParentTarget`. Used by "prevent that damage and
+    /// that creature's owner shuffles it into their library" (Weeping Angel),
+    /// where "their library" is the recipient's OWNER's library (CR 108.3),
+    /// routed there by CR 400.3 — NOT the shield controller's library.
+    ///
+    /// Resolves the OWNER (not controller) of the object in
+    /// `state.post_replacement_event_target` — mirrors
+    /// `PostReplacementSourceController`'s player-projection mechanism, NOT
+    /// `PostReplacementDamageTarget`'s raw object return. CR 109.4 (controller)
+    /// is the rule this variant is deliberately DISTINCT from; the same
+    /// owner-vs-controller split the sibling `ParentTargetOwner` cites.
+    PostReplacementDamageTargetOwner,
     /// CR 508.5 / CR 508.5a: Resolves to the defending player for the source
     /// attacking creature, looked up per attacker through
     /// `combat::defending_player_for_attacker`.
@@ -5618,6 +5741,12 @@ pub enum StaticCondition {
         text: String,
     },
     DuringYourTurn,
+    /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with
+    /// the most common color among all permanents on the battlefield (including
+    /// any color tied for most common). Used by Heroic Defiance's "gets +3/+3
+    /// unless it shares a color with the most common color among all permanents
+    /// or a color tied for most common" (the static gate wraps this in `Not`).
+    SharesColorWithMostCommonColorAmongPermanents,
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
@@ -5912,6 +6041,22 @@ pub enum ParsedCondition {
     },
     YouControlNoCreatures,
     YouAttackedThisTurn,
+    /// CR 508.6 + CR 508.5 + CR 109.5: True when the affected player attacked the
+    /// SOURCE's controller — or a planeswalker/battle that controller controls —
+    /// this turn. Evaluated as `has_attacked(affected_player, source.controller)`
+    /// against `attacked_defenders_this_turn`, whose `defending_player` is already
+    /// the CR-508.5 collapse of the attack target (planeswalker/battle → its
+    /// controller), so "attacked you OR a planeswalker you control" is one check.
+    /// Sandswirl Wanderglyph: "Each opponent who attacked you or a planeswalker you
+    /// control this turn can't cast spells."
+    ///
+    /// AXIS NOTE (parameterize-vs-proliferate): this is the 2nd "you-attacked-
+    /// [defender]" leaf — `YouAttackedThisTurn` (defender = ANY player) vs this
+    /// (defender = the source's controller). Kept as a flat leaf to match the
+    /// surrounding idiom (`YouAttackedThisTurn` / `YouAttackedWithAtLeast` /
+    /// `SourceAttackedThisTurn`). A THIRD defender variant should trigger a
+    /// refactor to `YouAttacked { defender: <scope> }` (CR 508.6); do not unify now.
+    YouAttackedSourceControllerThisTurn,
     /// CR 508.1a: True when the player declared at least `count` attackers this
     /// turn. `filter: None` counts every attacker the player declared (backed by
     /// the fast `state.attacking_creatures_this_turn` counter — "you attacked
@@ -7833,6 +7978,17 @@ pub enum PerpetualModification {
     GrantKeywords {
         keywords: Vec<crate::types::keywords::Keyword>,
     },
+    /// "[object] perpetually becomes a [subtypes] with base power and toughness
+    /// P/T [and gains [keywords]]" — replaces creature subtypes, ensures the
+    /// card is a creature, sets base power/toughness, and grants keywords
+    /// permanently (Second Little Pig).
+    Become {
+        creature_subtypes: Vec<String>,
+        power: i32,
+        toughness: i32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<crate::types::keywords::Keyword>,
+    },
 }
 
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
@@ -9630,6 +9786,14 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_object_filter: Option<TargetFilter>,
     },
+    /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
+    /// "the next time you would draw a card this turn, [effect] instead" draw
+    /// replacement (Words of Worship/Wilding). Mirrors CreateDamageReplacement for
+    /// the Draw event class; the substitute is a heterogeneous Effect resolved via
+    /// the post-replacement continuation. RUNTIME: create_draw_replacement::resolve.
+    CreateDrawReplacement {
+        replacement_effect: Box<Effect>,
+    },
     /// CR 104.3e: An effect may state that a player loses the game.
     ///
     /// `target` names the player who loses the game when the effect resolves:
@@ -9869,6 +10033,19 @@ pub enum Effect {
         /// Additional validation rules for the chosen subset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
+    },
+    /// CR 608.2c + CR 613.1f: Record the card selected by a preceding selection
+    /// effect (typically `ChooseFromZone`) onto the resolving ability's SOURCE as
+    /// `ChosenAttribute::Card`, so a companion Layer-6 static ("[this] has all
+    /// activated and triggered abilities of the last chosen card" — Koh, the Face
+    /// Stealer) can read it via `TargetFilter::ChosenCard`. Composable building
+    /// block: the choice UI/zone search stays in `ChooseFromZone`; this effect is
+    /// the persistent writer. `target` reads the chosen object(s) — Koh passes
+    /// `TrackedSet { id: TrackedSetId(0) }` (the resolution chain's published
+    /// pick, resolved via `resolve_tracked_set_sentinel`); the single recorded
+    /// card replaces any prior `ChosenAttribute::Card` (replace-on-rechoose).
+    RememberCard {
+        target: TargetFilter,
     },
     /// CR 608.2c + CR 105.1 / CR 205.2a: For each member of a fixed category
     /// (the five colors, or the CR 205.2a card types that can appear in a
@@ -11238,6 +11415,7 @@ impl TargetFilter {
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
         )
@@ -11441,6 +11619,7 @@ impl Effect {
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
+            | Effect::RememberCard { target }
             | Effect::PairWith { target }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
@@ -11829,7 +12008,10 @@ impl Effect {
             // CR 702.50a: EpicCopy carries its targets inside the snapshotted
             // spell ability, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
-            | Effect::CreateDamageReplacement { .. } => None,
+            | Effect::CreateDamageReplacement { .. }
+            // CR 614.11: CreateDrawReplacement is non-targeted — "you would
+            // draw" scopes via the shield's source-player default, no slot.
+            | Effect::CreateDrawReplacement { .. } => None,
             // CR 115.1: RevealUntil with a non-context player filter ("target
             // opponent reveals...") requires a stack-time player target slot.
             Effect::RevealUntil { player, .. } => {
@@ -12015,6 +12197,7 @@ impl Effect {
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
@@ -12023,6 +12206,7 @@ impl Effect {
             | Effect::Conjure { .. }
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateDrawReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
@@ -12242,6 +12426,7 @@ impl Effect {
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
@@ -12250,6 +12435,7 @@ impl Effect {
             | Effect::Conjure { .. }
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateDrawReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
@@ -12440,6 +12626,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileResolvingSpellInsteadOfGraveyard => "ExileResolvingSpellInsteadOfGraveyard",
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
+        Effect::CreateDrawReplacement { .. } => "CreateDrawReplacement",
         Effect::LoseTheGame { .. } => "LoseTheGame",
         Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
@@ -12464,6 +12651,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
+        Effect::RememberCard { .. } => "RememberCard",
         Effect::ForEachCategoryExile { .. } => "ForEachCategoryExile",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
@@ -12664,6 +12852,7 @@ pub enum EffectKind {
     ExileResolvingSpellInsteadOfGraveyard,
     PreventDamage,
     CreateDamageReplacement,
+    CreateDrawReplacement,
     Regenerate,
     RemoveAllDamage,
     LoseTheGame,
@@ -12690,6 +12879,7 @@ pub enum EffectKind {
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
+    RememberCard,
     ChooseObjectsIntoTrackedSet,
     ChooseAndSacrificeRest,
     Exploit,
@@ -12905,6 +13095,7 @@ impl From<&Effect> for EffectKind {
             }
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
+            Effect::CreateDrawReplacement { .. } => EffectKind::CreateDrawReplacement,
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
             Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
@@ -12935,6 +13126,7 @@ impl From<&Effect> for EffectKind {
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
+            Effect::RememberCard { .. } => EffectKind::RememberCard,
             // The per-member iteration parks `ChooseFromZoneChoice` prompts and
             // emits `ChooseFromZone` resolution events; it shares the kind.
             Effect::ForEachCategoryExile { .. } => EffectKind::ChooseFromZone,
@@ -14320,6 +14512,20 @@ pub enum AbilityCondition {
         #[serde(default)]
         use_lki: bool,
     },
+    /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
+    /// at least one *object* target. Guards reflexive-target riders ("If that
+    /// creature …, …") against the optional-declined-target case: when a
+    /// variable-number-of-targets antecedent ("destroy up to one target
+    /// creature") is announced with zero targets (CR 601.2c), the anaphor "that
+    /// creature" has no antecedent (CR 608.2c — read the whole text), so the
+    /// rider must not fire. `evaluate_condition` checks the resolved ability's
+    /// declared targets (CR 115.1) for a `TargetRef::Object`, with NO
+    /// `TriggeringSource` fallback (unlike `TargetMatchesFilter`), so a declined
+    /// optional target reads false. The lowering pass conjoins this with the
+    /// reflexive sub-condition (`And{[HasObjectTarget, …]}`) only when the
+    /// antecedent's `multi_target.min_is_fixed_zero()` — a no-op for
+    /// mandatory-single-target cards (`multi_target == None`).
+    HasObjectTarget,
     /// CR 608.2c + CR 603.2: "if it targets a [filter]" on a triggered ability —
     /// gates the sub_ability on whether the triggering spell's chosen targets
     /// include at least one permanent or player matching `filter`. The pronoun
@@ -16748,6 +16954,37 @@ pub enum ContinuousModification {
     /// each recipient of the host static (`FilterContext::from_source(recipient)`).
     GrantAllActivatedAbilitiesOf {
         source: TargetFilter,
+        /// CR 602.5b + CR 602.5c: An optional use-restriction injected into every
+        /// activated ability donated by this grant. `Some(OnlyOnceEachTurn)`
+        /// models Locus of Enlightenment's "You may activate each of those
+        /// abilities only once each turn" rider — the restriction travels with
+        /// each granted ability and is enforced per `(recipient, ability_index)`
+        /// by `game/restrictions.rs`. `None` (the default) leaves the donated
+        /// abilities uncapped, which is the correct, required behavior for every
+        /// other granting card (Myr Welder, Agatha's Soul Cauldron, Marvin,
+        /// Experiment Kraj, Necrotic Ooze, …). A typed `Option<ActivationRestriction>`
+        /// rather than a bool so the cap axis can grow to other use-restrictions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cap: Option<ActivationRestriction>,
+    },
+    /// CR 613.1f + CR 603.1 + CR 603.2: Grant the affected object **all triggered
+    /// abilities of** the objects matching `source` (Koh, the Face Stealer "Koh
+    /// has all activated and triggered abilities of the last chosen card"). The
+    /// triggered-ability mirror of `GrantAllActivatedAbilitiesOf`: the set is
+    /// dynamic — recomputed each layer pass — so it is expanded into one
+    /// `GrantTrigger` per matching trigger definition at continuous-effect
+    /// collection time (`expand_granted_triggered_abilities`); the layer-6 apply
+    /// of this variant itself is therefore a no-op. `source` is resolved relative
+    /// to the host static with each recipient's controller, mirroring the
+    /// activated expander. Distinct sibling rather than a parameter of
+    /// `GrantAllActivatedAbilitiesOf` because activated and triggered abilities
+    /// land in different stores (CR 602.1 `obj.abilities` via `GrantAbility` vs
+    /// CR 603.1 `obj.trigger_definitions` via `GrantTrigger`) with different
+    /// expansion, and the `cap` use-restriction (CR 602.5b) is activated-only —
+    /// the same split the singular `GrantAbility`/`GrantTrigger` pair already
+    /// draws. No cap: triggered abilities carry no activation restriction.
+    GrantAllTriggeredAbilitiesOf {
+        source: TargetFilter,
     },
     /// CR 604.1: Grant a triggered ability to the affected object.
     /// Unlike GrantAbility (which pushes to obj.abilities), this pushes to
@@ -17694,6 +17931,8 @@ mod tests {
             ZoneOwner::Opponent,
             ZoneOwner::ScopedPlayer,
             ZoneOwner::EachPlayer,
+            ZoneOwner::EachOpponent,
+            ZoneOwner::AllOwners,
         ] {
             let json = serde_json::to_string(&owner).expect("ZoneOwner serializes");
             let round_tripped: ZoneOwner =

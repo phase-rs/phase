@@ -330,6 +330,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // quote is required: scan_contains only matches at word starts, and "legend"
     // is glued to its opening quote ("legend) in the Oracle text.
     "\"legend rule\" doesn't apply",
+    "play any number of lands",
     "play an additional land",
     "play two additional lands",
     "triggers an additional time",

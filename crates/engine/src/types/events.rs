@@ -282,6 +282,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// CR 702.143d: a card in exile became foretold via an effect (e.g. The
+    /// Foretold Soldier "exile it face down. It becomes foretold."). Distinct
+    /// from the CR 702.143a foretell special action — it does NOT fire
+    /// "whenever you foretell" triggers (CR 702.143c reserves "foretell" for
+    /// the special action).
+    BecameForetold {
+        object_id: ObjectId,
+    },
     PlayerLost {
         player_id: PlayerId,
     },
