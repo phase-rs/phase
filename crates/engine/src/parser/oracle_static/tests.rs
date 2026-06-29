@@ -6534,6 +6534,7 @@ fn extract_must_be_blocked_by_conjunct_classifies_quality() {
         matches!(
             &conjunct,
             Some(MustBeBlockedByConjunct::Unrecognized(text))
+                // allow-noncombinator: test assertion verifying diagnostic text content, not parsing dispatch
                 if text.contains("must be blocked by a splorf if able")
         ),
         "expected an Unrecognized diagnostic conjunct, never None",
