@@ -30,14 +30,20 @@ import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
 // card leftward over the previous one. Tightens continuously as the hand grows
 // so a Commander-sized hand (up to ~20 cards) still fits on screen.
+//
+// The margin is a fraction of `--hand-card-w` — the SAME basis the cards are
+// rendered at (CardImage below). Using the base `--card-w` here while the cards
+// render at `--hand-card-w` (1.14–1.4× larger) left the real overlap off by the
+// scale factor, so the fan spread ~40% wider than the formula intends and the
+// error compounded with hand size, pushing the fan off-center to the right.
 function getHandOverlap(handSize: number): string {
-  if (handSize <= 5) return "calc(var(--card-w) * -0.25)";
-  if (handSize <= 7) return "calc(var(--card-w) * -0.45)";
+  if (handSize <= 5) return "calc(var(--hand-card-w) * -0.25)";
+  if (handSize <= 7) return "calc(var(--hand-card-w) * -0.45)";
   // For 8+ cards: target total width ≈ 4× card width.
   // First card occupies 1w; remaining (n-1) each contribute (1 + overlap)w.
   // (n-1)(1 + overlap) = 3  =>  overlap = 3/(n-1) - 1, clamped to [-0.85, -0.6].
   const overlap = Math.max(-0.85, Math.min(-0.6, 3 / (handSize - 1) - 1));
-  return `calc(var(--card-w) * ${overlap})`;
+  return `calc(var(--hand-card-w) * ${overlap})`;
 }
 
 // Per-card rotation in degrees. Total fan span is clamped to ±18° regardless of
@@ -60,36 +66,35 @@ function getArcCoefficient(handSize: number): number {
   return 54 / (maxDist * maxDist);
 }
 
-// Continue the hand's fan curve into the castable graveyard/exile "wings".
+// Geometry for the WHOLE displayed row — hand cards plus the castable exile
+// (left) and graveyard (right) "wings" — as one fan. Overlap, per-card tilt and
+// arc are all sized by the TOTAL number of displayed cards, so a 3-card hand
+// shown alongside 13 graveyard delve-candidates tucks into the same tight,
+// angle-clamped arc a 16-card hand would, instead of inheriting the loose
+// 3-card spacing and spilling off-screen with near-sideways edge cards.
 //
-// A card at virtual fan index `vi` lies exactly on the curve the hand already
-// defines: vi in [0, H) are the real hand cards (rendered untouched by
-// getCardRotation/arcOffset), vi < 0 are exile wing cards extending left, and
-// vi >= H are graveyard wing cards extending right. Reusing the hand's own
-// per-card rotation delta and arc coefficient — derived from HAND size only —
-// makes the wings perfectly continuous with the hand without altering a single
-// hand-card line, so the drag-to-reorder system (which only ever sees hand
-// cards) is completely undisturbed. Mirrors getCardRotation/getArcCoefficient:
-// rotation(i) === getCardRotation(i, H) and arc(i) === the hand's arcOffset.
-function handFanCurve(handSize: number) {
-  const center = (handSize - 1) / 2;
-  // Derive the fan SHAPE (per-card tilt + arc) from at least two cards so the
-  // wings still fan when the hand is empty or holds a single card (a raw delta
-  // of 0 would render them flat). `center` stays at the TRUE hand center, so for
-  // handSize >= 2 this is identical to before and the wing curve stays
-  // continuous with getCardRotation(i, handSize) at the seam.
-  const shapeSize = Math.max(2, handSize);
-  const delta = Math.min(6, 36 / (shapeSize - 1));
-  const arcCoeff = getArcCoefficient(shapeSize);
-  // The arc is a DOWNWARD parabola (edges drop, center rides highest). Past the
-  // hand's own edge a naive continuation would sink the wings below the band and
-  // clip them, so clamp wing lift to the outermost hand card's drop: wings rest
-  // level with the hand's edge cards while their rotation keeps sweeping.
+// `k` is a card's absolute position across the row: exile cards occupy [0, E),
+// hand cards [E, E + H), graveyard cards [E + H, N). When there are no wings
+// (N === H, E === 0) this is identical to the old hand-only geometry —
+// rotation(k) === getCardRotation(k, H) and arc(k) === the hand's old arcOffset
+// for every k — so a wing-less hand (and its drag-to-reorder system) is
+// completely undisturbed; only the wing case changes.
+function fanGeometry(totalCards: number) {
+  const center = (totalCards - 1) / 2;
+  // Size the SHAPE (tilt + arc) from at least two cards so a lone card / wing
+  // still fans (a raw delta of 0 would render flat).
+  const shape = Math.max(2, totalCards);
+  const delta = Math.min(6, 36 / (shape - 1));
+  const arcCoeff = getArcCoefficient(shape);
+  // Downward parabola (edges drop, center rides highest), clamped at the row's
+  // own edges so the outermost cards rest level with the band instead of sinking
+  // below it and clipping.
   const edgeLift = center * center * arcCoeff;
   return {
-    rotation: (vi: number) => (vi - center) * delta,
-    arc: (vi: number) => {
-      const d = vi - center;
+    overlap: getHandOverlap(totalCards),
+    rotation: (k: number) => (k - center) * delta,
+    arc: (k: number) => {
+      const d = k - center;
       return Math.min(d * d * arcCoeff, edgeLift);
     },
   };
@@ -229,7 +234,10 @@ export function PlayerHand() {
 
       // Average fan tilt of the flanking card(s) (single neighbor at an edge) —
       // drives both the arrow's lean and the direction it lifts to reach the
-      // (tilted) slot's top edge.
+      // (tilted) slot's top edge. Uses the hand-only tilt (`rects` are hand cards
+      // only): exact when no castable wings are present (then it equals each
+      // card's rendered `fan.rotation`), and a harmless approximation in the rare
+      // case a wing is shown mid-reorder — the arrow is a transient drag cue.
       let angle = 0;
       if (slot != null) {
         const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
@@ -427,14 +435,15 @@ export function PlayerHand() {
     .map((id) => objects[id])
     .filter((obj) => obj && obj.id !== pendingObjectId);
 
-  // Wing geometry shares the hand's curve so exile (left) and graveyard (right)
-  // sit on one continuous arc. `wingOverlap` matches the hand's internal
-  // overlap; the first card of each wing gets margin 0, leaving a hairline seam
-  // that visually groups the colored wing apart from the white hand cards.
+  // The hand and its exile (left) / graveyard (right) castable wings render as
+  // ONE fan sized by the total card count, so many wings tuck in tightly instead
+  // of inheriting the loose hand-only spacing. `k` is each card's absolute
+  // position across the row (exile [0,E), hand [E,E+H), graveyard [E+H,N)). The
+  // first card of each section keeps margin 0, leaving a hairline seam that
+  // visually groups the colored wings apart from the white hand cards.
   const handSize = handObjects.length;
-  const fanCurve = handFanCurve(handSize);
-  const wingOverlap = getHandOverlap(handSize);
   const exileCount = exileCards.length;
+  const fan = fanGeometry(exileCount + handSize + graveyardCards.length);
 
   return (
     <div
@@ -464,10 +473,10 @@ export function PlayerHand() {
         transition={{ duration: 0.25 }}
       >
         <AnimatePresence>
-          {/* Exile wing (left): virtual fan indices -E .. -1 continue the curve
-              leftward. Cast-only — never reorder targets. */}
+          {/* Exile wing (left): absolute fan positions 0 .. E-1. Cast-only —
+              never reorder targets. zIndex stays negative so exile sits beneath
+              the hand cards (whose zIndex is their 0-based hand index). */}
           {exileCards.map((obj, j) => {
-            const vi = j - exileCount;
             return (
               <ZoneFanCard
                 key={obj.id}
@@ -475,10 +484,10 @@ export function PlayerHand() {
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
-                rotation={fanCurve.rotation(vi)}
-                arcOffset={fanCurve.arc(vi)}
-                marginLeft={j === 0 ? 0 : wingOverlap}
-                zIndex={vi}
+                rotation={fan.rotation(j)}
+                arcOffset={fan.arc(j)}
+                marginLeft={j === 0 ? 0 : fan.overlap}
+                zIndex={j - exileCount}
                 theme={ZONE_THEME.exile}
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
@@ -491,7 +500,8 @@ export function PlayerHand() {
             );
           })}
           {handObjects.map((obj, i) => {
-          const rotation = getCardRotation(i, handObjects.length);
+          // Hand cards occupy absolute fan positions E .. E+H-1.
+          const k = exileCount + i;
           const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
           return (
@@ -506,7 +516,9 @@ export function PlayerHand() {
               insertionSlotMV={insertionSlotMV}
               draggingIndexMV={draggingIndexMV}
               gapPxMV={gapPxMV}
-              rotation={rotation}
+              rotation={fan.rotation(k)}
+              arcOffset={fan.arc(k)}
+              marginLeft={i === 0 ? 0 : fan.overlap}
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
@@ -523,10 +535,10 @@ export function PlayerHand() {
             />
           );
         })}
-          {/* Graveyard wing (right): virtual fan indices H .. H+G-1 continue the
-              curve rightward. Cast-only — never reorder targets. */}
+          {/* Graveyard wing (right): absolute fan positions E+H .. N-1. Cast-only
+              — never reorder targets. zIndex stays above the hand cards. */}
           {graveyardCards.map((obj, j) => {
-            const vi = handSize + j;
+            const k = exileCount + handSize + j;
             return (
               <ZoneFanCard
                 key={obj.id}
@@ -534,10 +546,10 @@ export function PlayerHand() {
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
-                rotation={fanCurve.rotation(vi)}
-                arcOffset={fanCurve.arc(vi)}
-                marginLeft={j === 0 ? 0 : wingOverlap}
-                zIndex={vi}
+                rotation={fan.rotation(k)}
+                arcOffset={fan.arc(k)}
+                marginLeft={j === 0 ? 0 : fan.overlap}
+                zIndex={handSize + j}
                 theme={ZONE_THEME.graveyard}
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
@@ -617,6 +629,8 @@ interface HandCardProps {
   draggingIndexMV: MotionValue<number>;
   gapPxMV: MotionValue<number>;
   rotation: number;
+  arcOffset: number;
+  marginLeft: string | number;
   isPlayable: boolean;
   isSelected: boolean;
   isDragging: boolean;
@@ -643,6 +657,8 @@ const HandCard = memo(function HandCard({
   draggingIndexMV,
   gapPxMV,
   rotation,
+  arcOffset,
+  marginLeft,
   isPlayable,
   isSelected,
   isDragging,
@@ -717,10 +733,9 @@ const HandCard = memo(function HandCard({
       : "opacity-90"
     : "";
 
-  // Quadratic arc: cards further from center drop more, forming a natural parabola.
-  // Coefficient scales down with hand size so edge cards don't fly off-screen.
-  const distFromCenter = Math.abs(index - (handSize - 1) / 2);
-  const arcOffset = distFromCenter * distFromCenter * getArcCoefficient(handSize);
+  // `rotation`, `arcOffset` and `marginLeft` come from the parent's whole-row
+  // `fanGeometry` (sized by hand + wing count) so the hand stays continuous with
+  // any castable wings. `index`/`handSize` remain purely for the reorder system.
 
   return (
     <motion.div
@@ -775,7 +790,7 @@ const HandCard = memo(function HandCard({
         isMobile ? "pointer-events-none" : ""
       }`}
       style={{
-        marginLeft: index === 0 ? 0 : getHandOverlap(handSize),
+        marginLeft,
         zIndex: isDragging ? 9999 : isSelected ? 20 : index,
       }}
       {...longPressHandlers}
@@ -788,7 +803,7 @@ const HandCard = memo(function HandCard({
           cardName={cardName}
           size="normal"
           unimplementedMechanics={unimplementedMechanics}
-          className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
+          className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
         />
         {/* Inner-edge drop highlights. Always rendered, normally invisible; their
             opacity is driven by MotionValues so the glow toggles without a
@@ -921,7 +936,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
           cardName={cardName}
           size="normal"
           unimplementedMechanics={unimplementedMechanics}
-          className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
+          className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
         />
         {/* Per-zone translucent wash marking "castable from elsewhere". */}
         <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
