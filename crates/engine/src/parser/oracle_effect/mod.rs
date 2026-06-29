@@ -1950,13 +1950,26 @@ fn parse_self_event_verb(input: &str) -> OracleResult<'_, crate::types::triggers
     .parse(input)
 }
 
-/// CR 603.6 + CR 603.7c: Build a self-referential `TriggerDefinition` from one
-/// disjunct of a delayed-trigger condition by scanning for a recognized
-/// self-event verb at any word boundary (so the leading "~" subject — present
-/// on the first disjunct, elided on the rest — is skipped). `valid_card`
-/// is `SelfRef` so the trigger fires only on the source's own event.
+/// CR 603.6 + CR 603.7c: Validate a single disjunct segment as a self-referential
+/// event phrase. Strips the optional self-subject prefix (`~ ` or `it `, present
+/// on the first disjunct, elided on subsequent disjuncts) and then requires
+/// `all_consuming` on the recognized self-event verb — so a qualified phrase
+/// like `becomes untapped during your upkeep` is rejected rather than matched
+/// as bare `Untaps`. `valid_card` is `SelfRef` so the trigger fires only on
+/// the source object's own event.
 fn scan_self_event_trigger(segment: &str) -> Option<crate::types::ability::TriggerDefinition> {
-    let mode = nom_primitives::scan_at_word_boundaries(segment, parse_self_event_verb)?;
+    // Strip the optional self-subject prefix ("~ " or "it ") — present on the
+    // first disjunct, elided on subsequent disjuncts. opt() always succeeds.
+    let (verb_text, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("~ "),
+        tag::<_, _, OracleError<'_>>("it "),
+    )))
+    .parse(segment)
+    .ok()?;
+    // Require full consumption: a trailing qualifier (e.g., "becomes untapped
+    // during your upkeep") is rejected here, leaving unsupported qualified
+    // events as Unimplemented rather than silently matching a verb prefix.
+    let (_, mode) = all_consuming(parse_self_event_verb).parse(verb_text).ok()?;
     Some(crate::types::ability::TriggerDefinition::new(mode).valid_card(TargetFilter::SelfRef))
 }
 
@@ -38425,6 +38438,43 @@ mod tests {
         assert!(
             matches!(e, Effect::Unimplemented { .. }),
             "graveyard-leaves disjunct must remain Unimplemented, got {e:?}"
+        );
+    }
+
+    /// Regression guard: a trailing qualifier after a recognized self-event verb
+    /// must NOT silently match as the bare verb. Before the `all_consuming` fix,
+    /// `scan_at_word_boundaries` would scan past `~ `, match `becomes untapped`,
+    /// discard `during your upkeep`, and return `TriggerMode::Untaps` — producing
+    /// `WhenNextEvent { Untaps, LeavesBattlefield }` for the whole disjunction.
+    /// After the fix, `scan_self_event_trigger` strips `~ ` and applies
+    /// `all_consuming(parse_self_event_verb)`, so the trailing qualifier causes
+    /// the first disjunct to fail and `parse_self_disjunctive_event_trigger`
+    /// returns `None`. The result must NOT be a `WhenNextEvent` with `Untaps` as
+    /// the first trigger — that was the false match the `all_consuming` guard
+    /// prevents. (PR #4475 round-2 review comment by @matthewevans.)
+    #[test]
+    fn self_disjunctive_trigger_trailing_qualifier_does_not_produce_false_untaps() {
+        use crate::types::triggers::TriggerMode;
+        let e = parse_effect(
+            "When ~ becomes untapped during your upkeep or leaves the battlefield, that permanent phases in",
+        );
+        // The old code produced WhenNextEvent { Untaps, LeavesBattlefield } by
+        // silently discarding " during your upkeep". The new all_consuming guard
+        // causes parse_self_disjunctive_event_trigger to return None for this
+        // input, so the result must NOT contain a WhenNextEvent with Untaps.
+        // Note: the fallback scan_delayed_condition_kind may still match
+        // "leaves the battlefield" within the condition text (a pre-existing
+        // issue with disjunctive condition texts), but the false Untaps match
+        // from scan_self_event_trigger is no longer produced.
+        assert!(
+            !matches!(
+                &e,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+                    ..
+                } if trigger.mode == TriggerMode::Untaps
+            ),
+            "qualified 'becomes untapped during ...' must NOT produce a false WhenNextEvent {{Untaps}} trigger, got {e:?}"
         );
     }
 
