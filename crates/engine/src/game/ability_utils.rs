@@ -3558,18 +3558,33 @@ fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<Target
     })
 }
 
+fn per_opponent_fanout_legal_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    bound_player: PlayerId,
+) -> Vec<TargetRef> {
+    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+        return Vec::new();
+    };
+    targeting::find_legal_object_targets_for_ability_with_filter_controller(
+        state,
+        &object_filter,
+        ability,
+        bound_player,
+    )
+}
+
 fn collect_per_opponent_target_fanout_slots(
     state: &GameState,
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
-    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+    if per_opponent_fanout_object_filter(ability).is_none() {
         return Ok(());
-    };
+    }
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
-        let legal_targets =
-            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
+        let legal_targets = per_opponent_fanout_legal_object_targets(state, ability, opponent);
         if legal_targets.is_empty() {
             if ability.targeting_is_optional() {
                 // CR 115.1 + CR 603.3d: "Up to one" per-opponent fanout — an
@@ -3612,8 +3627,7 @@ fn collect_per_opponent_target_fanout_specs(
         // creature pool is empty when targeting is optional so specs and slots
         // stay in lockstep.
         if ability.targeting_is_optional()
-            && targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id)
-                .is_empty()
+            && per_opponent_fanout_legal_object_targets(state, ability, opponent).is_empty()
         {
             continue;
         }
@@ -3641,9 +3655,9 @@ fn validate_per_opponent_target_fanout_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+    if per_opponent_fanout_object_filter(ability).is_none() {
         return Vec::new();
-    };
+    }
 
     let mut current_player = None;
     let mut legal = Vec::new();
@@ -3654,12 +3668,8 @@ fn validate_per_opponent_target_fanout_targets(
                 let Some(player_id) = current_player else {
                     continue;
                 };
-                let legal_targets = targeting::find_legal_targets(
-                    state,
-                    &object_filter,
-                    player_id,
-                    ability.source_id,
-                );
+                let legal_targets =
+                    per_opponent_fanout_legal_object_targets(state, ability, player_id);
                 if legal_targets.contains(target) {
                     legal.push(TargetRef::Object(*object_id));
                 }
@@ -3816,12 +3826,44 @@ fn legal_targets_for_selected_slot(
     } else {
         None
     };
+    let per_opponent_fanout_object_targets = if is_per_opponent_target_fanout(ability) {
+        match per_opponent_fanout_object_filter(ability) {
+            Some(object_filter) if spec.filter == object_filter => {
+                if let Some(TargetSlotSpec {
+                    filter: TargetFilter::SpecificPlayer { id },
+                    ..
+                }) = prior_specs.last()
+                {
+                    if let Some(Some(TargetRef::Player(selected_id))) = selected_slots.last() {
+                        if id == selected_id {
+                            Some(per_opponent_fanout_legal_object_targets(
+                                state,
+                                ability,
+                                *selected_id,
+                            ))
+                        } else {
+                            Some(Vec::new())
+                        }
+                    } else {
+                        Some(Vec::new())
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     let mut legal: Vec<TargetRef> = if matches!(ability.effect, Effect::PairWith { .. }) {
         pair_with_legal_choices(state, ability, &spec.filter)
     } else if let Some(targets) = damage_any_target_legal_targets(state, ability, &spec.filter) {
         targets
     } else if let Some(targets) = per_opponent_fanout_targets {
+        targets
+    } else if let Some(targets) = per_opponent_fanout_object_targets {
         targets
     } else {
         // CR 109.4 + CR 115.1: A filter scoped to a *relative* controller —
@@ -5695,8 +5737,10 @@ mod tests {
         WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
-    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::keywords::{HexproofFilter, Keyword};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
     use crate::types::{FormatConfig, GameAction};
 
@@ -8125,6 +8169,247 @@ mod tests {
     }
 
     #[test]
+    fn dismantling_wave_fanout_offer_excludes_regular_hexproof_permanent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact Creature",
+            &[CoreType::Artifact, CoreType::Creature],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        let unprotected_enchantment = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(3),
+            "Unprotected Enchantment",
+            &[CoreType::Enchantment],
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(unprotected_enchantment)]
+        );
+        assert!(!slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(hexproof_artifact)));
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("hidden player slot should be accepted") else {
+            panic!("expected object slot");
+        };
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(unprotected_enchantment)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_revalidation_drops_regular_hexproof_from_spell_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        let mut ability = dismantling_wave_fanout_ability(source);
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(hexproof_artifact),
+            ],
+        )
+        .expect("assignment should preserve pair structure");
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert!(
+            validated.targets.is_empty(),
+            "hexproof object is illegal from the spell controller and must drop"
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_excludes_matching_hexproof_from_source_quality() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_from_white = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof From White Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_from_white)
+            .unwrap()
+            .keywords
+            .push(Keyword::HexproofFrom(HexproofFilter::Color(
+                ManaColor::White,
+            )));
+        let unprotected_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(3),
+            "Unprotected Artifact",
+            &[CoreType::Artifact],
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(unprotected_artifact)]
+        );
+        assert!(!slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(hexproof_from_white)));
+    }
+
+    #[test]
+    fn per_opponent_fanout_ignore_hexproof_bypasses_regular_hexproof() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::IgnoreHexproof,
+            }],
+            None,
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(hexproof_artifact)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_later_sub_ability_target_uses_normal_recompute() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opponent_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opponent_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        let ability = per_opponent_gain_control_ability().sub_ability(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 5);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("first hidden player slot should be accepted") else {
+            panic!("expected first object slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponent_one_creature)),
+        )
+        .expect("first object slot should be accepted") else {
+            panic!("expected second hidden player slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(2))),
+        )
+        .expect("second hidden player slot should be accepted") else {
+            panic!("expected second object slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponent_two_creature)),
+        )
+        .expect("second object slot should advance to sub-ability target") else {
+            panic!("expected trailing sub-ability target slot");
+        };
+
+        assert_eq!(progress.current_slot, 4);
+        assert!(
+            progress
+                .current_legal_targets
+                .contains(&TargetRef::Player(PlayerId(1))),
+            "trailing non-fanout target slot should fall through to normal target recompute"
+        );
+    }
+
+    #[test]
     fn per_opponent_fanout_optional_skips_opponent_with_no_legal_targets() {
         // Regression: Haytham Kenway crash — "for each opponent, exile up to
         // one target creature that player controls." When one opponent has no
@@ -8367,6 +8652,73 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         object
+    }
+
+    fn create_permanent_with_types(
+        state: &mut GameState,
+        controller: PlayerId,
+        card_id: CardId,
+        name: &str,
+        core_types: &[CoreType],
+    ) -> ObjectId {
+        let object = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types = core_types.to_vec();
+        object
+    }
+
+    fn create_dismantling_wave_source(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Dismantling Wave".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        source
+    }
+
+    fn dismantling_wave_fanout_ability(source: ObjectId) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::AnyOf(vec![
+                        TypeFilter::Artifact,
+                        TypeFilter::Enchantment,
+                    ]))
+                    .controller(ControllerRef::TargetPlayer),
+                ),
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        ability
     }
 
     fn per_opponent_gain_control_ability() -> ResolvedAbility {
