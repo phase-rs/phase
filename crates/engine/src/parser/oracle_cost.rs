@@ -19,9 +19,10 @@ use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
-    EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    AbilityCost, AggregateFunction, BeholdCostAction, Comparator, ControllerRef, CostReduction,
+    CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
+    SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -1031,6 +1032,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: "Exile any number of
+    // [color] cards from your graveyard with [N] or more/greater [color] mana
+    // symbols among their mana costs" — Baron Helmut Zemo's Boast cost. Must run
+    // before the EffectCost fallback, which would otherwise wrap the exile as a
+    // non-functional `ChangeZone` effect-cost.
+    if let Some(cost) = try_parse_exile_with_aggregate_cost(&lower) {
+        return cost;
+    }
+
     // CR 118.3: Fallback — try parsing the cost text as an effect. Many
     // activation costs are structurally identical to effects ("Put a -1/-1
     // counter on ~", "Return a land you control to its owner's hand") and
@@ -1288,6 +1298,73 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
         },
         other => other,
     }
+}
+
+/// CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: Parse Baron Helmut Zemo's
+/// Boast cost — "Exile any number of [color] cards from your graveyard with [N]
+/// or more [color] mana symbols among their mana costs" — into a standalone
+/// `AbilityCost::ExileWithAggregate` (the aggregate-threshold sibling of
+/// `CollectEvidence`). `lower` is the already-lowercased cost text.
+///
+/// Composed from nom combinators (no string-dispatch): each grammar axis (the
+/// any-number prefix, the filter color + card noun, the graveyard zone, the
+/// threshold number, the comparator words, the aggregated color + symbol noun) is
+/// a single `tag`/`alt`/`parse_color`/`parse_number` step. Hybrid symbols count
+/// for each of their colors at resolution time (CR 107.4e) via the
+/// `ObjectProperty::ManaSymbolCount` resolver.
+fn try_parse_exile_with_aggregate_cost(lower: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (i, _) = tag::<_, _, E<'_>>("exile any number of ")
+        .parse(lower)
+        .ok()?;
+    // Filter: "[color] card(s)".
+    let (i, filter_color) = nom_primitives::parse_color(i).ok()?;
+    let (i, _) = alt((tag::<_, _, E<'_>>(" cards"), tag(" card")))
+        .parse(i)
+        .ok()?;
+    // Zone: "from your graveyard" — owned by you, in the graveyard.
+    let (i, _) = tag::<_, _, E<'_>>(" from your graveyard with ")
+        .parse(i)
+        .ok()?;
+    // Threshold: "[N] or more/greater".
+    let (i, n) = nom_primitives::parse_number(i).ok()?;
+    let (i, _) = alt((tag::<_, _, E<'_>>(" or more "), tag(" or greater ")))
+        .parse(i)
+        .ok()?;
+    // Aggregated property: "[color] mana symbols among their mana costs".
+    let (i, agg_color) = nom_primitives::parse_color(i).ok()?;
+    let (i, _) = alt((
+        tag::<_, _, E<'_>>(" mana symbols among their mana costs"),
+        tag(" mana symbols among their costs"),
+    ))
+    .parse(i)
+    .ok()?;
+    // The whole cost phrase must have been consumed — a trailing remainder means
+    // this is a different (unsupported) shape that must not silently match.
+    if !i.trim().is_empty() {
+        return None;
+    }
+
+    let filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::HasColor {
+                    color: filter_color,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]),
+    );
+    Some(AbilityCost::ExileWithAggregate {
+        filter,
+        function: AggregateFunction::Sum,
+        property: ObjectProperty::ManaSymbolCount(agg_color),
+        comparator: Comparator::GE,
+        value: n as i32,
+        zone: Zone::Graveyard,
+    })
 }
 
 /// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",

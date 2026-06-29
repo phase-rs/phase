@@ -387,7 +387,8 @@ pub fn resolve_event_context_target(
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageTarget => {
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         // CR 108.3 + CR 608.2c: `ParentTargetOwner` may fall back to the source's
@@ -621,6 +622,7 @@ fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
     )
 }
 
@@ -895,6 +897,21 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             Some(TargetRef::Player(controller))
         }
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
+        // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
+        // recipient ("that creature's owner shuffles it into their library").
+        // Mirrors `PostReplacementSourceController`'s player-projection but reads
+        // the recipient slot and projects to OWNER (CR 108.3), not the source
+        // slot / controller (CR 109.4). Routed here to the recipient's owner's
+        // library by CR 400.3.
+        TargetFilter::PostReplacementDamageTargetOwner => {
+            match &state.post_replacement_event_target {
+                Some(TargetRef::Object(id)) => {
+                    state.objects.get(id).map(|o| TargetRef::Player(o.owner))
+                }
+                Some(TargetRef::Player(p)) => Some(TargetRef::Player(*p)),
+                None => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1666,11 +1683,17 @@ fn can_target(
     if obj.has_keyword(&Keyword::Shroud) {
         return false;
     }
-    // CR 702.11e: An "ignore hexproof" effect (Detection Tower) lets the targeting
-    // source's controller target a permanent "as though it didn't have hexproof".
-    // It bypasses Hexproof / Hexproof from [quality] only — never Shroud.
+    // CR 702.11b: An "ignore hexproof" effect bypasses Hexproof / Hexproof from
+    // [quality] only — never Shroud. Two distinct scopings:
+    //   - player-scoped (Detection Tower): the targeting source's controller may
+    //     target any permanent "as though it didn't have hexproof";
+    //   - object-scoped (Nowhere to Run): specific permanents matching a static's
+    //     `affected` filter may be targeted as though they had no hexproof, by
+    //     ANY player — the card carries no "you control" qualifier on the spells
+    //     or abilities, which is the multiplayer-correct reading.
     let ignores_hexproof =
-        crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
+        crate::game::static_abilities::player_ignores_hexproof(state, source_controller)
+            || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
     // CR 702.11a: Hexproof prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
@@ -1987,6 +2010,40 @@ mod tests {
     }
 
     #[test]
+    fn post_replacement_damage_target_owner_resolves_to_recipient_owner_not_controller() {
+        // CR 108.3 + CR 400.3 + CR 615.5: Weeping Angel — "that creature's owner
+        // shuffles it into their library" must resolve to the recipient's OWNER,
+        // not its controller. Stolen-creature guard (owner != controller): the
+        // damage recipient `c1` is OWNED by P1 but currently CONTROLLED by P0
+        // (e.g. P0 — Weeping Angel's controller — has gained control of it). The
+        // owner ref must return P1 so the shuffle routes to P1's library
+        // (CR 400.3), NOT P0's. A controller-projection (the wrong resolution)
+        // would return P0 and fail this assertion.
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state.objects.get_mut(&c1).unwrap().controller = PlayerId(0);
+        state.post_replacement_event_target = Some(TargetRef::Object(c1));
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementDamageTargetOwner,
+            ObjectId(999),
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn post_replacement_damage_target_owner_returns_none_when_slot_empty() {
+        // Defensive: only resolves inside the post-replacement window.
+        let (state, _c0, _c1) = setup_with_creatures();
+        assert!(state.post_replacement_event_target.is_none());
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementDamageTargetOwner,
+            ObjectId(999),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn stack_spell_resolves_spell_cast_trigger() {
         let mut state = GameState::new_two_player(42);
         let spell_id = ObjectId(10);
@@ -2173,6 +2230,218 @@ mod tests {
         assert!(
             !find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99))
                 .contains(&TargetRef::Object(c1))
+        );
+    }
+
+    #[test]
+    fn scoped_ignore_hexproof_bypasses_for_any_player_multiplayer() {
+        // CR 702.11b: Nowhere to Run — "Creatures your opponents control can be
+        // the targets of spells and abilities as though they didn't have
+        // hexproof." The bypass carries no "you control" qualifier, so in a
+        // 3-player game it applies for ANY targeting player, scoped only by the
+        // static's `affected` filter (the static controller's opponents'
+        // creatures).
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        // P0 controls Nowhere to Run's object-scoped IgnoreHexproof static.
+        let nowhere = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nowhere to Run".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&nowhere).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::IgnoreHexproof).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                )),
+            ]
+            .into();
+
+        // P1 (an opponent of P0) controls a hexproof creature.
+        let p1_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p1_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Hexproof);
+        }
+        // P0 (the static controller) controls its OWN hexproof creature.
+        let p0_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "P0 Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p0_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Hexproof);
+        }
+        let p2_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(2),
+            "P2 Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_source = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "P1 Spell".to_string(),
+            Zone::Battlefield,
+        );
+
+        // P2 (the THIRD player, not the static's controller) CAN target P1's
+        // hexproof creature — the bypass is independent of the targeting source's
+        // controller. Revert-probe: gating on `source_controller == static
+        // controller` would make this assertion fail.
+        assert!(
+            can_target(
+                state.objects.get(&p1_creature).unwrap(),
+                PlayerId(2),
+                p2_source,
+                &state
+            ),
+            "scoped IgnoreHexproof must let a third player target the static controller's opponent's creature"
+        );
+
+        // Negative: P0's OWN hexproof creature does not match "your opponents
+        // control", so it keeps hexproof — P1 (its opponent) can't target it.
+        assert!(
+            !can_target(
+                state.objects.get(&p0_creature).unwrap(),
+                PlayerId(1),
+                p1_source,
+                &state
+            ),
+            "the static controller's own creature is outside the bypass scope and keeps hexproof"
+        );
+    }
+
+    /// CR 604.1 + CR 613.1: a scoped `IgnoreHexproof` static only grants the
+    /// hexproof bypass while its `condition` holds, and a condition that
+    /// references the would-be target must be evaluated against THAT target.
+    /// This guards the fix that routes `target_ignores_hexproof` through
+    /// `game_functioning_statics` + `static_condition_matches_context` with
+    /// `target_id: Some(target_id)` (mirroring `player_ignores_hexproof`).
+    ///
+    /// Measured against the pre-fix code (`battlefield_active_statics`, which
+    /// evaluates the condition in SOURCE context with no recipient): a recipient-
+    /// referencing condition is the discriminating class. Pre-fix, the recipient
+    /// condition resolved with `recipient = None`, so a condition that is TRUE for
+    /// the target was wrongly DENIED. Post-fix, it is evaluated against the target.
+    /// LOAD-BEARING REVERT PROBE: restoring `battlefield_active_statics` makes the
+    /// condition-TRUE assertion below fail (the bypass is denied because the
+    /// recipient context is dropped).
+    #[test]
+    fn scoped_ignore_hexproof_respects_recipient_condition_multiplayer() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        // Build the multiplayer Nowhere-to-Run scenario with a recipient-scoped
+        // `condition` on the object-scoped IgnoreHexproof static. Returns
+        // (state, target_creature, targeting_source).
+        let build = |condition: StaticCondition| -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+            // P0 controls the object-scoped IgnoreHexproof static (Nowhere to Run),
+            // affected = opponents' creatures, gated by `condition`.
+            let nowhere = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Nowhere to Run".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&nowhere).unwrap().static_definitions =
+                vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent),
+                    ))
+                    .condition(condition)]
+                .into();
+
+            // P1 (an opponent of P0) controls the hexproof creature we target.
+            let p1_creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "P1 Hexproof".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&p1_creature).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.keywords.push(Keyword::Hexproof);
+            }
+
+            // P2 (third player) is the targeting source.
+            let p2_source = create_object(
+                &mut state,
+                CardId(4),
+                PlayerId(2),
+                "P2 Spell".to_string(),
+                Zone::Battlefield,
+            );
+            (state, p1_creature, p2_source)
+        };
+
+        // Condition FALSE for the target: the recipient (a creature) is not a land,
+        // so the gate fails and the bypass is denied — the hexproof creature
+        // remains untargetable.
+        let (state, target, source) = build(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+        });
+        let denied = can_target(
+            state.objects.get(&target).unwrap(),
+            PlayerId(2),
+            source,
+            &state,
+        );
+        assert!(
+            !denied,
+            "a scoped IgnoreHexproof static whose condition is FALSE for the target must not grant the bypass"
+        );
+
+        // Condition TRUE for the target: the recipient IS a creature, so the gate
+        // holds and the bypass is granted. This flips relative to the FALSE case,
+        // proving the CONDITION gate (not some unrelated reason) is decisive, and
+        // proving `target_id` is wired to the recipient (pre-fix this was denied).
+        let (state, target, source) = build(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        });
+        let granted = can_target(
+            state.objects.get(&target).unwrap(),
+            PlayerId(2),
+            source,
+            &state,
+        );
+        assert!(
+            granted,
+            "a scoped IgnoreHexproof static whose condition is TRUE for the target must grant the bypass"
+        );
+
+        // The two measured outcomes must differ — non-vacuity: the condition value
+        // is the only variable, so the gate is the discriminator.
+        assert_ne!(
+            denied, granted,
+            "condition-false and condition-true must produce different targeting verdicts"
         );
     }
 

@@ -325,6 +325,56 @@ fn collect_trigger_condition_source_zones(condition: &TriggerCondition, out: &mu
     }
 }
 
+/// CR 113.6b + CR 400.7: When a trigger's intervening-if pins the source to a
+/// single zone ("if this card is in your graveyard") and the effect is an
+/// implicit self-return ("return it to the battlefield …") with no "from …"
+/// phrase, stamp that zone as `ChangeZone.origin` so the runtime can locate
+/// the object (Jocasta, Automaton Avenger — issue #4566).
+fn stamp_self_return_origin_from_trigger_condition(def: &mut TriggerDefinition) {
+    let zones = def
+        .condition
+        .as_ref()
+        .map(trigger_condition_source_zones)
+        .unwrap_or_default();
+    let Some(origin) = (zones.len() == 1).then(|| zones[0]) else {
+        return;
+    };
+    if let Some(execute) = def.execute.as_deref_mut() {
+        stamp_self_return_origin_in_effect(&mut execute.effect, origin);
+    }
+}
+
+fn stamp_self_return_origin_in_effect(effect: &mut Effect, origin: Zone) {
+    match effect {
+        Effect::ChangeZone {
+            origin: o,
+            destination,
+            target,
+            ..
+        } if matches!(
+            target,
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource
+        ) && matches!(destination, Zone::Battlefield | Zone::Hand) =>
+        {
+            if o.is_none() {
+                *o = Some(origin);
+            }
+            if matches!(target, TargetFilter::TriggeringSource) {
+                *target = TargetFilter::SelfRef;
+            }
+        }
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            stamp_self_return_origin_in_effect(&mut inner.effect, origin);
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches.iter_mut() {
+                stamp_self_return_origin_in_effect(&mut branch.effect, origin);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
 /// cast for `{X}`, bare "X" in the trigger body refers to the value paid for
 /// `{X}` during the cast. At runtime the `QuantityRef::Variable{name:"X"}`
@@ -946,6 +996,13 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
+    // CR 107.4 + CR 202.1 + CR 603.4: Stage the cast-trigger's colored-mana-symbol
+    // qualifier color (Namor) so a "create that many tokens" effect clause can
+    // back-reference the cast spell's colored-pip count instead of the generic
+    // EventContextAmount. Derived from the same condition/qualifier text whose
+    // spell qualifier becomes the trigger's `valid_card`.
+    let pending_mana_symbol_count_color =
+        extract_colored_mana_symbol_spell_qualifier(condition_text);
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
@@ -960,6 +1017,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
+        pending_mana_symbol_count_color,
         ..Default::default()
     };
 
@@ -1307,6 +1365,8 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     {
         def.trigger_zones = vec![zone];
     }
+
+    stamp_self_return_origin_from_trigger_condition(&mut def);
 
     // CR 107.3a + CR 107.3i + CR 601.2f: Rewrite X in ETB-self triggers.
     if trigger_should_rewrite_cost_x(&def) {
@@ -7968,7 +8028,14 @@ fn try_parse_event(
         // `parse_zone_change_clause`, the same building block the
         // disjunctive-condition path uses for Syr Konrad's "leaves graveyard"
         // clause, so the runtime `zone_change_clause_matches` path is shared.
-        if let Some(clause) = parse_zone_change_clause(subject, rest) {
+        // CR 603.4: peel the trailing "during your turn" intervening-if condition
+        // off the full verb phrase before the zone-change clause parser (which
+        // requires an empty tail) — the singular "card leaves your graveyard
+        // during your turn" form (Kishla Skimmer) otherwise collapses to Unknown.
+        // Mirrors the LeavesBattlefield branch above and the plural batched-leave
+        // path; `turn_condition` was already derived from the same trailing peel.
+        let (rest_peeled, _) = peel_trailing_turn_constraint(rest);
+        if let Some(clause) = parse_zone_change_clause(subject, rest_peeled) {
             let mut def = make_base();
             def.mode = TriggerMode::ChangesZone;
             // CR 113.6k + CR 603.10: a self-referential leaves trigger resolves
@@ -7979,6 +8046,9 @@ fn try_parse_event(
                 def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
             }
             def.zone_change_clauses = vec![clause];
+            if let Some(condition) = turn_condition {
+                def.condition = Some(condition);
+            }
             return Some((TriggerMode::ChangesZone, def));
         }
     }
@@ -9445,6 +9515,10 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    if let Some(result) = try_parse_you_attack_with_commander(lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_n_or_more_attacks(lower) {
         return Some(result);
     }
@@ -9833,6 +9907,35 @@ fn apply_attachment_prop(filter: TargetFilter, prop: Option<FilterProp>) -> Targ
         }
         (other, _) => other,
     }
+}
+
+/// CR 903.3 + CR 508.1: "whenever you attack with [your] commander" — fires when
+/// the scoped player declares a commander as an attacker (Jocasta, Automaton Avenger).
+fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (after_prefix, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (after_actor, ()) = value((), tag::<_, _, OracleError<'_>>("you attack with "))
+        .parse(after_prefix)
+        .ok()?;
+
+    let (filter, rest) = parse_commander_subject_filter_prefix(after_actor)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = TriggerMode::YouAttack;
+    def.valid_target = Some(TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::You),
+    ));
+    def.valid_card = Some(filter);
+    def.batched = true;
+    Some((TriggerMode::YouAttack, def))
 }
 
 /// Parse "whenever N or more creatures [you control] attack [a player]" patterns.
@@ -12198,6 +12301,38 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
 /// Shared with `oracle_effect::try_parse_when_next_event` (delayed-trigger variant
 /// of the same filter shape) — exposed as `pub(crate)` to keep the combinator
 /// definition in a single place.
+/// CR 107.4 + CR 202.1: Pure-nom recognizer for the spell-qualifier phrase
+/// "with one or more `<color>` mana symbol(s) in its mana cost"
+/// (Namor the Sub-Mariner — "Whenever you cast a noncreature spell with one or
+/// more blue mana symbols in its mana cost"). Returns the named `ManaColor`;
+/// the implied comparison is `Comparator::GE` against `1` ("one or more").
+///
+/// Reuses the shared atomic combinator `parse_color` rather than re-implementing
+/// color recognition or pip counting. This is a different grammatical position
+/// from `parse_colored_mana_symbol_count_target_condition` (a target eligibility
+/// condition, "it has N or more colored mana symbols in its mana cost"), so it
+/// is a separate recognizer that shares the atomics, not the call shape.
+fn parse_colored_mana_symbol_spell_qualifier(input: &str) -> OracleResult<'_, ManaColor> {
+    delimited(
+        tag("with one or more "),
+        nom_primitives::parse_color,
+        (tag(" mana symbol"), opt(tag("s")), tag(" in its mana cost")),
+    )
+    .parse(input)
+}
+
+/// CR 107.4 + CR 202.1: Pre-extraction helper for trigger plumbing. Locates the
+/// colored-mana-symbol spell qualifier inside finalized condition/qualifier text
+/// (e.g. the "noncreature spell with one or more blue mana symbols in its mana
+/// cost" valid-card phrase) and returns the named color so the effect-context can
+/// thread it to the token-count override (Namor "create that many" → EventSource
+/// pip count). Scans word boundaries so the qualifier need not begin the string.
+pub(crate) fn extract_colored_mana_symbol_spell_qualifier(text: &str) -> Option<ManaColor> {
+    let lower = text.to_lowercase();
+    nom_primitives::scan_preceded(&lower, parse_colored_mana_symbol_spell_qualifier)
+        .map(|(_, color, _)| color)
+}
+
 pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> {
     use crate::types::ability::{FilterProp, TypedFilter};
 
@@ -12274,6 +12409,23 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::InZone { zone }]),
             ));
+        }
+    }
+
+    // CR 107.4 + CR 202.1 + CR 603.2: "with one or more <color> mana symbol(s) in
+    // its mana cost" (Namor the Sub-Mariner). The implied comparison is
+    // Comparator::GE against 1 ("one or more"). Emits the colored-pip filter prop
+    // so the trigger's valid_card only matches spells with at least one such
+    // symbol, fixing the over-fire on every noncreature spell.
+    if let Ok((rest, color)) = parse_colored_mana_symbol_spell_qualifier(modifier) {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::ManaSymbolCount {
+                    color: Some(color),
+                    comparator: Comparator::GE,
+                    value: 1,
+                }],
+            )));
         }
     }
 
@@ -14311,6 +14463,44 @@ mod tests {
         assert!(def.execute.is_some());
     }
 
+    /// CR 603.10a + CR 603.4 (issue #4521): Kishla Skimmer — "Whenever a card
+    /// leaves your graveyard during your turn, draw a card. This ability
+    /// triggers only once each turn." The singular leaves-a-graveyard form must
+    /// route through `ChangesZone` with a graveyard-origin clause AND carry the
+    /// trailing "during your turn" as a `DuringPlayersTurn { Controller }`
+    /// intervening-if. Before the fix the un-peeled "during your turn" suffix
+    /// made `parse_zone_change_clause` reject the clause and the trigger
+    /// collapsed to `Unknown` (never firing). The plural batched-leave path and
+    /// the `LeavesBattlefield` branch already peel this suffix; the singular
+    /// non-battlefield-zone branch did not.
+    #[test]
+    fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
+        let def = parse_trigger_line(
+            "Whenever a card leaves your graveyard during your turn, draw a card. \
+             This ability triggers only once each turn.",
+            "Kishla Skimmer",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.zone_change_clauses.len(), 1);
+        let clause = &def.zone_change_clauses[0];
+        // CR 603.10a: origin is the graveyard; destination is unconstrained.
+        assert_eq!(clause.origin, OriginConstraint::Equals(Zone::Graveyard));
+        assert_eq!(clause.destination, None);
+        // CR 603.4: the "during your turn" suffix becomes an intervening-if.
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }),
+        );
+        // CR 603.2h: "triggers only once each turn" → OncePerTurn.
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+        );
+        assert!(def.execute.is_some());
+    }
+
     /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
     /// Syr Konrad's disjunctive zone-change condition into separate triggers.
     #[test]
@@ -14912,6 +15102,34 @@ mod tests {
                 );
             }
             other => panic!("expected Not(WasCast {{ zone: Hand, you/you }}), got {other:?}"),
+        }
+    }
+
+    /// Discordant Spirit: "if it's an opponent's turn" must hoist as the
+    /// intervening-if condition. CR 102.1 + CR 102.2: a turn is never vacant, so
+    /// "an opponent's turn" is "the active player is any non-controller" —
+    /// `Not(DuringPlayersTurn { Controller })`, equivalent to "it's not your
+    /// turn". Without this the condition was silently dropped and the counter
+    /// would be placed on the controller's own end step too.
+    #[test]
+    fn trigger_intervening_if_opponents_turn_discordant_spirit() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if it's an opponent's turn, put a +1/+1 counter on this creature for each 1 damage dealt to you this turn.",
+            "Discordant Spirit",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Not { condition }) => {
+                assert!(
+                    matches!(
+                        condition.as_ref(),
+                        TriggerCondition::DuringPlayersTurn {
+                            player: PlayerFilter::Controller,
+                        }
+                    ),
+                    "expected Not(DuringPlayersTurn {{ Controller }}), got {condition:?}"
+                );
+            }
+            other => panic!("expected Not(DuringPlayersTurn), got {other:?}"),
         }
     }
 
@@ -16394,6 +16612,140 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 }
             }
         );
+    }
+
+    #[test]
+    fn trigger_jocasta_commander_attack_return_tapped_and_attacking() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let oracle = "Flying\n\
+            Whenever your commander deals combat damage to a player, put a +1/+1 counter on Jocasta.\n\
+            Whenever you attack with your commander, if this card is in your graveyard, you may return it to the battlefield tapped and attacking.";
+
+        let parsed = parse_oracle_text(
+            oracle,
+            "Jocasta, Automaton Avenger",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Robot".to_string(), "Hero".to_string()],
+        );
+        let graveyard_return = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                t.execute
+                    .as_ref()
+                    .is_some_and(|a| matches!(a.effect.as_ref(), Effect::ChangeZone { .. }))
+            })
+            .expect("graveyard return trigger must exist in full pipeline");
+        assert!(
+            graveyard_return.trigger_zones.contains(&Zone::Graveyard),
+            "graveyard intervening-if must set trigger_zones, got {:?}",
+            graveyard_return.trigger_zones
+        );
+        assert_eq!(graveyard_return.mode, TriggerMode::YouAttack);
+        match &graveyard_return.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsCommander)));
+            }
+            other => panic!(
+                "YouAttack with your commander must set IsCommander valid_card, got {other:?}"
+            ),
+        }
+        let execute = graveyard_return
+            .execute
+            .as_ref()
+            .expect("trigger should have execute ability");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                enter_tapped,
+                enters_attacking,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(
+                    origin,
+                    &Some(Zone::Graveyard),
+                    "graveyard intervening-if must stamp ChangeZone origin"
+                );
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "enter_tapped must be set, got {enter_tapped:?}"
+                );
+                assert!(enters_attacking, "enters_attacking must be true");
+                assert!(matches!(target, TargetFilter::SelfRef));
+            }
+            other => panic!("expected Effect::ChangeZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stamp_self_return_origin_skips_nested_parent_target_return() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::zones::EtbTapState;
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::YouAttack);
+        trigger.condition = Some(TriggerCondition::SourceInZone {
+            zone: Zone::Graveyard,
+        });
+        let mut head = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Tapped,
+                enters_attacking: true,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        head.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        )));
+        trigger.execute = Some(Box::new(head));
+
+        stamp_self_return_origin_from_trigger_condition(&mut trigger);
+
+        let execute = trigger.execute.as_ref().expect("execute");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone { origin, target, .. } => {
+                assert_eq!(origin, &Some(Zone::Graveyard));
+                assert_eq!(*target, TargetFilter::SelfRef);
+            }
+            other => panic!("expected head ChangeZone, got {other:?}"),
+        }
+        let sub = execute.sub_ability.as_ref().expect("nested return");
+        match sub.effect.as_ref() {
+            Effect::ChangeZone { origin, target, .. } => {
+                assert_eq!(origin, &None);
+                assert_eq!(*target, TargetFilter::ParentTarget);
+            }
+            other => panic!("expected nested ParentTarget ChangeZone, got {other:?}"),
+        }
     }
 
     #[test]
@@ -35145,7 +35497,9 @@ mod controlled_chosen_type_enters_tests {
 #[cfg(test)]
 mod enchanted_player_controls_tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -35211,5 +35565,129 @@ mod enchanted_player_controls_tests {
                 TypedFilter::land().controller(ControllerRef::EnchantedPlayer)
             ))
         );
+    }
+
+    /// CR 107.4 + CR 202.1 + CR 603.2 + CR 603.4 (issue #4370): Namor the
+    /// Sub-Mariner — "Whenever you cast a noncreature spell with one or more
+    /// blue mana symbols in its mana cost, create that many 1/1 blue Merfolk
+    /// creature tokens." (1) the trigger's `valid_card` must carry the
+    /// colored-pip constraint (`FilterProp::ManaSymbolCount { Blue, GE, 1 }`)
+    /// AND the noncreature type filter, so it does not over-fire on every
+    /// noncreature spell; (2) the "create that many" count must back-reference
+    /// the cast spell's blue-pip count (`ManaSymbolsInManaCost { EventSource,
+    /// Some(Blue) }`), not the generic `EventContextAmount` (which resolves to
+    /// 0 → zero tokens).
+    /// Collect every `Effect` reachable through the `sub_ability` chain.
+    fn collect_effects(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Walk an `And`/`Typed` valid_card looking for a `ManaSymbolCount` prop.
+    fn valid_card_has_blue_pip(f: &TargetFilter) -> bool {
+        use crate::types::mana::ManaColor;
+        match f {
+            TargetFilter::And { filters } => filters.iter().any(valid_card_has_blue_pip),
+            TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaSymbolCount {
+                        color: Some(ManaColor::Blue),
+                        comparator: Comparator::GE,
+                        value: 1,
+                    }
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn namor_blue_pip_cast_trigger_valid_card_and_token_count() {
+        use crate::types::ability::{Effect, ObjectScope, QuantityExpr, QuantityRef};
+        use crate::types::mana::ManaColor;
+
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell with one or more blue mana symbols in its mana cost, create that many 1/1 blue Merfolk creature tokens.",
+            "Namor the Sub-Mariner",
+        );
+
+        // (1) valid_card carries the blue-pip constraint so the trigger does not
+        // over-fire on every noncreature spell.
+        let vc = def.valid_card.as_ref().expect("Namor trigger valid_card");
+        assert!(
+            valid_card_has_blue_pip(vc),
+            "valid_card must contain ManaSymbolCount {{ Blue, GE, 1 }}, got {vc:?}"
+        );
+
+        // (2) token count back-references the blue-pip count of the cast spell.
+        let execute = def.execute.as_deref().expect("Namor trigger execute body");
+        let token_count = collect_effects(execute)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Token { count, .. } => Some(count.clone()),
+                _ => None,
+            })
+            .expect("Namor trigger should create tokens");
+        assert_eq!(
+            token_count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::EventSource,
+                    color: Some(ManaColor::Blue),
+                },
+            },
+            "token count must back-reference the cast spell's blue-pip count"
+        );
+    }
+
+    /// CR 603.2 (issue #4370): Leakage guard — a cast trigger WITHOUT a
+    /// colored-pip qualifier ("Whenever you cast a noncreature spell, create
+    /// that many ... tokens") must NOT pick up the Namor override: the count
+    /// stays `EventContextAmount` and the valid_card carries no
+    /// `ManaSymbolCount`. Confirms the override is gated on the staged color.
+    #[test]
+    fn cast_trigger_without_pip_qualifier_keeps_event_context_count() {
+        use crate::types::ability::{Effect, QuantityExpr, QuantityRef};
+
+        let def = parse_trigger_line(
+            "Whenever you cast a noncreature spell, create that many 1/1 blue Merfolk creature tokens.",
+            "Test Card",
+        );
+
+        // valid_card must NOT contain a ManaSymbolCount prop anywhere.
+        fn has_pip(f: &TargetFilter) -> bool {
+            match f {
+                TargetFilter::And { filters } => filters.iter().any(has_pip),
+                TargetFilter::Typed(tf) => tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::ManaSymbolCount { .. })),
+                _ => false,
+            }
+        }
+        if let Some(vc) = def.valid_card.as_ref() {
+            assert!(!has_pip(vc), "no ManaSymbolCount expected, got {vc:?}");
+        }
+
+        if let Some(execute) = def.execute.as_deref() {
+            if let Some(count) = collect_effects(execute).into_iter().find_map(|e| match e {
+                Effect::Token { count, .. } => Some(count.clone()),
+                _ => None,
+            }) {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "without a pip qualifier the count must stay EventContextAmount"
+                );
+            }
+        }
     }
 }

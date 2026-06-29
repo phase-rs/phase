@@ -75,6 +75,63 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
+#[test]
+fn static_ignore_hexproof_and_ward_suppression_pair() {
+    // Nowhere to Run's static line: hexproof-bypass + ward-suppression. The
+    // "those creatures" anaphor in sentence 2 reuses sentence 1's parsed subject,
+    // so the pair is emitted from one line.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof. Ward abilities of those creatures don't trigger.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "must emit IgnoreHexproof + SuppressTriggers, got {defs:?}"
+    );
+
+    // Sentence 1: IgnoreHexproof scoped to opponents' creatures.
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    match &defs[0].affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "bypass must scope to creatures, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected opponents' creatures filter, got {other:?}"),
+    }
+
+    // Sentence 2: SuppressTriggers[BecomesTargeted] over the SAME filter
+    // ("those creatures" reuses sentence 1's subject).
+    match &defs[1].mode {
+        StaticMode::SuppressTriggers {
+            events,
+            source_filter,
+        } => {
+            assert_eq!(events, &vec![SuppressedTriggerEvent::BecomesTargeted]);
+            assert_eq!(
+                Some(source_filter),
+                defs[0].affected.as_ref(),
+                "ward suppression must reuse the hexproof-bypass subject filter"
+            );
+        }
+        other => panic!("expected SuppressTriggers, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_ignore_hexproof_without_ward_emits_single_static() {
+    // Control: the hexproof-bypass sentence alone (no ward clause) yields ONLY
+    // IgnoreHexproof — the ward static is never fabricated when unwritten.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof.",
+    );
+    assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+}
+
 /// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
 /// each of your opponents." (Absolute Virtue) must emit a SINGLE
 /// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a
@@ -5659,11 +5716,146 @@ fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
         assert_eq!(
             mods,
             vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-                source: TargetFilter::ExiledBySource
+                source: TargetFilter::ExiledBySource,
+                cap: None,
             }],
             "predicate: {predicate}"
         );
     }
+}
+
+/// CR 702.167c + CR 613.1f: "each activated ability of the exiled cards used to
+/// craft it/~" (Locus of Enlightenment) maps to `GrantAllActivatedAbilitiesOf
+/// { ExiledBySource }` — the singular "each activated ability" grant phrase and
+/// the craft-pile source-set arm both resolve to the kind-agnostic exiled-cards
+/// filter.
+#[test]
+fn parse_continuous_modifications_grants_each_activated_ability_of_craft_pile() {
+    use crate::types::ability::TargetFilter;
+    for predicate in [
+        "has each activated ability of the exiled cards used to craft it",
+        "has each activated ability of the exiled cards used to craft ~",
+        // The plural grant phrase + craft source must resolve identically.
+        "all activated abilities of the exiled card used to craft it",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::ExiledBySource,
+                // CR 602.5b: bare predicate — no rider sentence reaches this path,
+                // so the craft grant is uncapped here (the cap appears only on the
+                // full two-sentence Locus line; see the whole-line test below).
+                cap: None,
+            }],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 702.167c + CR 613.1f + CR 602.5b: Locus of Enlightenment's full L1 line
+/// (grant + once-per-turn rider, two sentences) parses as ONE SelfRef static
+/// carrying the craft-pile ability grant. The rider is parsed into
+/// `cap: Some(OnlyOnceEachTurn)` — the meaningfully typed use-restriction that the
+/// layer-6 expansion injects into each donated ability — not consumed and
+/// discarded.
+#[test]
+fn locus_of_enlightenment_grant_static_parses_whole_line() {
+    use crate::types::ability::{ActivationRestriction, TargetFilter};
+    let defs = parse_static_line_multi(
+        "~ has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn.",
+    );
+    assert_eq!(defs.len(), 1, "expected one grant static, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
+
+    // Discriminating: the SAME grant sentence WITHOUT the rider must stay
+    // uncapped (cap: None) — proving the cap is sourced from the parsed rider,
+    // not blanket-applied to every craft grant.
+    let no_rider = parse_static_line_multi(
+        "~ has each activated ability of the exiled cards used to craft it.",
+    );
+    assert_eq!(
+        no_rider.len(),
+        1,
+        "expected one grant static, got {no_rider:?}"
+    );
+    assert_eq!(
+        no_rider[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: None,
+        }]
+    );
+}
+
+/// CR 602.5b + CR 602.5c + CR 613.1f: the once-per-turn rider-fold is a SHARED
+/// primitive over ANY grant source, not a Locus/craft-pile special case. A grant
+/// with a DIFFERENT source (Drana and Linvala's "all creatures your opponents
+/// control") followed by the same rider must fold `cap: Some(OnlyOnceEachTurn)`
+/// onto that grant — proving the cap attaches to whatever
+/// `GrantAllActivatedAbilitiesOf` precedes the rider, regardless of its source.
+/// This FAILS if the fold is hard-coded to `ExiledBySource`/Locus.
+#[test]
+fn grant_cap_rider_folds_over_any_grant_source() {
+    use crate::types::ability::{
+        ActivationRestriction, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+    };
+    use crate::types::zones::Zone;
+    let defs = parse_static_line_multi(
+        "~ has all activated abilities of all creatures your opponents control. You may activate each of those abilities only once each turn.",
+    );
+    assert_eq!(defs.len(), 1, "expected one grant static, got {defs:?}");
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            // NOT ExiledBySource — a different source, proving generality.
+            source: TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
+}
+
+/// CR 702.167c + CR 602.5b: Locus parses to the capped grant through the STANDARD
+/// production dispatch (`parse_oracle_text`) — sentence 1 via the ordinary grant
+/// source parser, sentence 2 folded by the shared rider-fold — with no
+/// card-specific whole-line hook.
+#[test]
+fn locus_cap_via_standard_oracle_dispatch() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{ActivationRestriction, TargetFilter};
+    let parsed = parse_oracle_text(
+        "Locus of Enlightenment has each activated ability of the exiled cards used to craft it. You may activate each of those abilities only once each turn.",
+        "Locus of Enlightenment",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "expected exactly one grant static, got {:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed.statics[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::ExiledBySource,
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+        }]
+    );
 }
 
 /// CR 613.1f + CR 607.2a + CR 205.3: "all creature cards exiled with it/~" narrows
@@ -5679,6 +5871,7 @@ fn parse_continuous_modifications_grants_creature_cards_exiled() {
                 TargetFilter::ExiledBySource,
             ],
         },
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creature cards exiled with it",
@@ -5707,6 +5900,7 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
                     prop: Box::new(FilterProp::SameName),
                 }]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of creatures you control that don't have the same name as it",
@@ -5742,6 +5936,7 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
                 },
             ],
         },
+        cap: None,
     };
     for predicate in [
         "all activated abilities of each other creature with a +1/+1 counter on it",
@@ -5768,6 +5963,7 @@ fn parse_grant_all_activated_abilities_opponents_creatures() {
                     zone: Zone::Battlefield,
                 }]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creatures your opponents control",
@@ -5790,6 +5986,7 @@ fn parse_grant_all_activated_abilities_creature_cards_in_graveyards() {
         source: TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
             zone: Zone::Graveyard,
         }])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all creature cards in all graveyards",
@@ -5812,6 +6009,7 @@ fn parse_grant_all_activated_abilities_all_lands() {
         source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
             zone: Zone::Battlefield,
         }])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all lands on the battlefield",
@@ -5844,6 +6042,7 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
                     },
                 ]),
         ),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all legendary creatures you control",
@@ -5874,6 +6073,7 @@ fn parse_grant_all_activated_abilities_artifact_cards_in_your_graveyard() {
                 zone: Zone::Graveyard,
             },
         ])),
+        cap: None,
     };
     for predicate in [
         "all activated abilities of all artifact cards in your graveyard",
@@ -6382,6 +6582,17 @@ fn static_each_player_may_play_an_additional_land() {
         .unwrap();
     assert_eq!(def.mode, StaticMode::MayPlayAdditionalLand);
     assert_eq!(def.affected, Some(TargetFilter::Player));
+}
+
+#[test]
+fn static_anchor_choice_land_drop_stays_unsupported_until_choice_filter_exists() {
+    assert!(
+        parse_static_line(
+            "Each player who last chose green anchor may play an additional land during each of their turns.",
+        )
+        .is_none(),
+        "chosen-word player subjects must not be widened to all players"
+    );
 }
 
 #[test]
@@ -7388,6 +7599,52 @@ fn static_play_two_additional_lands() {
     let def =
         parse_static_line("You may play two additional lands on each of your turns.").unwrap();
     assert_eq!(def.mode, StaticMode::AdditionalLandDrop { count: 2 });
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(tf.controller, Some(ControllerRef::You)),
+        other => panic!("two-additional land static must affect controller only, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_play_any_number_of_lands() {
+    let def = parse_static_line("You may play any number of lands on each of your turns.").unwrap();
+    assert_eq!(def.mode, StaticMode::AdditionalLandDrop { count: u8::MAX });
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(tf.controller, Some(ControllerRef::You)),
+        other => panic!("any-number land static must affect controller only, got {other:?}"),
+    }
+}
+
+#[test]
+fn fastbond_first_line_is_static_not_targeted_play_effect() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "You may play any number of lands on each of your turns.\nWhenever you play a land, if it wasn't the first land you played this turn, this enchantment deals 1 damage to you.",
+        "Fastbond",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|def| {
+            def.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })
+                && matches!(
+                    &def.affected,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.controller == Some(ControllerRef::You)
+                )
+        }),
+        "Fastbond must parse its land-play permission as a static ability, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(*ability.effect, Effect::CastFromZone { .. })),
+        "Fastbond must not ask for a target by lowering the static land-play permission to CastFromZone, got {:?}",
+        parsed.abilities
+    );
 }
 
 #[test]
@@ -15291,6 +15548,130 @@ fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
     }
 }
 
+#[test]
+fn static_reduce_activated_ability_cost_dynamic_power() {
+    // Agatha of the Vile Cauldron, post `normalize_card_name_refs` ("Agatha's"
+    // → "~'s"): "Activated abilities of creatures you control cost {X} less to
+    // activate, where X is ~'s power. This effect can't reduce the mana in that
+    // cost to less than one mana." The `{X}` amount is the per-unit multiplier 1
+    // and the dynamic count is the source's power (CR 208.1 + CR 113.7).
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {X} less to activate, where X is ~'s power. This effect can't reduce the mana in that cost to less than one mana.",
+    )
+    .expect("Agatha dynamic activated-ability cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 1,
+            minimum_mana: Some(1),
+            dynamic_count: Some(QuantityRef::Power {
+                scope: ObjectScope::Source,
+            }),
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("expected creatures you control, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_where_x_is_source_power_yields_power_source_ref() {
+    // Amendment item 2: the dynamic referent combinator must map
+    // "{X} ... where X is ~'s power" → `QuantityRef::Power { scope: Source }`,
+    // with the per-unit amount pinned to 1. Drops the second sentence to prove
+    // the dynamic arm does not depend on the minimum-mana clause.
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {X} less to activate, where X is ~'s power.",
+    )
+    .expect("dynamic referent must parse without the minimum-mana clause");
+    match def.mode {
+        StaticMode::ReduceAbilityCost {
+            amount,
+            dynamic_count: Some(QuantityRef::Power { scope }),
+            ..
+        } => {
+            assert_eq!(scope, ObjectScope::Source);
+            assert_eq!(amount, 1);
+        }
+        other => panic!("expected dynamic Power{{Source}} reduction, got {other:?}"),
+    }
+}
+
+// --- Group B': Special-action (plot / unlock) cost reduction ---
+
+#[test]
+fn static_reduce_action_cost_plot() {
+    // Doc Aurlock, Grizzled Genius: "Plotting cards from your hand costs {2}
+    // less." (CR 116.2k / 702.170). Note the singular verb "costs".
+    let def = parse_static_line("Plotting cards from your hand costs {2} less.")
+        .expect("Doc Aurlock plot cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceActionCost {
+            action: SpecialAction::Plot,
+            mode: CostModifyMode::Reduce,
+            amount: 2,
+        }
+    );
+}
+
+#[test]
+fn static_reduce_action_cost_unlock() {
+    // Inquisitive Glimmer: "Unlock costs you pay cost {1} less." (CR 116.2m /
+    // 709.5e). The "cost" (not "costs") verb form.
+    let def = parse_static_line("Unlock costs you pay cost {1} less.")
+        .expect("Inquisitive Glimmer unlock cost reduction must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceActionCost {
+            action: SpecialAction::UnlockDoor,
+            mode: CostModifyMode::Reduce,
+            amount: 1,
+        }
+    );
+}
+
+#[test]
+fn spell_cost_reduction_does_not_become_action_cost() {
+    // Discriminator: a spell-cost reduction (Inquisitive Glimmer L1) must route
+    // to `ModifyCost`, NEVER the special-action `ReduceActionCost`. Pins the
+    // plot/unlock subject tags so they don't over-match generic "cost {N} less".
+    let def = parse_static_line("Enchantment spells you cast cost {1} less to cast.")
+        .expect("spell cost reduction parses");
+    assert!(
+        matches!(def.mode, StaticMode::ModifyCost { .. }),
+        "spell cost reduction must be ModifyCost, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_reduce_action_cost_registry_round_trip() {
+    // CR 116.2: Display/from_str must round-trip the action + direction so a
+    // serialized special-action reduction does not silently decode wrong.
+    for (action, mode) in [
+        (SpecialAction::Plot, CostModifyMode::Reduce),
+        (SpecialAction::UnlockDoor, CostModifyMode::Reduce),
+        (SpecialAction::Plot, CostModifyMode::Raise),
+    ] {
+        let original = StaticMode::ReduceActionCost {
+            action,
+            mode,
+            amount: 2,
+        };
+        let encoded = original.to_string();
+        let decoded = encoded
+            .parse::<StaticMode>()
+            .expect("registry string parses back into a StaticMode");
+        assert_eq!(decoded, original, "round trip changed value: {encoded}");
+    }
+}
+
 // --- Group C: Spells you cast have keyword ---
 
 #[test]
@@ -20845,5 +21226,108 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
             }),
         "must remove all creature types, got {:?}",
         def.modifications
+    );
+}
+
+/// CR 121.1 + CR 613.11: River Song regression. The "Meet in Reverse" line must
+/// lower to exactly one `DrawFromBottom { Controller }` static (NOT a spell
+/// catch-all `Effect::Unimplemented`), and the "Spoilers" trigger must remain a
+/// `PlayerPerformedAction` over [Scry, Surveil, SearchedLibrary].
+#[test]
+fn river_song_full_card_parses_without_unimplemented() {
+    use crate::types::events::PlayerActionKind;
+    use crate::types::triggers::TriggerMode;
+
+    let oracle = "Meet in Reverse \u{2014} You draw cards from the bottom of your library rather than the top.\n\
+        Spoilers \u{2014} Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on River Song. Then River Song deals damage to that player equal to its power.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "River Song",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Time".to_string(), "Lord".to_string()],
+    );
+
+    // (i) No spell catch-all Unimplemented leaked into the abilities.
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+        "River Song must parse with 0 Unimplemented abilities, got {:?}",
+        parsed.abilities
+    );
+
+    // (ii) Exactly one DrawFromBottom { Controller } static.
+    let bottom: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|d| {
+            d.mode
+                == StaticMode::DrawFromBottom {
+                    who: ProhibitionScope::Controller,
+                }
+        })
+        .collect();
+    assert_eq!(
+        bottom.len(),
+        1,
+        "expected exactly one DrawFromBottom(controller) static, got statics {:?}",
+        parsed.statics
+    );
+
+    // (iii) The Spoilers trigger shape is intact.
+    let spoilers = parsed
+        .triggers
+        .iter()
+        .find(|t| t.player_actions.is_some())
+        .expect("Spoilers must remain a player-action trigger");
+    assert_eq!(spoilers.mode, TriggerMode::PlayerPerformedAction);
+    let actions = spoilers
+        .player_actions
+        .as_ref()
+        .expect("player_actions present");
+    for expected in [
+        PlayerActionKind::Scry,
+        PlayerActionKind::Surveil,
+        PlayerActionKind::SearchedLibrary,
+    ] {
+        assert!(
+            actions.contains(&expected),
+            "Spoilers must fire on {expected:?}; got {actions:?}"
+        );
+    }
+}
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom`.
+/// "You draw a card from the bottom of your library rather than the top."
+/// must parse identically to the plural River Song wording.
+#[test]
+fn draw_from_bottom_singular_controller() {
+    let def =
+        parse_static_line("You draw a card from the bottom of your library rather than the top.")
+            .expect("singular controller form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Controller,
+        }
+    );
+}
+
+/// CR 121.1 + CR 613.11: Singular-form coverage for `DrawFromBottom` with
+/// opponent subject and "instead of" connector.
+/// "Each opponent draws a card from the bottom of their library instead of the top."
+#[test]
+fn draw_from_bottom_singular_opponents() {
+    let def = parse_static_line(
+        "Each opponent draws a card from the bottom of their library instead of the top.",
+    )
+    .expect("singular opponent form must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::DrawFromBottom {
+            who: ProhibitionScope::Opponents,
+        }
     );
 }

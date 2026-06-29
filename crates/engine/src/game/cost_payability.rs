@@ -88,6 +88,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -159,6 +160,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -390,6 +392,25 @@ impl AbilityCost {
             // is less than N.
             AbilityCost::CollectEvidence { amount } => {
                 super::effects::collect_evidence::can_collect_evidence(state, player, *amount)
+            }
+            // CR 118.3 + CR 601.2b: An "exile any number of [filter] with
+            // [aggregate] [cmp] N" cost is payable iff the aggregate over EVERY
+            // eligible object (the maximal chosen set) satisfies the comparator.
+            // For a `Sum`/`GE` threshold (Baron Helmut Zemo: ≥15 black symbols),
+            // "exile all" is the maximal value, so this is the correct ceiling.
+            AbilityCost::ExileWithAggregate {
+                filter,
+                function,
+                property,
+                comparator,
+                value,
+                zone,
+            } => {
+                let ids =
+                    eligible_exile_with_aggregate_objects(state, player, source, filter, *zone);
+                let total =
+                    super::quantity::aggregate_property_over(state, &ids, *function, *property);
+                comparator.evaluate(total, *value)
             }
             // CR 601.2b: Tapping N creatures requires N untapped creatures
             // matching the filter. The source is excluded only when a {T} cost
@@ -702,6 +723,39 @@ pub(super) fn eligible_exile_cost_objects(
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
+}
+
+/// CR 117.1 + CR 601.2b: Objects eligible to be exiled for an
+/// `AbilityCost::ExileWithAggregate` — cards in `zone` matching `filter`,
+/// excluding the ability source. Single source of truth for both the payability
+/// ceiling (aggregate over ALL eligible) and the interactive payment prompt's
+/// `choices`. Uses the owner-zone matcher so `controller: You` / `InZone` /
+/// `Owned` predicates resolve against non-battlefield cards (CR 400.3: a card in
+/// a graveyard is owned by, and controlled relative to, its owner). The filter's
+/// `controller: You` binds to `player` via the source-controller override.
+pub(crate) fn eligible_exile_with_aggregate_objects(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: &TargetFilter,
+    zone: Zone,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source_with_controller(source, player);
+    let zone_ids: Vec<ObjectId> = match (zone, state.players.get(player.0 as usize)) {
+        (Zone::Graveyard, Some(p)) => p.graveyard.iter().copied().collect(),
+        (Zone::Hand, Some(p)) => p.hand.iter().copied().collect(),
+        // Other zones (battlefield/exile) — scan the object table by zone.
+        _ => state
+            .objects
+            .values()
+            .filter(|o| o.zone == zone)
+            .map(|o| o.id)
+            .collect(),
+    };
+    zone_ids
+        .into_iter()
+        .filter(|&id| id != source && matches_target_filter_in_owner_zone(state, id, filter, &ctx))
+        .collect()
 }
 
 /// CR 702.167a/b: Objects eligible to be exiled as the materials of a craft

@@ -103,6 +103,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
     // game/effects/draw.rs. Coverage support is via is_data_carrying_static().
+    // Note: DrawFromBottom (CR 121.1/613.11) is a data-carrying variant — its
+    // top-vs-bottom selection is enforced in
+    // game/effects/draw.rs::select_cards_to_draw, which all four draw-delivery
+    // paths consult. Coverage support is via is_data_carrying_static().
     // Note: DoubleTriggers (CR 603.2d) is a data-carrying variant — runtime
     // enforcement is in triggers.rs::apply_trigger_doubling. Coverage support
     // is via is_data_carrying_static().
@@ -1019,17 +1023,80 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
-/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
-/// have hexproof, including "hexproof from [quality]" variants.
+/// CR 702.11b + CR 702.11e: Check if `player_id` may target creatures as though
+/// they didn't have hexproof, including "hexproof from [quality]" variants
+/// (CR 702.11e: an "as though it didn't have hexproof" effect also defeats
+/// hexproof-from-quality). This is the player-scoped grant (Detection Tower
+/// class — "you may target ... as though it
+/// didn't have hexproof"), keyed on a battlefield `IgnoreHexproof` static with
+/// NO object `affected` filter, plus the per-player transient grant.
+///
+/// Object-scoped `IgnoreHexproof` statics (Nowhere to Run, `affected = Some`)
+/// are deliberately excluded here — they are not player grants and must not
+/// widen the bypass to every target `player_id` chooses. Those are evaluated
+/// per-target by [`target_ignores_hexproof`].
 pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::IgnoreHexproof,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+    let player_scoped_grant = game_functioning_statics(state).any(|(obj, def)| {
+        matches!(def.mode, StaticMode::IgnoreHexproof)
+            && def.affected.is_none()
+            && static_condition_matches_context(
+                state,
+                obj.id,
+                obj.controller,
+                def,
+                &StaticCheckContext {
+                    player_id: Some(player_id),
+                    ..Default::default()
+                },
+            )
+    });
+    player_scoped_grant
+        || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+}
+
+/// CR 702.11b + CR 702.11e: Whether a FUNCTIONING `IgnoreHexproof` static whose
+/// `condition` currently holds and which is scoped by an object `affected` filter
+/// makes `target_id` targetable as though it had no hexproof (CR 702.11e extends
+/// the bypass to hexproof-from-quality). Nowhere to Run — "Creatures your
+/// opponents control can be the targets of spells and abilities as though they
+/// didn't have hexproof." The card carries no "you control" qualifier on the
+/// spells or abilities, so the bypass applies to ANY targeting player: it is
+/// keyed solely on the would-be target matching the static's `affected` filter
+/// (evaluated from the static's own source), independent of the targeting
+/// source's controller — hexproof (CR 702.11b) only ever blocks opponents, so
+/// removing it for the matched permanents opens them to every player.
+///
+/// CR 604.1 + CR 613.1: mirrors [`player_ignores_hexproof`] — uses
+/// `game_functioning_statics` (so a source whose abilities are suppressed, or a
+/// phased-out / non-functioning source, grants nothing) and gates each static
+/// through `static_condition_matches_context` with `target_id: Some(target_id)`
+/// so an "as long as ..." condition is honored, and a condition that references
+/// the would-be target (the recipient) is evaluated against that target rather
+/// than skipped. Object-scoped (`affected = Some`) only; the player-scoped
+/// Detection Tower form (`affected = None`) is handled by
+/// [`player_ignores_hexproof`].
+pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
+    game_functioning_statics(state).any(|(source_obj, def)| {
+        matches!(def.mode, StaticMode::IgnoreHexproof)
+            && def.affected.as_ref().is_some_and(|filter| {
+                matches_target_filter(
+                    state,
+                    target_id,
+                    filter,
+                    &FilterContext::from_source(state, source_obj.id),
+                )
+            })
+            && static_condition_matches_context(
+                state,
+                source_obj.id,
+                source_obj.controller,
+                def,
+                &StaticCheckContext {
+                    target_id: Some(target_id),
+                    ..Default::default()
+                },
+            )
+    })
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
@@ -1601,8 +1668,9 @@ fn transient_additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::StaticCondition;
-    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::statics::StaticMode;
@@ -1980,10 +2048,14 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
                     .description("You may play two additional lands on each of your turns.".into()),
             );
 
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
     }
 
     #[test]
@@ -2017,6 +2089,96 @@ mod tests {
 
         // CR 305.2: Two Explorations = +2 additional land drops
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
+    }
+
+    #[test]
+    fn test_additional_land_drops_saturates_any_number() {
+        let mut state = setup();
+
+        let fastbond = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fastbond".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fastbond)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::AdditionalLandDrop { count: u8::MAX })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play any number of lands on each of your turns.".into()),
+            );
+
+        let exploration = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exploration".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exploration)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::MayPlayAdditionalLand)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play an additional land on each of your turns.".into()),
+            );
+
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), u8::MAX);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
+    }
+
+    #[test]
+    fn test_parsed_controller_scoped_additional_land_drops_do_not_affect_opponent() {
+        let mut state = setup();
+
+        let fastbond = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fastbond".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fastbond)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("You may play any number of lands on each of your turns.")
+                    .expect("Fastbond land permission must parse"),
+            );
+
+        let azusa = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Azusa, Lost but Seeking".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&azusa)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("You may play two additional lands on each of your turns.")
+                    .expect("Azusa land permission must parse"),
+            );
+
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), u8::MAX);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
     }
 
     /// Issue #2879 + CR 305.2 + CR 611.2c: a turn-scoped transient grant (Escape

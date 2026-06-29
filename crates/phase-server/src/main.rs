@@ -3732,49 +3732,65 @@ async fn handle_client_message(
                 info!(game = %game_code, host = %display_name, "AI game started");
             } else {
                 // --- Standard multiplayer path ---
-                let mut mgr = state.lock().await;
                 // Capture the format before `format_config` is consumed so we
                 // can stamp it on the lobby entry below.
                 let format_config_for_lobby = format_config.clone();
-                let (game_code, player_token) = mgr.create_game_n_players(
-                    resolved,
-                    display_name.clone(),
-                    timer_seconds,
-                    pc,
-                    match_config,
-                    format_config,
-                );
-                info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
+                let (game_code, player_token, initial_player_count) = {
+                    let mut mgr = state.lock().await;
+                    let (game_code, player_token) = mgr.create_game_n_players(
+                        resolved,
+                        display_name.clone(),
+                        timer_seconds,
+                        pc,
+                        match_config,
+                        format_config,
+                    );
+                    info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
-                if let Some(session) = mgr.sessions.get_mut(&game_code) {
-                    session.start_when_full = start_when_full;
-                    session.ranked = ranked;
-                    for (seat_index, difficulty, deck) in &ai_requests {
-                        let seat = *seat_index as usize;
-                        session.display_names[seat] = format!("AI ({difficulty:?})");
-                        session.connected[seat] = true;
-                        session.decks[seat] = Some(deck.clone());
-                        let pid = PlayerId(*seat_index);
-                        session.ai_seats.insert(pid);
-                        let config = phase_ai::config::create_config_for_players(
-                            *difficulty,
-                            phase_ai::config::Platform::Native,
-                            pc,
-                        );
-                        session.ai_configs.insert(pid, config);
+                    let mut initial_player_count = 1;
+                    if let Some(session) = mgr.sessions.get_mut(&game_code) {
+                        session.start_when_full = start_when_full;
+                        session.ranked = ranked;
+                        for (seat_index, difficulty, deck) in &ai_requests {
+                            let seat = *seat_index as usize;
+                            session.display_names[seat] = format!("AI ({difficulty:?})");
+                            session.connected[seat] = true;
+                            session.decks[seat] = Some(deck.clone());
+                            let pid = PlayerId(*seat_index);
+                            session.ai_seats.insert(pid);
+                            let config = phase_ai::config::create_config_for_players(
+                                *difficulty,
+                                phase_ai::config::Platform::Native,
+                                pc,
+                            );
+                            session.ai_configs.insert(pid, config);
+                        }
+
+                        initial_player_count = session.current_player_count();
+                        session.lobby_meta = Some(server_core::PersistedLobbyMeta {
+                            host_name: display_name.clone(),
+                            public,
+                            password: password.clone(),
+                            timer_seconds,
+                            start_when_full,
+                            ranked,
+                        });
+                        persist_session_async(game_db, &game_code, session);
                     }
-                }
+
+                    (game_code, player_token, initial_player_count)
+                };
 
                 identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
 
-                let mut conns = connections.lock().await;
-                conns
-                    .entry(game_code.clone())
-                    .or_default()
-                    .insert(PlayerId(0), tx.clone());
+                {
+                    let mut conns = connections.lock().await;
+                    conns
+                        .entry(game_code.clone())
+                        .or_default()
+                        .insert(PlayerId(0), tx.clone());
+                }
 
-                let mut lob_guard = lobby.lock().await;
-                let lob = lob_guard.lobby_mut();
                 // Pull the client's advertised build identity from the
                 // stored ClientHello. `client_hello` is guaranteed Some here
                 // because the handshake gate at the top of this function
@@ -3784,63 +3800,51 @@ async fn handle_client_message(
                     .as_ref()
                     .map(|h| (h.client_version.clone(), h.build_commit.clone()))
                     .unwrap_or_default();
-                lob.register_game(
-                    &game_code,
-                    RegisterGameRequest {
-                        host_name: display_name.clone(),
-                        public,
-                        password: password.clone(),
-                        timer_seconds,
-                        host_version,
-                        host_build_commit,
-                        // Initial count reflects the host plus any AI seats
-                        // configured at creation time; further updates flow
-                        // through `set_current_players` as guests join.
-                        current_players: mgr
-                            .sessions
-                            .get(&game_code)
-                            .map(|s| s.current_player_count())
-                            .unwrap_or(1),
-                        // Use the clamped `pc` (not the raw request) so the
-                        // lobby listing's max_players matches the session's
-                        // actual capacity. A hostile client sending
-                        // `player_count: 100` would otherwise advertise
-                        // "1/100 players" while the game ran with 6.
-                        max_players: pc as u32,
-                        format_config: format_config_for_lobby,
-                        match_config,
-                        // Trim then drop empty strings so the client can't
-                        // smuggle a blank room_name that would render as an
-                        // empty row title. `None` is the "use host name"
-                        // fallback both here and in the client.
-                        room_name: room_name
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string),
-                        // Full-mode server runs the engine itself — no
-                        // PeerJS peer is involved, so this stays empty.
-                        host_peer_id: String::new(),
-                        // Draft metadata is P2P-only for now; Full-mode
-                        // servers don't host draft pods.
-                        draft_metadata: None,
-                        ranked,
-                    },
-                    &SysEnv,
-                );
-
-                // Store lobby metadata on the session and persist to SQLite
-                if let Some(session) = mgr.sessions.get_mut(&game_code) {
-                    session.lobby_meta = Some(server_core::PersistedLobbyMeta {
-                        host_name: display_name,
-                        public,
-                        password,
-                        timer_seconds,
-                        start_when_full,
-                        ranked,
-                    });
-                    persist_session_async(game_db, &game_code, session);
-                }
+                let lobby_added_game = {
+                    let mut lob_guard = lobby.lock().await;
+                    let lob = lob_guard.lobby_mut();
+                    lob.register_game(
+                        &game_code,
+                        RegisterGameRequest {
+                            host_name: display_name,
+                            public,
+                            password,
+                            timer_seconds,
+                            host_version,
+                            host_build_commit,
+                            // Initial count reflects the host plus any AI seats
+                            // configured at creation time; further updates flow
+                            // through `set_current_players` as guests join.
+                            current_players: initial_player_count,
+                            // Use the clamped `pc` (not the raw request) so the
+                            // lobby listing's max_players matches the session's
+                            // actual capacity. A hostile client sending
+                            // `player_count: 100` would otherwise advertise
+                            // "1/100 players" while the game ran with 6.
+                            max_players: pc as u32,
+                            format_config: format_config_for_lobby,
+                            match_config,
+                            // Trim then drop empty strings so the client can't
+                            // smuggle a blank room_name that would render as an
+                            // empty row title. `None` is the "use host name"
+                            // fallback both here and in the client.
+                            room_name: room_name
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                            // Full-mode server runs the engine itself — no
+                            // PeerJS peer is involved, so this stays empty.
+                            host_peer_id: String::new(),
+                            // Draft metadata is P2P-only for now; Full-mode
+                            // servers don't host draft pods.
+                            draft_metadata: None,
+                            ranked,
+                        },
+                        &SysEnv,
+                    );
+                    lob.public_game(&game_code)
+                };
 
                 let msg = ServerMessage::GameCreated {
                     game_code: game_code.clone(),
@@ -3853,15 +3857,12 @@ async fn handle_client_message(
                 // Send initial slot state so host sees themselves in the room
                 broadcast_player_slots(state, connections, &game_code).await;
 
-                if public {
-                    let games = lob.public_games();
-                    if let Some(game) = games.into_iter().find(|g| g.game_code == game_code) {
-                        broadcast_to_lobby_subscribers(
-                            lobby_subscribers,
-                            ServerMessage::LobbyGameAdded { game },
-                        )
-                        .await;
-                    }
+                if let Some(game) = lobby_added_game {
+                    broadcast_to_lobby_subscribers(
+                        lobby_subscribers,
+                        ServerMessage::LobbyGameAdded { game },
+                    )
+                    .await;
                 }
 
                 let count = player_count.load(Ordering::Relaxed);
@@ -6067,6 +6068,143 @@ mod full_create_guard_tests {
             .unwrap_err();
 
         assert!(err.contains("ai_seats[0].seat_index"));
+    }
+}
+
+#[cfg(test)]
+mod issue_4548_full_create_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use server_core::protocol::{ClientMessage, DeckData, ServerMessage};
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::WebSocketStream;
+
+    fn empty_deck() -> DeckData {
+        DeckData::default()
+    }
+
+    async fn spawn_full_mode_server() -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let game_db = Arc::new(
+            persistence::GameDb::open(&temp_dir.path().join("games.db")).expect("game db"),
+        );
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(AppState {
+                sessions: Arc::new(Mutex::new(SessionManager::new())),
+                draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+                draft_pools: Arc::new(draft_pools::DraftPools::default()),
+                connections: Arc::new(Mutex::new(HashMap::new())),
+                db: Arc::new(CardDatabase::default()),
+                lobby: Arc::new(Mutex::new(Broker::new())),
+                lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+                player_count: Arc::new(AtomicU32::new(0)),
+                game_db,
+                draft_spectators: Arc::new(Mutex::new(HashMap::new())),
+                game_spectators: Arc::new(Mutex::new(HashMap::new())),
+                mode: ServerMode::Full,
+                public_url: None,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+
+        (format!("ws://{addr}/ws"), handle, temp_dir)
+    }
+
+    async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let msg = socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame");
+        match msg {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("server message"),
+            other => panic!("expected text server message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_mode_create_sends_slots_after_game_created() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: empty_deck(),
+                display_name: "Alice".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&create).expect("create json").into(),
+                ))
+                .await
+                .expect("send create");
+
+            let mut game_code = None;
+            let mut saw_slots = false;
+            while game_code.is_none() || !saw_slots {
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::GameCreated {
+                        game_code: code, ..
+                    } => game_code = Some(code),
+                    ServerMessage::PlayerSlotsUpdate { slots } => {
+                        assert_eq!(slots.len(), 2);
+                        assert_eq!(slots[0].name, "Alice");
+                        saw_slots = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            game_code.expect("created game code")
+        })
+        .await;
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "full-mode create deadlocked before slot broadcast"
+        );
     }
 }
 

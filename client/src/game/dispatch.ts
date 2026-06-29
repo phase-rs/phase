@@ -94,6 +94,43 @@ function actionsEqual(a: GameAction, b: GameAction): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function waitingForActorMatches(
+  waitingFor: WaitingFor | null,
+  gameState: GameState | null,
+  actor: number,
+): boolean {
+  if (!waitingFor || !("data" in waitingFor)) return false;
+  const data = waitingFor.data;
+  if (typeof data !== "object" || data === null) return false;
+  const fields = data as Record<string, unknown>;
+
+  if (waitingFor.type === "Priority") {
+    return fields.player === actor || gameState?.priority_player === actor;
+  }
+  if (fields.player === actor) return true;
+
+  const pending = fields.pending;
+  return (
+    Array.isArray(pending) &&
+    pending.some((entry) => {
+      if (typeof entry !== "object" || entry === null) return false;
+      return (entry as Record<string, unknown>).player === actor;
+    })
+  );
+}
+
+function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
+  const { gameState, legalActions, waitingFor } = useGameStore.getState();
+  if (Object.is(next.waitingFor, waitingFor)) return true;
+  if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
+  if (legalActions.some((action) => actionsEqual(action, next.action))) return true;
+  return (
+    next.action.type === "PassPriority" &&
+    waitingFor?.type === "Priority" &&
+    gameState != null
+  );
+}
+
 function isStateLost(err: unknown): boolean {
   return err instanceof AdapterError && err.code === AdapterErrorCode.STATE_LOST;
 }
@@ -387,6 +424,11 @@ async function processQueue(): Promise<void> {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
+        if (!queuedLocalActionStillApplies(next)) {
+          debugLog(`dropping stale queued action ${next.action.type}: waitingFor changed`);
+          next.resolve();
+          continue;
+        }
         inFlightLocalAction = { action: next.action, actor: next.actor, waitingFor: next.waitingFor };
         try {
           await processAction(next.action, next.actor);

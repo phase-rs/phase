@@ -66,6 +66,7 @@ pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
+pub mod create_draw_replacement;
 pub mod create_emblem;
 pub mod create_token_copy_from_pool;
 pub mod deal_damage;
@@ -1257,6 +1258,7 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         colors: record.colors.clone(),
         chosen_attributes: Vec::new(),
         counters: Default::default(),
+        tapped: false,
     }
 }
 
@@ -2097,6 +2099,9 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
+            // CR 601.2c: a presence guard, not a decline-alternative selector —
+            // declining the optional effect does not pick a `HasObjectTarget` branch.
+            | AbilityCondition::HasObjectTarget
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
             | AbilityCondition::SourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
@@ -2934,6 +2939,9 @@ pub fn resolve_effect(
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
+        }
+        Effect::CreateDrawReplacement { .. } => {
+            create_draw_replacement::resolve(state, ability, events)
         }
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
@@ -6199,15 +6207,22 @@ fn resolve_chain_body(
     }
 
     // CR 609.3: Extract the numeric result emitted by this parent effect for
-    // `QuantityRef::PreviousEffectAmount` in sub-abilities. The event class is
-    // selected by the parent `Effect` so unrelated numeric side effects from the
-    // same resolution are not mixed together: damage to a battle removes defense
-    // counters and also deals damage, but "damage dealt this way" must read only
-    // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
-    // `CounterRemoved`.
-    if let Some(amount) =
-        previous_effect_amount_from_events(state, ability, &events[events_before..])
-    {
+    // `QuantityRef::PreviousEffectAmount` / `EventContextAmount` in sub-abilities.
+    // The event class is selected by the parent `Effect` so unrelated numeric
+    // side effects from the same resolution are not mixed together: damage to a
+    // battle removes defense counters and also deals damage, but "damage dealt
+    // this way" must read only `DamageDealt`; Coalition Relic's "counter removed
+    // this way" must read only `CounterRemoved`. Mirror the `player_scope` loop's
+    // discard accounting so controller-only "discard your hand, then draw that
+    // many" chains (Tolarian Winds) stamp `last_effect_count`.
+    let parent_events = &events[events_before..];
+    let counts_by_player =
+        previous_effect_counts_by_player_from_events(&ability.effect, parent_events);
+    if !counts_by_player.is_empty() {
+        state.last_effect_count = counts_by_player.values().copied().max();
+        state.last_effect_amount = state.last_effect_count;
+        state.last_effect_counts_by_player = counts_by_player;
+    } else if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
         state.last_effect_amount = Some(amount);
     }
 
@@ -6832,10 +6847,18 @@ fn resolve_chain_body(
             if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
                 sub_with_context.source_id = forwarded_objects[0];
                 if matches!(sub.effect, Effect::Attach { .. }) {
-                    if !sub_with_context
-                        .targets
-                        .iter()
-                        .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                    let attach_target_is_last_created = matches!(
+                        &sub.effect,
+                        Effect::Attach {
+                            target: TargetFilter::LastCreated,
+                            ..
+                        }
+                    );
+                    if !attach_target_is_last_created
+                        && !sub_with_context
+                            .targets
+                            .iter()
+                            .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
                     {
                         sub_with_context
                             .targets
@@ -7596,6 +7619,16 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
+        // CR 601.2c + CR 115.1 + CR 608.2c: True iff the parent ability declared at
+        // least one object target. Unlike `TargetMatchesFilter`, there is NO
+        // `TriggeringSource` fallback — a declined variable-count target
+        // (CR 601.2c: zero targets announced) reads false, so the lowering pass's
+        // `And{[HasObjectTarget, …]}` wrapper suppresses a reflexive-target rider
+        // whose anaphor ("that creature") has no antecedent.
+        AbilityCondition::HasObjectTarget => ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_))),
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions
             .iter()
@@ -8378,6 +8411,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![ChosenAttribute::Player(PlayerId(1))],
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
 
@@ -10529,6 +10563,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: Default::default(),
+                tapped: false,
             },
         );
         let events = vec![
@@ -10817,6 +10852,94 @@ mod tests {
             vec![TargetRef::Object(creature)],
             "delayed exile must snapshot the returned creature"
         );
+    }
+
+    #[test]
+    fn forward_result_attach_to_last_created_uses_moved_object_as_attachment() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Ratonhnhake:ton".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Assassin Gauntlet".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let token = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&token)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.last_created_token_ids = vec![token];
+
+        let attach_to_token = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut return_equipment = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Equipment".to_string())],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(equipment)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(attach_to_token);
+        return_equipment.forward_result = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &return_equipment, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&equipment].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(token))
+        );
+        assert!(state.objects[&token].attachments.contains(&equipment));
+        assert_eq!(state.objects[&source].attached_to, None);
+        assert!(!state.objects[&equipment].attachments.contains(&source));
     }
 
     /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
@@ -14115,6 +14238,69 @@ mod tests {
             state.players[1].hand.len(),
             7,
             "OPPONENT must also discard their hand then draw 7 (#781)"
+        );
+    }
+
+    /// Tolarian Winds class: controller discards their hand, then draws that many
+    /// (EventContextAmount). Without stamping `last_effect_count` after a
+    /// non-`player_scope` Discard, the chained Draw resolves to 0.
+    #[test]
+    fn discard_hand_then_draw_event_context_amount_without_player_scope() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(0),
+                format!("Lib {i}"),
+                Zone::Library,
+            );
+        }
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut winds = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        winds.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &winds, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            3,
+            "controller should draw as many cards as they discarded"
         );
     }
 

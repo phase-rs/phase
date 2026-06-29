@@ -847,6 +847,12 @@ pub fn parse_target_with_syntax<'a>(
         "those tokens",
         "those auras",
         "the revealed cards",
+        // CR 603.7 + CR 707.12: "those exiled cards" / "the copies" — the cards a
+        // prior clause (or, for Baron Helmut Zemo's Boast, the activation COST)
+        // exiled and published into the tracked set. Ordered before "those cards"
+        // so the longer "those exiled cards" anaphor is not shadowed.
+        "those exiled cards",
+        "the copies",
         "those cards",
         "those permanents",
         "those creatures",
@@ -1605,6 +1611,68 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     parse_type_phrase_with_ctx(text, &mut ParseContext::default())
 }
 
+/// CR 608.2c: separator byte length for a mass-target union continuation
+/// ("…, all artifacts, and all enchantments"). Longest-match-first over the
+/// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
+/// with a union separator.
+fn match_mass_union_separator(lower: &str) -> Option<usize> {
+    alt((
+        tag::<_, _, OracleError<'_>>(", and/or "),
+        tag(", and "),
+        tag(", or "),
+        tag(", "),
+        tag(" and/or "),
+        tag(" and "),
+        tag(" or "),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(rest, _)| lower.len() - rest.len())
+}
+
+/// CR 205.2a + CR 205.3a + CR 608.2c: Parse a mass target as a comma/"and"-separated
+/// union of "[all|each] <type-phrase>" legs — where each leg's type word spans both
+/// card types (205.2a: creature/artifact/enchantment) and subtypes (205.3a) — e.g.
+/// "creatures except those that share a
+/// creature type with a creature that convoked this spell, all artifacts, and
+/// all enchantments" (Everything Comes to Dust). Each leg is parsed by the full
+/// `parse_target_with_ctx` grammar (type words, relative clauses, the
+/// "except those" exclusion suffix, and spell-target stack scoping) and the legs
+/// are combined with `merge_or_filters`.
+///
+/// A single-leg input returns exactly what `parse_target_with_ctx` returns, so
+/// every existing `exile all <type>` card is unchanged — the loop only fires on a
+/// repeated-`all`/`each` continuation, which the base grammar's early type-union
+/// (`starts_with_or_article_type_segment` rejects a leading "all") deliberately
+/// stops at.
+pub(crate) fn parse_mass_type_union<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let (mut acc, mut rest) = parse_target_with_ctx(text, ctx);
+    loop {
+        let lower = rest.to_lowercase();
+        let Some(sep_len) = match_mass_union_separator(&lower) else {
+            break;
+        };
+        let after_sep = &rest[sep_len..];
+        let after_sep_lower = after_sep.to_lowercase();
+        // Optional repeated "all "/"each " pluralizer the early union does not fold.
+        let plural_len = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+            .parse(after_sep_lower.as_str())
+            .map(|(r, _)| after_sep_lower.len() - r.len())
+            .unwrap_or(0);
+        let leg_text = &after_sep[plural_len..];
+        if !starts_with_type_word(&leg_text.to_lowercase()) {
+            break;
+        }
+        let (leg, next) = parse_target_with_ctx(leg_text, ctx);
+        acc = merge_or_filters(acc, leg);
+        rest = next;
+    }
+    (acc, rest)
+}
+
 /// Context-aware variant of `parse_type_phrase`. Enables relative-player scope
 /// resolution via `ctx.relative_player_scope`.
 pub fn parse_type_phrase_with_ctx<'a>(
@@ -2298,6 +2366,53 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 608.2c: "<type> except those that <relative-clause>" / "other than those
+    // that <relative-clause>" — an exclusion suffix. The inner relative clause is
+    // parsed by the same `parse_that_clause_suffix` grammar and the leg matches the
+    // *complement* of the whole clause. `parse_that_clause_suffix` returns its
+    // predicates AND-combined (a conjunctive clause, e.g. "that are attacking and
+    // tapped"), so the complement is the De Morgan dual
+    // Not(X AND Y) = Not(X) OR Not(Y). A single predicate negates directly; a
+    // multi-predicate conjunction folds to a single `AnyOf{[Not(X), Not(Y)]}`
+    // (disjunction of negations) — never per-prop `Not(X) AND Not(Y)`, which would
+    // exclude every object matching X *or* Y rather than only those matching both.
+    // A clause whose disjunction is already a single prop (e.g. "enchanted or
+    // equipped" → `HasAnyAttachmentOf`) stays one prop and its `Not` De Morgans
+    // correctly at runtime. Covers "all creatures except those that share a
+    // creature type with a creature that convoked this spell" (Everything Comes to
+    // Dust) and the general class ("except those that attacked this turn").
+    {
+        let rem = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - rem.len();
+        if let Ok((after_those, _)) = alt((
+            tag::<_, _, OracleError<'_>>("except those "),
+            tag("other than those "),
+        ))
+        .parse(rem)
+        {
+            let prefix_len = rem.len() - after_those.len();
+            if let Some((excl_props, consumed)) = parse_that_clause_suffix(after_those, Some(ctx)) {
+                let negated: Vec<FilterProp> = excl_props
+                    .into_iter()
+                    .map(|prop| FilterProp::Not {
+                        prop: Box::new(prop),
+                    })
+                    .collect();
+                match negated.len() {
+                    0 => {}
+                    1 => properties.push(
+                        negated
+                            .into_iter()
+                            .next()
+                            .expect("len checked to be exactly 1"),
+                    ),
+                    _ => properties.push(FilterProp::AnyOf { props: negated }),
+                }
+                pos += ws + prefix_len + consumed;
+            }
+        }
+    }
+
     // CR 109.4: "that <player> control(s)" relative clause supplying the object
     // controller — e.g. "permanents you own that your opponents control"
     // (Zedruu). Placed after `parse_that_clause_suffix` so the quality/combat/
@@ -2420,6 +2535,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if controller.is_none() {
             controller = zone_ctrl;
         }
+    }
+
+    // CR 122.1 + CR 400.1: A counter-presence clause may TRAIL a zone clause
+    // ("a creature card in exile with a takeover counter on it" — The Master,
+    // Formed Anew). The pre-zone `parse_counter_suffix` pass above only catches
+    // counters that precede the zone; this second pass catches the
+    // zone-then-counter ordering so the full source-filter phrase is consumed and
+    // no leftover remains (a leftover that the clone-replacement guard rejects).
+    if let Some((prop, consumed)) = parse_counter_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
     }
 
     let mut exclude_chosen_type = false;
@@ -2955,9 +3081,25 @@ fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter
 }
 
 fn target_phrase_mentions_spell_word(phrase: &str) -> bool {
-    phrase
+    // CR 109.2 + CR 109.2b: the word "spell" makes a head descriptor mean a spell
+    // on the stack, but "this spell" / "that spell" is an anaphoric self-reference
+    // to the source object inside a relative clause — NOT the target's head
+    // descriptor — so it must not trigger spell-target stack scoping (otherwise "a
+    // creature that convoked this spell", Everything Comes to Dust, whose head is
+    // the battlefield permanent "a creature" per CR 109.2, would be wrongly
+    // rewritten to a stack spell). Any other occurrence ("instant and sorcery
+    // spells", "another spell") is a real head-descriptor type noun.
+    let mut previous: Option<&str> = None;
+    for word in phrase
         .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';' | '(' | ')'))
-        .any(|word| matches!(word, "spell" | "spells"))
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(word, "spell" | "spells") && !matches!(previous, Some("this") | Some("that")) {
+            return true;
+        }
+        previous = Some(word);
+    }
+    false
 }
 
 fn target_phrase_uses_spell_suffix(phrase: &str) -> bool {
@@ -5360,6 +5502,12 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         // ability source. Calamity, Galloping Inferno. Longest match first.
         ("saddled it this turn", FilterProp::SaddledSource),
         ("saddled it", FilterProp::SaddledSource),
+        // CR 702.51c: "that convoked this spell" / "that convoked it" — the
+        // creature was tapped to pay the source spell's convoke cost (recorded in
+        // the source's `convoked_creatures`). "it"/"this spell" refer to the
+        // source. Everything Comes to Dust. Longest match first.
+        ("convoked this spell", FilterProp::ConvokedSource),
+        ("convoked it", FilterProp::ConvokedSource),
     ];
 
     for (phrase, prop) in VERB_PHRASES {
@@ -9611,6 +9759,69 @@ mod tests {
         }
     }
 
+    /// CR 122.1 + CR 400.1: a zone clause followed by a counter-presence clause
+    /// ("creature card in exile with a takeover counter on it" — The Master,
+    /// Formed Anew). The whole source-filter phrase must be consumed (no
+    /// leftover) and both the zone (`InZone { Exile }`) and the counter
+    /// constraint (`Counters { OfType("takeover"), GE, 1 }`) must land on the
+    /// filter. Exercises the second `parse_counter_suffix` pass that runs after
+    /// the zone-suffix handling; the pre-zone pass only covers counter-then-zone.
+    #[test]
+    fn parse_type_phrase_zone_then_counter_suffix_consumes_both() {
+        let (filter, leftover) =
+            parse_type_phrase("creature card in exile with a takeover counter on it");
+        assert_eq!(
+            leftover.trim(),
+            "",
+            "whole source-filter phrase must be consumed, got leftover {leftover:?}"
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Exile })),
+            "zone clause must lower to InZone {{ Exile }}, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic(ct)),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                } if ct == "takeover"
+            )),
+            "counter clause must lower to GE-1 takeover Counters prop, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 122.1: the pre-existing counter-then-zone ordering still parses — the
+    /// new post-zone pass must not regress the symmetric (pre-zone) case.
+    #[test]
+    fn parse_type_phrase_counter_then_zone_suffix_still_consumes_both() {
+        let (filter, leftover) =
+            parse_type_phrase("creature card with a takeover counter on it in exile");
+        assert_eq!(leftover.trim(), "", "got leftover {leftover:?}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Exile })));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic(ct)),
+                ..
+            } if ct == "takeover"
+        )));
+    }
+
     /// "that has a <type> counter on it" relative clause — must lower to the
     /// same `FilterProp::Counters` shape as the `with`-form (Banewhip Punisher,
     /// Triad of Fates). Previously this clause was dropped entirely.
@@ -10599,6 +10810,124 @@ mod tests {
                     .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
             }
             other => panic!("Expected Typed, got {:?}", other),
+        }
+    }
+
+    // ── Cluster 59: convoke-relative filter + "except those" exclusion + mass union ──
+
+    #[test]
+    fn creature_that_convoked_this_spell_is_convoked_source() {
+        // CR 702.51c: "a creature that convoked this spell" → creature +
+        // ConvokedSource. The "this spell" self-reference must NOT scope the
+        // result to the stack (the spell-suffix guard).
+        let (f, rest) = parse_target("a creature that convoked this spell");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::ConvokedSource])
+            ),
+            "must stay a battlefield creature filter, not a stack spell"
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn convoked_it_alias_is_convoked_source() {
+        let (f, _) = parse_target("a creature that convoked it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::ConvokedSource])
+            )
+        );
+    }
+
+    #[test]
+    fn except_those_sharing_type_with_convoker_negates() {
+        // CR 608.2c: "creatures except those that share a creature type with a
+        // creature that convoked this spell" → creature + Not(SharesQuality).
+        let (f, _) = parse_type_phrase(
+            "creatures except those that share a creature type with a creature that convoked this spell",
+        );
+        let expected_ref = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::ConvokedSource]),
+        );
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(expected_ref)),
+                    relation: SharedQualityRelation::Shares,
+                }),
+            }]))
+        );
+    }
+
+    #[test]
+    fn except_those_multi_predicate_folds_to_disjunction_of_negations() {
+        // CR 608.2c De Morgan: "except those that <X> and <Y>" excludes only
+        // objects matching the FULL conjunction X AND Y, so the complement kept by
+        // the leg is the disjunction Not(X) OR Not(Y) — a single `AnyOf`, NEVER
+        // per-prop `Not(X) AND Not(Y)` (which would exclude objects matching X *or*
+        // Y, far too many). Exercised with a clause that `parse_that_clause_suffix`
+        // returns as two props ([Not(AttackedThisTurn), Not(EnteredThisTurn)]).
+        let (f, _) =
+            parse_type_phrase("creatures except those that didn't attack or enter this turn");
+        // The two negated-verb predicates negate (double `Not`) and fold into one
+        // `AnyOf` — the structural signature that distinguishes the De Morgan-correct
+        // disjunction from the broken per-prop conjunction.
+        let expected_props = vec![FilterProp::AnyOf {
+            props: vec![
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::Not {
+                        prop: Box::new(FilterProp::AttackedThisTurn),
+                    }),
+                },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::Not {
+                        prop: Box::new(FilterProp::EnteredThisTurn),
+                    }),
+                },
+            ],
+        }];
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(expected_props)),
+            "multi-predicate exclusion must fold to AnyOf of negations, not per-prop Not"
+        );
+    }
+
+    #[test]
+    fn mass_type_union_repeated_all() {
+        // CR 205.2a: "creatures, all artifacts, and all enchantments" →
+        // Or[creature, artifact, enchantment] (repeated-`all` continuation over
+        // card types).
+        let mut ctx = ParseContext::default();
+        let (f, rest) =
+            parse_mass_type_union("creatures, all artifacts, and all enchantments", &mut ctx);
+        assert_eq!(
+            f,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+                ],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn mass_type_union_single_leg_matches_parse_target() {
+        // Regression: inputs without a repeated-`all` continuation must equal the
+        // bare `parse_target` result (the loop must not fire on within-leg unions).
+        let mut ctx = ParseContext::default();
+        for phrase in ["artifacts", "artifacts and creatures", "other spells"] {
+            let (f, _) = parse_mass_type_union(phrase, &mut ctx);
+            let (baseline, _) = parse_target(phrase);
+            assert_eq!(f, baseline, "mass union changed bare parse for {phrase:?}");
         }
     }
 

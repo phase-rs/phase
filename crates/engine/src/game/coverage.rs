@@ -56,6 +56,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
+            // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
+            // special-action cost-reduction resolver
+            // (casting.rs::apply_special_action_cost_reduction), consulted at the
+            // plot activation and Room-door unlock payment sites. Not
+            // registry-keyed (SpecialAction is open value space).
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
@@ -149,6 +156,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
             | StaticMode::CantDraw { .. }
+            // CR 121.1 / CR 613.11: DrawFromBottom carries `who` — top-vs-bottom
+            // selection is enforced in
+            // game/effects/draw.rs::select_cards_to_draw.
+            | StaticMode::DrawFromBottom { .. }
             // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
             // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
             // turns.rs::should_skip_step_static(). Coverage support is via
@@ -503,6 +514,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "prevented event source's controller".into()
         }
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
+        TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::Neighbor { direction } => match direction {
@@ -555,6 +567,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::SaddledSource => parts.push("saddled the source".into()),
+            FilterProp::ConvokedSource => parts.push("convoked the source".into()),
             FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
@@ -708,6 +721,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     (Comparator::EQ, 1) => "monocolored".into(),
                     (Comparator::GE, 2) => "multicolored".into(),
                     _ => format!("colors {comparator:?} {count}").to_lowercase(),
+                };
+                parts.push(label);
+            }
+            FilterProp::ManaSymbolCount {
+                color,
+                comparator,
+                value,
+            } => {
+                let symbol = match color {
+                    Some(c) => format!("{c:?} mana symbol").to_lowercase(),
+                    None => "colored mana symbol".into(),
+                };
+                let label = match comparator {
+                    Comparator::GE => format!("≥{value} {symbol}"),
+                    Comparator::LE => format!("≤{value} {symbol}"),
+                    Comparator::GT => format!(">{value} {symbol}"),
+                    Comparator::LT => format!("<{value} {symbol}"),
+                    Comparator::EQ => format!("{value} {symbol}"),
+                    Comparator::NE => format!("≠{value} {symbol}"),
                 };
                 parts.push(label);
             }
@@ -2713,6 +2745,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("recipient_object_filter".into(), fmt_target(f)));
             }
         }
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
@@ -3228,6 +3266,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
         }
+        AbilityCondition::HasObjectTarget => "has an object target".into(),
         AbilityCondition::TargetMatchesFilter { filter, .. } => {
             format!("target is {}", fmt_target(filter))
         }
@@ -6278,6 +6317,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
         // `evaluate_condition` (effects/mod.rs) with current-state and optional
         // LKI paths.
+        // CR 601.2c + CR 115.1: object-target presence guard — resolved by
+        // `evaluate_condition` (effects/mod.rs) against the ability's declared targets.
+        AbilityCondition::HasObjectTarget => ("HasObjectTarget", Handled),
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
         AbilityCondition::TriggeringSpellTargetsFilter { .. } => {
             ("TriggeringSpellTargetsFilter", Handled)
@@ -7831,6 +7873,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             }
             StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
             StaticMode::CantDraw { .. } => effective_lower.contains("can't draw"),
+            StaticMode::DrawFromBottom { .. } => effective_lower.contains("from the bottom of"),
             StaticMode::PerTurnDrawLimit { .. } => effective_lower.contains("can't draw more than"),
             StaticMode::DoubleTriggers { .. } => {
                 effective_lower.contains("triggers an additional time")

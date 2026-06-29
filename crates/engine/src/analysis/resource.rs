@@ -94,7 +94,7 @@ pub enum CounterClass {
 
 impl CounterClass {
     /// Map an engine [`CounterType`] to its analysis classification.
-    fn from_counter_type(ct: &CounterType) -> CounterClass {
+    pub(crate) fn from_counter_type(ct: &CounterType) -> CounterClass {
         match ct {
             CounterType::Plus1Plus1 => CounterClass::Plus1Plus1,
             CounterType::Minus1Minus1 => CounterClass::Minus1Minus1,
@@ -461,6 +461,59 @@ impl ResourceVector {
         ] {
             if n > 0 {
                 out.push((axis, n));
+            }
+        }
+        out
+    }
+
+    /// CR 732.2a: **controller-scoped** net-progress — the single authority shared
+    /// by Engine A ([`crate::analysis::detect_loop`]) and Engine B
+    /// ([`crate::analysis::candidate_cycles`]). Returns true iff the cycle makes
+    /// unbounded progress on ≥1 axis without leaving the loop's controller with an
+    /// unsustainable net deficit on a *consumed* axis (their own life or mana).
+    ///
+    /// Distinct from [`Self::is_net_progress`] (PR-0) only in *who* the
+    /// consumed-axis constraint applies to: the controller's life going negative
+    /// is unsustainable (false), but an *opponent's* life/library going negative
+    /// is the drain/mill win (progress). Engine B layers an `unbounded_production`
+    /// override on top of this base check for dynamic production (HIGH-1).
+    pub(crate) fn net_progress_for(&self, controller: PlayerId) -> bool {
+        // CR 106.1: a loop that net-spends mana across the whole pool is not
+        // sustainable. Mana is not attributed per player in the summed `mana`
+        // array, so any net-negative color is a controller-side deficit.
+        if self.mana.iter().any(|&n| n < 0) {
+            return false;
+        }
+        // CR 119: the controller losing life across the cycle is unsustainable.
+        for (pid, &n) in &self.life {
+            if *pid == controller && n < 0 {
+                return false;
+            }
+        }
+        !self.unbounded_axes_for(controller).is_empty()
+    }
+
+    /// CR 732.2a + CR 704.5a: the unbounded axes of this delta with the
+    /// opponent-vs-controller sign rules a win classifier needs. Builds on
+    /// [`Self::unbounded_components`] (every strictly-positive axis plus any
+    /// nonzero library) and additionally surfaces an **opponent's life loss**
+    /// (negative life on a non-controller) as the drain win axis —
+    /// `unbounded_components` only reports positive life (lifegain), so a pure
+    /// drain loop would otherwise name no axis. Single authority shared by Engine
+    /// A and Engine B.
+    pub(crate) fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        let mut out: Vec<ResourceAxis> = self
+            .unbounded_components()
+            .into_iter()
+            .map(|(axis, _)| axis)
+            .collect();
+        // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
+        for (pid, &n) in &self.life {
+            if n < 0 && *pid != controller {
+                let axis = ResourceAxis::Life(*pid);
+                if !out.contains(&axis) {
+                    out.push(axis);
+                }
             }
         }
         out

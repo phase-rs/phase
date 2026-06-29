@@ -151,6 +151,549 @@ fn rewrite_else_parent_target_to_self_ref(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 608.2b: A chained tap/untap anaphor ("untap him"/"untap it")
+/// inherits its referent from the active antecedent. When the source itself
+/// (`SelfRef` — The Incredible Hulk: "put a +1/+1 counter on him ... untap him")
+/// is the active antecedent, a chained single-permanent `SetTapState` whose target
+/// lowered to the `ParentTarget` anaphor refers to the source, so rewrite it to
+/// `SelfRef` (the runtime then binds it to `source_id`).
+///
+/// The active antecedent is carried DOWN the sub-ability chain, so an intervening
+/// instruction that introduces NO new permanent referent ("... You gain 2 life.
+/// Untap him." / Hulk's extra-phase rider) does not break the rewrite — the
+/// immediate-child-only earlier version silently no-op'd those. It is reset only
+/// when an effect establishes a NEW OBJECT antecedent: a non-`SelfRef`,
+/// non-player-scoped target ("destroy target creature. Untap it." — "it" is the
+/// creature, not the source). Targetless and player-directed effects (life gain,
+/// extra phases, draws) leave the permanent antecedent intact.
+///
+/// A head with a real or *optional* target (Tyvar Kell: "...up to one target Elf.
+/// Untap it.") is NOT `SelfRef`, so its anaphor stays `ParentTarget`: it binds the
+/// chosen target, and a DECLINED optional target leaves the target list empty so
+/// the sub correctly does nothing (CR 608.2b — the anaphor has no referent).
+///
+/// Sibling of [`rewrite_else_parent_target_to_self_ref`] for the `sub_ability`
+/// chain. Must run at lowering time: by resolution the discriminator is erased
+/// (both Hulk and a declined-optional anaphor reach the resolver with the same
+/// empty target list), so the head's subject filter — visible only here — is the
+/// only thing that tells them apart. Scope is restricted to `Single` (the
+/// anaphoric singular) — `All` ("untap all ...") is a population filter.
+fn patch_self_ref_head_tap_anaphor(def: &mut AbilityDefinition) {
+    fn walk(def: &mut AbilityDefinition, carried_self_ref: bool) {
+        // Update the active permanent antecedent for THIS node, then apply it to
+        // the immediate chained sub before recursing further down the chain.
+        let active_self_ref = match def.effect.target_filter() {
+            Some(TargetFilter::SelfRef) => true,
+            // A new object antecedent (target creature/permanent/...) takes over.
+            Some(filter) if !target_filter_is_player_scoped(filter) => false,
+            // Player-directed (life/phase/draw) or targetless effects introduce no
+            // permanent referent — carry the antecedent through unchanged.
+            _ => carried_self_ref,
+        };
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if active_self_ref {
+                if let Effect::SetTapState {
+                    target: target @ TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    ..
+                } = sub.effect.as_mut()
+                {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
+            walk(sub, active_self_ref);
+        }
+    }
+    walk(def, false);
+}
+
+/// CR 601.2c + CR 608.2c: Guard a reflexive-target rider against a *declined*
+/// optional antecedent target. When an ability declares a variable number of
+/// targets that may be zero — "destroy **up to one** target creature"
+/// (`multi_target.min_is_fixed_zero()`, CR 601.2c) — and chains a conditional
+/// rider whose condition anaphors that target ("**if that creature** wasn't
+/// dealt damage this turn, its controller draws two cards"), declining the
+/// target leaves the rider's `TargetMatchesFilter` with no antecedent. At
+/// runtime that condition falls back to the trigger source (effects/mod.rs), so
+/// a `Not`-wrapped rider wrongly fires. Conjoining the rider condition with
+/// `HasObjectTarget` (`And{[HasObjectTarget, existing]}`) suppresses the rider
+/// when no object target was chosen, while leaving the chosen-target case
+/// unchanged (the conjunct is trivially true).
+///
+/// The optional-target context is threaded DOWN the chain via an inner `walk`: a node
+/// whose own `multi_target` is `None` inherits its parent's optionality, so a
+/// rider nested deeper than the immediate `sub_ability` — or hanging off an
+/// `else_ability` — is still gated against the declined PARENT target (CR 608.2c:
+/// read the whole text; the anaphor binds the parent's chosen target, not the
+/// intervening instruction). A node that declares its OWN targets establishes a
+/// NEW antecedent and recomputes optionality from its own `multi_target`, so a
+/// mandatory intervening target (always present) does NOT spuriously gate a rider
+/// that anaphors it. Both `sub_ability` and `else_ability` conditions are gated.
+///
+/// Class-level (Faller's Faithful, Sunpearl Kirin, Zephyr Sentinel, Rescue //
+/// Pepper Potts), both polarities. No-op for mandatory-single-target
+/// antecedents: those carry `multi_target == None` at the head with no optional
+/// ancestor, so optionality is false and the wrapper is never applied. Idempotent
+/// — an already-wrapped `And{..}` is not itself a reflexive-target condition, so
+/// re-lowering does not double-wrap.
+fn gate_reflexive_rider_on_declined_optional_target(def: &mut AbilityDefinition) {
+    // CR 601.2c + CR 608.2c: wrap a child's reflexive-target rider so a declined
+    // optional antecedent target suppresses it; a non-reflexive condition (or no
+    // condition) is left untouched.
+    fn gate_child_condition(child: &mut AbilityDefinition) {
+        if let Some(existing) = child.condition.take() {
+            if is_reflexive_target_condition(&existing) {
+                child.condition = Some(AbilityCondition::And {
+                    conditions: vec![AbilityCondition::HasObjectTarget, existing],
+                });
+            } else {
+                child.condition = Some(existing);
+            }
+        }
+    }
+    // Carry the parent's optional-target context down the chain; a node that
+    // declares its own targets establishes a NEW antecedent and recomputes it.
+    fn walk(def: &mut AbilityDefinition, parent_optional: bool) {
+        let optional_here = match def.multi_target.as_ref() {
+            Some(mt) => mt.min_is_fixed_zero(),
+            None => parent_optional,
+        };
+        if optional_here {
+            if let Some(sub) = def.sub_ability.as_deref_mut() {
+                gate_child_condition(sub);
+            }
+            if let Some(els) = def.else_ability.as_deref_mut() {
+                gate_child_condition(els);
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            walk(sub, optional_here);
+        }
+        if let Some(els) = def.else_ability.as_deref_mut() {
+            walk(els, optional_here);
+        }
+    }
+    walk(def, false);
+}
+
+/// CR 608.2c: A reflexive-target condition reads the parent's chosen target via
+/// an anaphor ("that creature"/"it"/"that much"), so a declined optional target
+/// leaves it without an antecedent. `TargetMatchesFilter` (current/LKI target
+/// match) and `PreviousEffectAmount` ("that much") are the affected shapes, in
+/// either polarity (`Not`-wrapped).
+fn is_reflexive_target_condition(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::PreviousEffectAmount { .. } => true,
+        AbilityCondition::Not { condition } => is_reflexive_target_condition(condition),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: True for `TargetFilter`s that refer to a PLAYER (or set of players),
+/// which therefore do NOT establish a new permanent antecedent for a chained
+/// tap/untap "him"/"it" anaphor (see [`patch_self_ref_head_tap_anaphor`]).
+///
+/// Deliberately a NON-exhaustive allow-list: any unlisted filter is treated as a
+/// potential new object antecedent, which only ever STOPS a rewrite (leaving the
+/// anaphor as `ParentTarget` — the pre-fix behavior), never causes a wrong-object
+/// untap. So an omission is safe; a false inclusion would not be, which is why
+/// only unambiguously player-referencing variants are listed.
+fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::AllPlayers
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::SpecificPlayer { .. }
+    )
+}
+
+#[cfg(test)]
+mod gate_reflexive_rider_tests {
+    use super::*;
+
+    /// "if that creature wasn't dealt damage this turn" — the reflexive-target
+    /// rider shape (`Not{TargetMatchesFilter{use_lki}}`) that anaphors the parent's
+    /// chosen target.
+    fn reflexive_rider() -> AbilityCondition {
+        AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::WasDealtDamageThisTurn]),
+                ),
+                use_lki: true,
+            }),
+        }
+    }
+
+    fn draw_effect() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTargetController,
+        }
+    }
+
+    /// Leaf rider node carrying `condition`.
+    fn leaf_with_condition(condition: AbilityCondition) -> Box<AbilityDefinition> {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        def.condition = Some(condition);
+        Box::new(def)
+    }
+
+    /// A head that declares an OPTIONAL "up to one" target (`min_is_fixed_zero()`).
+    fn optional_head() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        def.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        def
+    }
+
+    /// True iff `condition` is the gated form `And{[HasObjectTarget, reflexive_rider]}`.
+    fn is_gated(condition: &Option<AbilityCondition>) -> bool {
+        matches!(
+            condition,
+            Some(AbilityCondition::And { conditions })
+                if conditions.as_slice()
+                    == [AbilityCondition::HasObjectTarget, reflexive_rider()]
+        )
+    }
+
+    /// Baseline: the immediate `sub_ability` rider under an optional head is gated.
+    /// (Passes under both the old direct-child code and the threaded fix.)
+    #[test]
+    fn direct_rider_under_optional_head_is_gated() {
+        let mut head = optional_head();
+        head.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&sub.condition),
+            "direct rider must be gated: {:?}",
+            sub.condition
+        );
+    }
+
+    /// DISCRIMINATOR (nested): head[up to one] → sub1[own `multi_target == None`,
+    /// non-reflexive `IsYourTurn`] → sub2[reflexive rider]. The rider is two levels
+    /// below the optional antecedent. The fix threads the parent's optionality
+    /// through sub1 (which declares no own target), so sub2 is gated; the
+    /// intervening non-reflexive condition is left untouched. REVERT-PROBE: the old
+    /// direct-child recursion recomputes optionality from sub1's own `multi_target`
+    /// (`None` → false), so sub2 is NOT gated and this assertion fails.
+    #[test]
+    fn nested_deeper_rider_under_optional_head_is_gated() {
+        let mut sub1 = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        sub1.condition = Some(AbilityCondition::IsYourTurn);
+        sub1.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+        let mut head = optional_head();
+        head.sub_ability = Some(Box::new(sub1));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub1 = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub1.condition,
+            Some(AbilityCondition::IsYourTurn),
+            "intervening non-reflexive condition must be left untouched"
+        );
+        let sub2 = sub1.sub_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&sub2.condition),
+            "deeper rider must be gated with HasObjectTarget (bug: old code lost the guard here): {:?}",
+            sub2.condition
+        );
+    }
+
+    /// DISCRIMINATOR (else): head[up to one] → else_ability[reflexive rider]. The
+    /// fix gates the else branch's own reflexive condition. REVERT-PROBE: the old
+    /// code only gated `sub_ability` and never touched `else_ability`, so this
+    /// assertion fails.
+    #[test]
+    fn else_branch_rider_under_optional_head_is_gated() {
+        let mut head = optional_head();
+        head.else_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let els = head.else_ability.as_ref().unwrap();
+        assert!(
+            is_gated(&els.condition),
+            "else-branch rider must be gated: {:?}",
+            els.condition
+        );
+    }
+
+    /// NEGATIVE (new mandatory antecedent): head[up to one] → sub1[own EXACT(1)
+    /// target — a NEW, always-present antecedent] → sub2[reflexive rider]. sub2's
+    /// "that creature" anaphors sub1's mandatory target, which is never declined, so
+    /// the rider must NOT be gated. Guards against a naive fix that threads the
+    /// parent's optionality unconditionally past a node that establishes its own
+    /// target.
+    #[test]
+    fn mandatory_intervening_target_does_not_gate_deeper_rider() {
+        let mut sub1 = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        sub1.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }));
+        sub1.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+        let mut head = optional_head();
+        head.sub_ability = Some(Box::new(sub1));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub2 = head
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            sub2.condition,
+            Some(reflexive_rider()),
+            "rider under a mandatory own-target antecedent must NOT be gated"
+        );
+    }
+
+    /// NO-OP: a mandatory single-target head (`multi_target == Some(exact(1))`,
+    /// `min_is_fixed_zero()` false, no optional ancestor) does not gate its rider —
+    /// the 7 clean S01 mandatory cards are unaffected.
+    #[test]
+    fn mandatory_head_does_not_gate_rider() {
+        let mut head = AbilityDefinition::new(AbilityKind::Spell, draw_effect());
+        head.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }));
+        head.sub_ability = Some(leaf_with_condition(reflexive_rider()));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.condition,
+            Some(reflexive_rider()),
+            "mandatory single-target head must not wrap its rider"
+        );
+    }
+
+    /// NO-OP: a non-reflexive condition under an optional head is left untouched
+    /// (the gate only wraps reflexive-target riders).
+    #[test]
+    fn non_reflexive_rider_under_optional_head_untouched() {
+        let mut head = optional_head();
+        head.sub_ability = Some(leaf_with_condition(AbilityCondition::IsYourTurn));
+
+        gate_reflexive_rider_on_declined_optional_target(&mut head);
+
+        let sub = head.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::IsYourTurn),
+            "non-reflexive condition must be left untouched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod self_ref_tap_anaphor_tests {
+    use super::*;
+    use crate::types::ability::TapStateChange;
+
+    /// Builds a `PutCounter{head_target}` head with a chained
+    /// `SetTapState{ParentTarget, scope}` untap sub — the shape every chained
+    /// tap/untap anaphor lowers to.
+    fn put_counter_then_untap_chain(
+        head_target: TargetFilter,
+        sub_scope: EffectScope,
+    ) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: head_target,
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: sub_scope,
+                state: TapStateChange::Untap,
+            },
+        )));
+        def
+    }
+
+    // CR 608.2c: a chained "untap him" anaphor after a `SelfRef`-subject head (The
+    // Incredible Hulk: "put a +1/+1 counter on him ... untap him") refers to the
+    // source, so the patch rewrites its `ParentTarget` to `SelfRef`.
+    #[test]
+    fn self_ref_head_tap_anaphor_rewrites_to_self_ref() {
+        let mut def = put_counter_then_untap_chain(TargetFilter::SelfRef, EffectScope::Single);
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "SelfRef-head anaphor must be rewritten to SelfRef, got {:?}",
+            sub.effect
+        );
+    }
+
+    // CR 608.2b: a head with a real/optional target (Tyvar Kell "...up to one
+    // target Elf. Untap it.") is NOT `SelfRef`, so the anaphor MUST stay
+    // `ParentTarget` — it binds the chosen target, and a declined optional target
+    // leaves the target list empty so the sub no-ops. This is exactly the
+    // discrimination the rejected bare-`is_empty()` resolver arm lacked (it would
+    // have wrongly untapped the source planeswalker on a declined target).
+    #[test]
+    fn typed_head_tap_anaphor_stays_parent_target() {
+        let mut def = put_counter_then_untap_chain(
+            TargetFilter::Typed(TypedFilter::default()),
+            EffectScope::Single,
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "Typed-head anaphor must stay ParentTarget (CR 608.2b), got {:?}",
+            sub.effect
+        );
+    }
+
+    // Scope guard: `All` ("untap all ...") is a population filter, never an
+    // anaphor — it must not be rewritten even under a `SelfRef` head.
+    #[test]
+    fn self_ref_head_tap_all_scope_not_rewritten() {
+        let mut def = put_counter_then_untap_chain(TargetFilter::SelfRef, EffectScope::All);
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "All-scope SetTapState must not be rewritten, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Builds `PutCounter{head_target}` -> `middle` -> `SetTapState{ParentTarget,
+    /// Single}` untap — a THREE-node chain to exercise antecedent propagation
+    /// across an intervening instruction.
+    fn head_middle_untap_chain(head_target: TargetFilter, middle: Effect) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: head_target,
+            },
+        );
+        let mut middle_def = AbilityDefinition::new(AbilityKind::Spell, middle);
+        middle_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        )));
+        def.sub_ability = Some(Box::new(middle_def));
+        def
+    }
+
+    fn untap_of(chain: AbilityDefinition) -> AbilityDefinition {
+        *chain
+            .sub_ability
+            .expect("middle")
+            .sub_ability
+            .expect("untap")
+    }
+
+    // CR 608.2c: an intervening PLAYER-directed instruction (here "you gain 2
+    // life") between a `SelfRef` head and the untap does NOT introduce a new
+    // permanent referent, so the source antecedent carries through and the untap
+    // is still rewritten to `SelfRef`. Discrimination: the immediate-child-only
+    // version (and gemini's `target_filter().is_some()` reset) left this as
+    // `ParentTarget` — a runtime no-op.
+    #[test]
+    fn self_ref_head_intermediate_player_effect_still_rewrites() {
+        let mut def = head_middle_untap_chain(
+            TargetFilter::SelfRef,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let untap = untap_of(def);
+        assert!(
+            matches!(
+                &*untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "anaphor after SelfRef head + intervening player effect must rewrite to SelfRef, got {:?}",
+            untap.effect
+        );
+    }
+
+    // CR 608.2b/608.2c: an intervening effect that establishes a NEW OBJECT
+    // antecedent (here pairing with a chosen creature) resets the antecedent, so a
+    // following "untap it" binds THAT object (`ParentTarget`), not the source.
+    // This is the target-head negative fixture the maintainer asked for.
+    #[test]
+    fn self_ref_head_intermediate_object_target_does_not_rewrite() {
+        let mut def = head_middle_untap_chain(
+            TargetFilter::SelfRef,
+            Effect::PairWith {
+                target: TargetFilter::Typed(TypedFilter::default()),
+            },
+        );
+        patch_self_ref_head_tap_anaphor(&mut def);
+        let untap = untap_of(def);
+        assert!(
+            matches!(
+                &*untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "anaphor after an intervening object-target effect must stay ParentTarget, got {:?}",
+            untap.effect
+        );
+    }
+}
+
 /// CR 608.2c + CR 401.4: After an optional `CastFromZone` from a linked-exile
 /// pool (Sanwell, Chaos Wand class), a trailing "put the rest / put the exiled
 /// cards … on the bottom" clause must route uncards still linked to the source
@@ -1221,6 +1764,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // and coin flip conditional branches into their parent FlipCoin.
     consolidate_die_and_coin_defs(&mut defs, kind);
 
+    // CR 609.7a + CR 608.2c: Desperate Gambit — a preceding
+    // `ChooseDamageSource` makes bare "it" in the lose-branch one-shot prevention
+    // refer to the chosen source, not `SelfRef` (the instant on the stack).
+    thread_chosen_damage_source_into_oneshot_effects(&mut defs);
+
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
     // append to the deepest sub rather than overwriting.
@@ -1332,6 +1880,14 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
+    // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
+    // SelfRef-subject head (The Incredible Hulk's "untap him") — rewrite its
+    // ParentTarget to SelfRef so it binds the source, while a real/optional
+    // target head (Tyvar Kell) keeps ParentTarget and no-ops when declined.
+    patch_self_ref_head_tap_anaphor(&mut result);
+    // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
+    // "up to one" antecedent target is declined (no object target chosen).
+    gate_reflexive_rider_on_declined_optional_target(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
@@ -1422,7 +1978,7 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
 fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
-    if let Some(sub) = def.sub_ability.as_ref() {
+    if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
             && matches!(
                 sub.condition,
@@ -1438,8 +1994,12 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
                 ..
             }
         );
+        let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
+            && rebind_attach_attachment_to_forwarded_source_if_last_created_target(&mut sub.effect);
         if parent_moves_to_battlefield
-            && (sub_is_attach_with_zone_changed_cond || sub_targets_moved_card(sub))
+            && (sub_is_attach_with_zone_changed_cond
+                || attach_uses_moved_card_as_attachment_to_last_created
+                || sub_targets_moved_card(sub))
         {
             def.forward_result = true;
         }
@@ -1450,6 +2010,24 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewire_result_anchored_subchain(else_branch);
     }
+}
+
+fn rebind_attach_attachment_to_forwarded_source_if_last_created_target(
+    effect: &mut Effect,
+) -> bool {
+    let Effect::Attach { attachment, target } = effect else {
+        return false;
+    };
+    if matches!(target, TargetFilter::LastCreated)
+        && matches!(
+            attachment,
+            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+        )
+    {
+        *attachment = TargetFilter::SelfRef;
+        return true;
+    }
+    false
 }
 
 /// CR 608.2c: True when a sub-ability anchors on the just-moved card via
@@ -2086,6 +2664,76 @@ fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
 /// `ChangeZone` is included because Inalla-style "Exile it at the beginning
 /// of the next end step" lowers to `ChangeZone { destination: Exile,
 /// target: ParentTarget }`.
+fn definition_contains_choose_damage_source(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::ChooseDamageSource { .. }) {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(definition_contains_choose_damage_source)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_contains_choose_damage_source)
+}
+
+/// CR 609.7a + CR 608.2c: When a resolution chain begins with
+/// `ChooseDamageSource`, bare "it" in a coin-flip one-shot prevention branch
+/// co-refers with the chosen source — rewrite `SelfRef` to `ChosenDamageSource`.
+fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
+    match effect {
+        Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } if matches!(damage_source_filter, Some(TargetFilter::SelfRef)) => {
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource);
+        }
+        Effect::CreateDamageReplacement { source_filter, .. }
+            if matches!(source_filter, Some(TargetFilter::SelfRef)) =>
+        {
+            *source_filter = Some(TargetFilter::ChosenDamageSource);
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win) = win_effect.as_deref_mut() {
+                rewrite_oneshot_selfref_to_chosen_in_def(win);
+            }
+            if let Some(lose) = lose_effect.as_deref_mut() {
+                rewrite_oneshot_selfref_to_chosen_in_def(lose);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_oneshot_selfref_to_chosen_in_def(def: &mut AbilityDefinition) {
+    rewrite_oneshot_selfref_to_chosen_in_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_def(sub);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_def(else_def);
+    }
+}
+
+fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinition]) {
+    if !defs.iter().any(definition_contains_choose_damage_source) {
+        return;
+    }
+    for def in defs.iter_mut() {
+        rewrite_oneshot_selfref_to_chosen_in_effect(&mut def.effect);
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            rewrite_oneshot_selfref_to_chosen_in_def(sub);
+        }
+        if let Some(else_def) = def.else_ability.as_deref_mut() {
+            rewrite_oneshot_selfref_to_chosen_in_def(else_def);
+        }
+    }
+}
+
 pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
         Effect::Sacrifice { target, .. }
@@ -6753,6 +7401,9 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1: `ExileWithAggregate`'s threshold is a fixed `i32` and its
+        // filter is static — no where-X `QuantityExpr` amount to bind.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }

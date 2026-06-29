@@ -1390,6 +1390,56 @@ fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
 /// matched set, so a trigger object that matches the filter predicate but lies
 /// outside the filter's zone is not wrongly decremented. The `Aggregate` resolver
 /// delegates here for its population, so count and aggregate share this exclusion.
+/// CR 202.3 + CR 107.4a/107.4e/202.1: Aggregate (`function`) a single
+/// `property` over a set of objects. The single summation authority shared by
+/// `QuantityRef::Aggregate`, `QuantityRef::TrackedSetAggregate`, the
+/// `AbilityCost::ExileWithAggregate` cost payability + payment, and (via those)
+/// the Collect Evidence family.
+///
+/// Per-object value reads the live object first — post-layer P/T (CR 613) and
+/// the printed mana cost / per-color symbol count (CR 202.1, stable across
+/// zones) — falling back to the LKI snapshot for off-battlefield P/T look-backs
+/// (CR 608.2h + CR 400.7). `ManaSymbolCount` never needs the LKI fallback: the
+/// live printed cost is authoritative and the LKI snapshot does not retain
+/// individual shards. Hybrid symbols contribute to each of their colors
+/// (CR 107.4e) via `count_cost_color_symbols`.
+pub(crate) fn aggregate_property_over(
+    state: &GameState,
+    ids: &[ObjectId],
+    function: AggregateFunction,
+    property: ObjectProperty,
+) -> i32 {
+    let extract = |id: ObjectId| -> Option<i32> {
+        let live = state.objects.get(&id).and_then(|obj| match property {
+            ObjectProperty::Power => obj.power,
+            ObjectProperty::Toughness => obj.toughness,
+            // CR 202.3e: include X when on the stack (cost_x_paid).
+            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
+                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+            )),
+            // CR 107.4a + CR 107.4e + CR 202.1: colored mana symbols of `color`;
+            // hybrid symbols contribute to each of their colors.
+            ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
+                crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
+            )),
+        });
+        live.or_else(|| {
+            state.lki_cache.get(&id).and_then(|lki| match property {
+                ObjectProperty::Power => lki.power,
+                ObjectProperty::Toughness => lki.toughness,
+                ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
+                ObjectProperty::ManaSymbolCount(_) => None,
+            })
+        })
+    };
+    let values = ids.iter().filter_map(|&id| extract(id));
+    match function {
+        AggregateFunction::Max => values.max().unwrap_or(0),
+        AggregateFunction::Min => values.min().unwrap_or(0),
+        AggregateFunction::Sum => values.sum(),
+    }
+}
+
 pub(crate) fn object_count_matching_ids(
     state: &GameState,
     filter: &TargetFilter,
@@ -1807,41 +1857,13 @@ fn resolve_ref(
             property,
             filter,
         } => {
+            // CR 608.2h + CR 400.7: id population delegated to
+            // `object_count_matching_ids` (single source of truth for zone
+            // selection + the `OtherThanTriggerObject` exclusion); per-object
+            // aggregation delegated to `aggregate_property_over` (single
+            // summation authority, live-then-LKI per property).
             let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
-            let extract = |id: ObjectId| -> Option<i32> {
-                let live = state.objects.get(&id).and_then(|obj| match property {
-                    ObjectProperty::Power => obj.power,
-                    ObjectProperty::Toughness => obj.toughness,
-                    // CR 202.3e: include X when on the stack (cost_x_paid).
-                    // Printed value is stable across zones, no LKI fallback needed.
-                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )),
-                    // CR 107.4a + CR 107.4e + CR 202.1: count colored mana symbols
-                    // of `color` in the object's printed cost; hybrid symbols
-                    // contribute to each of their colors. Always defined (0 when
-                    // the object has no mana cost), so no LKI fallback is needed.
-                    ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
-                        crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, *color),
-                    )),
-                });
-                live.or_else(|| {
-                    state.lki_cache.get(&id).and_then(|lki| match property {
-                        ObjectProperty::Power => lki.power,
-                        ObjectProperty::Toughness => lki.toughness,
-                        ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
-                        // The live cost is authoritative for symbol counting; the
-                        // LKI snapshot does not retain individual shards.
-                        ObjectProperty::ManaSymbolCount(_) => None,
-                    })
-                })
-            };
-            let values = ids.iter().filter_map(|&id| extract(id));
-            match function {
-                AggregateFunction::Max => values.max().unwrap_or(0),
-                AggregateFunction::Min => values.min().unwrap_or(0),
-                AggregateFunction::Sum => values.sum(),
-            }
+            aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 107.1 + CR 700.1: min/max across players of the count of
         // battlefield objects matching `filter` each player controls.
@@ -2199,34 +2221,9 @@ fn resolve_ref(
             let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
                 return 0;
             };
-            let extract = |id: ObjectId| -> Option<i32> {
-                let live = state.objects.get(&id).and_then(|obj| match property {
-                    ObjectProperty::Power => obj.power,
-                    ObjectProperty::Toughness => obj.toughness,
-                    // CR 202.3e: include X when on the stack (cost_x_paid).
-                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )),
-                    // CR 107.4a + CR 202.1: colored mana symbols of `color`.
-                    ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
-                        crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, *color),
-                    )),
-                });
-                live.or_else(|| {
-                    state.lki_cache.get(&id).and_then(|lki| match property {
-                        ObjectProperty::Power => lki.power,
-                        ObjectProperty::Toughness => lki.toughness,
-                        ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
-                        ObjectProperty::ManaSymbolCount(_) => None,
-                    })
-                })
-            };
-            let values = ids.iter().filter_map(|&id| extract(id));
-            match function {
-                AggregateFunction::Max => values.max().unwrap_or(0),
-                AggregateFunction::Min => values.min().unwrap_or(0),
-                AggregateFunction::Sum => values.sum(),
-            }
+            // Per-object aggregation delegated to the shared
+            // `aggregate_property_over` summation authority (live-then-LKI).
+            aggregate_property_over(state, ids, *function, *property)
         }
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
@@ -2296,6 +2293,11 @@ fn resolve_ref(
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
+            // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
+            // trigger/effect context, it may refer to the variable count chosen
+            // for the spell or activated ability's cost (for example, "Remove
+            // any number of counters: Create that many tokens.").
+            .or_else(|| chosen_x.map(u32_to_i32_saturating))
             // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
             // if it had one or more <X> counters on it, put that many <X> counters
             // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
@@ -3693,18 +3695,7 @@ fn resolve_mana_symbols_in_mana_cost(
     targets: &[TargetRef],
 ) -> i32 {
     object_for_scope(state, scope, ctx, targets)
-        .map(|obj| match &obj.mana_cost {
-            ManaCost::Cost { shards, .. } => usize_to_i32_saturating(
-                shards
-                    .iter()
-                    .filter(|shard| match color {
-                        Some(c) => shard.contributes_to(c),
-                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
-                    })
-                    .count(),
-            ),
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
-        })
+        .map(|obj| obj.mana_cost.count_colored_pips(color))
         .unwrap_or(0)
 }
 
@@ -5031,6 +5022,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -5188,6 +5180,73 @@ mod tests {
         // graveyard excluded); P1 sees only their own 2.
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bf), 3);
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), opp), 2);
+    }
+
+    /// CR 107.4a + CR 107.4e + CR 202.1: `aggregate_property_over` is the single
+    /// summation authority shared by the `Aggregate`/`TrackedSetAggregate`
+    /// resolvers, the `ExileWithAggregate` cost payability, and its payment.
+    /// `Sum` of `ManaSymbolCount(Black)` counts each black symbol once and counts
+    /// a hybrid `{B/R}` as black (CR 107.4e: a hybrid symbol is all of its
+    /// colors). `{B}{B}` (2) + `{B/R}` (1) + `{1}{R}` (0) = 3 over the set.
+    ///
+    /// Revert probe: making `aggregate_property_over` return `0` (or counting
+    /// only monocolored `Black` shards, dropping the hybrid) flips the
+    /// assertions — the hybrid contribution (3 vs 2) and the nonzero total both
+    /// fail, proving the test is non-vacuous and discriminating.
+    #[test]
+    fn aggregate_property_over_sums_black_symbols_including_hybrid() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        let mut state = GameState::new_two_player(7);
+        let make = |state: &mut GameState, cid: u64, shards: Vec<ManaCostShard>| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(cid),
+                PlayerId(0),
+                "C".to_string(),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost { shards, generic: 1 };
+            id
+        };
+        let bb = make(
+            &mut state,
+            1,
+            vec![ManaCostShard::Black, ManaCostShard::Black],
+        );
+        let hybrid = make(&mut state, 2, vec![ManaCostShard::BlackRed]);
+        let red = make(&mut state, 3, vec![ManaCostShard::Red]);
+
+        // {B}{B}(2) + {B/R}(1) = 3 black symbols; the red-only card adds 0.
+        assert_eq!(
+            super::aggregate_property_over(
+                &state,
+                &[bb, hybrid, red],
+                AggregateFunction::Sum,
+                ObjectProperty::ManaSymbolCount(ManaColor::Black),
+            ),
+            3
+        );
+        // The hybrid alone contributes exactly one black symbol (CR 107.4e).
+        assert_eq!(
+            super::aggregate_property_over(
+                &state,
+                &[hybrid],
+                AggregateFunction::Sum,
+                ObjectProperty::ManaSymbolCount(ManaColor::Black),
+            ),
+            1
+        );
+        // Empty set sums to 0 (no panic on `values.sum()`).
+        assert_eq!(
+            super::aggregate_property_over(
+                &state,
+                &[],
+                AggregateFunction::Sum,
+                ObjectProperty::ManaSymbolCount(ManaColor::Black),
+            ),
+            0
+        );
     }
 
     /// CR 107.4a/107.4e/107.4f + CR 202.1: `ManaSymbolsInManaCost { color: None }`
@@ -10637,6 +10696,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         state.current_trigger_event =
@@ -10697,6 +10757,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let power = resolve_quantity_with_targets(
@@ -10842,6 +10903,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -10905,6 +10967,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         assert!(
@@ -10966,6 +11029,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11024,6 +11088,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11075,6 +11140,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11137,6 +11203,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11176,6 +11243,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -11794,6 +11862,7 @@ mod tests {
                     colors: vec![],
                     counters: Default::default(),
                     chosen_attributes: vec![],
+                    tapped: false,
                 },
             );
             state.exile_links.push(ExileLink {

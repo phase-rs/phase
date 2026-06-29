@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-27T00:00:00Z",
+  "updated": "2026-06-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -456,18 +456,6 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
           "count": 1,
           "name": "Den of the Bugbear"
         },
@@ -476,48 +464,16 @@
           "name": "Mountain"
         },
         {
-          "count": 2,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
           "count": 3,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Spirebluff Canal"
+          "name": "Experimental Synthesizer"
         },
         {
           "count": 4,
           "name": "Flow State"
         },
         {
-          "count": 3,
-          "name": "Reckless Rage"
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 3,
@@ -525,25 +481,53 @@
         },
         {
           "count": 3,
-          "name": "Experimental Synthesizer"
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 2,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
         }
       ],
       "sideboard": [
         {
           "count": 1,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 1,
           "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
         },
         {
           "count": 1,
@@ -551,11 +535,11 @@
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
-          "name": "Octopus Form"
+          "name": "Firebending Lesson"
         },
         {
           "count": 1,
@@ -563,19 +547,27 @@
         },
         {
           "count": 1,
-          "name": "Abandon Attachments"
+          "name": "Iroh's Demonstration"
         },
         {
-          "count": 3,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         },
         {
           "count": 2,
           "name": "Redcap Melee"
         },
         {
-          "count": 1,
-          "name": "Disdainful Stroke"
+          "count": 3,
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -591,40 +583,24 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Arclight Phoenix"
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
-        },
-        {
-          "count": 2,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
+          "name": "Vibrant Outburst"
         },
         {
           "count": 3,
-          "name": "Lightning Axe"
+          "name": "Traumatic Critique"
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 4,
+          "name": "Ledger Shredder"
         },
         {
           "count": 1,
@@ -632,77 +608,109 @@
         },
         {
           "count": 4,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Charm"
-        },
-        {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
           "name": "Steam Vents"
         },
         {
-          "count": 1,
-          "name": "Stormcarved Coast"
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 2,
+          "name": "Thing in the Ice"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
         },
         {
           "count": 4,
           "name": "Treasure Cruise"
         },
         {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Abrade"
+          "name": "Abandon Attachments"
         },
         {
           "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 3,
           "name": "Brazen Borrower"
         },
         {
           "count": 1,
-          "name": "Flowstone Infusion"
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "Into the Flood Maw"
+          "name": "Negate"
         },
         {
-          "count": 3,
-          "name": "Ledger Shredder"
+          "count": 1,
+          "name": "Disdainful Stroke"
         },
         {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Rending Volley"
+          "count": 1,
+          "name": "Spell Pierce"
         }
       ]
     },

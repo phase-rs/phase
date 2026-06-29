@@ -30,6 +30,70 @@ pub(crate) fn parse_taggable_ability_keyword(input: &str) -> OracleResult<'_, &'
     .parse(input)
 }
 
+/// CR 116.2 + CR 118.7a: Parse a special-action cost-reduction static.
+///
+/// - "Plotting cards from your hand costs {N} less" → `ReduceActionCost { action: Plot }`
+///   (Doc Aurlock, CR 116.2k / 702.170). Note the singular verb "costs".
+/// - "Unlock costs you pay cost {N} less" → `ReduceActionCost { action: UnlockDoor }`
+///   (Inquisitive Glimmer, CR 116.2m / 709.5e).
+///
+/// Composed end-to-end from nom combinators (no verbatim full-string match):
+/// each axis (subject → verb → `{N}` → direction) is its own `tag`/`alt`. The
+/// verb axis accepts both "costs" (singular) and "cost" so a future
+/// "[special action] cost{,s} you pay cost {N} less" lands without a new arm.
+/// The reduction targets generic mana only (CR 118.7a).
+pub(crate) fn parse_action_cost_reduction(text: &str, lower: &str) -> Option<StaticDefinition> {
+    let trimmed = lower.trim().trim_end_matches('.').trim_end();
+    let parsed: OracleResult<'_, (SpecialAction, CostModifyMode, u32)> = (|| {
+        let (i, action) = alt((
+            value(
+                SpecialAction::Plot,
+                tag::<_, _, OracleError<'_>>("plotting cards from your hand"),
+            ),
+            value(
+                SpecialAction::UnlockDoor,
+                tag::<_, _, OracleError<'_>>("unlock costs you pay"),
+            ),
+        ))
+        .parse(trimmed)?;
+        // CR 116.2: Doc Aurlock prints the singular verb "costs"; Inquisitive
+        // Glimmer prints "cost". Accept both as one verb axis.
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>(" costs "),
+            tag::<_, _, OracleError<'_>>(" cost "),
+        ))
+        .parse(i)?;
+        let (i, amount) = nom::sequence::delimited(
+            tag::<_, _, OracleError<'_>>("{"),
+            nom_primitives::parse_number,
+            tag::<_, _, OracleError<'_>>("}"),
+        )
+        .parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" ").parse(i)?;
+        let (i, mode) = alt((
+            value(CostModifyMode::Reduce, tag::<_, _, OracleError<'_>>("less")),
+            value(CostModifyMode::Raise, tag::<_, _, OracleError<'_>>("more")),
+        ))
+        .parse(i)?;
+        Ok((i, (action, mode, amount)))
+    })();
+    let (rest, (action, mode, amount)) = parsed.ok()?;
+    // The line must be fully consumed (modulo trailing whitespace) so a longer
+    // unrelated cost clause is never silently truncated into a special-action
+    // reduction.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::ReduceActionCost {
+            action,
+            mode,
+            amount,
+        })
+        .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     preceded(
         take_until::<_, _, OracleError<'_>>(

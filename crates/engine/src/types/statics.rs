@@ -10,7 +10,7 @@ use super::ability::{
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, StepEndManaAction};
+use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -154,6 +154,16 @@ pub enum SuppressedTriggerEvent {
     /// CR 700.4: "Dies" means moving from the battlefield to the graveyard.
     /// Narrower than "leaves the battlefield" — does not catch exile or bounce.
     Dies,
+    /// CR 702.21a + CR 611.3 + CR 613.11: A permanent becoming the target of a
+    /// spell or ability — the ward trigger event (CR 702.21a). Used to suppress
+    /// the becomes-target *ward* triggered ability (Nowhere to Run: "Ward
+    /// abilities of those creatures don't trigger") via a continuous effect that
+    /// turns the ability off (CR 611.3 / 613.11), NOT a CR 603.2g event
+    /// prevention — the event still occurs. Consumed at the inline ward-trigger
+    /// creation gate in `triggers.rs`, not the ETB/Dies
+    /// `event_is_suppressed_by_static_triggers` path, so non-ward becomes-target
+    /// triggers on the same creature are unaffected.
+    BecomesTargeted,
 }
 
 impl fmt::Display for SuppressedTriggerEvent {
@@ -161,6 +171,7 @@ impl fmt::Display for SuppressedTriggerEvent {
         match self {
             SuppressedTriggerEvent::EntersBattlefield => write!(f, "EntersBattlefield"),
             SuppressedTriggerEvent::Dies => write!(f, "Dies"),
+            SuppressedTriggerEvent::BecomesTargeted => write!(f, "BecomesTargeted"),
         }
     }
 }
@@ -634,6 +645,28 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
 }
 
+/// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
+/// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
+fn special_action_registry_str(action: SpecialAction) -> &'static str {
+    match action {
+        SpecialAction::Plot => "Plot",
+        SpecialAction::UnlockDoor => "UnlockDoor",
+        SpecialAction::TurnFaceUp => "TurnFaceUp",
+        SpecialAction::RollPlanarDie => "RollPlanarDie",
+    }
+}
+
+/// Inverse of [`special_action_registry_str`].
+fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
+    match s {
+        "Plot" => Some(SpecialAction::Plot),
+        "UnlockDoor" => Some(SpecialAction::UnlockDoor),
+        "TurnFaceUp" => Some(SpecialAction::TurnFaceUp),
+        "RollPlanarDie" => Some(SpecialAction::RollPlanarDie),
+        _ => None,
+    }
+}
+
 /// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
 /// Distinct from [`CostModifyMode`], which only adjusts the mana component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -907,6 +940,28 @@ pub enum StaticMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
+    /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
+    /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
+    /// direction given by `mode`. Doc Aurlock ("Plotting cards from your hand
+    /// costs {2} less") and Inquisitive Glimmer ("Unlock costs you pay cost {1}
+    /// less").
+    ///
+    /// Parameterized over [`SpecialAction`] rather than proliferating one variant
+    /// per action — any future "[special action] costs you pay cost {N} less"
+    /// lands without a new variant. Distinct from [`StaticMode::ReduceAbilityCost`]
+    /// (which keys on an `AbilityTag` and never matches a special action, since
+    /// plot/unlock payments carry no tag) and from [`StaticMode::ModifyCost`]
+    /// (spell costs, CR 601.2f). `amount` is generic mana only (CR 118.7a — a
+    /// generic cost reduction can't touch colored/colorless components).
+    /// `Minimum` is not meaningful here — only `Reduce` and `Raise` are
+    /// emitted/applied.
+    ReduceActionCost {
+        action: SpecialAction,
+        /// CR 118.7: Direction of the adjustment.
+        mode: CostModifyMode,
+        /// Generic mana adjustment per the special action (CR 118.7a).
+        amount: u32,
+    },
     /// CR 702.142b: Modifies the per-turn activation limit for abilities matching
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
@@ -969,6 +1024,15 @@ pub enum StaticMode {
         attacker: ObjectId,
     },
     CantDraw {
+        who: ProhibitionScope,
+    },
+    /// CR 121.1 + CR 613.11: Rule-modifying continuous effect — affected players
+    /// draw cards from the BOTTOM of their library rather than the top (River
+    /// Song, "Meet in Reverse"). Data-carrying / non-registry; the top-vs-bottom
+    /// decision is enforced by `game/effects/draw.rs::select_cards_to_draw`,
+    /// which EVERY draw-delivery path consults. `who` scopes the affected
+    /// players via `ProhibitionScope` (River Song = `Controller`).
+    DrawFromBottom {
         who: ProhibitionScope,
     },
     /// CR 603.2d: "If [cause], a triggered ability of a permanent you control
@@ -1807,6 +1871,7 @@ impl Hash for StaticMode {
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
@@ -1819,6 +1884,10 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 116.2 + CR 118.7a: data-carrying (SpecialAction is not Hash);
+            // consumed by direct match in the special-action cost-reduction
+            // resolver, never used as a HashMap key.
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1861,6 +1930,7 @@ impl StaticMode {
             | StaticMode::ModifyCost { .. }
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::CantPayCost { .. }
@@ -1872,6 +1942,7 @@ impl StaticMode {
             | StaticMode::MustBlock
             | StaticMode::MustBlockAttacker { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::DoubleTriggers { .. }
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
@@ -2019,6 +2090,23 @@ impl fmt::Display for StaticMode {
                     write!(f, "ReduceAbilityCost({sign}{keyword},{amount})")
                 }
             }
+            StaticMode::ReduceActionCost {
+                action,
+                mode,
+                amount,
+            } => {
+                // CR 118.7: Encode direction lossless ("+"/"-"); legacy default
+                // is Reduce in `from_str`.
+                let sign = match mode {
+                    CostModifyMode::Raise => "+",
+                    _ => "-",
+                };
+                write!(
+                    f,
+                    "ReduceActionCost({},{sign}{amount})",
+                    special_action_registry_str(*action)
+                )
+            }
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
             }
@@ -2040,6 +2128,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBlockAttacker({attacker:?})")
             }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
+            StaticMode::DrawFromBottom { who } => write!(f, "DrawFromBottom({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
             StaticMode::GraveyardCastPermission {
@@ -2386,6 +2475,31 @@ impl FromStr for StaticMode {
                     StaticMode::Other(s.to_string())
                 }
             }
+            s if s.starts_with("ReduceActionCost(") => {
+                // CR 116.2 + CR 118.7: Parse "ReduceActionCost(Action,[+|-]amount)".
+                // A leading "+"/"-" on the amount marks Raise/Reduce; legacy
+                // strings without a marker default to Reduce.
+                let parsed = s
+                    .strip_prefix("ReduceActionCost(")
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .and_then(|inner| inner.split_once(','))
+                    .and_then(|(action_str, amt_str)| {
+                        let action = special_action_from_registry_str(action_str)?;
+                        let (mode, amount_str) = if let Some(rest) = amt_str.strip_prefix('+') {
+                            (CostModifyMode::Raise, rest)
+                        } else if let Some(rest) = amt_str.strip_prefix('-') {
+                            (CostModifyMode::Reduce, rest)
+                        } else {
+                            (CostModifyMode::Reduce, amt_str)
+                        };
+                        Some(StaticMode::ReduceActionCost {
+                            action,
+                            mode,
+                            amount: amount_str.parse().ok()?,
+                        })
+                    });
+                parsed.unwrap_or_else(|| StaticMode::Other(s.to_string()))
+            }
             s if s.starts_with("ModifyActivationLimit(") => {
                 let inner = s
                     .strip_prefix("ModifyActivationLimit(")
@@ -2689,6 +2803,14 @@ impl FromStr for StaticMode {
                 {
                     if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantDraw { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("DrawFromBottom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::DrawFromBottom { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other

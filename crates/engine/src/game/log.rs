@@ -1328,6 +1328,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

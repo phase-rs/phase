@@ -233,6 +233,15 @@ pub struct LKISnapshot {
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default, with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
+    /// CR 110.5 + CR 110.5d: Tap status as it last existed on the battlefield.
+    /// A permanent's tapped/untapped status is battlefield-only — once the object
+    /// leaves a public zone it is neither tapped nor untapped, so a look-back rider
+    /// ("Return target creature to its owner's hand. If it was tapped, ..." —
+    /// Brackish Blunder) must read this captured value via `FilterProp::Tapped`
+    /// (use_lki). `#[serde(default)]` ⇒ pre-existing saved states deserialize to
+    /// `tapped = false`.
+    #[serde(default)]
+    pub tapped: bool,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
@@ -2684,6 +2693,25 @@ pub enum PayCostKind {
     },
     Behold {
         action: BeholdCostAction,
+    },
+    /// CR 117.1 + CR 601.2b + CR 602.2b: Interactive payment of an
+    /// `AbilityCost::ExileWithAggregate` — the player exiles *any number* of the
+    /// pre-filtered `WaitingFor::PayCost.choices` from `zone` such that the
+    /// aggregate `function` of `property` over the chosen set satisfies
+    /// `comparator` against `value`. Modeled on `PayCostKind::TapCreatures`
+    /// (aggregate-threshold payment, validated by the handler rather than a fixed
+    /// cardinality) combined with `ExileFromZone` (graveyard exile). The handler
+    /// (`handle_exile_aggregate_for_cost`) re-validates uniqueness, still-in-zone
+    /// membership, and the threshold, then publishes the exiled cards as a fresh
+    /// tracked set and binds the resolving ability's tracked-set sentinel to it
+    /// before the ability is pushed to the stack (CR 608.2c, Baron Helmut Zemo).
+    ExileAggregate {
+        zone: Zone,
+        function: crate::types::ability::AggregateFunction,
+        property: crate::types::ability::ObjectProperty,
+        comparator: crate::types::ability::Comparator,
+        value: i32,
+        filter: crate::types::ability::TargetFilter,
     },
 }
 

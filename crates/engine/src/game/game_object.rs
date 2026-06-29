@@ -1380,6 +1380,10 @@ impl GameObject {
             colors: self.color.clone(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
+            // CR 110.5: Capture live tap status. This snapshot is taken while the
+            // object is still in its public zone (mana-spent / attack-declaration
+            // captures), so `self.tapped` is authoritative.
+            tapped: self.tapped,
         }
     }
 
