@@ -3604,6 +3604,9 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
+        // CR 601.2c + CR 115.1: reads the resolved ability's declared targets;
+        // a resolution-flow guard with no continuous-effect (StaticCondition) form.
+        | AbilityCondition::HasObjectTarget
         | AbilityCondition::TriggeringSpellTargetsFilter { .. }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }

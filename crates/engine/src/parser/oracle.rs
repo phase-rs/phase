@@ -5770,13 +5770,27 @@ mod tests {
         }
 
         // Sub clause: gated on the target being a creature, sets base P/T 2/2.
+        // CR 601.2c + CR 608.2c: the head's "up to one" antecedent is optional, so
+        // the reflexive creature gate is conjoined with `HasObjectTarget` by the
+        // lowering pass — a declined target suppresses the base-P/T rider.
         let sub = execute
             .sub_ability
             .as_deref()
             .expect("base-P/T sub-ability must be present");
+        let Some(AbilityCondition::And { conditions }) = &sub.condition else {
+            panic!(
+                "optional-target sub clause must gate on And{{[HasObjectTarget, \
+                 TargetMatchesFilter(creature)]}}, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(
+            matches!(conditions.first(), Some(AbilityCondition::HasObjectTarget)),
+            "first conjunct must be the HasObjectTarget optional-target guard, got {conditions:?}"
+        );
         assert!(
             matches!(
-                &sub.condition,
+                conditions.get(1),
                 Some(AbilityCondition::TargetMatchesFilter { filter, .. })
                     if matches!(
                         filter,
@@ -5784,8 +5798,7 @@ mod tests {
                             if type_filters == &vec![TypeFilter::Creature]
                     )
             ),
-            "sub clause must gate on TargetMatchesFilter(creature), got {:?}",
-            sub.condition
+            "sub clause must still gate on TargetMatchesFilter(creature), got {conditions:?}"
         );
         match &*sub.effect {
             Effect::GenericEffect {

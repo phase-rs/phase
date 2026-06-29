@@ -2098,6 +2098,9 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
+            // CR 601.2c: a presence guard, not a decline-alternative selector —
+            // declining the optional effect does not pick a `HasObjectTarget` branch.
+            | AbilityCondition::HasObjectTarget
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
             | AbilityCondition::SourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
@@ -7612,6 +7615,16 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
+        // CR 601.2c + CR 115.1 + CR 608.2c: True iff the parent ability declared at
+        // least one object target. Unlike `TargetMatchesFilter`, there is NO
+        // `TriggeringSource` fallback — a declined variable-count target
+        // (CR 601.2c: zero targets announced) reads false, so the lowering pass's
+        // `And{[HasObjectTarget, …]}` wrapper suppresses a reflexive-target rider
+        // whose anaphor ("that creature") has no antecedent.
+        AbilityCondition::HasObjectTarget => ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_))),
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions
             .iter()
