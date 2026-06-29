@@ -5709,24 +5709,16 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
 
 /// CR 401.5 + CR 601.2a: Consume the per-turn slot when a `OncePerTurn`
 /// `TopOfLibraryCastPermission { play_mode: Play }` authorizes a land play from
-/// the library. Mirrors how `finalize_cast` (casting_costs.rs) records
-/// `top_of_library_cast_permissions_used` for spell casts. `Unlimited`
-/// permissions (Future Sight, Bolas's Citadel) do not spend a slot.
+/// the library. Receives the pre-captured `(src_id, frequency)` that was resolved
+/// BEFORE the zone change — `top_of_library_permission_source` reads
+/// `library.front()`, which no longer points to the played land after the land
+/// is delivered to the battlefield. `Unlimited` permissions (Future Sight,
+/// Bolas's Citadel) do not spend a slot.
 fn record_top_of_library_land_permission(
     state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
+    src_id: ObjectId,
+    frequency: crate::types::statics::CastFrequency,
 ) {
-    let Some((top_id, src_id, frequency, _)) = super::casting::top_of_library_permission_source(
-        state,
-        player,
-        Some(crate::types::ability::CardPlayMode::Play),
-    ) else {
-        return;
-    };
-    if top_id != object_id {
-        return;
-    }
     if matches!(frequency, crate::types::statics::CastFrequency::OncePerTurn) {
         state.top_of_library_cast_permissions_used.insert(src_id);
     }
@@ -5842,12 +5834,36 @@ fn handle_play_land(
 
     // CR 401.5 + CR 305.1: Check top of library for
     // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
-    // Bolas's Citadel, Magus of the Future). The helper already gates on
-    // "front of library + play-mode permission + filter match + is a land,"
-    // so we only need to confirm it points at the caller's object_id.
-    let in_library_with_permission =
-        super::casting::top_of_library_land_playable_by_permission(state, player)
-            .is_some_and(|(top_id, _)| top_id == object_id);
+    // Bolas's Citadel, Magus of the Future, The Fourth Doctor).
+    //
+    // IMPORTANT: capture (src_id, frequency) HERE — before the zone change.
+    // `top_of_library_permission_source` reads `library.front()`, which will
+    // point to the next card once the land is delivered to the battlefield.
+    // Recording in the post-delivery epilogue would always see the wrong top
+    // card and silently skip the once-per-turn slot, allowing a OncePerTurn
+    // permission to be reused indefinitely. CR 401.5 + CR 601.2a.
+    let library_permission_src: Option<(ObjectId, crate::types::statics::CastFrequency)> =
+        super::casting::top_of_library_permission_source(
+            state,
+            player,
+            Some(crate::types::ability::CardPlayMode::Play),
+        )
+        .and_then(|(top_id, src_id, frequency, _)| {
+            if top_id != object_id {
+                return None;
+            }
+            // CR 305.1: only land cards qualify for the Play-permission path.
+            let obj = state.objects.get(&top_id)?;
+            if !obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+            {
+                return None;
+            }
+            Some((src_id, frequency))
+        });
+    let in_library_with_permission = library_permission_src.is_some();
     let exile_permission_source = if state.exile.contains(&object_id) {
         super::casting::exile_lands_playable_by_permission(state, player)
             .iter()
@@ -6088,9 +6104,10 @@ fn handle_play_land(
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     // CR 401.5 + CR 601.2a: consume the once-per-turn library
-                    // play slot when applicable (mirrors spell-cast recording).
-                    if in_library_with_permission {
-                        record_top_of_library_land_permission(state, player, object_id);
+                    // play slot using the pre-captured source (library.front()
+                    // now points to the next card, not the played land).
+                    if let Some((src_id, frequency)) = library_permission_src {
+                        record_top_of_library_land_permission(state, src_id, frequency);
                     }
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
@@ -6121,9 +6138,10 @@ fn handle_play_land(
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
             // CR 401.5 + CR 601.2a: consume the once-per-turn library play
-            // slot when applicable (mirrors spell-cast recording).
-            if in_library_with_permission {
-                record_top_of_library_land_permission(state, player, object_id);
+            // slot using the pre-captured source (library.front() now points
+            // to the next card, not the played land).
+            if let Some((src_id, frequency)) = library_permission_src {
+                record_top_of_library_land_permission(state, src_id, frequency);
             }
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
@@ -6149,9 +6167,10 @@ fn handle_play_land(
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
     // CR 401.5 + CR 601.2a: consume the once-per-turn library play slot
-    // when applicable (mirrors spell-cast recording in finalize_cast).
-    if in_library_with_permission {
-        record_top_of_library_land_permission(state, player, object_id);
+    // using the pre-captured source (library.front() now points to the
+    // next card, not the played land — post-delivery re-lookup would fail).
+    if let Some((src_id, frequency)) = library_permission_src {
+        record_top_of_library_land_permission(state, src_id, frequency);
     }
     let player_data = state
         .players
@@ -9944,6 +9963,124 @@ mod tests {
         assert!(
             result.is_err(),
             "PlayLand must be rejected under transient CantPlayLand effect (Pardic Miner class)"
+        );
+    }
+
+    /// CR 401.5 + CR 601.2a: A `OncePerTurn` `TopOfLibraryCastPermission`
+    /// with `play_mode: Play` (The Fourth Doctor / Future Sight shape) must
+    /// consume its per-turn slot when a land is played from the library top,
+    /// and a second `PlayLand` from the same permission source must be rejected.
+    ///
+    /// This is the discriminating regression for the pre-capture bug: before the
+    /// fix, `record_top_of_library_land_permission` recomputed the authorizing
+    /// source via `top_of_library_permission_source` AFTER the zone change, at
+    /// which point `library.front()` returned the next card — the `top_id !=
+    /// object_id` guard triggered and the slot was silently left unconsumed.
+    #[test]
+    fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{CastFrequency, StaticMode};
+
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+
+        // Install a OncePerTurn Play-mode permission on the battlefield.
+        // This models The Fourth Doctor / any "once each turn, you may play
+        // a [land] from the top of your library" effect.
+        let perm_src = create_object(
+            &mut state,
+            CardId(9200),
+            player,
+            "Permission Source (test)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                play_mode: crate::types::ability::CardPlayMode::Play,
+                frequency: CastFrequency::OncePerTurn,
+                alt_cost: None,
+            })
+            .affected(crate::types::ability::TargetFilter::Any);
+            let obj = state.objects.get_mut(&perm_src).unwrap();
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        // Place two lands consecutively on top of the library (land2 on top,
+        // land1 below it). We play land2 first.
+        let land1 = create_object(
+            &mut state,
+            CardId(9201),
+            player,
+            "Forest A".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        {
+            let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+            pd.library.push_back(land1);
+        }
+
+        let land2 = create_object(
+            &mut state,
+            CardId(9202),
+            player,
+            "Forest B".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        {
+            // land2 goes to the FRONT (top) of the library.
+            let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+            pd.library.push_front(land2);
+        }
+
+        // First play: must succeed and consume the OncePerTurn slot.
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land2,
+                card_id: CardId(9202),
+            },
+        )
+        .expect("first top-of-library land play must succeed");
+
+        assert!(
+            state.battlefield.contains(&land2),
+            "land2 must be on the battlefield after the first play"
+        );
+        assert!(
+            state
+                .top_of_library_cast_permissions_used
+                .contains(&perm_src),
+            "the OncePerTurn slot must be recorded after the land is moved — \
+             pre-capture bug: post-delivery re-lookup returns the wrong library top"
+        );
+
+        // Second play: land1 is now on top; the slot is consumed so this must fail.
+        let second = apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(9201),
+            },
+        );
+        assert!(
+            second.is_err(),
+            "second top-of-library land play under the same OncePerTurn source \
+             must be rejected once the slot is consumed"
         );
     }
 
