@@ -6215,16 +6215,22 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
-    /// As Foretold (WHO/AKH): the once-per-turn "pay {0}" free-cast line must NOT
-    /// fall through to `Effect::Unimplemented`. The whole card must lower to the
-    /// upkeep `PutCounter{Time}` trigger plus a single `CastFromHandFree`
-    /// (OncePerTurn) static carrying the dynamic mana-value cap. Revert-
-    /// discriminating: without the `try_parse_pay_zero_free_cast_permission`
-    /// classifier anchor + combinator, the free-cast line falls to the Priority 9
-    /// spell catch-all and the zero-Unimplemented assertion fails.
+    /// As Foretold (WHO/AKH): the once-per-turn "pay {0} rather than pay the mana
+    /// cost" free-cast line is correctly UNSUPPORTED. As Foretold places no zone
+    /// restriction on which spell the cost applies to, but the engine's
+    /// `CastFromHandFree` runtime path only covers hand and command-zone origins
+    /// (CR 601.2a). Implementing it correctly requires a general once-per-turn
+    /// alternative-cost modifier that composes with every cast-permission origin
+    /// (graveyard, exile, etc.) — a cross-cutting runtime refactor. Until that
+    /// work lands, the free-cast line must fall to `Effect::Unimplemented` rather
+    /// than falsely claiming coverage via the wrong zone-scoped path.
+    ///
+    /// The upkeep time-counter trigger is a separate Oracle line and must still
+    /// parse. The swallow auditor is suppressed when any ability is Unimplemented
+    /// (architecture rule: explicit Unimplemented beats swallow-detector noise), so
+    /// no spurious `Optional_YouMay` warning fires.
     #[test]
-    fn as_foretold_pay_zero_free_cast_has_no_unimplemented() {
-        use crate::types::statics::{CastFreeOrigin, CastFrequency};
+    fn as_foretold_free_cast_line_is_unsupported() {
         let r = parse(
             "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.",
             "As Foretold",
@@ -6243,30 +6249,27 @@ mod tests {
         for ability in &r.abilities {
             walk(ability, &mut effects);
         }
+        // The free-cast line is Unimplemented — zone-unrestricted "{0}" alternative
+        // cost cannot be lowered onto CastFromHandFree without misrepresenting scope.
         assert!(
-            !effects
+            effects
                 .iter()
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
-            "As Foretold must not emit Effect::Unimplemented, got {effects:#?}"
+            "As Foretold free-cast line must remain Effect::Unimplemented until \
+             a zone-agnostic alternative-cost modifier is implemented; got {effects:#?}"
         );
 
-        // The free-cast line lowers to exactly one CastFromHandFree static.
-        let free_cast = r.statics.iter().find(|s| {
-            matches!(
-                s.mode,
-                StaticMode::CastFromHandFree {
-                    frequency: CastFrequency::OncePerTurn,
-                    origin: CastFreeOrigin::DefaultCastPermission,
-                }
-            )
-        });
+        // No spurious CastFromHandFree static must appear.
         assert!(
-            free_cast.is_some(),
-            "As Foretold must produce a CastFromHandFree(OncePerTurn) static, got {:?}",
+            r.statics
+                .iter()
+                .all(|s| !matches!(s.mode, StaticMode::CastFromHandFree { .. })),
+            "As Foretold must NOT produce a CastFromHandFree static (wrong zone scope); \
+             got {:?}",
             r.statics
         );
 
-        // The upkeep time-counter trigger must still parse.
+        // The upkeep time-counter trigger must still parse correctly.
         assert!(
             r.triggers
                 .iter()
@@ -6275,19 +6278,16 @@ mod tests {
             r.triggers
         );
 
-        // The "you may pay {0}" optionality is fully captured by the
-        // CastFromHandFree static (an optional alternative-cost permission,
-        // CR 118.9b), so the swallow auditor must NOT demote the card with an
-        // Optional_YouMay false positive. Without the swallow_check allowlist
-        // entry the card parses cleanly at the AST level but remains a coverage
-        // gap — this guards against that regression.
+        // Swallow auditor is suppressed when Unimplemented is present, so no
+        // Optional_YouMay warning fires despite "you may" appearing in the oracle text.
         assert!(
             !r.parse_warnings.iter().any(|w| matches!(
                 w,
                 OracleDiagnostic::SwallowedClause { detector, .. }
                     if detector == "Optional_YouMay"
             )),
-            "As Foretold must not emit an Optional_YouMay swallow warning, got {:?}",
+            "Optional_YouMay must not fire when Unimplemented suppresses swallow checks; \
+             got {:?}",
             r.parse_warnings
         );
     }

@@ -560,27 +560,6 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
-    // CR 118.9 + CR 118.9a + CR 601.2b: "[Once each turn,] you may pay {0} rather
-    // than pay the mana cost for a spell you cast …" — the metered free-cast
-    // permission class (As Foretold). Route it to the static parser
-    // (`StaticMode::CastFromHandFree`) instead of the Priority 9 `Unimplemented`
-    // effect path. The required frequency prefix + literal `{0}` keep this
-    // disjoint from the unmetered alternative-cost class (Rooftop Storm), which is
-    // claimed earlier by Priority 6c (`is_spells_alternative_cost_pattern` requires
-    // the line to START with "you may pay ", so the frequency-prefixed form here
-    // never collides).
-    if preceded(
-        alt((
-            tag::<_, _, OracleError<'_>>("once each turn, "),
-            tag("once during each of your turns, "),
-        )),
-        tag("you may pay {0} rather than pay the mana cost for "),
-    )
-    .parse(lower)
-    .is_ok()
-    {
-        return true;
-    }
     // CR 117.1c + CR 113.6b: The Matrix-of-Time form leads with the timing
     // qualifier ("During your turn, you may play lands and cast spells from
     // among cards exiled with ~."), so the "you may [play|cast]" prefix is not
