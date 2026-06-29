@@ -4142,6 +4142,29 @@ fn pay_additional_cost_with_source(
                 events,
             );
         }
+        AbilityCost::KeywordCostOfCastSpell { keyword } => {
+            // CR 118.9 + CR 702.62a: pay the cast spell's borrowed keyword cost as
+            // mana on the LINGERING branch — an
+            // `ExileWithAltAbilityCost { cost: KeywordCostOfCastSpell }` grant
+            // produced when a keyword-cost rider attaches to a non-hand-origin
+            // cast clause (CR 611.2). The Face of Boe takes the during-resolution
+            // branch (the `ExileWithAltCost` override in casting.rs) and never
+            // reaches here, so there is no double charge; this arm serves the same
+            // variant's lingering class and is required for match exhaustiveness.
+            let cost =
+                super::keywords::effective_keyword_mana_cost(state, pending.object_id, keyword)
+                    .unwrap_or_else(ManaCost::zero);
+            let combined = super::restrictions::add_mana_cost(&pending.cost, &cost);
+            return finish_pending_cost_or_cast(
+                state,
+                player,
+                PendingCast {
+                    cost: combined,
+                    ..pending
+                },
+                events,
+            );
+        }
         AbilityCost::Sacrifice(cost) => {
             let target = &cost.target;
             let SacrificeRequirement::Count { count } = cost.requirement else {

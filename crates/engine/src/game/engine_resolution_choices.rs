@@ -556,6 +556,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         exile_instead_of_graveyard_on_resolve: false,
+                        alt_mana_cost: None,
                     },
                     events,
                 )?;
@@ -791,6 +792,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         exile_instead_of_graveyard_on_resolve: false,
+                        alt_mana_cost: None,
                     },
                     events,
                 )?;
@@ -840,6 +842,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         exile_instead_of_graveyard_on_resolve: false,
+                        alt_mana_cost: None,
                     },
                     events,
                 )?;
@@ -933,6 +936,7 @@ pub(super) fn handle_resolution_choice(
                     cast_transformed: false,
                     cleanup,
                     exile_instead_of_graveyard_on_resolve: false,
+                    alt_mana_cost: None,
                 },
                 events,
             )?;

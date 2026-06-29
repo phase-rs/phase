@@ -16115,18 +16115,16 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
-        let hand_origin = matches!(
-            &filter,
-            TargetFilter::Typed(tf)
-                if tf.properties.iter().any(|prop| {
-                    matches!(prop, FilterProp::InZone { zone: Zone::Hand })
-                })
+        // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
+        // `alt_is_some` are no-ops for every current Branch-2 card (all hand-origin
+        // Branch-2 casts are `mode==Cast` with the rider inline only on Cruelclaw-
+        // shaped non-hand clauses); the §9 corpus driver-diff guards this.
+        let driver = during_resolution_for_filter_cast_clause(
+            mode,
+            without_paying,
+            alt_ability_cost.is_some(),
+            cast_target_is_hand_origin(&filter),
         );
-        let driver = if without_paying && alt_ability_cost.is_none() && hand_origin {
-            crate::types::ability::CastFromZoneDriver::DuringResolution
-        } else {
-            crate::types::ability::CastFromZoneDriver::LingeringPermission
-        };
         return Some(Effect::CastFromZone {
             target: filter,
             without_paying_mana_cost: without_paying,
@@ -16150,6 +16148,57 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         duration: None,
         driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
     })
+}
+
+/// CR 601.2a: A "cast a <filter> from <zone>" clause is hand-origin when its
+/// top-level `Typed` filter carries an `InZone { Hand }` property. Mirrors the
+/// Branch-2 producer's own check so the alt-cost fold and the producer cannot
+/// drift.
+fn cast_target_is_hand_origin(target: &TargetFilter) -> bool {
+    matches!(target, TargetFilter::Typed(tf)
+        if tf.properties.iter().any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })))
+}
+
+/// CR 608.2g vs CR 611.2: Decide the casting *mechanism* (DRIVER ONLY) of a
+/// *filter-form* cast-from-zone clause ("cast a <filter> [from <zone>] …") from
+/// its structural signals. This is the Branch-2 + alt-cost-fold driver
+/// authority (`try_parse_cast_effect` Branch 2 and
+/// `attach_alt_cost_to_prior_cast_from_zone`); the exile-*anaphor* immediate-cast
+/// form (Bring to Light) is the separate Branch-1 authority and is intentionally
+/// NOT routed through here — its identical field tuple maps to the opposite
+/// driver (anaphor of a just-exiled single card vs. a standing filter pool).
+///
+/// DURATION IS DELIBERATELY NOT A PARAMETER. The driver is decided while any
+/// leading duration is stripped (`parse_effect_clause`), and the duration is
+/// stamped by a *separate* orthogonal pass (`with_clause_duration`) that never
+/// touches `driver`. The engine ships hand-origin `DuringResolution` casts that
+/// ALSO carry `duration=UntilEndOfTurn` (twinning glass, chandra flame's
+/// catalyst ultimate); a durational hand-origin free-cast is NOT lingering. The
+/// real discriminator is the *alternative casting method* (`without_paying` OR
+/// an alternative cost), proven by Sen Triplets (hand-origin, durational,
+/// FULL-cost → lingering) sitting opposite twinning glass (hand-origin,
+/// durational, FREE → during-resolution).
+///
+/// Casts during resolution iff it is a `Cast` (CR 601.2, not a CR 305.1 land
+/// play) from a `hand` origin via an alternative casting method — free
+/// (`without_paying`: the Expertise cycle, Brain in a Jar) OR an alternative
+/// cost (`alt_is_some`: The Face of Boe's suspend cost). A *full-cost*
+/// continuous "as though" permission (Colossal Dreadmaw / Form of the
+/// Mulldrifter / Sen Triplets — hand-origin, neither free nor alt-cost) is a
+/// standing grant (CR 611.2); non-hand pools (Memory Plunder, Tasha) likewise
+/// stay lingering permissions exercised at a later priority window.
+fn during_resolution_for_filter_cast_clause(
+    mode: CardPlayMode,
+    without_paying: bool,
+    alt_is_some: bool,
+    hand_origin: bool,
+) -> crate::types::ability::CastFromZoneDriver {
+    use crate::types::ability::CastFromZoneDriver;
+    if mode == CardPlayMode::Cast && hand_origin && (without_paying || alt_is_some) {
+        CastFromZoneDriver::DuringResolution
+    } else {
+        CastFromZoneDriver::LingeringPermission
+    }
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
@@ -16225,8 +16274,14 @@ fn parse_with_mana_value_constraint(lower: &str) -> Option<CastPermissionConstra
 /// Oracle text that carries an alternative-casting-cost rider. Shared by
 /// standalone rider clauses and inline `CastFromZone` anaphor arms.
 fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::AbilityCost> {
+    // CR 118.9: alternative-cost riders are templated "rather than [paying] its
+    // mana cost". The verbless "rather than its mana cost" (The Face of Boe:
+    // "pay its suspend cost rather than its mana cost") is a distinct, non-
+    // overlapping surface form — "rather than paying its mana cost" never
+    // contains it contiguously (the intervening "paying " breaks the match).
     if !nom_primitives::scan_contains(lower, "rather than paying its mana cost")
         && !nom_primitives::scan_contains(lower, "rather than pay its mana cost")
+        && !nom_primitives::scan_contains(lower, "rather than its mana cost")
     {
         return None;
     }
@@ -16250,6 +16305,15 @@ fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::Ab
             amount: crate::types::ability::QuantityExpr::Ref {
                 qty: crate::types::ability::QuantityRef::SelfManaValue,
             },
+        });
+    }
+    // CR 702.62a + CR 118.9: "pay its suspend cost rather than its mana cost"
+    // (The Face of Boe). Ordered AFTER discard/pay-life so Cruelclaw and Nashi
+    // keep their existing costs; the suspend body fires only when neither
+    // matched.
+    if nom_primitives::scan_contains(lower, "its suspend cost") {
+        return Some(crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+            keyword: crate::types::keywords::KeywordKind::Suspend,
         });
     }
     None
@@ -16356,9 +16420,29 @@ fn attach_alt_cost_to_prior_cast_from_zone(
         }
         if let Effect::CastFromZone {
             alt_ability_cost: alt @ None,
+            driver,
+            mode,
+            without_paying_mana_cost,
+            target,
             ..
         } = &mut *def.effect
         {
+            // CR 608.2g vs CR 611.2: re-derive the casting MECHANISM from the
+            // cast clause's structure now that an alternative cost attaches.
+            // Shares the Branch-2 (filter-form) authority. The driver is a
+            // property of the clause (mode + hand-origin + alternative casting
+            // method), NOT of the cost (CR 118.9) and NOT of the duration —
+            // duration is stamped by the orthogonal `with_clause_duration` pass
+            // and is left untouched here. `alt_is_some = true` because we are
+            // attaching one. The exile-origin folded rider (Xander's Pact,
+            // `ExiledBySource` → hand_origin false) correctly stays
+            // `LingeringPermission` via the hand gate.
+            *driver = during_resolution_for_filter_cast_clause(
+                *mode,
+                *without_paying_mana_cost,
+                true,
+                cast_target_is_hand_origin(target),
+            );
             *alt = Some(cost.clone());
             return true;
         }
@@ -19495,6 +19579,14 @@ pub(crate) fn parse_effect_chain_ir(
                     description: None,
                 }),
                 boundary: chunk.boundary_after,
+                // CR 118.9: `condition: None` is intentional. The chunk's
+                // "If you do," gate (`OptionalEffectPerformed`) is deliberately
+                // discarded: the alternative cost is inherently conditional on the
+                // cast occurring, and `attach_alt_cost_to_prior_cast_from_zone`
+                // ties it to the `CastFromZone` permission, which only charges the
+                // cost when a card is actually picked and cast. Propagating the
+                // condition would double-gate (the folded `alt_ability_cost` has no
+                // condition field to carry it anyway).
                 condition: None,
                 is_optional: false,
                 opponent_may_scope: None,
@@ -57891,6 +57983,112 @@ mod tests {
             !has_pay_unimpl(&def),
             "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
         );
+    }
+
+    /// CR 702.62a + CR 118.9: The Face of Boe's verbless "pay its suspend cost
+    /// rather than its mana cost" rider must parse to the parameterized
+    /// `KeywordCostOfCastSpell { Suspend }` alternative cost (broadened head
+    /// guard + suspend body recognizer).
+    #[test]
+    fn suspend_cost_rider_recognized() {
+        assert_eq!(
+            super::parse_alt_ability_cost_rider("pay its suspend cost rather than its mana cost"),
+            Some(crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
+            }),
+        );
+    }
+
+    /// Regression guard for the broadened head guard + body ordering: the discard
+    /// (Cruelclaw) and pay-life (Nashi) riders must keep returning their existing
+    /// costs unchanged — the suspend body only fires when neither matched.
+    #[test]
+    fn discard_and_pay_life_riders_unchanged_by_suspend_addition() {
+        assert!(matches!(
+            super::parse_alt_ability_cost_rider(
+                "cast that card by discarding a card rather than paying its mana cost"
+            ),
+            Some(crate::types::ability::AbilityCost::Discard { .. })
+        ));
+        assert!(matches!(
+            super::parse_alt_ability_cost_rider(
+                "pay life equal to its mana value rather than paying its mana cost"
+            ),
+            Some(crate::types::ability::AbilityCost::PayLife { .. })
+        ));
+    }
+
+    /// CR 608.2g vs CR 611.2 + CR 118.9: The Face of Boe's full cast clause folds
+    /// the suspend cost onto the hand-origin `CastFromZone` AND re-derives the
+    /// driver to `DuringResolution` (the alt-cost arm of the shared filter-form
+    /// authority), with no `Unimplemented` leaking anywhere.
+    #[test]
+    fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
+        let def = super::parse_effect_chain(
+            "you may cast a spell with suspend from your hand. if you do, pay its suspend cost rather than its mana cost.",
+            AbilityKind::Activated,
+        );
+        fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
+            if matches!(*d.effect, Effect::CastFromZone { .. }) {
+                return Some(&d.effect);
+            }
+            d.sub_ability.as_ref().and_then(|s| find_cast(s))
+        }
+        let cast = find_cast(&def).expect("CastFromZone should be in chain");
+        let Effect::CastFromZone {
+            alt_ability_cost: Some(alt),
+            driver,
+            ..
+        } = cast
+        else {
+            panic!("expected CastFromZone with alt_ability_cost, got {cast:?}");
+        };
+        assert_eq!(
+            *alt,
+            crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
+            },
+            "expected folded KeywordCostOfCastSpell {{ Suspend }}",
+        );
+        assert_eq!(
+            *driver,
+            crate::types::ability::CastFromZoneDriver::DuringResolution,
+            "hand-origin alt-cost cast must re-derive to DuringResolution",
+        );
+        fn has_unimpl(d: &AbilityDefinition) -> bool {
+            matches!(&*d.effect, Effect::Unimplemented { .. })
+                || d.sub_ability.as_ref().is_some_and(|s| has_unimpl(s))
+        }
+        assert!(
+            !has_unimpl(&def),
+            "no Unimplemented may survive the suspend-cost fold"
+        );
+    }
+
+    /// CR 608.2g vs CR 611.2: the shared filter-form DRIVER authority is
+    /// duration-blind — the discriminator is mode + hand-origin + an alternative
+    /// casting method (`without_paying` OR an alternative cost). Duration is
+    /// intentionally not a parameter: twinning glass (durational, free →
+    /// DuringResolution) and Sen Triplets (durational, full-cost → Lingering)
+    /// prove the wp/alt axis decides, not duration.
+    #[test]
+    fn filter_cast_driver_authority_is_duration_blind() {
+        use crate::types::ability::CardPlayMode::{Cast, Play};
+        use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
+        let d = super::during_resolution_for_filter_cast_clause;
+        // The Face of Boe via fold: hand-origin alt cost.
+        assert_eq!(d(Cast, false, true, true), DuringResolution);
+        // Colossal Dreadmaw / Form of the Mulldrifter / Sen Triplets: full-cost
+        // hand cast (durational or not) → standing grant.
+        assert_eq!(d(Cast, false, false, true), LingeringPermission);
+        // Memory Plunder / Tasha: non-hand free pool.
+        assert_eq!(d(Cast, true, false, false), LingeringPermission);
+        // Expertise cycle / Brain in a Jar / twinning glass / chandra: hand free.
+        assert_eq!(d(Cast, true, false, true), DuringResolution);
+        // Xander's Pact: exile-origin alt cost — hand gate, not duration.
+        assert_eq!(d(Cast, false, true, false), LingeringPermission);
+        // CR 305.1 land plays have no during-resolution mechanism.
+        assert_eq!(d(Play, true, false, true), LingeringPermission);
     }
 
     #[test]

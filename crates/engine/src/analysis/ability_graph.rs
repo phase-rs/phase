@@ -1503,6 +1503,10 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: a borrowed keyword cost is an alternative cost on a SEPARATE
+        // cast (the spell being cast), never an activation cost of this ability,
+        // so it carries no modeled axis for the loop detector.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }

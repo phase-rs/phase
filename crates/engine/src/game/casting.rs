@@ -8100,6 +8100,11 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cast_transformed: bool,
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) exile_instead_of_graveyard_on_resolve: bool,
+    /// CR 118.9: Optional alternative mana cost for a during-resolution cast
+    /// (The Face of Boe's borrowed suspend cost). `None` = a free cast
+    /// (Cascade/Discover/Suspend last-counter), preserving the existing
+    /// zero-cost override.
+    pub(super) alt_mana_cost: Option<ManaCost>,
 }
 
 /// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
@@ -8138,6 +8143,7 @@ pub(super) fn initiate_cast_during_resolution(
         cast_transformed,
         cleanup,
         exile_instead_of_graveyard_on_resolve,
+        alt_mana_cost,
     } = request;
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
@@ -8150,7 +8156,10 @@ pub(super) fn initiate_cast_during_resolution(
         // enters the cascade reject path.
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
-                cost: ManaCost::zero(),
+                // CR 118.9: optional alternative mana cost for a during-resolution
+                // cast (The Face of Boe's suspend cost); `None` = free
+                // (Cascade/Discover/Suspend last-counter unchanged).
+                cost: alt_mana_cost.clone().unwrap_or_else(ManaCost::zero),
                 cast_transformed,
                 constraint,
                 granted_to: Some(player),
